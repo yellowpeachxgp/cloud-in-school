@@ -1192,7 +1192,7 @@ export function createCampusCloudApp(options = {}) {
     try {
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
-      const upperMethod = method.toUpperCase();
+      const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
 
       if (
         upperMethod === "GET" &&
