@@ -40,6 +40,7 @@ export function renderConsoleHtml() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.CONSOLE_PORT || 8081);
+  const host = process.env.HOST || "127.0.0.1";
   const server = http.createServer((req, res) => {
     if (req.url === "/healthz") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -49,7 +50,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(renderConsoleHtml());
   });
-  server.listen(port, "0.0.0.0", () => {
-    console.log(JSON.stringify({ service: "ops-console", port, views: CONSOLE_VIEWS.length }));
+  server.listen(port, host, () => {
+    console.log(JSON.stringify({ service: "ops-console", host, port, views: CONSOLE_VIEWS.length }));
   });
 }
