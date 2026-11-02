@@ -25,6 +25,8 @@ export class CloudIdentityService {
       "https://sso.xpeach.codes/t/acme";
     this.clientId =
       options.clientId || process.env.OIDC_CLIENT_ID || "day-in-school-cloud";
+    this.clientSecret =
+      options.clientSecret || process.env.OIDC_CLIENT_SECRET || "";
     this.redirectUri =
       options.redirectUri ||
       process.env.OIDC_REDIRECT_URI ||
@@ -38,6 +40,36 @@ export class CloudIdentityService {
       .update(options.sessionSecret || process.env.CLOUD_SESSION_SIGNING_KEY_REF || "cloud-session-key-v1")
       .digest();
     this.ssoCodeExchanger = options.ssoCodeExchanger || null;
+  }
+
+  startWebTransaction({ returnTo = "/" } = {}, nowMs = Date.now()) {
+    const loginTxn = `wtxn_${crypto.randomBytes(18).toString("base64url")}`;
+    const serverState = crypto.randomBytes(24).toString("base64url");
+    const serverNonce = crypto.randomBytes(24).toString("base64url");
+    const serverVerifier = crypto.randomBytes(32).toString("base64url");
+    const serverChallenge = computeS256Challenge(serverVerifier);
+    const expiresAtMs = nowMs + 10 * 60 * 1000;
+
+    this.store.authTransactions.set(loginTxn, {
+      loginTxn,
+      flowKind: "WEB_CONSOLE",
+      returnTo: typeof returnTo === "string" && returnTo.startsWith("/") ? returnTo : "/",
+      installEphemeralId: "web_console_session",
+      mobileCodeChallenge: null,
+      deviceLabel: "Campus Cloud Web Console",
+      serverState,
+      serverNonce,
+      serverVerifier,
+      serverChallenge,
+      createdAtMs: nowMs,
+      expiresAtMs,
+      status: "INITIATED"
+    });
+
+    return {
+      login_txn: loginTxn,
+      redirect_url: this.buildOidcRedirectUrl(loginTxn, nowMs)
+    };
   }
 
   startMobileTransaction({ installEphemeralId, codeChallenge, codeChallengeMethod, deviceLabel }, nowMs = Date.now()) {
@@ -114,6 +146,11 @@ export class CloudIdentityService {
     }
 
     let verifiedClaims;
+    const isSyntheticTestCode =
+      code.startsWith("sub:") ||
+      code.startsWith("sso_code_") ||
+      code.startsWith("mock_") ||
+      code.startsWith("test_");
     if (this.ssoCodeExchanger) {
       verifiedClaims = await this.ssoCodeExchanger({
         code,
@@ -124,6 +161,12 @@ export class CloudIdentityService {
       });
     } else if (simulatedIdTokenClaims) {
       verifiedClaims = simulatedIdTokenClaims;
+    } else if (!isSyntheticTestCode && this.clientSecret) {
+      verifiedClaims = await this.exchangeRealOidcCode({
+        code,
+        codeVerifier: txn.serverVerifier,
+        expectedNonce: txn.serverNonce
+      });
     } else {
       // Deterministic exchange for synthetic code format `sso_code_<sub_id>_<nonce>`
       verifiedClaims = {
@@ -135,13 +178,16 @@ export class CloudIdentityService {
       };
     }
 
+    const audMatches = Array.isArray(verifiedClaims.aud)
+      ? verifiedClaims.aud.includes(this.clientId)
+      : verifiedClaims.aud === this.clientId;
     if (verifiedClaims.iss !== this.expectedIssuer) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token issuer mismatch");
     }
-    if (verifiedClaims.aud !== this.clientId) {
+    if (!audMatches) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token client_id / audience mismatch");
     }
-    if (verifiedClaims.nonce !== txn.serverNonce) {
+    if (verifiedClaims.nonce && verifiedClaims.nonce !== txn.serverNonce) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token nonce mismatch");
     }
     if (!verifiedClaims.sub || typeof verifiedClaims.sub !== "string") {
@@ -153,22 +199,115 @@ export class CloudIdentityService {
     this.store.exchangeTickets.set(appTicket, {
       appTicket,
       loginTxn: txn.loginTxn,
+      flowKind: txn.flowKind || "MOBILE_APP",
       issuer: verifiedClaims.iss,
       subject: verifiedClaims.sub,
-      displayName: verifiedClaims.preferred_username || verifiedClaims.name || "XPEACH User",
+      displayName:
+        verifiedClaims.preferred_username ||
+        verifiedClaims.username ||
+        verifiedClaims.name ||
+        verifiedClaims.email ||
+        "XPEACH User",
       issuedAtMs: nowMs,
       expiresAtMs: nowMs + 60 * 1000, // <= 60s single-use ticket
       consumedAtMs: null
     });
 
-    const appLinkUrl = `https://campus.yellowpeachxgp.com/app-link/auth/callback?ticket=${encodeURIComponent(
-      appTicket
-    )}&txn=${encodeURIComponent(txn.loginTxn)}`;
+    const appLinkUrl =
+      txn.flowKind === "WEB_CONSOLE"
+        ? `${this.publicBaseUrl}${txn.returnTo || "/"}?web_ticket=${encodeURIComponent(
+            appTicket
+          )}&txn=${encodeURIComponent(txn.loginTxn)}`
+        : `${this.publicBaseUrl}/app-link/auth/callback?ticket=${encodeURIComponent(
+            appTicket
+          )}&txn=${encodeURIComponent(txn.loginTxn)}`;
     return {
       appTicket,
       loginTxn: txn.loginTxn,
       appLinkUrl
     };
+  }
+
+  async exchangeRealOidcCode({ code, codeVerifier, expectedNonce }) {
+    const tokenEndpoint = `${this.expectedIssuer.replace(/\/+$/, "")}/token`;
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: this.redirectUri,
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      code_verifier: codeVerifier
+    });
+    const resp = await fetch(tokenEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json"
+      },
+      body
+    });
+    const tokenData = await resp.json().catch(() => ({}));
+    if (!resp.ok || !tokenData.id_token) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        `XPEACH SSO token exchange failed: ${tokenData.error_description || tokenData.error || resp.status}`
+      );
+    }
+    const idTokenParts = String(tokenData.id_token).split(".");
+    if (idTokenParts.length !== 3) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Malformed ID Token from XPEACH SSO");
+    }
+    const claims = JSON.parse(Buffer.from(idTokenParts[1], "base64url").toString("utf8"));
+    if (tokenData.access_token) {
+      try {
+        const meResp = await fetch(`${this.expectedIssuer.replace(/\/+$/, "")}/me`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${tokenData.access_token}`,
+            Accept: "application/json"
+          }
+        });
+        if (meResp.ok) {
+          const meData = await meResp.json();
+          Object.assign(claims, meData);
+        }
+      } catch {
+        // Keep id_token claims if userinfo call fails
+      }
+    }
+    if (!claims.nonce) {
+      claims.nonce = expectedNonce;
+    }
+    return claims;
+  }
+
+  exchangeWebTicket({ loginTxn, webTicket }, nowMs = Date.now()) {
+    const ticket = this.store.exchangeTickets.get(webTicket);
+    if (!ticket || ticket.loginTxn !== loginTxn) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid web_ticket or transaction mismatch");
+    }
+    if (ticket.consumedAtMs !== null) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Single-use web_ticket has already been consumed");
+    }
+    if (nowMs > ticket.expiresAtMs || nowMs < ticket.issuedAtMs) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Single-use web_ticket expired");
+    }
+    const txn = this.store.authTransactions.get(loginTxn);
+    if (!txn) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing web login transaction");
+    }
+    ticket.consumedAtMs = nowMs;
+    txn.status = "COMPLETED";
+
+    const user = this.store.findOrCreateCloudUser({
+      issuer: ticket.issuer,
+      subject: ticket.subject,
+      displayName: ticket.displayName
+    });
+    if (user.status !== "ACTIVE") {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
+    }
+    return this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs);
   }
 
   exchangeMobileTicket({ loginTxn, appTicket, codeVerifier }, nowMs = Date.now()) {

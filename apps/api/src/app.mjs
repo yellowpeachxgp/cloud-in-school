@@ -30,6 +30,10 @@ import {
 } from "../../../packages/plugin-sdk/src/index.mjs";
 import { greetCampus } from "../../../examples/hello-campus-plugin/dist/index.mjs";
 import { queryStationHours } from "../../../examples/parcel-station-plugin/dist/index.mjs";
+import {
+  renderConsoleHtml,
+  renderMobileCallbackHtml
+} from "../../console/src/main.mjs";
 
 function compileRoutePattern(pathTemplate) {
   const paramNames = [];
@@ -1190,6 +1194,69 @@ export function createCampusCloudApp(options = {}) {
       const pathname = parsedUrl.pathname;
       const upperMethod = method.toUpperCase();
 
+      if (
+        upperMethod === "GET" &&
+        (pathname === "/" || pathname === "/console" || pathname === "/console/")
+      ) {
+        return {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-request-id": requestId
+          },
+          rawBody: renderConsoleHtml(),
+          body: okEnvelope("CONSOLE_PORTAL_OK", { portal: "cloud-in-school-console" }, requestId)
+        };
+      }
+
+      if (upperMethod === "GET" && pathname === "/app-link/auth/callback") {
+        const ticket = parsedUrl.searchParams.get("ticket") || "";
+        const txn = parsedUrl.searchParams.get("txn") || "";
+        return {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-request-id": requestId
+          },
+          rawBody: renderMobileCallbackHtml({ ticket, txn }),
+          body: okEnvelope("MOBILE_CALLBACK_OK", { ticket, txn }, requestId)
+        };
+      }
+
+      if (upperMethod === "GET" && pathname === "/api/v1/auth/web/start") {
+        const webTxn = identity.startWebTransaction(
+          { returnTo: parsedUrl.searchParams.get("return_to") || "/" },
+          nowMs
+        );
+        return {
+          status: 302,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId,
+            Location: webTxn.redirect_url
+          },
+          body: okEnvelope("WEB_OIDC_REDIRECT", webTxn, requestId)
+        };
+      }
+
+      if (upperMethod === "POST" && pathname === "/api/v1/auth/web/exchange") {
+        const sessionRes = identity.exchangeWebTicket(
+          {
+            loginTxn: body?.login_txn,
+            webTicket: body?.web_ticket
+          },
+          nowMs
+        );
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("WEB_SESSION_ISSUED", sessionRes, requestId)
+        };
+      }
+
       let matchedRoute = null;
       let params = {};
       for (const route of routes) {
@@ -1271,7 +1338,11 @@ export function createCampusCloudApp(options = {}) {
         body: parsedBody
       });
       res.writeHead(response.status, response.headers);
-      res.end(JSON.stringify(response.body));
+      if (typeof response.rawBody === "string") {
+        res.end(response.rawBody);
+      } else {
+        res.end(JSON.stringify(response.body));
+      }
     });
   }
 
