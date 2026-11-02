@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://campus.yellowpeachxgp.com/schemas/plugin-extension-v2.schema.json",
+  "title": "Day in School Unified Plugin Manifest (v1/v2)",
+  "description": "Validates dis-extension/v2, dis-plugin/v2, and legacy dis-campus-plugin/v1 manifests with strict permission, UI slot, command, and Ed25519 signature invariants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "id",
+    "name",
+    "version",
+    "publisher",
+    "license",
+    "hostApi",
+    "types",
+    "capabilities",
+    "permissions"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "enum": ["dis-extension/v2", "dis-plugin/v2", "dis-campus-plugin/v1"]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$",
+      "minLength": 5,
+      "maxLength": 120
+    },
+    "name": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?$"
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 80
+    },
+    "license": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 64
+    },
+    "category": {
+      "type": "string",
+      "enum": ["campus", "library", "parcel", "academic", "utility"]
+    },
+    "hostApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "max": { "type": "integer", "minimum": 1, "maximum": 2 }
+      }
+    },
+    "types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "feature-card",
+          "school-service",
+          "library-provider",
+          "parcel-discovery-provider",
+          "parcel-tracking-provider",
+          "parcel-station-provider",
+          "academic-adapter"
+        ]
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schoolId"],
+        "properties": {
+          "schoolId": { "type": "string", "minLength": 2, "maxLength": 64 }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9._-]+$"
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "network.request",
+              "account.session",
+              "storage.scoped",
+              "notification.send",
+              "location.coarse"
+            ]
+          },
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^https://[a-zA-Z0-9.-]+(:[0-9]+)?$"
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^/[a-zA-Z0-9/_.-]*$"
+            }
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["GET", "POST"]
+            }
+          },
+          "purposes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["READ", "AUTH", "WRITE"]
+            }
+          },
+          "scope": { "type": "string" },
+          "operations": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["read", "write"] }
+          }
+        }
+      }
+    },
+    "uiContributions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "componentId", "template", "title"],
+        "properties": {
+          "slot": {
+            "type": "string",
+            "enum": [
+              "home.bento.primary",
+              "home.bento.secondary",
+              "campus.services.grid",
+              "academic.overview.panel",
+              "timetable.detail.action",
+              "library.booking.preference",
+              "profile.extensions",
+              "settings.integrations",
+              "widget.generic.card",
+              "console.dashboard.widget",
+              "console.feature.page",
+              "parcel.sources",
+              "parcel.details",
+              "parcel.settings"
+            ]
+          },
+          "componentId": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "template": {
+            "type": "string",
+            "enum": ["metric-card/v1", "key-value-card/v1", "action-list/v1", "query-form/v1"]
+          },
+          "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "subtitle": { "type": "string", "maxLength": 120 },
+          "bind": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "command"],
+            "properties": {
+              "type": { "type": "string", "enum": ["host-query", "host-command"] },
+              "command": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "sideEffect", "handler"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9._-]+$" },
+          "inputSchema": { "type": "string" },
+          "outputSchema": { "type": "string" },
+          "sideEffect": { "type": "string", "enum": ["NONE", "READ_ONLY", "MUTATION_GATED"] },
+          "handler": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["remote-https", "declarative-mock"] },
+              "method": { "type": "string", "enum": ["GET", "POST"] },
+              "path": { "type": "string", "pattern": "^/[a-zA-Z0-9/_.-]*$" },
+              "staticResponse": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "maxBytes"],
+      "properties": {
+        "scope": { "type": "string", "enum": ["school-account", "campus-profile"] },
+        "maxBytes": { "type": "integer", "minimum": 1024, "maximum": 10485760 }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["networkTimeoutMs", "maxResponseBytes"],
+      "properties": {
+        "networkTimeoutMs": { "type": "integer", "minimum": 500, "maximum": 15000 },
+        "maxResponseBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "publisherKeyId"],
+      "properties": {
+        "algorithm": { "type": "string", "const": "Ed25519" },
+        "publisherKeyId": { "type": "string", "minLength": 3, "maxLength": 64 },
+        "detachedFile": { "type": "string" }
+      }
+    }
+  }
+}

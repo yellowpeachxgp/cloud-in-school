@@ -1,0 +1,37 @@
+version: 1.0.0
+host_api_versions:
+  - host_api: 1
+    format: dis-campus-plugin/v1
+    status: SUPPORTED_LEGACY_COMPATIBLE
+    adapter: LegacySchoolPackageAdapter
+    supported_types: [school-service, academic-adapter]
+    signature_algorithm: Ed25519
+  - host_api: 2
+    format: dis-extension/v2
+    aliases: [dis-plugin/v2]
+    status: CURRENT_STABLE
+    supported_types:
+      - feature-card
+      - school-service
+      - library-provider
+      - parcel-discovery-provider
+      - parcel-tracking-provider
+      - parcel-station-provider
+      - academic-adapter
+    supported_ui_slots:
+      - home.bento.primary
+      - home.bento.secondary
+      - campus.services.grid
+      - academic.overview.panel
+      - timetable.detail.action
+      - library.booking.preference
+      - profile.extensions
+      - settings.integrations
+      - widget.generic.card
+      - console.dashboard.widget
+      - console.feature.page
+      - parcel.sources
+      - parcel.details
+      - parcel.settings
+    signature_algorithm: Ed25519
+    dynamic_code_loading_allowed: false

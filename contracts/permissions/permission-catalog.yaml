@@ -1,0 +1,54 @@
+version: 1.0.0
+permissions:
+  - id: network.request
+    scope: plugin
+    description: Outbound HTTPS request restricted to declared origins, paths, methods, and purposes (READ/AUTH/WRITE).
+    default_granted: false
+  - id: account.session
+    scope: plugin
+    description: Scoped access to a specific school or parcel provider session via PluginBroker without raw secret exposure.
+    default_granted: false
+  - id: storage.scoped
+    scope: plugin
+    description: Partitioned key-value/table storage isolated by (publisher, packageId, version, schoolId, profileId).
+    default_granted: false
+  - id: notification.send
+    scope: plugin
+    description: Send sanitized user notifications through host NotificationChannel.
+    default_granted: false
+  - id: location.coarse
+    scope: plugin
+    description: Coarse campus location for matching nearest parcel station or library building.
+    default_granted: false
+  - id: library.booking.read
+    scope: host_and_plugin
+    description: Read library areas, seat snapshots, and current user bookings.
+    default_granted: true
+  - id: library.booking.create
+    scope: host_only_gated
+    description: Submit seat reservation at target T; requires active user consent, school authorization evidence, and kill_switch=false.
+    default_granted: false
+  - id: parcel.read
+    scope: host_and_plugin
+    description: Read canonical parcels, traces, and pickup stations within current campus profile.
+    default_granted: true
+  - id: parcel.ai.invoke
+    scope: host_only_gated
+    description: Send user-approved parcel fields to opt-in AI assistant; off by default.
+    default_granted: false
+roles:
+  - role: PLATFORM_OWNER
+    allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]
+    forbidden_actions: [read_plaintext_school_password]
+  - role: OPERATIONS_ADMIN
+    allowed_actions: [read_overview, manage_schools, toggle_kill_switch, read_jobs, read_audit]
+    forbidden_actions: [read_plaintext_school_password, mutate_wallet_directly]
+  - role: SCHOOL_OPERATOR
+    allowed_actions: [read_overview, manage_schools, approve_school_auth, toggle_kill_switch]
+    forbidden_actions: [cross_school_binding_access, read_plaintext_school_password]
+  - role: FINANCE_OPERATOR
+    allowed_actions: [read_overview, read_orders, reconcile_orders, approve_refund]
+    forbidden_actions: [read_school_cookies, mutate_booking_state]
+  - role: SECURITY_AUDITOR
+    allowed_actions: [read_overview, read_audit]
+    forbidden_actions: [mutate_wallet_directly, trigger_booking]

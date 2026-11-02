@@ -1,0 +1,154 @@
+asyncapi: 2.6.0
+info:
+  title: Day in School Campus Cloud Event & Outbox Contracts
+  version: 1.0.0
+  description: |
+    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, and Security Audit Events.
+defaultContentType: application/json
+channels:
+  reservation.schedule.precheck:
+    description: T-30m initial read-only precheck event
+    publish:
+      operationId: publishReservationPrecheckEvent
+      message:
+        $ref: '#/components/messages/TripleScheduleEvent'
+  reservation.schedule.final_check:
+    description: T-5m read-only quality gate recheck event
+    publish:
+      operationId: publishReservationFinalCheckEvent
+      message:
+        $ref: '#/components/messages/TripleScheduleEvent'
+  reservation.schedule.fire:
+    description: Target T execution event (fail-closed unless school authorized and kill_switch=false)
+    publish:
+      operationId: publishReservationFireEvent
+      message:
+        $ref: '#/components/messages/TripleScheduleEvent'
+  finance.saga.charge:
+    description: Post-confirmation idempotent debit intent (`dis:reservation:<orderUUID>:debit:v1`)
+    publish:
+      operationId: publishOrderChargeRequired
+      message:
+        $ref: '#/components/messages/FinanceSagaEvent'
+  finance.saga.refund:
+    description: Approved idempotent refund intent (`dis:reservation:<orderUUID>:refund:v1`)
+    publish:
+      operationId: publishOrderRefundRequired
+      message:
+        $ref: '#/components/messages/FinanceSagaEvent'
+  parcel.sync.batch:
+    description: Incremental batch event from a parcel discovery provider (`PARTIAL` vs `COMPLETED`)
+    publish:
+      operationId: publishParcelSyncBatchEvent
+      message:
+        $ref: '#/components/messages/ParcelSyncBatchEvent'
+  security.audit.recorded:
+    description: Tamper-evident security, consent, and credential access audit event
+    publish:
+      operationId: publishSecurityAuditEvent
+      message:
+        $ref: '#/components/messages/SecurityAuditEvent'
+components:
+  messages:
+    TripleScheduleEvent:
+      name: TripleScheduleEvent
+      payload:
+        type: object
+        required: [event_id, job_id, plan_id, kind, due_at, generation, school_id]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          job_id:
+            type: string
+            format: uuid
+          plan_id:
+            type: string
+            format: uuid
+          kind:
+            type: string
+            enum: [PRECHECK, FINAL_CHECK, FIRE]
+          due_at:
+            type: string
+            format: date-time
+          generation:
+            type: integer
+          school_id:
+            type: string
+    FinanceSagaEvent:
+      name: FinanceSagaEvent
+      payload:
+        type: object
+        required: [event_id, order_id, cloud_user_id, kind, event_key, amount_micropeach]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          order_id:
+            type: string
+            format: uuid
+          cloud_user_id:
+            type: string
+            format: uuid
+          kind:
+            type: string
+            enum: [DEBIT, REFUND]
+          event_key:
+            type: string
+            pattern: '^dis:reservation:[0-9a-fA-F-]{36}:(debit|refund):v1$'
+          amount_micropeach:
+            type: integer
+            minimum: 1
+    ParcelSyncBatchEvent:
+      name: ParcelSyncBatchEvent
+      payload:
+        type: object
+        required: [job_id, provider_id, sequence, stage, items_received, items_merged, completeness, observed_at]
+        properties:
+          job_id:
+            type: string
+          provider_id:
+            type: string
+          source_account_ref:
+            type: [string, 'null']
+          sequence:
+            type: integer
+          stage:
+            type: string
+            enum: [STARTED, BATCH_COMMITTED, COMPLETED, FAILED]
+          items_received:
+            type: integer
+          items_merged:
+            type: integer
+          completeness:
+            type: string
+            enum: [PARTIAL, COMPLETED]
+          error:
+            type: [string, 'null']
+          observed_at:
+            type: string
+            format: date-time
+    SecurityAuditEvent:
+      name: SecurityAuditEvent
+      payload:
+        type: object
+        required: [id, actor_kind, actor_ref, action, resource_kind, resource_ref, outcome, occurred_at]
+        properties:
+          id:
+            type: string
+            format: uuid
+          actor_kind:
+            type: string
+          actor_ref:
+            type: string
+          action:
+            type: string
+          resource_kind:
+            type: string
+          resource_ref:
+            type: string
+          outcome:
+            type: string
+          occurred_at:
+            type: string
+            format: date-time

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://campus.yellowpeachxgp.com/schemas/booking-rule-v1.schema.json",
+  "title": "School Library Triple-Schedule Booking Rule Schema (v1)",
+  "description": "Defines school-specific daily booking windows and ADR-005 T-30m / T-5m / T invariants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "school_id",
+    "rule_version",
+    "time_zone",
+    "window_start",
+    "window_end_exclusive",
+    "same_day_only",
+    "precheck_lead_seconds",
+    "final_check_lead_seconds",
+    "max_lateness_seconds_limit",
+    "in_person_sign_in_required"
+  ],
+  "properties": {
+    "school_id": { "type": "string", "minLength": 2, "maxLength": 64 },
+    "rule_version": { "type": "string", "minLength": 4, "maxLength": 64 },
+    "time_zone": { "type": "string", "default": "Asia/Shanghai" },
+    "window_start": {
+      "type": "string",
+      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$"
+    },
+    "window_end_exclusive": {
+      "type": "string",
+      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$"
+    },
+    "same_day_only": { "type": "boolean" },
+    "precheck_lead_seconds": { "type": "integer", "const": 1800 },
+    "final_check_lead_seconds": { "type": "integer", "const": 300 },
+    "max_lateness_seconds_limit": { "type": "integer", "minimum": 0, "maximum": 1800 },
+    "in_person_sign_in_required": { "type": "boolean", "const": true }
+  }
+}

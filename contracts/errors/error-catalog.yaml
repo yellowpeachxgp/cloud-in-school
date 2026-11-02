@@ -1,0 +1,112 @@
+version: 1.0.0
+errors:
+  - code: CLOUD_AUTH_REQUIRED
+    http_status: 401
+    retryable: false
+    user_action: RECONNECT_XPEACH_BROWSER
+    description: Cloud session missing, expired, or revoked.
+  - code: SESSION_REPLAY_DETECTED
+    http_status: 401
+    retryable: false
+    user_action: REAUTHENTICATE_ALL
+    description: Refresh token reuse detected; entire device session family revoked.
+  - code: SSO_UNAVAILABLE
+    http_status: 503
+    retryable: true
+    user_action: KEEP_LOCAL_MODE_OR_RETRY_LATER
+    description: XPEACH SSO temporarily unreachable; local features remain unaffected.
+  - code: CAMPUS_BINDING_REQUIRED
+    http_status: 409
+    retryable: false
+    user_action: BIND_SCHOOL_IDENTITY
+    description: Verified school binding is required for this operation.
+  - code: SCHOOL_PERMISSION_REQUIRED
+    http_status: 403
+    retryable: false
+    user_action: USE_MANUAL_OR_MOCK_MODE
+    description: School has not granted commercial/third-party automation permission or kill_switch is enabled.
+  - code: SCHOOL_CAPABILITY_UNVERIFIED
+    http_status: 409
+    retryable: false
+    user_action: USE_OFFICIAL_WEB_ENTRY
+    description: Live write capability is unverified against the school system.
+  - code: SCHOOL_AUTH_EXPIRED
+    http_status: 401
+    retryable: false
+    user_action: REAUTHORIZE_SCHOOL_BINDING
+    description: Delegated school credential has expired or been revoked.
+  - code: CAPTCHA_OR_MFA_REQUIRED
+    http_status: 409
+    retryable: false
+    user_action: COMPLETE_MANUAL_VERIFICATION
+    description: School or parcel source requires interactive human verification; automatic bypass is strictly forbidden.
+  - code: SCHOOL_RATE_LIMITED
+    http_status: 429
+    retryable: true
+    user_action: WAIT_FOR_RATE_LIMIT_WINDOW
+    description: School provider rate limit reached; proxy rotation is forbidden.
+  - code: BOOKING_WINDOW_CLOSED
+    http_status: 422
+    retryable: false
+    user_action: SELECT_TARGET_TIME_WITHIN_SCHOOL_WINDOW
+    description: Requested target time T falls outside the school's official booking window.
+  - code: BOOKING_RESULT_UNKNOWN
+    http_status: 202
+    retryable: false
+    user_action: AWAIT_AUTHORITATIVE_READBACK
+    description: Submission timed out; awaiting authoritative read-only verification without blind retry.
+  - code: WALLET_INSUFFICIENT
+    http_status: 409
+    retryable: false
+    user_action: RECHARGE_PEACH_WALLET
+    description: Insufficient 🍑 balance in XPEACH SSO wallet.
+  - code: PAYMENT_RECONCILING
+    http_status: 202
+    retryable: true
+    user_action: AWAIT_LEDGER_RECONCILIATION
+    description: Payment settlement with XPEACH SSO is being reconciled idempotently.
+  - code: PAYMENT_DUE
+    http_status: 409
+    retryable: false
+    user_action: SETTLE_OUTSTANDING_ORDER
+    description: School booking succeeded but post-confirmation 🍑 debit failed due to concurrent spend.
+  - code: CONSENT_WITHDRAWN
+    http_status: 403
+    retryable: false
+    user_action: GRANT_CONSENT_IF_DESIRED
+    description: User consent was withdrawn; all dependent jobs and credentials have been halted.
+  - code: JOB_ALREADY_TERMINAL
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_JOB_STATUS
+    description: Reservation job has already reached a terminal state.
+  - code: REQUEST_DUPLICATE
+    http_status: 200
+    retryable: false
+    user_action: NONE
+    description: Idempotent replay returning original result.
+  - code: PARCEL_SOURCE_AUTH_REQUIRED
+    http_status: 401
+    retryable: false
+    user_action: AUTHORIZE_PARCEL_PROVIDER
+    description: Independent authorization is required for this parcel platform.
+  - code: PARCEL_PROVIDER_NOT_AUTHORIZED
+    http_status: 403
+    retryable: false
+    user_action: USE_MANUAL_IMPORT_OR_MOCK
+    description: Provider is marked RESEARCH_ONLY or MANUAL_ONLY in PROVIDER_AUTHORITY_MATRIX.
+  - code: PARCEL_CONSENT_REVOKED
+    http_status: 403
+    retryable: false
+    user_action: GRANT_AI_OR_SYNC_CONSENT
+    description: Explicit consent for parcel AI or sync was not granted or has been revoked.
+  - code: PLUGIN_SIGNATURE_INVALID
+    http_status: 400
+    retryable: false
+    user_action: VERIFY_PLUGIN_PACKAGE_SIGNATURE
+    description: Plugin Ed25519 signature or SHA-256 artifact digest verification failed.
+  - code: PLUGIN_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: REVIEW_PLUGIN_PERMISSIONS
+    description: Plugin attempted an undeclared or forbidden capability via PluginBroker.

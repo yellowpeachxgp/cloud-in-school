@@ -1,0 +1,333 @@
+version: 1.0.0
+openapi_source: contracts/openapi/cloud-v1.yaml
+endpoints:
+  - method: GET
+    path: /healthz
+    operationId: getHealthz
+    auth: none
+    owner: system
+  - method: GET
+    path: /readyz
+    operationId: getReadyz
+    auth: none
+    owner: system
+  - method: GET
+    path: /api/v1/openapi.json
+    operationId: getOpenApiSpec
+    auth: none
+    owner: system
+  - method: POST
+    path: /api/v1/auth/mobile/start
+    operationId: startMobileAuthTransaction
+    auth: anonymous_rate_limited
+    owner: identity
+  - method: GET
+    path: /api/v1/auth/oidc/start
+    operationId: startOidcRedirect
+    auth: login_txn
+    owner: identity
+  - method: GET
+    path: /api/v1/auth/oidc/callback
+    operationId: handleOidcCallback
+    auth: oidc_state_nonce
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/mobile/exchange
+    operationId: exchangeMobileAppTicket
+    auth: single_use_ticket_and_pkce
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/refresh
+    operationId: refreshCloudSession
+    auth: refresh_token_family
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/logout
+    operationId: logoutCurrentSession
+    auth: bearer
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/logout-all
+    operationId: logoutAllSessions
+    auth: bearer
+    owner: identity
+  - method: GET
+    path: /api/v1/me
+    operationId: getMyProfile
+    auth: bearer
+    owner: identity
+  - method: GET
+    path: /api/v1/me/devices
+    operationId: listMyDevices
+    auth: bearer
+    owner: identity
+  - method: DELETE
+    path: /api/v1/me/devices/{deviceId}
+    operationId: revokeMyDevice
+    auth: bearer
+    owner: identity
+  - method: GET
+    path: /api/v1/me/wallet
+    operationId: getMyWallet
+    auth: bearer
+    owner: finance
+  - method: GET
+    path: /api/v1/me/orders
+    operationId: listMyOrders
+    auth: bearer
+    owner: finance
+  - method: GET
+    path: /api/v1/me/consents
+    operationId: listMyConsents
+    auth: bearer
+    owner: security
+  - method: POST
+    path: /api/v1/me/consents
+    operationId: grantConsent
+    auth: bearer
+    owner: security
+  - method: DELETE
+    path: /api/v1/me/consents/{consentId}
+    operationId: withdrawConsent
+    auth: bearer
+    owner: security
+  - method: POST
+    path: /api/v1/me/data-export
+    operationId: requestMyDataExport
+    auth: bearer
+    owner: security
+  - method: POST
+    path: /api/v1/me/data-delete
+    operationId: requestMyDataDelete
+    auth: bearer
+    owner: security
+  - method: GET
+    path: /api/v1/schools
+    operationId: listSchools
+    auth: public
+    owner: school-spi
+  - method: GET
+    path: /api/v1/schools/{schoolId}/library/capabilities
+    operationId: getSchoolLibraryCapabilities
+    auth: public
+    owner: school-spi
+  - method: GET
+    path: /api/v1/schools/{schoolId}/library/rules
+    operationId: getSchoolLibraryRules
+    auth: public
+    owner: school-spi
+  - method: GET
+    path: /api/v1/schools/{schoolId}/booking-rules
+    operationId: getSchoolBookingRulesCanonical
+    auth: public
+    owner: school-spi
+  - method: GET
+    path: /api/v1/school-bindings
+    operationId: listMySchoolBindings
+    auth: bearer
+    owner: school-spi
+  - method: POST
+    path: /api/v1/school-bindings
+    operationId: initiateSchoolBinding
+    auth: bearer
+    owner: school-spi
+  - method: POST
+    path: /api/v1/school-bindings/{bindingId}/complete
+    operationId: completeSchoolBinding
+    auth: bearer
+    owner: school-spi
+  - method: POST
+    path: /api/v1/school-bindings/{bindingId}/reauthorize
+    operationId: reauthorizeSchoolBinding
+    auth: bearer
+    owner: school-spi
+  - method: DELETE
+    path: /api/v1/school-bindings/{bindingId}
+    operationId: revokeSchoolBinding
+    auth: bearer
+    owner: school-spi
+  - method: GET
+    path: /api/v1/reservation-plans
+    operationId: listReservationPlans
+    auth: bearer
+    owner: reservations
+  - method: POST
+    path: /api/v1/reservation-plans
+    operationId: createReservationPlan
+    auth: bearer
+    owner: reservations
+  - method: PATCH
+    path: /api/v1/reservation-plans/{planId}
+    operationId: updateReservationPlan
+    auth: bearer
+    owner: reservations
+  - method: DELETE
+    path: /api/v1/reservation-plans/{planId}
+    operationId: cancelReservationPlan
+    auth: bearer
+    owner: reservations
+  - method: GET
+    path: /api/v1/reservation-jobs
+    operationId: listReservationJobs
+    auth: bearer
+    owner: reservations
+  - method: GET
+    path: /api/v1/reservation-jobs/{jobId}
+    operationId: getReservationJob
+    auth: bearer
+    owner: reservations
+  - method: POST
+    path: /api/v1/reservation-jobs/{jobId}/cancel
+    operationId: cancelReservationJob
+    auth: bearer
+    owner: reservations
+  - method: GET
+    path: /api/v1/reservation-jobs/{jobId}/evidence
+    operationId: getReservationJobEvidence
+    auth: bearer
+    owner: reservations
+  - method: GET
+    path: /api/v1/pricing/library-booking
+    operationId: getLibraryBookingPricing
+    auth: public
+    owner: pricing
+  - method: GET
+    path: /api/v1/notifications
+    operationId: listMyNotifications
+    auth: bearer
+    owner: notifications
+  - method: POST
+    path: /api/v1/notifications/{notificationId}/read
+    operationId: markNotificationRead
+    auth: bearer
+    owner: notifications
+  - method: GET
+    path: /api/v1/parcels
+    operationId: listParcels
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/parcels/{parcelId}
+    operationId: getParcelById
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/parcels/{parcelId}/trace
+    operationId: getParcelTrace
+    auth: bearer
+    owner: parcels
+  - method: POST
+    path: /api/v1/parcels/{parcelId}/tracking
+    operationId: updateParcelTrackingPreference
+    auth: bearer
+    owner: parcels
+  - method: POST
+    path: /api/v1/parcels/imports
+    operationId: importParcels
+    auth: bearer
+    owner: parcels
+  - method: POST
+    path: /api/v1/parcel-sources/{providerId}/authorizations
+    operationId: startParcelSourceAuthorization
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/parcel-sources/connections
+    operationId: listParcelSourceConnections
+    auth: bearer
+    owner: parcels
+  - method: DELETE
+    path: /api/v1/parcel-sources/connections/{connectionId}
+    operationId: revokeParcelSourceConnection
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/parcel-stations
+    operationId: listParcelStations
+    auth: public
+    owner: parcels
+  - method: POST
+    path: /api/v1/parcel-sync/jobs
+    operationId: createParcelSyncJob
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/parcel-sync/jobs/{jobId}
+    operationId: getParcelSyncJob
+    auth: bearer
+    owner: parcels
+  - method: POST
+    path: /api/v1/parcel-ai/requests
+    operationId: invokeParcelAiAssistant
+    auth: bearer
+    owner: parcels
+  - method: GET
+    path: /api/v1/plugins/registry
+    operationId: listRegisteredPlugins
+    auth: public
+    owner: plugins
+  - method: POST
+    path: /api/v1/plugins/install
+    operationId: installSignedPlugin
+    auth: bearer
+    owner: plugins
+  - method: POST
+    path: /api/v1/plugins/{pluginId}/lifecycle
+    operationId: transitionPluginLifecycle
+    auth: bearer
+    owner: plugins
+  - method: POST
+    path: /api/v1/plugins/{pluginId}/commands/{commandId}/invoke
+    operationId: invokePluginCommand
+    auth: bearer
+    owner: plugins
+  - method: GET
+    path: /api/v1/features
+    operationId: listHostFeatures
+    auth: public
+    owner: plugins
+  - method: GET
+    path: /api/v1/admin/overview
+    operationId: getAdminOverview
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/schools
+    operationId: listAdminSchoolIntegrations
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/schools/{schoolId}/kill-switch
+    operationId: toggleSchoolKillSwitch
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/schools/{schoolId}/authorization-approval
+    operationId: approveSchoolAuthorization
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/jobs
+    operationId: listAdminReservationJobs
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/orders
+    operationId: listAdminOrders
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/orders/{orderId}/reconcile
+    operationId: reconcileAdminOrder
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/orders/{orderId}/refund
+    operationId: refundAdminOrder
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/audit-events
+    operationId: listAdminAuditEvents
+    auth: bearer_rbac
+    owner: admin

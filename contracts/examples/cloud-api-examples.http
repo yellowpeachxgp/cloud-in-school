@@ -1,0 +1,54 @@
+### 1. Health & Readiness
+GET http://127.0.0.1:4100/healthz
+Accept: application/json
+
+### 2. School Booking Rules (ADR-005 Dynamic Target T)
+GET http://127.0.0.1:4100/api/v1/schools/haut/booking-rules
+Accept: application/json
+
+### 3. Create Triple-Schedule Reservation Plan (T=12:10 -> Precheck 11:40, FinalCheck 12:05, Fire 12:10)
+POST http://127.0.0.1:4100/api/v1/reservation-plans
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: plan_20261103_1210_demo01
+
+{
+  "school_binding_id": "11111111-1111-4111-8111-111111111111",
+  "execution_mode": "CLOUD_HOSTED",
+  "target_local_date": "2026-11-03",
+  "target_local_time": "12:10:00",
+  "time_zone": "Asia/Shanghai",
+  "consent_id": "22222222-2222-4222-8222-222222222222",
+  "preferred_area_ids": ["area-haut-north-4f"],
+  "preferred_seat_ids": ["N4-088", "N4-089"],
+  "allow_alternative_seat": true,
+  "precheck_lead_seconds": 1800,
+  "final_check_lead_seconds": 300,
+  "max_lateness_seconds": 0
+}
+
+### 4. Parcel Hub Manual/SMS Import (OTP Filtered)
+POST http://127.0.0.1:4100/api/v1/parcels/imports
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+
+{
+  "campus_profile_id": "profile-haut-default",
+  "source_type": "SMS_OR_NOTIFICATION_TEXT",
+  "raw_content": "【菜鸟驿站】您的顺丰包裹SF152839481920已到莲花街校区东区菜鸟驿站，请凭取件码12-3-4506取件。",
+  "carrier_code": "SF",
+  "tracking_number": "SF152839481920"
+}
+
+### 5. Invoke Sandboxed Plugin Command (Zero Host Code Change)
+POST http://127.0.0.1:4100/api/v1/plugins/org.example.hello-campus/commands/campus.demo.read/invoke
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+
+{
+  "campus_profile_id": "profile-haut-default",
+  "school_id": "haut",
+  "input": {
+    "campus": "lianhuajie"
+  }
+}

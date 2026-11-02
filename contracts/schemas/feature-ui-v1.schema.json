@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://campus.yellowpeachxgp.com/schemas/feature-ui-v1.schema.json",
+  "title": "Declarative UI Extension Slot Schema (v1)",
+  "description": "Safe declarative UI DSL components rendered by the Android Compose Host and Cloud Console without arbitrary HTML/JS/Dex execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slot", "component_id", "template", "title", "nodes"],
+  "properties": {
+    "slot": {
+      "type": "string",
+      "enum": [
+        "home.bento.primary",
+        "home.bento.secondary",
+        "campus.services.grid",
+        "academic.overview.panel",
+        "timetable.detail.action",
+        "library.booking.preference",
+        "profile.extensions",
+        "settings.integrations",
+        "widget.generic.card",
+        "console.dashboard.widget",
+        "console.feature.page",
+        "parcel.sources",
+        "parcel.details",
+        "parcel.settings"
+      ]
+    },
+    "component_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "template": {
+      "type": "string",
+      "enum": ["metric-card/v1", "key-value-card/v1", "action-list/v1", "query-form/v1"]
+    },
+    "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "accessibility_label": { "type": "string", "maxLength": 120 },
+    "nodes": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "label"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "Text",
+              "Metric",
+              "KeyValue",
+              "Badge",
+              "ActionButton",
+              "Field",
+              "Form",
+              "List",
+              "Chart",
+              "EmptyState",
+              "ErrorState"
+            ]
+          },
+          "label": { "type": "string", "maxLength": 80 },
+          "value": { "type": "string", "maxLength": 240 },
+          "command": { "type": "string", "pattern": "^[a-z0-9._-]+$" }
+        }
+      }
+    }
+  }
+}

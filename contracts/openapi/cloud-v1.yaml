@@ -1,0 +1,2594 @@
+openapi: 3.1.2
+info:
+  title: Day in School Campus Cloud API
+  version: 1.0.0
+  summary: Contract-First REST API for Day in School Campus Cloud, XPEACH SSO BFF, Triple-Schedule Reservation Engine, Parcel Hub & Plugin Ecosystem
+  description: |
+    Authoritative OpenAPI 3.1.2 specification for `cloud-in-school` (`day-in-school-cloud`).
+    Enforces ADR-001 through ADR-007 and `SYSTEM_CONTRACT.md`:
+    - XPEACH SSO zero-source-modification OIDC BFF + App Link single-use ticket exchange
+    - Arbitrary school-permitted target time `T` with 3 durable events (`T-30m` PRECHECK, `T-5m` FINAL_CHECK, `T` FIRE)
+    - Strict school capability & kill-switch gating (`MOCK_ONLY` / `MANUAL_ONLY` unless written school authorization is active)
+    - Isolated Finance Bridge single-debit path with idempotency key `dis:reservation:<orderUUID>:debit:v1`
+    - Parcel Hub 4-source + carrier + campus station aggregation with `PROVIDER_AUTHORITY_MATRIX`
+    - Unified `dis-extension/v2` (`dis-plugin/v2`) & `dis-campus-plugin/v1` plugin registry and command broker
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: https://campus.yellowpeachxgp.com
+    description: Domestic Campus Cloud Production Gateway (CN)
+  - url: http://127.0.0.1:4100
+    description: Local Development & Contract Verification Server
+tags:
+  - name: system
+    description: Health, readiness, and live OpenAPI contract discovery
+  - name: auth
+    description: Confidential Web OIDC BFF, PKCE mobile ticket exchange, and Cloud session rotation
+  - name: me
+    description: User profile, devices, 🍑 wallet snapshot, orders, consents, and GDPR/PIPL data rights
+  - name: schools
+    description: School directory, library capabilities, and versioned booking window rules
+  - name: school-bindings
+    description: Verified campus identity bindings and KMS-encrypted credential vault lifecycle
+  - name: reservations
+    description: Arbitrary target T (T-30m / T-5m / T) reservation plans, jobs, cancellation, and authoritative evidence
+  - name: pricing
+    description: Immutable service pricing catalog
+  - name: notifications
+    description: User notification inbox and read receipts
+  - name: parcels
+    description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
+  - name: plugins
+    description: Signed plugin registry (`dis-campus-plugin/v1` & `dis-extension/v2`) and sandboxed command broker
+  - name: admin
+    description: RBAC operations console, school kill-switch, dual-person approval, finance reconciliation, and security audit
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags: [system]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /readyz:
+    get:
+      operationId: getReadyz
+      tags: [system]
+      summary: Readiness probe checking DB, Queue, and KMS status
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Dependency unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/openapi.json:
+    get:
+      operationId: getOpenApiSpec
+      tags: [system]
+      summary: Return the active OpenAPI 3.1.2 contract
+      responses:
+        '200':
+          description: OpenAPI 3.1.2 JSON document
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/v1/auth/mobile/start:
+    post:
+      operationId: startMobileAuthTransaction
+      tags: [auth]
+      summary: Initiate mobile OIDC BFF login transaction with client PKCE S256 challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileAuthStartRequest'
+      responses:
+        '201':
+          description: Login transaction created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileAuthStartEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/oidc/start:
+    get:
+      operationId: startOidcRedirect
+      tags: [auth]
+      summary: Redirect system browser / Custom Tab to XPEACH SSO authorization endpoint
+      parameters:
+        - name: txn
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 16
+      responses:
+        '302':
+          description: Redirect to discovered XPEACH SSO authorization_endpoint
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/auth/oidc/callback:
+    get:
+      operationId: handleOidcCallback
+      tags: [auth]
+      summary: Confidential Web Client callback from XPEACH SSO; issues single-use App Link ticket
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: iss
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to verified Android App Link with single-use app_ticket
+          headers:
+            Location:
+              schema:
+                type: string
+            Referrer-Policy:
+              schema:
+                type: string
+                const: no-referrer
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/mobile/exchange:
+    post:
+      operationId: exchangeMobileAppTicket
+      tags: [auth]
+      summary: Atomically consume single-use app_ticket and verify mobile PKCE code_verifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileTicketExchangeRequest'
+      responses:
+        '200':
+          description: Cloud session issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudSessionEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshCloudSession
+      tags: [auth]
+      summary: Rotate Cloud refresh token within device session family (replay revokes family)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Rotated Cloud session tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudSessionEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/logout:
+    post:
+      operationId: logoutCurrentSession
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      summary: Revoke current device session
+      responses:
+        '200':
+          description: Current session revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/logout-all:
+    post:
+      operationId: logoutAllSessions
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      summary: Revoke all device sessions and optionally unlink XPEACH identity
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                unlink_xpeach:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: All sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me:
+    get:
+      operationId: getMyProfile
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Get current Cloud user identity summary (minimized SSO subject metadata)
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeProfileEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/devices:
+    get:
+      operationId: listMyDevices
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: List active device session families for current user
+      responses:
+        '200':
+          description: Device list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/devices/{deviceId}:
+    delete:
+      operationId: revokeMyDevice
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Revoke a specific device session family
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Device revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/me/wallet:
+    get:
+      operationId: getMyWallet
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Read authoritative 🍑 wallet snapshot from XPEACH SSO via Finance Bridge (no hold/freeze claimed)
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Wallet snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletSnapshotEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/me/orders:
+    get:
+      operationId: listMyOrders
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Cursor-paginated list of user reservation service orders and payment states
+      parameters:
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: User orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/consents:
+    get:
+      operationId: listMyConsents
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: List explicit user consent records
+      responses:
+        '200':
+          description: Consent list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: grantConsent
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Record explicit user consent for a specific purpose and policy version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantConsentRequest'
+      responses:
+        '201':
+          description: Consent recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/consents/{consentId}:
+    delete:
+      operationId: withdrawConsent
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Withdraw consent and immediately halt dependent scheduled jobs and vault credentials
+      parameters:
+        - name: consentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Consent withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/data-export:
+    post:
+      operationId: requestMyDataExport
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Export user Cloud data bundle (excluding raw school credentials)
+      responses:
+        '200':
+          description: Export bundle generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataExportEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/data-delete:
+    post:
+      operationId: requestMyDataDelete
+      tags: [me]
+      security:
+        - bearerAuth: []
+      summary: Destroy school bindings, vault secrets, and active plans while retaining statutory financial ledger refs
+      responses:
+        '200':
+          description: Deletion completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/schools:
+    get:
+      operationId: listSchools
+      tags: [schools]
+      summary: List supported schools and their current automation & kill-switch states
+      responses:
+        '200':
+          description: School directory
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolListEnvelope'
+  /api/v1/schools/{schoolId}/library/capabilities:
+    get:
+      operationId: getSchoolLibraryCapabilities
+      tags: [schools]
+      summary: Get capability claims and evidence levels for a school's library provider
+      parameters:
+        - $ref: '#/components/parameters/SchoolIdParam'
+      responses:
+        '200':
+          description: School capability claims
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolCapabilitiesEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/schools/{schoolId}/library/rules:
+    get:
+      operationId: getSchoolLibraryRules
+      tags: [schools]
+      summary: Get versioned daily booking window and lead-time rules for a school
+      parameters:
+        - $ref: '#/components/parameters/SchoolIdParam'
+      responses:
+        '200':
+          description: School booking rules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBookingRulesEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/schools/{schoolId}/booking-rules:
+    get:
+      operationId: getSchoolBookingRulesCanonical
+      tags: [schools]
+      summary: Canonical ADR-005 endpoint for versioned school booking window and T-30m / T-5m / T rules
+      parameters:
+        - $ref: '#/components/parameters/SchoolIdParam'
+      responses:
+        '200':
+          description: School booking rules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBookingRulesEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/school-bindings:
+    get:
+      operationId: listMySchoolBindings
+      tags: [school-bindings]
+      security:
+        - bearerAuth: []
+      summary: List current user's school identity bindings
+      responses:
+        '200':
+          description: User's school bindings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBindingListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: initiateSchoolBinding
+      tags: [school-bindings]
+      security:
+        - bearerAuth: []
+      summary: Initiate verified school account binding with explicit consent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSchoolBindingRequest'
+      responses:
+        '201':
+          description: Binding challenge initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBindingEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/school-bindings/{bindingId}/complete:
+    post:
+      operationId: completeSchoolBinding
+      tags: [school-bindings]
+      security:
+        - bearerAuth: []
+      summary: Complete school identity verification and optionally escrow delegated token into CN Vault
+      parameters:
+        - $ref: '#/components/parameters/BindingIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteSchoolBindingRequest'
+      responses:
+        '200':
+          description: School binding verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBindingEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/school-bindings/{bindingId}/reauthorize:
+    post:
+      operationId: reauthorizeSchoolBinding
+      tags: [school-bindings]
+      security:
+        - bearerAuth: []
+      summary: Reauthorize an expired or degraded school binding
+      parameters:
+        - $ref: '#/components/parameters/BindingIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteSchoolBindingRequest'
+      responses:
+        '200':
+          description: School binding reauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolBindingEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/school-bindings/{bindingId}:
+    delete:
+      operationId: revokeSchoolBinding
+      tags: [school-bindings]
+      security:
+        - bearerAuth: []
+      summary: Revoke school binding, destroy KMS vault secret, and cancel queued jobs
+      parameters:
+        - $ref: '#/components/parameters/BindingIdParam'
+      responses:
+        '200':
+          description: Binding revoked and credentials destroyed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/reservation-plans:
+    get:
+      operationId: listReservationPlans
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: List user's Cloud reservation plans
+      responses:
+        '200':
+          description: Reservation plans
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationPlanListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createReservationPlan
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Create a date-scoped reservation plan with user-customizable target time T (schedules T-30m, T-5m, T)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReservationPlanRequest'
+      responses:
+        '201':
+          description: Created reservation plan and triple-schedule events (T-30m, T-5m, T)
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationPlanEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/reservation-plans/{planId}:
+    patch:
+      operationId: updateReservationPlan
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Update target time T or seat preferences on an unexecuted plan (increments generation)
+      parameters:
+        - $ref: '#/components/parameters/PlanIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateReservationPlanRequest'
+      responses:
+        '200':
+          description: Plan updated and triple-schedule events regenerated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationPlanEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      operationId: cancelReservationPlan
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Disable plan and cancel unexecuted jobs and schedule events
+      parameters:
+        - $ref: '#/components/parameters/PlanIdParam'
+      responses:
+        '200':
+          description: Plan cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/reservation-jobs:
+    get:
+      operationId: listReservationJobs
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: List user's reservation jobs and their T-30m / T-5m / T event statuses
+      responses:
+        '200':
+          description: Reservation job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationJobListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/reservation-jobs/{jobId}:
+    get:
+      operationId: getReservationJob
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Get detailed status and triple-schedule events for a reservation job
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: Reservation job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationJobEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/reservation-jobs/{jobId}/cancel:
+    post:
+      operationId: cancelReservationJob
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Cancel an unexecuted reservation job via CAS state_version check
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationJobEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/reservation-jobs/{jobId}/evidence:
+    get:
+      operationId: getReservationJobEvidence
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Get sanitized authoritative school readback evidence for a reservation job
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: Sanitized booking verification evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationEvidenceEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/pricing/library-booking:
+    get:
+      operationId: getLibraryBookingPricing
+      tags: [pricing]
+      summary: Get current immutable pricing catalog for LOCAL_DEVICE (0 🍑), MANUAL_REMINDER (0 🍑), and CLOUD_HOSTED
+      responses:
+        '200':
+          description: Pricing catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricingCatalogEnvelope'
+  /api/v1/notifications:
+    get:
+      operationId: listMyNotifications
+      tags: [notifications]
+      security:
+        - bearerAuth: []
+      summary: List user notifications
+      responses:
+        '200':
+          description: Notification list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/notifications/{notificationId}/read:
+    post:
+      operationId: markNotificationRead
+      tags: [notifications]
+      security:
+        - bearerAuth: []
+      summary: Mark a notification as read (idempotent)
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification marked read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcels:
+    get:
+      operationId: listParcels
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Cursor-paginated list of canonical parcels scoped by campus_profile_id
+      parameters:
+        - name: campus_profile_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Canonical parcel list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcels/{parcelId}:
+    get:
+      operationId: getParcelById
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Get canonical parcel detail with field-level provenance and confidence
+      parameters:
+        - $ref: '#/components/parameters/ParcelIdParam'
+      responses:
+        '200':
+          description: Canonical parcel detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelDetailEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/parcels/{parcelId}/trace:
+    get:
+      operationId: getParcelTrace
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Get chronological shipment tracking timeline and ETA metadata
+      parameters:
+        - $ref: '#/components/parameters/ParcelIdParam'
+      responses:
+        '200':
+          description: Parcel tracking timeline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelTraceEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/parcels/{parcelId}/tracking:
+    post:
+      operationId: updateParcelTrackingPreference
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Enable or disable background tracking notification for a specific parcel
+      parameters:
+        - $ref: '#/components/parameters/ParcelIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParcelTrackingPreferenceRequest'
+      responses:
+        '200':
+          description: Tracking preference updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelDetailEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcels/imports:
+    post:
+      operationId: importParcels
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Import parcels from explicit user share, SMS/notification text, or backup JSON (filters out OTP codes)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParcelImportRequest'
+      responses:
+        '201':
+          description: Import processed and merged into canonical parcels
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelImportEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcel-sources/{providerId}/authorizations:
+    post:
+      operationId: startParcelSourceAuthorization
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Start independent authorization for a parcel source provider (enforces PROVIDER_AUTHORITY_MATRIX)
+      parameters:
+        - name: providerId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParcelSourceAuthRequest'
+      responses:
+        '200':
+          description: Authorization state or official redirect / research-only restriction notice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelSourceAuthEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/parcel-sources/connections:
+    get:
+      operationId: listParcelSourceConnections
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: List bound parcel source connections and authority statuses for current campus profile
+      parameters:
+        - name: campus_profile_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Bound source connections and authority matrix
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelConnectionListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcel-sources/connections/{connectionId}:
+    delete:
+      operationId: revokeParcelSourceConnection
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Revoke and delete a parcel source connection and its credentials
+      parameters:
+        - name: connectionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Connection revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcel-stations:
+    get:
+      operationId: listParcelStations
+      tags: [parcels]
+      summary: List verified campus parcel pickup stations with GIS map coordinates
+      parameters:
+        - name: school_id
+          in: query
+          required: false
+          schema:
+            type: string
+            default: haut
+      responses:
+        '200':
+          description: Campus parcel station directory
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelStationListEnvelope'
+  /api/v1/parcel-sync/jobs:
+    post:
+      operationId: createParcelSyncJob
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Trigger a user-initiated multi-source parcel synchronization job (partial failure preserves stale snapshot)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateParcelSyncJobRequest'
+      responses:
+        '202':
+          description: Sync job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelSyncJobEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/parcel-sync/jobs/{jobId}:
+    get:
+      operationId: getParcelSyncJob
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Get per-source batch progress and completeness state for a parcel sync job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sync job status and batch events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelSyncJobEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/parcel-ai/requests:
+    post:
+      operationId: invokeParcelAiAssistant
+      tags: [parcels]
+      security:
+        - bearerAuth: []
+      summary: Invoke opt-in Parcel AI assistant or rule-based daily summary (requires explicit field-level consent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParcelAiRequest'
+      responses:
+        '200':
+          description: AI or rule-based parcel assistant response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParcelAiResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/plugins/registry:
+    get:
+      operationId: listRegisteredPlugins
+      tags: [plugins]
+      summary: List signed and verified plugins (`dis-campus-plugin/v1`, `dis-extension/v2`, `dis-plugin/v2`)
+      responses:
+        '200':
+          description: Signed plugin registry and UI slot contributions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginRegistryEnvelope'
+  /api/v1/plugins/install:
+    post:
+      operationId: installSignedPlugin
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      summary: Verify Ed25519 signature + SHA-256 artifact digests and install a plugin without modifying host code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PluginInstallRequest'
+      responses:
+        '201':
+          description: Plugin verified and installed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginDescriptorEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/plugins/{pluginId}/lifecycle:
+    post:
+      operationId: transitionPluginLifecycle
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      summary: Enable, disable, rollback, or uninstall an installed plugin
+      parameters:
+        - name: pluginId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PluginLifecycleRequest'
+      responses:
+        '200':
+          description: Plugin lifecycle transitioned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginDescriptorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/plugins/{pluginId}/commands/{commandId}/invoke:
+    post:
+      operationId: invokePluginCommand
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      summary: Invoke a sandboxed plugin command through the host Permission Broker
+      parameters:
+        - name: pluginId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: commandId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PluginCommandInvokeRequest'
+      responses:
+        '200':
+          description: Command executed within declared permission and resource budget
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginCommandInvokeEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/features:
+    get:
+      operationId: listHostFeatures
+      tags: [plugins]
+      summary: List all built-in and dynamically installed FeatureDescriptors and UiExtensionSlots
+      responses:
+        '200':
+          description: Unified feature descriptors and UI slots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureCatalogEnvelope'
+  /api/v1/admin/overview:
+    get:
+      operationId: getAdminOverview
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Get RBAC-protected operational dashboard metrics, school kill-switch states, and finance summary
+      responses:
+        '200':
+          description: Operations dashboard metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOverviewEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/schools:
+    get:
+      operationId: listAdminSchoolIntegrations
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: List school integrations, capability evidence, and kill-switch configurations
+      responses:
+        '200':
+          description: School integrations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchoolListEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/schools/{schoolId}/kill-switch:
+    post:
+      operationId: toggleSchoolKillSwitch
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Toggle emergency school kill-switch (enabling live write requires dual-person approval & evidence)
+      parameters:
+        - $ref: '#/components/parameters/SchoolIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminKillSwitchRequest'
+      responses:
+        '200':
+          description: Kill-switch updated and audited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/schools/{schoolId}/authorization-approval:
+    post:
+      operationId: approveSchoolAuthorization
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Record first or second operator approval for school authorization evidence
+      parameters:
+        - $ref: '#/components/parameters/SchoolIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminApprovalRequest'
+      responses:
+        '200':
+          description: Approval recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/jobs:
+    get:
+      operationId: listAdminReservationJobs
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: List anonymized reservation jobs and triple-schedule timelines for operations troubleshooting
+      responses:
+        '200':
+          description: Anonymized reservation jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationJobListEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/orders:
+    get:
+      operationId: listAdminOrders
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: List service orders, payment states, and reconciliation variances
+      responses:
+        '200':
+          description: Service orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderListEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/orders/{orderId}/reconcile:
+    post:
+      operationId: reconcileAdminOrder
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Reconcile an order against XPEACH SSO Finance Bridge using its deterministic idempotency key
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order reconciled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/orders/{orderId}/refund:
+    post:
+      operationId: refundAdminOrder
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Issue an idempotent refund for a PAID order (`dis:reservation:<orderUUID>:refund:v1`, capped at paid amount)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRefundRequest'
+      responses:
+        '200':
+          description: Order refunded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/audit-events:
+    get:
+      operationId: listAdminAuditEvents
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: List tamper-evident security and credential access audit events (zero plaintext secrets)
+      responses:
+        '200':
+          description: Audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventListEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    CursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    SchoolIdParam:
+      name: schoolId
+      in: path
+      required: true
+      schema:
+        type: string
+    BindingIdParam:
+      name: bindingId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PlanIdParam:
+      name: planId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobIdParam:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ParcelIdParam:
+      name: parcelId
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Invalid request parameters or schema validation failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Authentication required or Cloud session expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: Operation forbidden by RBAC, consent withdrawal, or school/provider authority matrix
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource not found or not owned by authenticated subject
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: Business state conflict, duplicate active plan, or insufficient wallet balance
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    UnprocessableEntity:
+      description: Target time T outside school booking window or invalid rule version
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ServiceUnavailable:
+      description: Upstream dependency (e.g., XPEACH SSO or school service) unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ResponseMeta:
+      type: object
+      required: [request_id, api_version]
+      properties:
+        request_id:
+          type: string
+        api_version:
+          type: string
+          default: v1
+        next_cursor:
+          type: [string, 'null']
+    ErrorDetail:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        user_action:
+          type: string
+        retryable:
+          type: boolean
+        detail:
+          type: object
+    ErrorEnvelope:
+      type: object
+      required: [ok, code, request_id, error, meta]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        code:
+          type: string
+        request_id:
+          type: string
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    HealthResponse:
+      type: object
+      required: [ok, service, version, timestamp]
+      properties:
+        ok:
+          type: boolean
+        service:
+          type: string
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+    ReadyResponse:
+      type: object
+      required: [ok, db, queue, kms, sso_discovery]
+      properties:
+        ok:
+          type: boolean
+        db:
+          type: boolean
+        queue:
+          type: boolean
+        kms:
+          type: boolean
+        sso_discovery:
+          type: string
+    ActionAckEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    MobileAuthStartRequest:
+      type: object
+      additionalProperties: false
+      required: [install_ephemeral_id, code_challenge, code_challenge_method]
+      properties:
+        install_ephemeral_id:
+          type: string
+          minLength: 8
+          maxLength: 128
+        code_challenge:
+          type: string
+          minLength: 43
+          maxLength: 128
+        code_challenge_method:
+          type: string
+          enum: [S256]
+        device_label:
+          type: string
+          maxLength: 64
+    MobileAuthStartEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required: [login_txn, authorize_url, expires_at]
+          properties:
+            login_txn:
+              type: string
+            authorize_url:
+              type: string
+              format: uri
+            expires_at:
+              type: string
+              format: date-time
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    MobileTicketExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [login_txn, app_ticket, code_verifier]
+      properties:
+        login_txn:
+          type: string
+        app_ticket:
+          type: string
+        code_verifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+    RefreshTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    CloudSessionEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required: [cloud_user_id, access_token, refresh_token, expires_in, family_id, sso_issuer, sso_subject]
+          properties:
+            cloud_user_id:
+              type: string
+              format: uuid
+            access_token:
+              type: string
+            refresh_token:
+              type: string
+            expires_in:
+              type: integer
+            family_id:
+              type: string
+              format: uuid
+            sso_issuer:
+              type: string
+            sso_subject:
+              type: string
+            display_name:
+              type: string
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    MeProfileEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required: [cloud_user_id, sso_issuer, sso_subject, status, roles]
+          properties:
+            cloud_user_id:
+              type: string
+              format: uuid
+            sso_issuer:
+              type: string
+            sso_subject:
+              type: string
+            display_name:
+              type: string
+            status:
+              type: string
+            roles:
+              type: array
+              items:
+                type: string
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DeviceListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    WalletSnapshotEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required: [cloud_user_id, currency_symbol, peach_balance, micropeach_balance, hold_supported, fetched_at]
+          properties:
+            cloud_user_id:
+              type: string
+              format: uuid
+            currency_symbol:
+              type: string
+              const: "🍑"
+            peach_balance:
+              type: number
+            micropeach_balance:
+              type: integer
+            hold_supported:
+              type: boolean
+              const: false
+            fetched_at:
+              type: string
+              format: date-time
+            source:
+              type: string
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    OrderListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    OrderEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GrantConsentRequest:
+      type: object
+      additionalProperties: false
+      required: [purpose, document_version, document_sha256]
+      properties:
+        purpose:
+          type: string
+          enum:
+            - SCHOOL_CREDENTIAL_ESCROW
+            - CLOUD_AUTO_BOOKING
+            - SERVICE_FEE_TERMS
+            - PARCEL_CLOUD_BACKUP
+            - PARCEL_AI_ASSISTANT
+        document_version:
+          type: string
+        document_sha256:
+          type: string
+        school_binding_id:
+          type: string
+          format: uuid
+    ConsentEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ConsentListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DataExportEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SchoolListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SchoolCapabilitiesEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SchoolBookingRulesEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required: [school_id, rule_version, time_zone, window_start, window_end_exclusive, precheck_lead_seconds, final_check_lead_seconds]
+          properties:
+            school_id:
+              type: string
+            rule_version:
+              type: string
+            time_zone:
+              type: string
+            window_start:
+              type: string
+            window_end_exclusive:
+              type: string
+            precheck_lead_seconds:
+              type: integer
+              const: 1800
+            final_check_lead_seconds:
+              type: integer
+              const: 300
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    CreateSchoolBindingRequest:
+      type: object
+      additionalProperties: false
+      required: [school_id, consent_id]
+      properties:
+        school_id:
+          type: string
+        local_profile_id:
+          type: string
+        masked_student_ref:
+          type: string
+        consent_id:
+          type: string
+          format: uuid
+    CompleteSchoolBindingRequest:
+      type: object
+      additionalProperties: false
+      required: [verification_proof, credential_kind]
+      properties:
+        verification_proof:
+          type: string
+        credential_kind:
+          type: string
+          enum:
+            - OFFICIAL_DELEGATED_TOKEN
+            - OFFICIAL_SHORT_LIVED_SESSION
+            - USER_CONSENTED_CREDENTIAL_ESCROW
+        delegated_secret_payload:
+          type: string
+        masked_student_ref:
+          type: string
+    SchoolBindingEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SchoolBindingListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    CreateReservationPlanRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - school_binding_id
+        - execution_mode
+        - target_local_date
+        - target_local_time
+        - time_zone
+        - consent_id
+      properties:
+        school_binding_id:
+          type: string
+          format: uuid
+        execution_mode:
+          type: string
+          enum: [CLOUD_HOSTED]
+        target_local_date:
+          type: string
+          format: date
+        target_local_time:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+        time_zone:
+          type: string
+          default: Asia/Shanghai
+        consent_id:
+          type: string
+          format: uuid
+        preferred_area_ids:
+          type: array
+          items:
+            type: string
+        preferred_seat_ids:
+          type: array
+          items:
+            type: string
+        allow_alternative_seat:
+          type: boolean
+          default: true
+        precheck_lead_seconds:
+          type: integer
+          const: 1800
+          default: 1800
+        final_check_lead_seconds:
+          type: integer
+          const: 300
+          default: 300
+        max_lateness_seconds:
+          type: integer
+          minimum: 0
+          maximum: 1800
+          default: 0
+        accepted_price_version:
+          type: string
+        accepted_policy_version:
+          type: string
+    UpdateReservationPlanRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_local_time:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+        preferred_area_ids:
+          type: array
+          items:
+            type: string
+        preferred_seat_ids:
+          type: array
+          items:
+            type: string
+        allow_alternative_seat:
+          type: boolean
+        enabled:
+          type: boolean
+    ReservationPlanEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          required:
+            - plan_id
+            - job_id
+            - execution_mode
+            - target_at
+            - precheck_at
+            - final_check_at
+            - status
+            - capability
+          properties:
+            plan_id:
+              type: string
+              format: uuid
+            job_id:
+              type: string
+              format: uuid
+            execution_mode:
+              type: string
+            target_local_date:
+              type: string
+            target_local_time:
+              type: string
+            target_at:
+              type: string
+              format: date-time
+            precheck_at:
+              type: string
+              format: date-time
+            final_check_at:
+              type: string
+              format: date-time
+            school_window:
+              type: object
+            status:
+              type: string
+            capability:
+              type: string
+            schedule_events:
+              type: array
+              items:
+                type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReservationPlanListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReservationJobEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReservationJobListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReservationEvidenceEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PricingCatalogEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    NotificationListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelDetailEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelTraceEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelTrackingPreferenceRequest:
+      type: object
+      additionalProperties: false
+      required: [track_enabled]
+      properties:
+        track_enabled:
+          type: boolean
+        cadence_minutes:
+          type: integer
+          minimum: 15
+          default: 30
+    ParcelImportRequest:
+      type: object
+      additionalProperties: false
+      required: [campus_profile_id, source_type, raw_content]
+      properties:
+        campus_profile_id:
+          type: string
+        source_type:
+          type: string
+          enum: [MANUAL_ENTRY, SMS_OR_NOTIFICATION_TEXT, SHARE_INTENT, BACKUP_JSON]
+        raw_content:
+          type: string
+        carrier_code:
+          type: string
+        tracking_number:
+          type: string
+        pickup_code_override:
+          type: string
+        station_id:
+          type: string
+        product_title:
+          type: string
+    ParcelImportEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelSourceAuthRequest:
+      type: object
+      additionalProperties: false
+      required: [campus_profile_id]
+      properties:
+        campus_profile_id:
+          type: string
+        account_label:
+          type: string
+        mode:
+          type: string
+          enum: [OFFICIAL_OAUTH, MOCK_SANDBOX]
+          default: MOCK_SANDBOX
+    ParcelSourceAuthEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelConnectionListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelStationListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    CreateParcelSyncJobRequest:
+      type: object
+      additionalProperties: false
+      required: [campus_profile_id, provider_ids, idempotency_key]
+      properties:
+        campus_profile_id:
+          type: string
+        provider_ids:
+          type: array
+          items:
+            type: string
+        source_connection_ids:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+          enum: [IN_TRANSIT_ONLY, ALL_ACTIVE]
+          default: IN_TRANSIT_ONLY
+        reason:
+          type: string
+          default: USER_INITIATED
+        idempotency_key:
+          type: string
+    ParcelSyncJobEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ParcelAiRequest:
+      type: object
+      additionalProperties: false
+      required: [campus_profile_id, query, mode]
+      properties:
+        campus_profile_id:
+          type: string
+        query:
+          type: string
+        mode:
+          type: string
+          enum: [RULE_ONLY_DAILY_REPORT, AI_OPT_IN_ASSISTANT]
+          default: RULE_ONLY_DAILY_REPORT
+        consent_id:
+          type: string
+          format: uuid
+        allowed_fields:
+          type: array
+          items:
+            type: string
+    ParcelAiResponseEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PluginRegistryEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PluginInstallRequest:
+      type: object
+      additionalProperties: false
+      required: [manifest, signature_base64, public_key_base64]
+      properties:
+        manifest:
+          type: object
+        signature_base64:
+          type: string
+        public_key_base64:
+          type: string
+        artifact_payloads:
+          type: object
+          additionalProperties:
+            type: string
+    PluginLifecycleRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [ENABLE, DISABLE, ROLLBACK, UNINSTALL]
+        reason:
+          type: string
+    PluginDescriptorEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PluginCommandInvokeRequest:
+      type: object
+      additionalProperties: false
+      required: [campus_profile_id, input]
+      properties:
+        campus_profile_id:
+          type: string
+        school_id:
+          type: string
+        input:
+          type: object
+    PluginCommandInvokeEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    FeatureCatalogEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    AdminOverviewEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    AdminKillSwitchRequest:
+      type: object
+      additionalProperties: false
+      required: [kill_switch, reason]
+      properties:
+        kill_switch:
+          type: boolean
+        reason:
+          type: string
+    AdminApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [evidence_ref, expires_at, note]
+      properties:
+        evidence_ref:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        note:
+          type: string
+    AdminRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [amount_micropeach, reason, second_approver_ref]
+      properties:
+        amount_micropeach:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+        second_approver_ref:
+          type: string
+    AuditEventListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
