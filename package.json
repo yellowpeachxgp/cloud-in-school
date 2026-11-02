@@ -1,0 +1,29 @@
+{
+  "name": "cloud-in-school",
+  "version": "1.0.0",
+  "private": false,
+  "license": "Apache-2.0",
+  "description": "Day in School Campus Cloud — Contract-First Campus Services, Triple-Schedule Reservation Engine, XPEACH SSO BFF, Parcel Hub & Plugin Ecosystem",
+  "type": "module",
+  "bin": {
+    "dis-plugin": "./packages/plugin-sdk/bin/dis-plugin.mjs"
+  },
+  "scripts": {
+    "contract:check": "node tools/contract-ci/validate-contracts.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:unit": "node --test tests/unit.test.mjs",
+    "test:contract": "node --test tests/contract-parity.test.mjs",
+    "test:saga": "node --test tests/finance-saga-concurrency.test.mjs",
+    "test:scheduler": "node --test tests/triple-schedule.test.mjs",
+    "test:plugin": "node --test tests/plugin-zero-host-change.test.mjs",
+    "test:security": "node --test tests/security-redteam.test.mjs",
+    "start": "node apps/api/src/main.mjs",
+    "start:console": "node apps/console/src/main.mjs",
+    "start:finance-bridge": "node apps/finance-bridge/src/main.mjs",
+    "start:mock-school": "node apps/mock-school/src/main.mjs",
+    "start:scheduler": "node apps/scheduler/src/main.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

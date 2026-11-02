@@ -36,6 +36,14 @@ permissions:
     scope: host_only_gated
     description: Send user-approved parcel fields to opt-in AI assistant; off by default.
     default_granted: false
+  - id: ui.slot.render
+    scope: plugin
+    description: Render declarative extension cards in approved host UI slots.
+    default_granted: true
+  - id: parcel.write.import
+    scope: plugin
+    description: Submit normalized parcel snapshots from authorized campus station plugins.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

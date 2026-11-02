@@ -1,0 +1,33 @@
+name: Campus Cloud CI & Contract Gate
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Secret & Credential Leak Gate
+        run: |
+          if grep -RInE "(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|SSO_INTERNAL_SERVICE_KEY=[^<\s])" \
+            --exclude-dir=.git --exclude-dir=tests --exclude=".env.example" .; then
+            echo "Secret scan failed!"
+            exit 1
+          fi
+
+      - name: Validate OpenAPI 3.1.2, JSON Schemas & SYSTEM_CONTRACT
+        run: npm run contract:check
+
+      - name: Run Unit, Contract Parity, Triple-Schedule, Finance Saga, Plugin & Security Red-Team Tests
+        run: npm test

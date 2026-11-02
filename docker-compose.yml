@@ -1,0 +1,53 @@
+services:
+  campus-cloud-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dis-campus-cloud-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - dis_internal_net
+
+  campus-cloud-console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dis-campus-cloud-console
+    restart: unless-stopped
+    command: ["node", "apps/console/src/main.mjs"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      CONSOLE_PORT: 8081
+    ports:
+      - "127.0.0.1:18081:8081"
+    networks:
+      - dis_internal_net
+
+  campus-cloud-finance-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dis-campus-cloud-finance-bridge
+    restart: unless-stopped
+    command: ["node", "apps/finance-bridge/src/main.mjs"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      FINANCE_BRIDGE_PORT: 8082
+    networks:
+      - dis_internal_net
+
+networks:
+  dis_internal_net:
+    driver: bridge

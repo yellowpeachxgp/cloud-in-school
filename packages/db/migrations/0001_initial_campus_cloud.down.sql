@@ -1,0 +1,18 @@
+BEGIN;
+DROP TABLE IF EXISTS admin_role_bindings;
+DROP TABLE IF EXISTS cloud_notifications;
+DROP TABLE IF EXISTS security_audit_events;
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS finance_operations;
+DROP TABLE IF EXISTS reservation_orders;
+DROP TABLE IF EXISTS school_reservations;
+DROP TABLE IF EXISTS reservation_jobs;
+DROP TABLE IF EXISTS reservation_plans;
+DROP TABLE IF EXISTS encrypted_credentials;
+DROP TABLE IF EXISTS consent_records;
+DROP TABLE IF EXISTS school_account_bindings;
+DROP TABLE IF EXISTS school_integrations;
+DROP TABLE IF EXISTS cloud_device_sessions;
+DROP TABLE IF EXISTS user_identities;
+DROP TABLE IF EXISTS cloud_users;
+COMMIT;

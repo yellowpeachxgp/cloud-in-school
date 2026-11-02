@@ -1,0 +1,42 @@
+{
+  "schema_version": "dis-extension/v2",
+  "plugin_id": "org.example.parcel-station",
+  "name": "校园菜鸟驿站状态插件",
+  "version": "1.0.0",
+  "min_host_api": 2,
+  "max_host_api": 2,
+  "permissions": [
+    "ui.slot.render",
+    "parcel.read",
+    "parcel.write.import"
+  ],
+  "allowed_origins": [],
+  "ui_slots": [
+    {
+      "slot_id": "parcel.cards",
+      "card_id": "org.example.parcel-station.hours",
+      "title": "莲花街北苑驿站营业状态",
+      "subtitle": "08:30 - 21:00 | 当前免排队",
+      "action_command": "queryStationHours"
+    }
+  ],
+  "commands": [
+    {
+      "name": "queryStationHours",
+      "description": "Query campus parcel station opening hours and crowd status",
+      "required_permission": "parcel.read"
+    }
+  ],
+  "entry_artifacts": [
+    {
+      "path": "dist/index.mjs",
+      "sha256": "33359efbb9e7e7bebf316777304a2eb933ef2fab5f51765180f33d3ae43b7fa0",
+      "size_bytes": 235
+    }
+  ],
+  "signature": {
+    "algorithm": "Ed25519",
+    "key_id": "dis-official-examples-2026",
+    "value_base64": "3+GRxtWVzTUSm0FoX6ZRyU0mIhhHs7Vd7n1P0LgDQlRzNuOrAK2BzQK7VDKsKhkszUmrVoPl1TVd2fNB5/WaBA=="
+  }
+}
