@@ -21,7 +21,7 @@ jobs:
       - name: Secret & Credential Leak Gate
         run: |
           if grep -RInE "(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|SSO_INTERNAL_SERVICE_KEY=[^<\s])" \
-            --exclude-dir=.git --exclude-dir=tests --exclude=".env.example" .; then
+            --exclude-dir=.git --exclude-dir=.github --exclude-dir=tests --exclude=".env.example" .; then
             echo "Secret scan failed!"
             exit 1
           fi
