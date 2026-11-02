@@ -283,6 +283,36 @@ export class IsolatedFinanceBridge {
         if (userObj && body.wallet) {
           userObj.peach_wallet = body.wallet;
         }
+        // Report cross-site financial ledger event to XPeach SSO (/api/v1/finance/events)
+        try {
+          await fetch(`${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/finance/events`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+              "X-Internal-Service-Key": this.internalServiceKey,
+              "X-Idempotency-Key": `${eventKey}:ledger`
+            },
+            body: JSON.stringify({
+              site_short_code: "dis",
+              site_name: "日在校园",
+              user_uuid: ssoSubject,
+              username: userObj?.username || userObj?.display_name || ssoSubject,
+              event_type: resolvedPeach < 0 ? "library_seat_reservation_debit" : "library_seat_reservation_refund",
+              direction: resolvedPeach < 0 ? "debit" : "credit",
+              peach_amount: Math.abs(resolvedPeach),
+              currency: "PEACH",
+              order_no: eventKey,
+              idempotency_key: `${eventKey}:ledger`,
+              already_applied_on_source: true,
+              apply_wallet_sync: false,
+              description: reason,
+              occurred_at: new Date().toISOString()
+            })
+          });
+        } catch {
+          // Best-effort cross-site ledger reporting
+        }
         const out = {
           ok: true,
           deduplicated: Boolean(body.deduplicated),
@@ -318,6 +348,28 @@ export class IsolatedFinanceBridge {
     } finally {
       this.inFlightLocks.delete(eventKey);
       releaseLock();
+    }
+  }
+
+  async getSiteFinanceMatrix() {
+    if (!this.internalServiceKey) {
+      return null;
+    }
+    try {
+      const resp = await fetch(
+        `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/finance/matrix?site=dis`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            "X-Internal-Service-Key": this.internalServiceKey
+          }
+        }
+      );
+      if (!resp.ok) return null;
+      return await resp.json().catch(() => null);
+    } catch {
+      return null;
     }
   }
 }

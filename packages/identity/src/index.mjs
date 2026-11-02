@@ -547,6 +547,41 @@ export class CloudIdentityService {
     };
   }
 
+  async syncUserSiteProfileToSso(user, siteDataPatch = {}) {
+    if (!user || !user.sso_access_token) {
+      return { ok: false, skipped: "no_sso_access_token" };
+    }
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${user.sso_access_token}`
+      };
+      if (this.internalServiceKey) {
+        headers["X-Internal-Service-Key"] = this.internalServiceKey;
+      }
+      const resp = await fetch(`${this.ssoBaseUrl.replace(/\/+$/, "")}/api/internal/user-profile`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          client_id: this.clientId,
+          site_short_code: "dis",
+          site_data: {
+            cloud_user_id: user.id,
+            synced_at: new Date().toISOString(),
+            ...siteDataPatch
+          }
+        })
+      });
+      if (!resp.ok) {
+        return { ok: false, status: resp.status };
+      }
+      return await resp.json().catch(() => ({ ok: true }));
+    } catch {
+      return { ok: false, skipped: "network_error" };
+    }
+  }
+
   signWebSessionCookie({ cloudUserId, accessToken, refreshToken }) {
     const payload = Buffer.from(
       JSON.stringify({
