@@ -3,11 +3,6 @@ import { ContractError } from "../../contracts/src/index.mjs";
 
 /**
  * Confidential Web OIDC BFF + Single-Use App Link Ticket + Session Family Replay Guard.
- * Enforces Section 03.3, 03.5, 04.1 & 18.2 (AUTH-001 through AUTH-020):
- * - Zero XPEACH SSO source modification
- * - S256 PKCE both between Mobile <-> Cloud BFF and Cloud BFF <-> XPEACH SSO
- * - Single-use `app_ticket` with <= 60s TTL and atomic consumption
- * - Refresh token rotation with family_id; reusing a consumed refresh token immediately revokes the entire family!
  */
 export function computeS256Challenge(codeVerifier) {
   return crypto
@@ -23,10 +18,15 @@ export class CloudIdentityService {
       options.expectedIssuer ||
       process.env.OIDC_EXPECTED_ISSUER ||
       "https://sso.xpeach.codes/t/acme";
+    this.ssoBaseUrl =
+      options.ssoBaseUrl ||
+      this.expectedIssuer.replace(/\/t\/[^/]+\/?$/, "").replace(/\/+$/, "");
     this.clientId =
       options.clientId || process.env.OIDC_CLIENT_ID || "day-in-school-cloud";
     this.clientSecret =
       options.clientSecret || process.env.OIDC_CLIENT_SECRET || "";
+    this.internalServiceKey =
+      options.internalServiceKey || process.env.SSO_INTERNAL_SERVICE_KEY || "";
     this.redirectUri =
       options.redirectUri ||
       process.env.OIDC_REDIRECT_URI ||
@@ -121,7 +121,7 @@ export class CloudIdentityService {
       client_id: this.clientId,
       redirect_uri: this.redirectUri,
       response_type: "code",
-      scope: "openid profile email",
+      scope: "openid profile email offline_access",
       state: txn.serverState,
       nonce: txn.serverNonce,
       code_challenge: txn.serverChallenge,
@@ -168,7 +168,6 @@ export class CloudIdentityService {
         expectedNonce: txn.serverNonce
       });
     } else {
-      // Deterministic exchange for synthetic code format `sso_code_<sub_id>_<nonce>`
       verifiedClaims = {
         iss: this.expectedIssuer,
         aud: this.clientId,
@@ -194,6 +193,30 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token missing subject");
     }
 
+    const displayName =
+      verifiedClaims.name ||
+      verifiedClaims.preferred_username ||
+      verifiedClaims.username ||
+      verifiedClaims.email ||
+      "XPEACH User";
+
+    const user = this.store.findOrCreateCloudUser({
+      issuer: verifiedClaims.iss,
+      subject: verifiedClaims.sub,
+      displayName,
+      username: verifiedClaims.username || verifiedClaims.preferred_username || displayName,
+      email: verifiedClaims.email || null,
+      emailVerified: Boolean(verifiedClaims.email_verified),
+      group: verifiedClaims.group || verifiedClaims.peach_wallet?.group || "默认分组",
+      affCode: verifiedClaims.aff_code || verifiedClaims.peach_wallet?.affCode || null,
+      role: verifiedClaims.role || "user",
+      ssoCreatedAt: verifiedClaims.sso_created_at || null,
+      ssoLastLoginAt: verifiedClaims.sso_last_login_at || null,
+      ssoAccessToken: verifiedClaims.sso_access_token || null,
+      ssoRefreshToken: verifiedClaims.sso_refresh_token || null,
+      peachWallet: verifiedClaims.peach_wallet || null
+    });
+
     txn.status = "CALLBACK_VERIFIED";
     const appTicket = `tkt_${crypto.randomBytes(24).toString("base64url")}`;
     this.store.exchangeTickets.set(appTicket, {
@@ -202,16 +225,32 @@ export class CloudIdentityService {
       flowKind: txn.flowKind || "MOBILE_APP",
       issuer: verifiedClaims.iss,
       subject: verifiedClaims.sub,
-      displayName:
-        verifiedClaims.preferred_username ||
-        verifiedClaims.username ||
-        verifiedClaims.name ||
-        verifiedClaims.email ||
-        "XPEACH User",
+      displayName,
+      username: verifiedClaims.username || verifiedClaims.preferred_username || displayName,
+      email: verifiedClaims.email || null,
+      emailVerified: Boolean(verifiedClaims.email_verified),
+      group: verifiedClaims.group || verifiedClaims.peach_wallet?.group || "默认分组",
+      affCode: verifiedClaims.aff_code || verifiedClaims.peach_wallet?.affCode || null,
+      role: verifiedClaims.role || "user",
+      ssoCreatedAt: verifiedClaims.sso_created_at || null,
+      ssoLastLoginAt: verifiedClaims.sso_last_login_at || null,
+      ssoAccessToken: verifiedClaims.sso_access_token || null,
+      ssoRefreshToken: verifiedClaims.sso_refresh_token || null,
+      peachWallet: verifiedClaims.peach_wallet || null,
       issuedAtMs: nowMs,
-      expiresAtMs: nowMs + 60 * 1000, // <= 60s single-use ticket
+      expiresAtMs: nowMs + 60 * 1000,
       consumedAtMs: null
     });
+
+    let webSessionCookie = null;
+    if (txn.flowKind === "WEB_CONSOLE") {
+      const webSess = this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs);
+      webSessionCookie = this.signWebSessionCookie({
+        cloudUserId: user.id,
+        accessToken: webSess.access_token,
+        refreshToken: webSess.refresh_token
+      });
+    }
 
     const appLinkUrl =
       txn.flowKind === "WEB_CONSOLE"
@@ -224,7 +263,8 @@ export class CloudIdentityService {
     return {
       appTicket,
       loginTxn: txn.loginTxn,
-      appLinkUrl
+      appLinkUrl,
+      webSessionCookie
     };
   }
 
@@ -259,22 +299,101 @@ export class CloudIdentityService {
     }
     const claims = JSON.parse(Buffer.from(idTokenParts[1], "base64url").toString("utf8"));
     if (tokenData.access_token) {
+      claims.sso_access_token = tokenData.access_token;
+      if (tokenData.refresh_token) {
+        claims.sso_refresh_token = tokenData.refresh_token;
+      }
+      // 1) Fetch full canonical user profile + 🍑 wallet from /api/internal/user-profile
       try {
-        const meResp = await fetch(`${this.expectedIssuer.replace(/\/+$/, "")}/me`, {
+        const headers = {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          Accept: "application/json"
+        };
+        if (this.internalServiceKey) {
+          headers["X-Internal-Service-Key"] = this.internalServiceKey;
+        }
+        const profileResp = await fetch(`${this.ssoBaseUrl}/api/internal/user-profile`, {
           method: "GET",
-          headers: {
-            Authorization: `Bearer ${tokenData.access_token}`,
-            Accept: "application/json"
-          }
+          headers
         });
-        if (meResp.ok) {
-          const meData = await meResp.json();
-          Object.assign(claims, meData);
+        if (profileResp.ok) {
+          const profileData = await profileResp.json();
+          const u = profileData?.user;
+          if (u && typeof u === "object") {
+            claims.sub = u.uuid || u.id || claims.sub;
+            claims.username = u.username || claims.preferred_username || claims.username;
+            claims.preferred_username = claims.username;
+            claims.name = u.name || u.username || claims.name;
+            claims.email = u.email || claims.email;
+            claims.email_verified = Boolean(u.email_verified);
+            claims.group = u.group || "默认分组";
+            claims.aff_code = u.aff_code || null;
+            claims.role = u.role || "user";
+            claims.sso_created_at = u.created_at || null;
+            claims.sso_last_login_at = u.last_login_at || null;
+            if (u.peach_wallet && typeof u.peach_wallet === "object") {
+              claims.peach_wallet = u.peach_wallet;
+            }
+          }
         }
       } catch {
-        // Keep id_token claims if userinfo call fails
+        // Fallback below
+      }
+
+      // 2) Standard OIDC userinfo fallback
+      if (!claims.username) {
+        try {
+          const meResp = await fetch(`${this.expectedIssuer.replace(/\/+$/, "")}/me`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${tokenData.access_token}`,
+              Accept: "application/json"
+            }
+          });
+          if (meResp.ok) {
+            const meData = await meResp.json();
+            Object.assign(claims, meData);
+          }
+        } catch {
+          // Keep id_token claims
+        }
       }
     }
+
+    // 3) Ensure live 🍑 wallet is synced from /api/v1/users/:uuid/peach
+    if (!claims.peach_wallet && claims.sub && (this.internalServiceKey || tokenData.access_token)) {
+      try {
+        const headers = { Accept: "application/json" };
+        if (this.internalServiceKey) {
+          headers["X-Internal-Service-Key"] = this.internalServiceKey;
+        } else if (tokenData.access_token) {
+          headers.Authorization = `Bearer ${tokenData.access_token}`;
+        }
+        const peachResp = await fetch(
+          `${this.ssoBaseUrl}/api/v1/users/${encodeURIComponent(claims.sub)}/peach`,
+          { method: "GET", headers }
+        );
+        if (peachResp.ok) {
+          const pd = await peachResp.json();
+          if (pd && pd.ok) {
+            claims.peach_wallet = {
+              quota: Number(pd.quota ?? 0),
+              usedQuota: Number(pd.usedQuota ?? 0),
+              requestCount: Number(pd.requestCount ?? 0),
+              group: pd.group || claims.group || "默认分组",
+              affCode: pd.affCode || claims.aff_code || "",
+              peachBalance: Number(pd.peachBalance ?? 0),
+              peachUsed: Number(pd.peachUsed ?? 0),
+              peachBalanceFormatted: String(pd.peachBalanceFormatted ?? "0.00"),
+              peachUsedFormatted: String(pd.peachUsedFormatted ?? "0.00")
+            };
+          }
+        }
+      } catch {
+        // Ignore network error
+      }
+    }
+
     if (!claims.nonce) {
       claims.nonce = expectedNonce;
     }
@@ -302,7 +421,18 @@ export class CloudIdentityService {
     const user = this.store.findOrCreateCloudUser({
       issuer: ticket.issuer,
       subject: ticket.subject,
-      displayName: ticket.displayName
+      displayName: ticket.displayName,
+      username: ticket.username,
+      email: ticket.email,
+      emailVerified: ticket.emailVerified,
+      group: ticket.group,
+      affCode: ticket.affCode,
+      role: ticket.role,
+      ssoCreatedAt: ticket.ssoCreatedAt,
+      ssoLastLoginAt: ticket.ssoLastLoginAt,
+      ssoAccessToken: ticket.ssoAccessToken,
+      ssoRefreshToken: ticket.ssoRefreshToken,
+      peachWallet: ticket.peachWallet
     });
     if (user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
@@ -330,14 +460,24 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Mobile PKCE code_verifier verification failed");
     }
 
-    // Atomically mark ticket & transaction consumed
     ticket.consumedAtMs = nowMs;
     txn.status = "COMPLETED";
 
     const user = this.store.findOrCreateCloudUser({
       issuer: ticket.issuer,
       subject: ticket.subject,
-      displayName: ticket.displayName
+      displayName: ticket.displayName,
+      username: ticket.username,
+      email: ticket.email,
+      emailVerified: ticket.emailVerified,
+      group: ticket.group,
+      affCode: ticket.affCode,
+      role: ticket.role,
+      ssoCreatedAt: ticket.ssoCreatedAt,
+      ssoLastLoginAt: ticket.ssoLastLoginAt,
+      ssoAccessToken: ticket.ssoAccessToken,
+      ssoRefreshToken: ticket.ssoRefreshToken,
+      peachWallet: ticket.peachWallet
     });
 
     if (user.status !== "ACTIVE") {
@@ -366,6 +506,9 @@ export class CloudIdentityService {
       created_at: new Date(nowMs).toISOString()
     };
     this.store.deviceSessions.set(sessionId, sessionRecord);
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
 
     const accessToken = this.signAccessToken({
       sub: user.id,
@@ -377,6 +520,10 @@ export class CloudIdentityService {
       nowMs
     });
 
+    const pw = user.peach_wallet || {};
+    const peachBalance = Number(pw.peachBalance ?? 0);
+    const peachUsed = Number(pw.peachUsed ?? 0);
+
     return {
       cloud_user_id: user.id,
       access_token: accessToken,
@@ -385,8 +532,71 @@ export class CloudIdentityService {
       family_id: familyId,
       sso_issuer: user.issuer,
       sso_subject: user.subject,
-      display_name: user.display_name
+      username: user.username || user.display_name,
+      display_name: user.display_name,
+      email: user.email || null,
+      email_verified: Boolean(user.email_verified),
+      group: user.group || pw.group || "默认分组",
+      aff_code: user.aff_code || pw.affCode || null,
+      role: user.role || "user",
+      peach_balance: peachBalance,
+      peach_balance_formatted: pw.peachBalanceFormatted || peachBalance.toFixed(2),
+      peach_used: peachUsed,
+      peach_used_formatted: pw.peachUsedFormatted || peachUsed.toFixed(2),
+      peach_wallet: user.peach_wallet || null
     };
+  }
+
+  signWebSessionCookie({ cloudUserId, accessToken, refreshToken }) {
+    const payload = Buffer.from(
+      JSON.stringify({
+        uid: cloudUserId,
+        at: accessToken,
+        rt: refreshToken,
+        exp: Math.floor(Date.now() / 1000) + 7 * 86400
+      })
+    ).toString("base64url");
+    const sig = crypto
+      .createHmac("sha256", this.sessionSecret)
+      .update(payload)
+      .digest("base64url");
+    return `${payload}.${sig}`;
+  }
+
+  verifyWebSessionCookie(cookieHeader, nowMs = Date.now()) {
+    if (!cookieHeader || typeof cookieHeader !== "string") return null;
+    const m = cookieHeader.match(/(?:^|;\s*)dis_web_session=([^;]+)/);
+    if (!m) return null;
+    const raw = decodeURIComponent(m[1].trim());
+    const dot = raw.indexOf(".");
+    if (dot <= 0) return null;
+    const payloadB64 = raw.slice(0, dot);
+    const sigB64 = raw.slice(dot + 1);
+    const expectedSig = crypto
+      .createHmac("sha256", this.sessionSecret)
+      .update(payloadB64)
+      .digest("base64url");
+    if (
+      sigB64.length !== expectedSig.length ||
+      !crypto.timingSafeEqual(Buffer.from(sigB64), Buffer.from(expectedSig))
+    ) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+      if (parsed.exp && parsed.exp * 1000 <= nowMs) return null;
+      const user = this.store.users.get(parsed.uid);
+      if (!user || user.status !== "ACTIVE") return null;
+      return {
+        user,
+        cloudUserId: user.id,
+        accessToken: parsed.at,
+        refreshToken: parsed.rt,
+        roles: this.store.getUserRoles(user.id)
+      };
+    } catch {
+      return null;
+    }
   }
 
   refreshSession(rawRefreshToken, nowMs = Date.now()) {
@@ -401,7 +611,6 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Unknown refresh_token");
     }
 
-    // Replay Detection (AUTH-014): if already consumed, revoke entire token family!
     if (session.consumed_at !== null) {
       this.revokeSessionFamily(session.family_id, "REFRESH_TOKEN_REPLAY", nowMs);
       throw new ContractError(
@@ -506,7 +715,6 @@ export class CloudIdentityService {
     if (!user || user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user is inactive or deleted");
     }
-    // Check that the session family has not been revoked
     const familySessions = Array.from(this.store.deviceSessions.values()).filter(
       (s) => s.family_id === payload.family_id
     );

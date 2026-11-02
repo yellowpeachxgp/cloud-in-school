@@ -119,10 +119,24 @@ export function createCampusCloudApp(options = {}) {
   function extractBearer(headers, nowMs) {
     const authHeader = headers?.authorization || headers?.Authorization || "";
     const m = String(authHeader).match(/^Bearer\s+(.+)$/i);
-    if (!m) {
-      throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing Bearer Authorization header");
+    if (m) {
+      return identity.verifyAccessToken(m[1].trim(), nowMs);
     }
-    return identity.verifyAccessToken(m[1].trim(), nowMs);
+    const cookieAuth = identity.verifyWebSessionCookie(
+      headers?.cookie || headers?.Cookie || "",
+      nowMs
+    );
+    if (cookieAuth) {
+      return {
+        cloudUserId: cookieAuth.cloudUserId,
+        familyId: "web_cookie_family",
+        sessionId: "web_cookie_session",
+        ssoIssuer: cookieAuth.user.issuer,
+        ssoSubject: cookieAuth.user.subject,
+        roles: cookieAuth.roles
+      };
+    }
+    throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing Bearer Authorization header");
   }
 
   // --- 1..3 System & OpenAPI ---
@@ -200,9 +214,15 @@ export function createCampusCloudApp(options = {}) {
         },
         nowMs
       );
+      const headers = { Location: res.appLinkUrl };
+      if (res.webSessionCookie) {
+        headers["set-cookie"] = `dis_web_session=${encodeURIComponent(
+          res.webSessionCookie
+        )}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`;
+      }
       return {
         status: 302,
-        headers: { Location: res.appLinkUrl },
+        headers,
         code: "OIDC_CALLBACK_OK",
         data: {
           app_ticket: res.appTicket,
@@ -263,6 +283,7 @@ export function createCampusCloudApp(options = {}) {
   // --- 11..20 Me, Devices, Wallet, Orders, Consents, Data Export/Delete ---
   register("GET", "/api/v1/me", "getMyProfile", "bearer", async ({ auth }) => {
     const user = store.users.get(auth.cloudUserId);
+    const wallet = await financeService.getWalletSnapshot(auth.cloudUserId);
     return {
       status: 200,
       code: "PROFILE_OK",
@@ -270,7 +291,17 @@ export function createCampusCloudApp(options = {}) {
         cloud_user_id: user.id,
         sso_issuer: user.issuer,
         sso_subject: user.subject,
+        username: user.username || user.display_name,
         display_name: user.display_name,
+        email: user.email || null,
+        email_verified: Boolean(user.email_verified),
+        group: wallet.group || user.group || "默认分组",
+        aff_code: wallet.aff_code || user.aff_code || null,
+        peach_balance: wallet.peach_balance,
+        peach_balance_formatted: wallet.peach_balance_formatted,
+        peach_used: wallet.peach_used,
+        peach_used_formatted: wallet.peach_used_formatted,
+        peach_wallet: user.peach_wallet || null,
         roles: auth.roles,
         status: user.status
       }
@@ -1194,17 +1225,112 @@ export function createCampusCloudApp(options = {}) {
       const pathname = parsedUrl.pathname;
       const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
 
-      if (
-        upperMethod === "GET" &&
-        (pathname === "/" || pathname === "/console" || pathname === "/console/")
-      ) {
+      // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
+      if (upperMethod === "GET" && (pathname.startsWith("/static/") || pathname === "/favicon.ico")) {
+        const staticDir = path.join(REPO_ROOT, "apps/console/public/static");
+        const fileName =
+          pathname === "/favicon.ico"
+            ? "xpeach-logo.png"
+            : path.basename(pathname);
+        const filePath = path.join(staticDir, fileName);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const ext = path.extname(fileName).toLowerCase();
+          const mime =
+            ext === ".css"
+              ? "text/css; charset=utf-8"
+              : ext === ".js"
+                ? "application/javascript; charset=utf-8"
+                : ext === ".png"
+                  ? "image/png"
+                  : "application/octet-stream";
+          const buf = fs.readFileSync(filePath);
+          return {
+            status: 200,
+            headers: {
+              "content-type": mime,
+              "cache-control": "public, max-age=3600",
+              "x-request-id": requestId
+            },
+            rawBody: buf,
+            body: okEnvelope("STATIC_ASSET_OK", { file: fileName }, requestId)
+          };
+        }
+      }
+
+      const webConsoleRoutes = new Map([
+        ["/", "portal"],
+        ["/portal", "portal"],
+        ["/reservations", "reservations"],
+        ["/parcels", "parcels"],
+        ["/orders", "orders"],
+        ["/console", "console"],
+        ["/console/", "console"]
+      ]);
+
+      if (upperMethod === "GET" && webConsoleRoutes.has(pathname)) {
+        const activeNav = webConsoleRoutes.get(pathname);
+        const cookieAuth = identity.verifyWebSessionCookie(
+          headers?.cookie || headers?.Cookie || "",
+          nowMs
+        );
+        const referer = String(headers?.referer || headers?.Referer || "");
+        if (
+          !cookieAuth &&
+          referer.includes("sso.xpeach.codes") &&
+          !parsedUrl.searchParams.has("web_ticket") &&
+          !parsedUrl.searchParams.has("code")
+        ) {
+          const webTxn = identity.startWebTransaction({ returnTo: pathname }, nowMs);
+          return {
+            status: 302,
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "x-request-id": requestId,
+              Location: webTxn.redirect_url
+            },
+            rawBody: "",
+            body: okEnvelope("WEB_OIDC_AUTO_REDIRECT", webTxn, requestId)
+          };
+        }
+
+        let consoleCtx = { activeNav };
+        if (cookieAuth) {
+          const wallet = await financeService.getWalletSnapshot(cookieAuth.cloudUserId);
+          const bindings = Array.from(store.schoolBindings.values()).filter(
+            (b) => b.cloud_user_id === cookieAuth.cloudUserId
+          );
+          const plans = Array.from(store.reservationPlans.values()).filter(
+            (p) => p.cloud_user_id === cookieAuth.cloudUserId
+          );
+          const jobs = Array.from(store.reservationJobs.values()).filter(
+            (j) => j.cloud_user_id === cookieAuth.cloudUserId
+          );
+          const parcels = parcelHub.listUserParcels(cookieAuth.cloudUserId);
+          const orders = Array.from(store.reservationOrders.values()).filter(
+            (o) => o.cloud_user_id === cookieAuth.cloudUserId
+          );
+          consoleCtx = {
+            user: cookieAuth.user,
+            wallet,
+            roles: cookieAuth.roles,
+            activeNav,
+            bindings,
+            plans,
+            jobs,
+            parcels,
+            orders,
+            accessToken: cookieAuth.accessToken
+          };
+        }
+
         return {
           status: 200,
           headers: {
             "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store, no-cache, must-revalidate",
             "x-request-id": requestId
           },
-          rawBody: renderConsoleHtml(),
+          rawBody: renderConsoleHtml(consoleCtx),
           body: okEnvelope("CONSOLE_PORTAL_OK", { portal: "cloud-in-school-console" }, requestId)
         };
       }
@@ -1239,6 +1365,20 @@ export function createCampusCloudApp(options = {}) {
         };
       }
 
+      if (upperMethod === "GET" && pathname === "/api/v1/auth/web/logout") {
+        return {
+          status: 302,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-request-id": requestId,
+            "set-cookie": "dis_web_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+            Location: "/"
+          },
+          rawBody: "",
+          body: okEnvelope("WEB_LOGGED_OUT", { logged_out: true }, requestId)
+        };
+      }
+
       if (upperMethod === "POST" && pathname === "/api/v1/auth/web/exchange") {
         const sessionRes = identity.exchangeWebTicket(
           {
@@ -1247,13 +1387,42 @@ export function createCampusCloudApp(options = {}) {
           },
           nowMs
         );
+        const cookieVal = identity.signWebSessionCookie({
+          cloudUserId: sessionRes.cloud_user_id,
+          accessToken: sessionRes.access_token,
+          refreshToken: sessionRes.refresh_token
+        });
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId,
+            "set-cookie": `dis_web_session=${encodeURIComponent(
+              cookieVal
+            )}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
+          },
+          body: okEnvelope("WEB_SESSION_ISSUED", sessionRes, requestId)
+        };
+      }
+
+      const execNowMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/execute-now$/);
+      if (upperMethod === "POST" && execNowMatch) {
+        const auth = extractBearer(headers, nowMs);
+        const jobId = decodeURIComponent(execNowMatch[1]);
+        const job = store.reservationJobs.get(jobId);
+        if (!job || job.cloud_user_id !== auth.cloudUserId) {
+          throw new ContractError("NOT_FOUND", "Reservation job not found");
+        }
+        await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
+        await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", nowMs);
+        const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", nowMs);
         return {
           status: 200,
           headers: {
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
-          body: okEnvelope("WEB_SESSION_ISSUED", sessionRes, requestId)
+          body: okEnvelope("RESERVATION_JOB_EXECUTED", fireRes, requestId)
         };
       }
 
@@ -1338,7 +1507,7 @@ export function createCampusCloudApp(options = {}) {
         body: parsedBody
       });
       res.writeHead(response.status, response.headers);
-      if (typeof response.rawBody === "string") {
+      if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
         res.end(response.rawBody);
       } else {
         res.end(JSON.stringify(response.body));

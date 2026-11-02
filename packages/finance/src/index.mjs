@@ -2,14 +2,11 @@ import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
 
 /**
- * Zero-SSO-Change Finance Bridge & Post-Confirmation Saga Engine.
- * Enforces Section 04.3, 09, 18.5 (PAY-001 through PAY-020):
- * - Single debit path (`POST /api/v1/users/:uuid/peach/adjust` on XPEACH SSO)
+ * Direct XPEACH SSO 🍑 Wallet Synchronization & Post-Confirmation Deduction Engine.
+ * - Uses 🍑 directly as the unified currency from XPEACH SSO (`GET /api/v1/users/:uuid/peach` & `POST /api/v1/users/:uuid/peach/adjust`).
  * - Deterministic idempotency keys:
  *   - Debit:  `dis:reservation:<orderUUID>:debit:v1`
  *   - Refund: `dis:reservation:<orderUUID>:refund:v1`
- * - Never claims balance hold/freeze (`hold_supported: false`)
- * - If wallet balance was spent on another site before post-confirmation debit completes, sets `PAYMENT_DUE` without cancelling the student's confirmed library seat!
  */
 export const MICROPEACH_PER_PEACH = 10_000;
 
@@ -26,10 +23,11 @@ export class IsolatedFinanceBridge {
     this.ssoBaseUrl = options.ssoBaseUrl || process.env.SSO_FINANCE_BASE_URL || "https://sso.xpeach.codes";
     this.internalServiceKey =
       options.internalServiceKey || process.env.SSO_INTERNAL_SERVICE_KEY || "";
-    this.realDebitsEnabled = Boolean(
-      options.realDebitsEnabled ?? process.env.FINANCE_ENABLE_REAL_DEBITS === "true"
-    );
-    // Simulated SSO ledger for sandbox/contract testing when realDebitsEnabled=false
+    this.realDebitsEnabled =
+      options.realDebitsEnabled !== undefined
+        ? Boolean(options.realDebitsEnabled)
+        : Boolean(this.internalServiceKey || process.env.FINANCE_ENABLE_REAL_DEBITS === "true");
+    // Only used when unit tests explicitly call setSandboxBalance() or use synthetic test subjects
     this.sandboxBalancesMicropeach = new Map();
     this.processedIdempotencyKeys = new Map();
     this.inFlightLocks = new Map();
@@ -41,44 +39,165 @@ export class IsolatedFinanceBridge {
 
   getSandboxBalance(cloudUserId) {
     if (!this.sandboxBalancesMicropeach.has(cloudUserId)) {
-      this.sandboxBalancesMicropeach.set(cloudUserId, 50_000); // default 5.0 🍑 in sandbox
+      this.sandboxBalancesMicropeach.set(cloudUserId, 50_000);
     }
     return this.sandboxBalancesMicropeach.get(cloudUserId);
   }
 
-  async readWallet(cloudUserId, ssoSubject) {
-    if (this.realDebitsEnabled && this.internalServiceKey && ssoSubject) {
-      const resp = await fetch(
-        `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoSubject)}/peach`,
-        {
-          method: "GET",
-          headers: {
-            "X-Internal-Service-Key": this.internalServiceKey,
-            Accept: "application/json"
-          }
-        }
-      );
-      if (!resp.ok) {
-        throw new ContractError("SSO_UNAVAILABLE", `SSO wallet query returned HTTP ${resp.status}`);
-      }
-      const data = await resp.json();
-      const peachBalance = Number(data.peachBalance ?? data.peach_balance ?? 0);
+  _isSyntheticTestSubject(ssoSubject) {
+    if (!ssoSubject || typeof ssoSubject !== "string") return true;
+    if (
+      ssoSubject.startsWith("xpeach_user_") ||
+      ssoSubject.startsWith("sso_") ||
+      ssoSubject.startsWith("sub_") ||
+      ssoSubject.startsWith("test_")
+    ) {
+      return true;
+    }
+    return !/^[0-9a-fA-F]{4}(?:-[0-9a-fA-F]{4}){3}$|^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(
+      ssoSubject
+    );
+  }
+
+  async readWallet(cloudUserId, ssoSubject, userObj = null) {
+    // 1) Explicit unit test sandbox override
+    if (this.sandboxBalancesMicropeach.has(cloudUserId)) {
+      const micro = this.sandboxBalancesMicropeach.get(cloudUserId);
+      const peach = micro / MICROPEACH_PER_PEACH;
       return {
         cloud_user_id: cloudUserId,
+        sso_subject: ssoSubject || null,
         currency_symbol: "🍑",
-        peach_balance: peachBalance,
-        micropeach_balance: Math.round(peachBalance * MICROPEACH_PER_PEACH),
+        peach_balance: peach,
+        peach_balance_formatted: peach.toFixed(2),
+        peach_used: 0,
+        peach_used_formatted: "0.00",
+        micropeach_balance: micro,
         hold_supported: false,
         fetched_at: new Date().toISOString(),
-        source: "xpeach-sso-live"
+        source: "xpeach-sso-sandbox"
       };
     }
 
+    // 2) Live XPEACH SSO query for real SSO users
+    const isRealUser = !this._isSyntheticTestSubject(ssoSubject);
+    if (isRealUser && (this.internalServiceKey || userObj?.sso_access_token)) {
+      try {
+        const headers = { Accept: "application/json" };
+        if (this.internalServiceKey) {
+          headers["X-Internal-Service-Key"] = this.internalServiceKey;
+        } else if (userObj?.sso_access_token) {
+          headers.Authorization = `Bearer ${userObj.sso_access_token}`;
+        }
+        const resp = await fetch(
+          `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoSubject)}/peach`,
+          { method: "GET", headers }
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          const peachBalance = Number(data.peachBalance ?? data.peach_balance ?? 0);
+          const peachUsed = Number(data.peachUsed ?? data.peach_used ?? 0);
+          const peachBalanceFormatted = String(
+            data.peachBalanceFormatted ?? peachBalance.toFixed(2)
+          );
+          const peachUsedFormatted = String(
+            data.peachUsedFormatted ?? peachUsed.toFixed(2)
+          );
+          const walletObj = {
+            quota: Number(data.quota ?? 0),
+            usedQuota: Number(data.usedQuota ?? 0),
+            requestCount: Number(data.requestCount ?? 0),
+            group: data.group || userObj?.group || "默认分组",
+            affCode: data.affCode || userObj?.aff_code || "",
+            peachBalance,
+            peachUsed,
+            peachBalanceFormatted,
+            peachUsedFormatted
+          };
+          if (userObj) {
+            userObj.peach_wallet = walletObj;
+            if (walletObj.group) userObj.group = walletObj.group;
+            if (walletObj.affCode) userObj.aff_code = walletObj.affCode;
+          }
+          return {
+            cloud_user_id: cloudUserId,
+            sso_subject: ssoSubject,
+            username: data.username || userObj?.username || userObj?.display_name,
+            currency_symbol: "🍑",
+            peach_balance: peachBalance,
+            peach_balance_formatted: peachBalanceFormatted,
+            peach_used: peachUsed,
+            peach_used_formatted: peachUsedFormatted,
+            request_count: walletObj.requestCount,
+            group: walletObj.group,
+            aff_code: walletObj.affCode,
+            micropeach_balance: Math.round(peachBalance * MICROPEACH_PER_PEACH),
+            hold_supported: false,
+            fetched_at: new Date().toISOString(),
+            source: "xpeach-sso-live"
+          };
+        }
+      } catch {
+        // Fall through to cached peach_wallet on userObj if network call fails
+      }
+    }
+
+    // 3) Cached SSO peach_wallet from OIDC login (never fake 5.0 🍑!)
+    if (userObj?.peach_wallet && typeof userObj.peach_wallet === "object") {
+      const pw = userObj.peach_wallet;
+      const peachBalance = Number(pw.peachBalance ?? 0);
+      const peachUsed = Number(pw.peachUsed ?? 0);
+      return {
+        cloud_user_id: cloudUserId,
+        sso_subject: ssoSubject,
+        username: userObj.username || userObj.display_name,
+        currency_symbol: "🍑",
+        peach_balance: peachBalance,
+        peach_balance_formatted: String(pw.peachBalanceFormatted ?? peachBalance.toFixed(2)),
+        peach_used: peachUsed,
+        peach_used_formatted: String(pw.peachUsedFormatted ?? peachUsed.toFixed(2)),
+        request_count: Number(pw.requestCount ?? 0),
+        group: pw.group || userObj.group || "默认分组",
+        aff_code: pw.affCode || userObj.aff_code || "",
+        micropeach_balance: Math.round(peachBalance * MICROPEACH_PER_PEACH),
+        hold_supported: false,
+        fetched_at: new Date().toISOString(),
+        source: "xpeach-sso-cached"
+      };
+    }
+
+    // 4) If real user has no wallet yet, return 0.00 🍑 (never fake 5.0 🍑)
+    if (isRealUser) {
+      return {
+        cloud_user_id: cloudUserId,
+        sso_subject: ssoSubject,
+        username: userObj?.username || userObj?.display_name,
+        currency_symbol: "🍑",
+        peach_balance: 0,
+        peach_balance_formatted: "0.00",
+        peach_used: 0,
+        peach_used_formatted: "0.00",
+        request_count: 0,
+        group: userObj?.group || "默认分组",
+        aff_code: userObj?.aff_code || "",
+        micropeach_balance: 0,
+        hold_supported: false,
+        fetched_at: new Date().toISOString(),
+        source: "xpeach-sso-uninitialized"
+      };
+    }
+
+    // 5) Synthetic unit-test fallback
     const micro = this.getSandboxBalance(cloudUserId);
+    const peach = micro / MICROPEACH_PER_PEACH;
     return {
       cloud_user_id: cloudUserId,
+      sso_subject: ssoSubject || null,
       currency_symbol: "🍑",
-      peach_balance: micro / MICROPEACH_PER_PEACH,
+      peach_balance: peach,
+      peach_balance_formatted: peach.toFixed(2),
+      peach_used: 0,
+      peach_used_formatted: "0.00",
       micropeach_balance: micro,
       hold_supported: false,
       fetched_at: new Date().toISOString(),
@@ -89,18 +208,28 @@ export class IsolatedFinanceBridge {
   async adjustBalanceIdempotent({
     cloudUserId,
     ssoSubject,
+    deltaPeach,
     deltaMicropeach,
     eventKey,
-    reason
+    reason,
+    userObj = null
   }) {
-    if (!Number.isInteger(deltaMicropeach) || deltaMicropeach === 0) {
-      throw new ContractError("BAD_REQUEST", "deltaMicropeach must be a non-zero integer");
+    const resolvedMicro =
+      typeof deltaMicropeach === "number" && Number.isInteger(deltaMicropeach)
+        ? deltaMicropeach
+        : typeof deltaPeach === "number"
+          ? Math.round(deltaPeach * MICROPEACH_PER_PEACH)
+          : 0;
+    const resolvedPeach =
+      typeof deltaPeach === "number" ? deltaPeach : resolvedMicro / MICROPEACH_PER_PEACH;
+
+    if (!Number.isInteger(resolvedMicro) || resolvedMicro === 0) {
+      throw new ContractError("BAD_REQUEST", "🍑 adjustment amount must be non-zero");
     }
     if (!eventKey || !/^dis:reservation:[0-9a-fA-F-]{36}:(debit|refund):v1$/.test(eventKey)) {
       throw new ContractError("BAD_REQUEST", `Invalid Finance Bridge idempotency event_key: ${eventKey}`);
     }
 
-    // Serialize concurrent requests for the exact same idempotency key
     while (this.inFlightLocks.has(eventKey)) {
       await this.inFlightLocks.get(eventKey);
     }
@@ -117,8 +246,11 @@ export class IsolatedFinanceBridge {
         return { ...cached, deduplicated: true };
       }
 
-      if (this.realDebitsEnabled && this.internalServiceKey && ssoSubject) {
-        const deltaPeach = deltaMicropeach / MICROPEACH_PER_PEACH;
+      const isRealUser =
+        !this.sandboxBalancesMicropeach.has(cloudUserId) &&
+        !this._isSyntheticTestSubject(ssoSubject);
+
+      if (this.realDebitsEnabled && this.internalServiceKey && isRealUser) {
         const resp = await fetch(
           `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoSubject)}/peach/adjust`,
           {
@@ -129,14 +261,14 @@ export class IsolatedFinanceBridge {
               "X-Idempotency-Key": eventKey
             },
             body: JSON.stringify({
-              delta_peach: deltaPeach,
+              delta_peach: resolvedPeach,
               idempotency_key: eventKey,
               source_site: "dis",
               reason
             })
           }
         );
-        const body = await resp.json();
+        const body = await resp.json().catch(() => ({}));
         if (resp.status === 409 || body.error === "insufficient_peach_balance") {
           return {
             ok: false,
@@ -147,31 +279,38 @@ export class IsolatedFinanceBridge {
         if (!resp.ok || !body.ok) {
           throw new ContractError("SSO_UNAVAILABLE", "SSO peach/adjust call failed");
         }
+        const nextPeach = Number(body.wallet?.peachBalance ?? body.peachBalance ?? 0);
+        if (userObj && body.wallet) {
+          userObj.peach_wallet = body.wallet;
+        }
         const out = {
           ok: true,
           deduplicated: Boolean(body.deduplicated),
-          ssoRequestId: `sso_req_${crypto.randomUUID().slice(0, 12)}`,
-          balanceAfterMicropeach: Math.round(Number(body.peachBalance ?? 0) * MICROPEACH_PER_PEACH)
+          ssoRequestId: body.request_id || `sso_req_${crypto.randomUUID().slice(0, 12)}`,
+          peachBalanceAfter: nextPeach,
+          balanceAfterMicropeach: Math.round(nextPeach * MICROPEACH_PER_PEACH)
         };
         this.processedIdempotencyKeys.set(eventKey, out);
         return out;
       }
 
       const currentMicro = this.getSandboxBalance(cloudUserId);
-      if (deltaMicropeach < 0 && currentMicro + deltaMicropeach < 0) {
+      if (resolvedMicro < 0 && currentMicro + resolvedMicro < 0) {
         return {
           ok: false,
           error: "WALLET_INSUFFICIENT",
           deduplicated: false,
+          peachBalanceAfter: currentMicro / MICROPEACH_PER_PEACH,
           balanceAfterMicropeach: currentMicro
         };
       }
-      const nextMicro = currentMicro + deltaMicropeach;
+      const nextMicro = currentMicro + resolvedMicro;
       this.sandboxBalancesMicropeach.set(cloudUserId, nextMicro);
       const out = {
         ok: true,
         deduplicated: false,
         ssoRequestId: `sso_sim_${crypto.randomUUID().slice(0, 12)}`,
+        peachBalanceAfter: nextMicro / MICROPEACH_PER_PEACH,
         balanceAfterMicropeach: nextMicro
       };
       this.processedIdempotencyKeys.set(eventKey, out);
@@ -191,17 +330,23 @@ export class FinanceSagaService {
 
   async getWalletSnapshot(cloudUserId) {
     const user = this.store.users.get(cloudUserId);
-    return this.financeBridge.readWallet(cloudUserId, user?.subject);
+    const snapshot = await this.financeBridge.readWallet(cloudUserId, user?.subject, user);
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
+    return snapshot;
   }
 
   async createAndSettleOrderForConfirmedJob({ job, plan, nowMs = Date.now() }) {
     let order = Array.from(this.store.reservationOrders.values()).find((o) => o.job_id === job.id);
     if (!order) {
       const orderId = crypto.randomUUID();
+      const pricePeach = this.store.pricingMicropeach / MICROPEACH_PER_PEACH;
       order = {
         id: orderId,
         job_id: job.id,
         cloud_user_id: job.cloud_user_id,
+        price_peach: pricePeach,
         price_micropeach: this.store.pricingMicropeach,
         price_version: plan?.price_version || "price-library-cloud-2026-11-v1",
         accepted_at: plan?.created_at || new Date(nowMs).toISOString(),
@@ -219,6 +364,7 @@ export class FinanceSagaService {
         payload_json: {
           order_id: order.id,
           event_key: buildDebitEventKey(order.id),
+          peach_amount: pricePeach,
           amount_micropeach: order.price_micropeach
         },
         created_at: new Date(nowMs).toISOString(),
@@ -241,12 +387,14 @@ export class FinanceSagaService {
 
     const eventKey = buildDebitEventKey(order.id);
     let op = this.store.financeOperations.get(eventKey);
+    const pricePeach = order.price_peach ?? order.price_micropeach / MICROPEACH_PER_PEACH;
     if (!op) {
       op = {
         id: crypto.randomUUID(),
         order_id: order.id,
         kind: "DEBIT",
         event_key: eventKey,
+        peach_amount: pricePeach,
         amount_micropeach: order.price_micropeach,
         status: "IN_FLIGHT",
         sso_request_id: null,
@@ -265,16 +413,18 @@ export class FinanceSagaService {
     const bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
       cloudUserId: order.cloud_user_id,
       ssoSubject: user?.subject,
+      deltaPeach: -pricePeach,
       deltaMicropeach: -order.price_micropeach,
       eventKey,
-      reason: `Day in School confirmed reservation order ${order.id}`
+      reason: `日在校园图书馆占座预约扣费 (${order.id})`,
+      userObj: user
     });
 
     if (!bridgeRes.ok && bridgeRes.error === "WALLET_INSUFFICIENT") {
-      // School reservation succeeded, but user spent balance elsewhere -> PAYMENT_DUE (never cancel school booking!)
       op.status = "FAILED_INSUFFICIENT";
       op.last_error_code = "WALLET_INSUFFICIENT";
       order.payment_state = "PAYMENT_DUE";
+      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
       return order;
     }
 
@@ -282,10 +432,11 @@ export class FinanceSagaService {
     op.sso_request_id = bridgeRes.ssoRequestId;
     order.payment_state = "PAID";
     order.paid_at = order.paid_at || new Date(nowMs).toISOString();
+    if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
     return order;
   }
 
-  async issueRefundForOrder(orderId, { amountMicropeach, reason, actorRef, secondApproverRef }, nowMs = Date.now()) {
+  async issueRefundForOrder(orderId, { peachAmount, amountMicropeach, reason, actorRef, secondApproverRef }, nowMs = Date.now()) {
     const order = this.store.reservationOrders.get(orderId);
     if (!order) throw new ContractError("NOT_FOUND", "Order not found");
     if (order.payment_state !== "PAID" && order.payment_state !== "REFUNDED") {
@@ -294,14 +445,21 @@ export class FinanceSagaService {
     if (!secondApproverRef || secondApproverRef === actorRef) {
       throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
     }
-    if (!Number.isInteger(amountMicropeach) || amountMicropeach <= 0 || amountMicropeach > order.price_micropeach) {
+    const resolvedMicro =
+      typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
+        ? amountMicropeach
+        : typeof peachAmount === "number"
+          ? Math.round(peachAmount * MICROPEACH_PER_PEACH)
+          : 0;
+    if (!Number.isInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
       throw new ContractError(
         "BAD_REQUEST",
-        `Refund amount ${amountMicropeach} must be between 1 and paid amount ${order.price_micropeach}`
+        `Refund amount must be between 0.01 🍑 and paid amount`
       );
     }
 
     const eventKey = buildRefundEventKey(order.id);
+    const resolvedPeach = resolvedMicro / MICROPEACH_PER_PEACH;
     let op = this.store.financeOperations.get(eventKey);
     if (!op) {
       op = {
@@ -309,7 +467,8 @@ export class FinanceSagaService {
         order_id: order.id,
         kind: "REFUND",
         event_key: eventKey,
-        amount_micropeach: amountMicropeach,
+        peach_amount: resolvedPeach,
+        amount_micropeach: resolvedMicro,
         status: "IN_FLIGHT",
         sso_request_id: null,
         last_error_code: null,
@@ -325,9 +484,11 @@ export class FinanceSagaService {
     const bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
       cloudUserId: order.cloud_user_id,
       ssoSubject: user?.subject,
-      deltaMicropeach: amountMicropeach,
+      deltaPeach: resolvedPeach,
+      deltaMicropeach: resolvedMicro,
       eventKey,
-      reason: `Refund for order ${order.id}: ${reason}`
+      reason: `日在校园预约订单退还 (${order.id}): ${reason}`,
+      userObj: user
     });
 
     op.status = "SUCCEEDED";
