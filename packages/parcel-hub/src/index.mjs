@@ -97,6 +97,20 @@ const PICKUP_CONTEXT_KEYWORDS = [
   "包裹"
 ];
 
+export function cleanNullableText(raw) {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "none" || lower === "nil") {
+    return null;
+  }
+  return trimmed
+    .replace(/\s*·\s*null\b/gi, "")
+    .replace(/\bnull\s*·\s*/gi, "")
+    .trim() || null;
+}
+
 export function normalizeTrackingNumber(raw) {
   const cleaned = String(raw || "")
     .trim()
@@ -317,9 +331,18 @@ export class ParcelHubService {
     const provider = this.enforceProviderAuthority(providerId, { channel, sandboxOverride });
     const normalizedTracking = normalizeTrackingNumber(trackingNumber);
 
-    const extracted = rawNotificationText ? resolvePickupCode(rawNotificationText) : null;
-    const effectivePickupCode = pickupCode || extracted?.pickup_code || null;
-    const effectiveStationName = stationName || extracted?.station_name || null;
+    const cleanCarrierCode = cleanNullableText(carrierCode) || "AUTO";
+    const cleanCarrierName = cleanNullableText(carrierName) || "校园快递";
+    const cleanInputPickupCode = cleanNullableText(pickupCode);
+    const cleanInputStationName = cleanNullableText(stationName);
+    const cleanInputItemTitle = cleanNullableText(itemTitle);
+    const cleanRawNotificationText = cleanNullableText(rawNotificationText);
+
+    const extracted = cleanRawNotificationText ? resolvePickupCode(cleanRawNotificationText) : null;
+    const effectivePickupCode =
+      cleanInputPickupCode || cleanNullableText(extracted?.pickup_code) || null;
+    const effectiveStationName =
+      cleanInputStationName || cleanNullableText(extracted?.station_name) || null;
     const effectiveStatus =
       effectivePickupCode && (status === "IN_TRANSIT" || status === "OUT_FOR_DELIVERY")
         ? "READY_FOR_PICKUP"
@@ -335,12 +358,12 @@ export class ParcelHubService {
         id: parcelId,
         cloud_user_id: cloudUserId,
         tracking_number: normalizedTracking,
-        carrier_code: carrierCode,
-        carrier_name: carrierName,
+        carrier_code: cleanCarrierCode,
+        carrier_name: cleanCarrierName,
         status: effectiveStatus,
         pickup_code: effectivePickupCode,
         station_name: effectiveStationName,
-        item_title: itemTitle,
+        item_title: cleanInputItemTitle,
         tracking_enabled: true,
         sources: [
           {
@@ -357,7 +380,7 @@ export class ParcelHubService {
           station_name: effectiveStationName
             ? { provider_id: providerId, priority: provider.source_priority, updated_at: nowIso }
             : null,
-          item_title: itemTitle
+          item_title: cleanInputItemTitle
             ? { provider_id: providerId, priority: provider.source_priority, updated_at: nowIso }
             : null
         },
@@ -372,6 +395,20 @@ export class ParcelHubService {
 
     const parcel = this.store.parcels.get(existingId);
     const incomingPriority = provider.source_priority;
+
+    // Self-heal any legacy persisted "null" literals on existing parcel records
+    parcel.pickup_code = cleanNullableText(parcel.pickup_code);
+    parcel.station_name = cleanNullableText(parcel.station_name);
+    parcel.item_title = cleanNullableText(parcel.item_title);
+    parcel.carrier_name = cleanNullableText(parcel.carrier_name) || "校园快递";
+    parcel.carrier_code = cleanNullableText(parcel.carrier_code) || "AUTO";
+
+    if (cleanCarrierName && cleanCarrierName !== "校园快递" && cleanCarrierName !== "快递包裹") {
+      parcel.carrier_name = cleanCarrierName;
+    }
+    if (cleanCarrierCode && cleanCarrierCode !== "AUTO") {
+      parcel.carrier_code = cleanCarrierCode;
+    }
 
     const existingSrc = parcel.sources.find((s) => s.provider_id === providerId);
     if (existingSrc) {
@@ -394,7 +431,8 @@ export class ParcelHubService {
     };
     if (
       (statusRank[effectiveStatus] || 0) >= (statusRank[parcel.status] || 0) ||
-      incomingPriority >= (parcel.field_provenance.status?.priority || 0)
+      incomingPriority >= (parcel.field_provenance.status?.priority || 0) ||
+      (parcel.status === "READY_FOR_PICKUP" && !parcel.pickup_code && !effectivePickupCode && effectiveStatus === "IN_TRANSIT")
     ) {
       parcel.status = effectiveStatus;
       parcel.field_provenance.status = {
@@ -431,11 +469,11 @@ export class ParcelHubService {
     }
 
     if (
-      itemTitle &&
+      cleanInputItemTitle &&
       (!parcel.item_title ||
         incomingPriority >= (parcel.field_provenance.item_title?.priority || 0))
     ) {
-      parcel.item_title = itemTitle;
+      parcel.item_title = cleanInputItemTitle;
       parcel.field_provenance.item_title = {
         provider_id: providerId,
         priority: incomingPriority,
@@ -450,6 +488,15 @@ export class ParcelHubService {
 
   listUserParcels(cloudUserId, statusFilter = null) {
     return Array.from(this.store.parcels.values())
+      .map((p) => {
+        if (p) {
+          p.pickup_code = cleanNullableText(p.pickup_code);
+          p.station_name = cleanNullableText(p.station_name);
+          p.item_title = cleanNullableText(p.item_title);
+          p.carrier_name = cleanNullableText(p.carrier_name) || "校园快递";
+        }
+        return p;
+      })
       .filter((p) => p.cloud_user_id === cloudUserId && (!statusFilter || p.status === statusFilter))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }

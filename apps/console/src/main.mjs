@@ -15,8 +15,23 @@ export const CONSOLE_VIEWS = [
   { id: "privacy-erasure", title: "数据导出与注销", role: "USER" }
 ];
 
+function cleanDisplayText(val, fallback = "") {
+  if (val === null || val === undefined) return fallback;
+  const trimmed = String(val).trim();
+  if (!trimmed) return fallback;
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "none" || lower === "nil") {
+    return fallback;
+  }
+  const cleaned = trimmed
+    .replace(/\s*·\s*null\b/gi, "")
+    .replace(/\bnull\s*·\s*/gi, "")
+    .trim();
+  return cleaned || fallback;
+}
+
 function escapeHtml(val) {
-  return String(val ?? "")
+  return String(cleanDisplayText(val, ""))
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -309,7 +324,7 @@ function renderUnauthenticatedLandingHtml() {
 function groupParcelsByStation(parcels) {
   const map = new Map();
   for (const p of parcels) {
-    const station = p.station_name || "校内菜鸟驿站";
+    const station = cleanDisplayText(p.station_name, "校内菜鸟驿站");
     if (!map.has(station)) map.set(station, []);
     map.get(station).push(p);
   }
@@ -348,11 +363,23 @@ export function renderConsoleHtml(ctx = {}) {
   const activeStudentNo = bindings[0]?.student_no || bindings[0]?.student_no_masked || "";
   const plans = Array.isArray(ctx.plans) ? ctx.plans : [];
   const jobs = Array.isArray(ctx.jobs) ? ctx.jobs : [];
-  const parcels = Array.isArray(ctx.parcels) ? ctx.parcels : [];
+  const parcels = (Array.isArray(ctx.parcels) ? ctx.parcels : []).map((p) => {
+    const cleanCode = cleanDisplayText(p?.pickup_code, "");
+    const cleanStation = cleanDisplayText(p?.station_name, "");
+    const cleanTitle = cleanDisplayText(p?.item_title, "");
+    const cleanCarrier = cleanDisplayText(p?.carrier_name, "") || cleanDisplayText(p?.carrier_code, "") || "校园快递";
+    return {
+      ...p,
+      pickup_code: cleanCode || null,
+      station_name: cleanStation || null,
+      item_title: cleanTitle || null,
+      carrier_name: cleanCarrier
+    };
+  });
   const orders = Array.isArray(ctx.orders) ? ctx.orders : [];
   const activePlans = plans.filter((p) => p.enabled !== false);
   const readyParcels = parcels.filter(
-    (p) => p.status !== "PICKED_UP" && (p.status === "READY_FOR_PICKUP" || p.pickup_code)
+    (p) => p.status !== "PICKED_UP" && (p.status === "READY_FOR_PICKUP" || Boolean(p.pickup_code))
   );
   const stationGroups = groupParcelsByStation(readyParcels);
 
@@ -816,23 +843,30 @@ export function renderConsoleHtml(ctx = {}) {
                 parcels.length === 0
                   ? `<tr><td colspan="5" class="text-muted">暂无快递记录，可在上方粘贴取件短信或在日在校园 App 中绑定手机号自动同步。</td></tr>`
                   : parcels
-                      .map(
-                        (p) => `<tr>
+                      .map((p) => {
+                        const codeDisplay = p.pickup_code
+                          ? p.pickup_code
+                          : p.status === "PICKED_UP"
+                            ? "已签收"
+                            : "待出码";
+                        const statusBadge =
+                          p.status === "PICKED_UP"
+                            ? '<span class="badge">已取件</span>'
+                            : p.pickup_code || p.status === "READY_FOR_PICKUP"
+                              ? '<span class="badge badge-success">待取件</span>'
+                              : '<span class="badge badge-primary">运输派送中</span>';
+                        return `<tr>
                           <td><strong>${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")}</strong> · <code>${escapeHtml(p.tracking_number)}</code></td>
-                          <td><code style="font-size: 14px; font-weight: 700; color: #E86A33;">${escapeHtml(p.pickup_code || "运输中")}</code></td>
+                          <td><code style="font-size: 14px; font-weight: 700; color: #E86A33;">${escapeHtml(codeDisplay)}</code></td>
                           <td>${escapeHtml(p.station_name || "校内菜鸟驿站")}</td>
-                          <td>${
-                            p.status === "PICKED_UP"
-                              ? '<span class="badge">已取件</span>'
-                              : '<span class="badge badge-success">待取件</span>'
-                          }</td>
+                          <td>${statusBadge}</td>
                           <td>${
                             p.status !== "PICKED_UP"
                               ? `<button type="button" class="btn btn-ghost btn-sm" data-pickup-parcel="${escapeHtml(p.id)}">标记已取</button>`
                               : "-"
                           }</td>
-                        </tr>`
-                      )
+                        </tr>`;
+                      })
                       .join("")
               }
             </tbody>
@@ -1383,13 +1417,23 @@ export function renderConsoleHtml(ctx = {}) {
                 if (seats.length > 0) {
                   populateSeatsFromList(
                     seats.map(function (s) {
+                      var cleanShort = (s.short_name && s.short_name !== "null") ? s.short_name : "";
+                      var cleanFull = (s.seat_name && s.seat_name !== "null") ? s.seat_name : "";
                       return {
-                        code: s.short_name || s.seat_name || String(s.seat_id),
+                        code: cleanShort || cleanFull || String(s.seat_id),
                         tag: s.available ? "空闲可选" : "已占",
                         available: Boolean(s.available)
                       };
                     })
                   );
+                } else {
+                  var rMeta = LIVE_REGIONS_MAP[areaKey];
+                  var totalCount = Math.min(Math.max(Number(rMeta && rMeta.totalSeats) || 60, 20), 200);
+                  var genItems = [];
+                  for (var k = 1; k <= totalCount; k++) {
+                    genItems.push({ code: String(k).padStart(3, "0") + "号", tag: "空闲可选", available: true });
+                  }
+                  populateSeatsFromList(genItems);
                 }
               })
               .catch(function () {});

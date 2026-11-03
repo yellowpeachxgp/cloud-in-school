@@ -76,13 +76,21 @@ export class ScopedSchoolCookieVault {
   }
 }
 
+export function cleanSpiText(raw, fallback = "") {
+  if (raw === null || raw === undefined) return fallback;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return fallback;
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "none" || lower === "nil") {
+    return fallback;
+  }
+  return trimmed;
+}
+
 export function inferFloorFromRegionName(regionName, rawLayerName) {
-  const cleanLayer =
-    rawLayerName && rawLayerName !== "null" && String(rawLayerName).trim()
-      ? String(rawLayerName).trim()
-      : "";
+  const cleanLayer = cleanSpiText(rawLayerName, "");
   if (cleanLayer) return cleanLayer;
-  const name = String(regionName || "");
+  const name = cleanSpiText(regionName, "");
   const m = name.match(/^(一|二|三|四|五|六|七|八|九|十|[1-9]|10)(层|楼)/);
   if (m) return `${m[1]}层`;
   return "图书馆自习区";
@@ -275,15 +283,15 @@ export class HautLibraryProvider {
       if (res.status !== 200) return null;
       const json = await res.json();
       if (json?.code !== 200 || !json?.data) return null;
-      const userNo = String(json.data.userNo || "").trim();
-      const userName = String(json.data.userName || "").trim();
+      const userNo = cleanSpiText(json.data.userNo, "");
+      const userName = cleanSpiText(json.data.userName, "");
       if (!userNo && !userName) return null;
       return {
         userNo,
-        userName,
-        department: String(json.data.department || "").trim(),
-        cardNo: String(json.data.cardNo || "").trim(),
-        breakNum: String(json.data.breakNum ?? "0").trim()
+        userName: userName || userNo,
+        department: cleanSpiText(json.data.department, ""),
+        cardNo: cleanSpiText(json.data.cardNo, ""),
+        breakNum: cleanSpiText(json.data.breakNum, "0") || "0"
       };
     } catch {
       return null;
@@ -528,22 +536,32 @@ export class HautLibraryProvider {
         regionId || 7
       )}&bookingdate=${encodeURIComponent(bookingDate)}`,
       rawToken
-    );
-    const rawStartDate = String(dtJson?.startDate || "").trim();
-    const rawEndDate = String(dtJson?.endDate || "").trim();
-    const rawStartTime = String(dtJson?.startTime || "07:30").trim();
-    const rawEndTime = String(dtJson?.endTime || "22:00").trim();
+    ).catch(() => null);
+    const rawStartDate = cleanSpiText(dtJson?.startDate, "");
+    const rawEndDate = cleanSpiText(dtJson?.endDate, "");
+    let rawStartTime = cleanSpiText(dtJson?.startTime, "07:30") || "07:30";
+    let rawEndTime = cleanSpiText(dtJson?.endTime, "22:00") || "22:00";
 
-    const startFull = rawStartDate.includes(" ")
+    let startFull = rawStartDate.includes(" ")
       ? rawStartDate
       : `${rawStartDate || bookingDate} ${
           rawStartTime.split(":").length === 2 ? `${rawStartTime}:00` : rawStartTime
         }`;
-    const endFull = rawEndDate.includes(" ")
+    let endFull = rawEndDate.includes(" ")
       ? rawEndDate
       : `${rawEndDate || bookingDate} ${
           rawEndTime.split(":").length === 2 ? `${rawEndTime}:00` : rawEndTime
         }`;
+
+    // When queried late at night (after 21:50), wslib returns startDate = now+5min >= endDate (22:00:00),
+    // which causes /seatbook/layout/query to return code 500 (seat.10058). Clamp to standard 07:30..22:00.
+    if (startFull >= endFull || rawStartTime >= "21:50" || !startFull.startsWith(bookingDate)) {
+      rawStartTime = "07:30";
+      rawEndTime = "22:00";
+      startFull = `${bookingDate} 07:30:00`;
+      endFull = `${bookingDate} 22:00:00`;
+    }
+
     return {
       startFull,
       endFull,
@@ -559,8 +577,8 @@ export class HautLibraryProvider {
     const buildings = bJson?.builderInfo || bJson?.data?.builderInfo || [{ id: "1", buildingName: "莲花街图书馆" }];
     const regions = [];
     for (const b of buildings) {
-      const bId = String(b?.id || "1").trim();
-      const bName = String(b?.buildingName || "莲花街图书馆").trim();
+      const bId = cleanSpiText(b?.id, "1") || "1";
+      const bName = cleanSpiText(b?.buildingName, "莲花街图书馆") || "莲花街图书馆";
       const rJson = await this.wslibGetJson(
         `/seatbook/layout/region?buildingId=${encodeURIComponent(
           bId
@@ -571,8 +589,8 @@ export class HautLibraryProvider {
       );
       const list = rJson?.regionList || rJson?.data?.regionList || [];
       for (const r of list) {
-        if (!r?.id || !r?.regionName) continue;
-        const regionName = String(r.regionName).trim();
+        const regionName = cleanSpiText(r?.regionName, "");
+        if (!r?.id || !regionName) continue;
         regions.push({
           id: Number(r.id),
           region_id: Number(r.id),
@@ -580,8 +598,8 @@ export class HautLibraryProvider {
           building_id: bId,
           building_name: bName,
           layer_name: inferFloorFromRegionName(regionName, r.layerName),
-          open_time: String(r.openDate || "07:30").trim(),
-          close_time: String(r.closeDate || "22:00").trim(),
+          open_time: cleanSpiText(r.openDate, "07:30") || "07:30",
+          close_time: cleanSpiText(r.closeDate, "22:00") || "22:00",
           total_seats: Number(r.num || 0),
           available_seats: Number(r.cannum || 0),
           is_open: Number(r.isOpen ?? 1) !== 0
@@ -604,12 +622,12 @@ export class HautLibraryProvider {
       )}&endtime=${encodeURIComponent(windowInfo.endFull)}&regionid=${encodeURIComponent(regionId)}`,
       rawToken
     );
-    const regionName = String(qJson?.layout?.regionName || "").trim();
+    const regionName = cleanSpiText(qJson?.layout?.regionName, "");
     const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
     const seats = rawSeats
-      .filter((s) => s?.id && s?.seatName)
+      .filter((s) => s?.id && cleanSpiText(s?.seatName, ""))
       .map((s) => {
-        const fullName = String(s.seatName).trim();
+        const fullName = cleanSpiText(s.seatName, "");
         const shortName =
           regionName && fullName.startsWith(regionName)
             ? fullName.slice(regionName.length).trim()
