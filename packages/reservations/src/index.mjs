@@ -138,10 +138,17 @@ export class TripleScheduleEngine {
         !["CANCELLED", "FAILED", "EXPIRED"].includes(j.state)
     );
     if (duplicateActive) {
-      throw new ContractError(
-        "CONFLICT",
-        `An active reservation plan/job already exists for ${payload.target_local_date}`
-      );
+      if (payload.replace_existing === true && duplicateActive.state !== "CONFIRMED") {
+        duplicateActive.state = "CANCELLED";
+        duplicateActive.state_version += 1;
+        const oldPlan = this.store.reservationPlans.get(duplicateActive.plan_id);
+        if (oldPlan) oldPlan.enabled = false;
+      } else {
+        throw new ContractError(
+          "CONFLICT",
+          `An active reservation plan/job already exists for ${payload.target_local_date}`
+        );
+      }
     }
 
     const rules = this.schoolProvider.getRules();

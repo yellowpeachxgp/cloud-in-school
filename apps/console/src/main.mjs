@@ -724,7 +724,7 @@ export function renderConsoleHtml(ctx = {}) {
                             j.state === "CONFIRMED"
                               ? `<button type="button" class="btn btn-secondary btn-sm" data-cancel-seat-job="${escapeHtml(j.id)}">退座释放</button>`
                               : !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
-                                ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-job="${escapeHtml(j.id)}">取消预约</button>`
+                                ? `<div class="cluster"><button type="button" class="btn btn-primary btn-sm" data-execute-now-job="${escapeHtml(j.id)}">⚡ 立即抢一次</button><button type="button" class="btn btn-ghost btn-sm" data-cancel-job="${escapeHtml(j.id)}">取消预约</button></div>`
                                 : "-"
                           }</td>
                         </tr>`;
@@ -1604,7 +1604,8 @@ export function renderConsoleHtml(ctx = {}) {
                 candidate_seats: seats,
                 slot_window: slot,
                 target_local_date: targetDate,
-                target_local_time: targetTime
+                target_local_time: targetTime,
+                replace_existing: true
               })
             });
           });
@@ -1628,6 +1629,19 @@ export function renderConsoleHtml(ctx = {}) {
           });
         }
 
+        function handleExecuteJobResult(execRes) {
+          var data = (execRes && execRes.data) || {};
+          var job = data.job || {};
+          var sr = data.schoolReservation || data.school_reservation || {};
+          if (job.state === "CONFIRMED") {
+            var alias = sr.seat_alias ? "（" + sr.seat_alias + "）" : "";
+            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 0.1 🍑。");
+          } else {
+            showToast("未能锁定所选座位（座位已被占用或未绑定正确图书馆密码），本次未扣费", true);
+          }
+          setTimeout(function () { window.location.reload(); }, 900);
+        }
+
         var btnFireNow = document.getElementById("btn-fire-now");
         if (btnFireNow) {
           btnFireNow.addEventListener("click", function () {
@@ -1641,10 +1655,7 @@ export function renderConsoleHtml(ctx = {}) {
                   body: JSON.stringify({})
                 });
               })
-              .then(function () {
-                showToast("占座成功！已从您的 XPeach 账户扣除 0.1 🍑。");
-                setTimeout(function () { window.location.reload(); }, 800);
-              })
+              .then(handleExecuteJobResult)
               .catch(function (err) {
                 showToast(err.message, true);
               })
@@ -1654,6 +1665,24 @@ export function renderConsoleHtml(ctx = {}) {
               });
           });
         }
+
+        document.querySelectorAll("[data-execute-now-job]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var jobId = btn.getAttribute("data-execute-now-job");
+            btn.disabled = true;
+            btn.textContent = "抢座中…";
+            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/execute-now", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(handleExecuteJobResult)
+              .catch(function (err) {
+                showToast(err.message, true);
+                btn.disabled = false;
+                btn.textContent = "⚡ 立即抢一次";
+              });
+          });
+        });
 
         // Cancel reservation job buttons
         document.querySelectorAll("[data-cancel-job]").forEach(function (btn) {

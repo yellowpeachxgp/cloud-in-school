@@ -119,8 +119,13 @@ export function createCampusCloudApp(options = {}) {
   function extractBearer(headers, nowMs) {
     const authHeader = headers?.authorization || headers?.Authorization || "";
     const m = String(authHeader).match(/^Bearer\s+(.+)$/i);
+    let bearerErr = null;
     if (m) {
-      return identity.verifyAccessToken(m[1].trim(), nowMs);
+      try {
+        return identity.verifyAccessToken(m[1].trim(), nowMs);
+      } catch (err) {
+        bearerErr = err;
+      }
     }
     const cookieAuth = identity.verifyWebSessionCookie(
       headers?.cookie || headers?.Cookie || "",
@@ -136,6 +141,7 @@ export function createCampusCloudApp(options = {}) {
         roles: cookieAuth.roles
       };
     }
+    if (bearerErr) throw bearerErr;
     throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing Bearer Authorization header");
   }
 
