@@ -741,7 +741,9 @@ export function renderConsoleHtml(ctx = {}) {
                               ? '<span class="badge">已取消 (未扣费)</span>'
                               : j.state === "FAILED"
                                 ? '<span class="badge badge-danger">未抢到座位 (未扣费)</span>'
-                                : '<span class="badge badge-primary">已就绪 · 等待到点开抢</span>';
+                                : j.state === "EXPIRED"
+                                  ? '<span class="badge badge-danger">已过开抢时间窗 (未扣费)</span>'
+                                  : '<span class="badge badge-primary">已就绪 · 等待到点开抢</span>';
                         return `<tr>
                           <td>${escapeHtml(p.target_local_date || j.booking_local_date || "-")} ${escapeHtml(p.target_local_time || j.target_local_time || "07:00:00")}</td>
                           <td><strong>${escapeHtml(p.area_name || p.area_code || "4楼北自习区")}</strong> · <code>${escapeHtml(seats)}</code></td>
