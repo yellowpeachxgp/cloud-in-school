@@ -575,6 +575,7 @@ export class HautLibraryProvider {
         const regionName = String(r.regionName).trim();
         regions.push({
           id: Number(r.id),
+          region_id: Number(r.id),
           region_name: regionName,
           building_id: bId,
           building_name: bName,
@@ -616,6 +617,7 @@ export class HautLibraryProvider {
         const seatStatus = Number(s.seatStatus ?? 1);
         return {
           id: Number(s.id),
+          seat_id: Number(s.id),
           seat_name: fullName,
           short_name: shortName || fullName,
           seat_status: seatStatus,

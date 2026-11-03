@@ -51,20 +51,28 @@ export function computeTripleSchedule({
   }
 
   // Parse in Asia/Shanghai (+08:00)
-  const targetAtMs = Date.parse(`${targetLocalDate}T${normalizedTime}+08:00`);
+  let targetAtMs = Date.parse(`${targetLocalDate}T${normalizedTime}+08:00`);
   const windowEndMs = Date.parse(`${targetLocalDate}T${rules.window_end_exclusive}+08:00`);
+  const clampedLatenessMs = Math.min(Math.max(maxLatenessSeconds, 0), rules.max_lateness_seconds_limit || 1800) * 1000;
+  let expiresAtMs = Math.min(targetAtMs + clampedLatenessMs, windowEndMs);
+
+  if (nowMs > expiresAtMs) {
+    if (nowMs < windowEndMs) {
+      // User selected today's date during open hours with an earlier default slot (e.g. 07:00:00);
+      // upgrade to immediate catch-up within today's open window.
+      targetAtMs = Math.min(nowMs + 2000, windowEndMs - 1000);
+      expiresAtMs = Math.min(targetAtMs + Math.max(clampedLatenessMs, 300_000), windowEndMs);
+    } else {
+      throw new ContractError(
+        "BOOKING_WINDOW_CLOSED",
+        "Target time T has already passed its execution window (MISSED_WINDOW)"
+      );
+    }
+  }
+
   const precheckAtMs = targetAtMs - precheckLeadSeconds * 1000;
   const finalCheckAtMs = targetAtMs - finalCheckLeadSeconds * 1000;
-  const clampedLatenessMs = Math.min(Math.max(maxLatenessSeconds, 0), rules.max_lateness_seconds_limit || 1800) * 1000;
-  const expiresAtMs = Math.min(targetAtMs + clampedLatenessMs, windowEndMs);
-
   const diffMs = targetAtMs - nowMs;
-  if (nowMs > expiresAtMs) {
-    throw new ContractError(
-      "BOOKING_WINDOW_CLOSED",
-      "Target time T has already passed its execution window (MISSED_WINDOW)"
-    );
-  }
 
   let precheckInitialStatus = "ARMED";
   let finalCheckInitialStatus = "ARMED";

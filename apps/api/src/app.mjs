@@ -1896,7 +1896,7 @@ export function createCampusCloudApp(options = {}) {
 
         await syncUserToSso(auth.cloudUserId);
         return {
-          status: 200,
+          status: 201,
           headers: {
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
@@ -1904,6 +1904,10 @@ export function createCampusCloudApp(options = {}) {
           body: okEnvelope(
             "SCHOOL_BINDING_LIVE_VERIFIED",
             {
+              id: binding.id,
+              consent_id: consent.id,
+              student_no: binding.student_no,
+              user_name: authRes.userInfo?.userName || "",
               binding,
               consent,
               user_info: authRes.userInfo
@@ -1916,7 +1920,9 @@ export function createCampusCloudApp(options = {}) {
       if (upperMethod === "GET" && pathname === "/api/v1/schools/haut/library/live-regions") {
         const auth = extractBearer(headers, nowMs);
         const dateParam =
-          parsedUrl.searchParams.get("date") || new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+          parsedUrl.searchParams.get("booking_date") ||
+          parsedUrl.searchParams.get("date") ||
+          new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
         const binding = Array.from(store.schoolBindings.values()).find(
           (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
         );
@@ -1958,7 +1964,9 @@ export function createCampusCloudApp(options = {}) {
         const auth = extractBearer(headers, nowMs);
         const regionId = Number(parsedUrl.searchParams.get("region_id") || 7);
         const dateParam =
-          parsedUrl.searchParams.get("date") || new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+          parsedUrl.searchParams.get("booking_date") ||
+          parsedUrl.searchParams.get("date") ||
+          new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
         const binding = Array.from(store.schoolBindings.values()).find(
           (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
         );
