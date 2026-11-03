@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
 
 /**
- * School SPI, SSRF Guard, Cross-School Cookie Isolation & HAUT Provider.
+ * School SPI, SSRF Guard, Cross-School Cookie Isolation & Live HAUT Library Provider.
  * Enforces Section 07, 14 (SSRF / SIGN_IN prohibition / fail-closed kill_switch) & 27.
  */
 const PRIVATE_IP_PATTERNS = [
@@ -20,6 +20,12 @@ const PRIVATE_IP_PATTERNS = [
   /\.internal$/i,
   /metadata\.google\.internal/i
 ];
+
+export const HAUT_CAS_LOGIN_URL =
+  "https://mapp.haut.edu.cn/cas/login?service=https://wslib.haut.edu.cn/stage-api/api/caslogin/ticketlogin";
+export const HAUT_WSLIB_API_BASE = "https://wslib.haut.edu.cn/spacelink/api";
+const HAUT_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
 
 export function validateAllowedSchoolUrl(urlString, allowedHosts) {
   let parsed;
@@ -68,6 +74,18 @@ export class ScopedSchoolCookieVault {
       .map(([k, v]) => `${k}=${v}`)
       .join("; ");
   }
+}
+
+export function inferFloorFromRegionName(regionName, rawLayerName) {
+  const cleanLayer =
+    rawLayerName && rawLayerName !== "null" && String(rawLayerName).trim()
+      ? String(rawLayerName).trim()
+      : "";
+  if (cleanLayer) return cleanLayer;
+  const name = String(regionName || "");
+  const m = name.match(/^(一|二|三|四|五|六|七|八|九|十|[1-9]|10)(层|楼)/);
+  if (m) return `${m[1]}层`;
+  return "图书馆自习区";
 }
 
 export class HautLibraryProvider {
@@ -170,7 +188,550 @@ export class HautLibraryProvider {
     return { executionPath: "MOCK_ONLY" };
   }
 
-  async executeMockOrAuthorizedCreate({ job, plan, binding, schoolIntegration, nowInstant }) {
+  normalizeRawToken(token) {
+    let cur = String(token || "").trim();
+    while (/^Bearer\s+/i.test(cur)) {
+      cur = cur.replace(/^Bearer\s+/i, "").trim();
+    }
+    return cur;
+  }
+
+  parseCredentialBundle(rawSecret, binding = null) {
+    const fallbackStudentNo = String(binding?.student_no || "").trim();
+    if (!rawSecret) {
+      return {
+        raw_token: "",
+        cas_tgc: "",
+        cas_jsessionid: "",
+        student_no: fallbackStudentNo,
+        password: "",
+        isLiveCredential: false
+      };
+    }
+    const text = String(rawSecret).trim();
+    if (
+      text === "delegated_session_v1" ||
+      text === "reauthorized_session_v1" ||
+      text.startsWith("mock_") ||
+      text.startsWith("test_")
+    ) {
+      return {
+        raw_token: "",
+        cas_tgc: "",
+        cas_jsessionid: "",
+        student_no: fallbackStudentNo,
+        password: "",
+        isLiveCredential: false
+      };
+    }
+    if (text.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(text);
+        const rawToken = this.normalizeRawToken(parsed.raw_token || parsed.rawToken || parsed.token);
+        const casTgc = String(parsed.cas_tgc || parsed.casTgcCookie || "").trim();
+        const casJsessionId = String(parsed.cas_jsessionid || parsed.casJsessionId || "").trim();
+        const studentNo = String(parsed.student_no || parsed.studentId || fallbackStudentNo).trim();
+        const password = String(parsed.password || parsed.passwordPlain || "").trim();
+        const isLive = Boolean(rawToken.length > 32 || casTgc.length > 10 || (studentNo && password));
+        return {
+          raw_token: rawToken,
+          cas_tgc: casTgc,
+          cas_jsessionid: casJsessionId,
+          student_no: studentNo,
+          password,
+          isLiveCredential: isLive
+        };
+      } catch {
+        // Fallback to raw token handling
+      }
+    }
+    const cleanToken = this.normalizeRawToken(text);
+    const isJwtLike = cleanToken.length > 32 && cleanToken.includes(".");
+    return {
+      raw_token: isJwtLike ? cleanToken : "",
+      cas_tgc: "",
+      cas_jsessionid: "",
+      student_no: fallbackStudentNo,
+      password: "",
+      isLiveCredential: isJwtLike
+    };
+  }
+
+  async validateWslibTokenOnline(rawToken) {
+    const cleanToken = this.normalizeRawToken(rawToken);
+    if (!cleanToken) return null;
+    const url = `${HAUT_WSLIB_API_BASE}/h5user/my/userinfo`;
+    validateAllowedSchoolUrl(url, this.allowedHosts);
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": HAUT_USER_AGENT,
+          Authorization: `Bearer ${cleanToken}`,
+          Accept: "application/json, text/plain, */*"
+        },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (res.status !== 200) return null;
+      const json = await res.json();
+      if (json?.code !== 200 || !json?.data) return null;
+      const userNo = String(json.data.userNo || "").trim();
+      const userName = String(json.data.userName || "").trim();
+      if (!userNo && !userName) return null;
+      return {
+        userNo,
+        userName,
+        department: String(json.data.department || "").trim(),
+        cardNo: String(json.data.cardNo || "").trim(),
+        breakNum: String(json.data.breakNum ?? "0").trim()
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async authenticateHautSession(credInput, binding = null) {
+    const bundle =
+      typeof credInput === "object" && credInput !== null && "isLiveCredential" in credInput
+        ? credInput
+        : this.parseCredentialBundle(credInput, binding);
+
+    // Level 1: Direct wslib JWT token validation
+    if (bundle.raw_token) {
+      const userInfo = await this.validateWslibTokenOnline(bundle.raw_token);
+      if (userInfo) {
+        return {
+          rawToken: bundle.raw_token,
+          casTgc: bundle.cas_tgc || "",
+          casJsessionId: bundle.cas_jsessionid || "",
+          userInfo,
+          source: "CACHED_TOKEN"
+        };
+      }
+    }
+
+    // Helper for cookie jar & redirect chain on mapp.haut.edu.cn -> wslib.haut.edu.cn
+    const jar = new Map();
+    const saveCookies = (res) => {
+      const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
+      for (const sc of setCookies) {
+        const [pair] = String(sc).split(";");
+        const eq = pair.indexOf("=");
+        if (eq > 0) {
+          jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+        }
+      }
+    };
+    const cookieHeader = () =>
+      Array.from(jar.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join("; ");
+
+    const followRedirectsForToken = async (initialResp, startUrl) => {
+      let r = initialResp;
+      let currUrl = startUrl;
+      for (let i = 0; i < 12; i++) {
+        const loc = r.headers.get("location");
+        if (!loc) break;
+        const nextUrl = new URL(loc, currUrl)
+          .toString()
+          .replace(/^http:\/\/(wslib|mapp|lib)\.haut\.edu\.cn/i, "https://$1.haut.edu.cn");
+        validateAllowedSchoolUrl(nextUrl, this.allowedHosts);
+        const tokenMatch = nextUrl.match(/[?&]token=([^&#;]+)/);
+        if (tokenMatch) {
+          return this.normalizeRawToken(decodeURIComponent(tokenMatch[1]));
+        }
+        currUrl = nextUrl;
+        r = await fetch(currUrl, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            "User-Agent": HAUT_USER_AGENT,
+            ...(jar.size > 0 ? { Cookie: cookieHeader() } : {})
+          },
+          signal: AbortSignal.timeout(9000)
+        });
+        saveCookies(r);
+      }
+      return null;
+    };
+
+    // Level 2: Silent CASTGC cookie exchange
+    if (bundle.cas_tgc) {
+      try {
+        jar.set("CASTGC", bundle.cas_tgc);
+        if (bundle.cas_jsessionid) jar.set("JSESSIONID", bundle.cas_jsessionid);
+        validateAllowedSchoolUrl(HAUT_CAS_LOGIN_URL, this.allowedHosts);
+        const r0 = await fetch(HAUT_CAS_LOGIN_URL, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            "User-Agent": HAUT_USER_AGENT,
+            Cookie: cookieHeader()
+          },
+          signal: AbortSignal.timeout(9000)
+        });
+        saveCookies(r0);
+        if ([301, 302, 303, 307, 308].includes(r0.status)) {
+          const freshToken = await followRedirectsForToken(r0, HAUT_CAS_LOGIN_URL);
+          if (freshToken) {
+            const userInfo = await this.validateWslibTokenOnline(freshToken);
+            if (userInfo) {
+              return {
+                rawToken: freshToken,
+                casTgc: jar.get("CASTGC") || bundle.cas_tgc,
+                casJsessionId: jar.get("JSESSIONID") || bundle.cas_jsessionid || "",
+                userInfo,
+                source: "PERSISTED_COOKIE"
+              };
+            }
+          }
+        }
+      } catch {
+        // Proceed to Level 3 password login
+      }
+    }
+
+    // Level 3: Full CAS login with student_no + password
+    if (bundle.student_no && bundle.password) {
+      jar.clear();
+      validateAllowedSchoolUrl(HAUT_CAS_LOGIN_URL, this.allowedHosts);
+      const r1 = await fetch(HAUT_CAS_LOGIN_URL, {
+        method: "GET",
+        redirect: "manual",
+        headers: { "User-Agent": HAUT_USER_AGENT },
+        signal: AbortSignal.timeout(10000)
+      });
+      saveCookies(r1);
+      if ([301, 302, 303, 307, 308].includes(r1.status)) {
+        const directToken = await followRedirectsForToken(r1, HAUT_CAS_LOGIN_URL);
+        if (directToken) {
+          const userInfo = await this.validateWslibTokenOnline(directToken);
+          if (userInfo) {
+            return {
+              rawToken: directToken,
+              casTgc: jar.get("CASTGC") || "",
+              casJsessionId: jar.get("JSESSIONID") || "",
+              userInfo,
+              source: "CAS_DIRECT"
+            };
+          }
+        }
+      }
+      const html = await r1.text();
+      const lt = (html.match(/name="lt"\s+value="([^"]+)"/) ||
+        html.match(/value="([^"]+)"\s+name="lt"/) ||
+        [])[1];
+      if (!lt) {
+        throw new ContractError(
+          "SCHOOL_AUTH_EXPIRED",
+          "未能从学校统一身份认证页面提取登录令牌 (lt)"
+        );
+      }
+      const execution = (html.match(/name="execution"\s+value="([^"]+)"/) || [null, "e1s1"])[1];
+      const actionRaw = (html.match(/<form[^>]*id="fm1"[^>]*action="([^"]+)"/) || [])[1]?.replace(
+        /&amp;/g,
+        "&"
+      );
+      const postUrl = actionRaw ? new URL(actionRaw, HAUT_CAS_LOGIN_URL).toString() : HAUT_CAS_LOGIN_URL;
+      validateAllowedSchoolUrl(postUrl, this.allowedHosts);
+
+      const encodedPwd = "{gilight}_" + Buffer.from(bundle.password, "utf8").toString("base64");
+      const formBody = new URLSearchParams({
+        username: bundle.student_no,
+        password: encodedPwd,
+        lt,
+        execution,
+        _eventId: "submit"
+      }).toString();
+
+      const r2 = await fetch(postUrl, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "User-Agent": HAUT_USER_AGENT,
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          ...(jar.size > 0 ? { Cookie: cookieHeader() } : {})
+        },
+        body: formBody,
+        signal: AbortSignal.timeout(10000)
+      });
+      saveCookies(r2);
+      if (!r2.headers.get("location")) {
+        const errBody = await r2.text();
+        if (errBody.includes("验证码") || /captcha/i.test(errBody)) {
+          throw new ContractError(
+            "SCHOOL_AUTH_EXPIRED",
+            "学校统一身份认证要求输入图形验证码，请先在 App 选座页登录一次"
+          );
+        }
+        throw new ContractError(
+          "SCHOOL_AUTH_EXPIRED",
+          "学校统一身份认证未通过，请核对学号与统一认证密码是否正确"
+        );
+      }
+      const freshToken = await followRedirectsForToken(r2, postUrl);
+      if (!freshToken) {
+        throw new ContractError(
+          "SCHOOL_AUTH_EXPIRED",
+          "未从图书馆空间预约回调中获取登录 Token"
+        );
+      }
+      const userInfo = (await this.validateWslibTokenOnline(freshToken)) || {
+        userNo: bundle.student_no,
+        userName: bundle.student_no,
+        department: "",
+        cardNo: "",
+        breakNum: "0"
+      };
+      return {
+        rawToken: freshToken,
+        casTgc: jar.get("CASTGC") || "",
+        casJsessionId: jar.get("JSESSIONID") || "",
+        userInfo,
+        source: "BACKGROUND_PASSWORD_LOGIN"
+      };
+    }
+
+    throw new ContractError(
+      "SCHOOL_AUTH_EXPIRED",
+      "学校图书馆登录态已过期，请在页面或 App 中绑定学号与统一认证密码"
+    );
+  }
+
+  async wslibGetJson(pathAndQuery, rawToken) {
+    const cleanToken = this.normalizeRawToken(rawToken);
+    const url = `${HAUT_WSLIB_API_BASE}${pathAndQuery}`;
+    validateAllowedSchoolUrl(url, this.allowedHosts);
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "User-Agent": HAUT_USER_AGENT,
+        Authorization: `Bearer ${cleanToken}`,
+        Accept: "application/json, text/plain, */*"
+      },
+      signal: AbortSignal.timeout(8500)
+    });
+    if (res.status === 401) {
+      throw new ContractError("SCHOOL_AUTH_EXPIRED", "图书馆登录 Token 已过期");
+    }
+    const json = await res.json();
+    if (json?.code === 401) {
+      throw new ContractError("SCHOOL_AUTH_EXPIRED", "图书馆登录 Token 已过期");
+    }
+    return json;
+  }
+
+  async resolveDefaultBookingWindow(rawToken, regionId, bookingDate) {
+    const dtJson = await this.wslibGetJson(
+      `/seatbook/layout/getDefaultTime?regionid=${encodeURIComponent(
+        regionId || 7
+      )}&bookingdate=${encodeURIComponent(bookingDate)}`,
+      rawToken
+    );
+    const rawStartDate = String(dtJson?.startDate || "").trim();
+    const rawEndDate = String(dtJson?.endDate || "").trim();
+    const rawStartTime = String(dtJson?.startTime || "07:30").trim();
+    const rawEndTime = String(dtJson?.endTime || "22:00").trim();
+
+    const startFull = rawStartDate.includes(" ")
+      ? rawStartDate
+      : `${rawStartDate || bookingDate} ${
+          rawStartTime.split(":").length === 2 ? `${rawStartTime}:00` : rawStartTime
+        }`;
+    const endFull = rawEndDate.includes(" ")
+      ? rawEndDate
+      : `${rawEndDate || bookingDate} ${
+          rawEndTime.split(":").length === 2 ? `${rawEndTime}:00` : rawEndTime
+        }`;
+    return {
+      startFull,
+      endFull,
+      startTime: rawStartTime,
+      endTime: rawEndTime,
+      canSetTime: String(dtJson?.isCanSetTime || "0") !== "0"
+    };
+  }
+
+  async fetchLiveStudyRegions(rawToken, bookingDate) {
+    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, 7, bookingDate);
+    const bJson = await this.wslibGetJson("/seatbook/layout/building", rawToken);
+    const buildings = bJson?.builderInfo || bJson?.data?.builderInfo || [{ id: "1", buildingName: "莲花街图书馆" }];
+    const regions = [];
+    for (const b of buildings) {
+      const bId = String(b?.id || "1").trim();
+      const bName = String(b?.buildingName || "莲花街图书馆").trim();
+      const rJson = await this.wslibGetJson(
+        `/seatbook/layout/region?buildingId=${encodeURIComponent(
+          bId
+        )}&layerid=&starttime=${encodeURIComponent(windowInfo.startFull)}&endtime=${encodeURIComponent(
+          windowInfo.endFull
+        )}`,
+        rawToken
+      );
+      const list = rJson?.regionList || rJson?.data?.regionList || [];
+      for (const r of list) {
+        if (!r?.id || !r?.regionName) continue;
+        const regionName = String(r.regionName).trim();
+        regions.push({
+          id: Number(r.id),
+          region_name: regionName,
+          building_id: bId,
+          building_name: bName,
+          layer_name: inferFloorFromRegionName(regionName, r.layerName),
+          open_time: String(r.openDate || "07:30").trim(),
+          close_time: String(r.closeDate || "22:00").trim(),
+          total_seats: Number(r.num || 0),
+          available_seats: Number(r.cannum || 0),
+          is_open: Number(r.isOpen ?? 1) !== 0
+        });
+      }
+    }
+    return {
+      booking_date: bookingDate,
+      start_full: windowInfo.startFull,
+      end_full: windowInfo.endFull,
+      regions
+    };
+  }
+
+  async fetchLiveRegionSeats(rawToken, regionId, bookingDate) {
+    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, regionId, bookingDate);
+    const qJson = await this.wslibGetJson(
+      `/seatbook/layout/query?starttime=${encodeURIComponent(
+        windowInfo.startFull
+      )}&endtime=${encodeURIComponent(windowInfo.endFull)}&regionid=${encodeURIComponent(regionId)}`,
+      rawToken
+    );
+    const regionName = String(qJson?.layout?.regionName || "").trim();
+    const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
+    const seats = rawSeats
+      .filter((s) => s?.id && s?.seatName)
+      .map((s) => {
+        const fullName = String(s.seatName).trim();
+        const shortName =
+          regionName && fullName.startsWith(regionName)
+            ? fullName.slice(regionName.length).trim()
+            : fullName;
+        const seatStatus = Number(s.seatStatus ?? 1);
+        return {
+          id: Number(s.id),
+          seat_name: fullName,
+          short_name: shortName || fullName,
+          seat_status: seatStatus,
+          available: seatStatus === 2
+        };
+      });
+    return {
+      region_id: Number(regionId),
+      region_name: regionName,
+      booking_date: bookingDate,
+      start_full: windowInfo.startFull,
+      end_full: windowInfo.endFull,
+      seats
+    };
+  }
+
+  async fetchCurrentActiveBooking(rawToken) {
+    const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
+    const data = curJson?.data || curJson?.booking || null;
+    if (data && data.id && ["1", "2", "3", "4"].includes(String(data.bookingStatus))) {
+      return {
+        bookingId: String(data.id),
+        seatId: data.seatId ? Number(data.seatId) : null,
+        seatName: String(data.seatName || "").trim(),
+        regionName: String(data.regionName || "").trim(),
+        buildingLayerRegionId: data.buildingLayerRegionId ? Number(data.buildingLayerRegionId) : null,
+        startDate: String(data.startDate || "").trim(),
+        endDate: String(data.endDate || "").trim(),
+        bookingStatus: Number(data.bookingStatus)
+      };
+    }
+    const inProgJson = await this.wslibGetJson(
+      "/seatbook/user/mybookingInProgress?bookingstatus=0&pageSize=15&pageNum=1",
+      rawToken
+    ).catch(() => null);
+    const rows = inProgJson?.rows || [];
+    for (const row of rows) {
+      if (row && row.id && ["1", "2", "3", "4"].includes(String(row.bookingStatus))) {
+        return {
+          bookingId: String(row.id),
+          seatId: row.seatId ? Number(row.seatId) : null,
+          seatName: String(row.seatName || "").trim(),
+          regionName: String(row.regionName || "").trim(),
+          buildingLayerRegionId: row.buildingLayerRegionId ? Number(row.buildingLayerRegionId) : null,
+          startDate: String(row.startDate || "").trim(),
+          endDate: String(row.endDate || "").trim(),
+          bookingStatus: Number(row.bookingStatus)
+        };
+      }
+    }
+    return null;
+  }
+
+  async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
+    const auth = await this.authenticateHautSession(decryptedSecret, binding);
+    const rawToken = auth.rawToken;
+    let targetBookingId =
+      externalBookingId && /^\d+$/.test(String(externalBookingId).trim())
+        ? String(externalBookingId).trim()
+        : null;
+
+    if (!targetBookingId) {
+      const current = await this.fetchCurrentActiveBooking(rawToken);
+      if (current?.bookingId) {
+        targetBookingId = current.bookingId;
+      }
+    }
+    if (!targetBookingId) {
+      return {
+        cancelled: true,
+        alreadyReleased: true,
+        message: "当前账号下无生效中的图书馆座位预约"
+      };
+    }
+
+    const cancelJson = await this.wslibGetJson(
+      `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
+      rawToken
+    );
+    if (cancelJson?.code === 200) {
+      return {
+        cancelled: true,
+        bookingId: targetBookingId,
+        message: cancelJson?.msg || "已成功取消学校图书馆座位预约并释放座位"
+      };
+    }
+
+    // Fallback to signoff if booking window already started
+    const signOffJson = await this.wslibGetJson(
+      `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`,
+      rawToken
+    ).catch(() => null);
+    if (signOffJson?.code === 200) {
+      return {
+        cancelled: true,
+        bookingId: targetBookingId,
+        message: "已自动通过签退释放学校图书馆座位"
+      };
+    }
+
+    return {
+      cancelled: false,
+      bookingId: targetBookingId,
+      message: cancelJson?.msg || signOffJson?.msg || "取消座位预约未成功"
+    };
+  }
+
+  async executeMockOrAuthorizedCreate({
+    job,
+    plan,
+    binding,
+    schoolIntegration,
+    decryptedSecret = null,
+    nowInstant,
+    allowDateFallbackToToday = false
+  }) {
     if (job.school_id !== this.schoolId) {
       throw new ContractError("FORBIDDEN", "Cross-school provider mismatch");
     }
@@ -192,7 +753,141 @@ export class HautLibraryProvider {
       return this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
     }
 
-    // Default deterministic mock reservation result (safe sandbox)
+    const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
+    if (credBundle.isLiveCredential) {
+      const auth = await this.authenticateHautSession(credBundle, binding);
+      const rawToken = auth.rawToken;
+
+      // 1) Check if user already has an active seat booking
+      const existingActive = await this.fetchCurrentActiveBooking(rawToken);
+      if (existingActive) {
+        return {
+          outcome: "SUBMITTED",
+          externalBookingId: existingActive.bookingId,
+          seatAlias: existingActive.seatName,
+          regionAlias: existingActive.regionName,
+          rawToken
+        };
+      }
+
+      const shanghaiToday = formatLocalDateInShanghai(nowInstant);
+      const datesToTry =
+        allowDateFallbackToToday && job.booking_local_date !== shanghaiToday
+          ? [job.booking_local_date, shanghaiToday]
+          : [job.booking_local_date];
+
+      const preferredArea =
+        plan.area_name ||
+        plan.preferences_json?.preferred_area_ids?.[0] ||
+        plan.area_code ||
+        "四层东书库南区";
+      const wantedSeats = (
+        plan.candidate_seats ||
+        plan.preferences_json?.preferred_seat_ids ||
+        []
+      ).map((s) => String(s).trim());
+      const allowAlt = plan.preferences_json?.allow_alternative_seat !== false;
+
+      let lastMsg = "";
+      for (const targetDate of datesToTry) {
+        const regSnap = await this.fetchLiveStudyRegions(rawToken, targetDate);
+        const allRegions = regSnap.regions || [];
+        if (allRegions.length === 0) continue;
+
+        // Match region by name/floor, or fall back to regions with available seats
+        const cleanWantedArea = String(preferredArea)
+          .replace(/^[1-9]F_[A-Z]+$/i, "")
+          .trim();
+        let matchedRegions = allRegions.filter(
+          (r) =>
+            r.region_name === cleanWantedArea ||
+            r.region_name.includes(cleanWantedArea) ||
+            cleanWantedArea.includes(r.region_name)
+        );
+        if (matchedRegions.length === 0) {
+          const floorHint = cleanWantedArea.match(/(一|二|三|四|五|六|七|八|九|十|[1-9])/)?.[1];
+          const floorMap = {
+            "1": "一层",
+            "2": "二层",
+            "3": "三层",
+            "4": "四层",
+            "5": "五层",
+            "6": "六层",
+            "7": "七层",
+            "8": "八层",
+            "9": "九层"
+          };
+          const floorCn = floorMap[floorHint] || (floorHint ? `${floorHint}层` : "");
+          if (floorCn) {
+            matchedRegions = allRegions.filter(
+              (r) => r.region_name.includes(floorCn) && r.available_seats > 0
+            );
+          }
+        }
+        if (allowAlt) {
+          const otherAvailRegions = allRegions.filter(
+            (r) => r.available_seats > 0 && !matchedRegions.some((m) => m.id === r.id)
+          );
+          matchedRegions = [...matchedRegions, ...otherAvailRegions.slice(0, 2)];
+        }
+
+        for (const region of matchedRegions.slice(0, 3)) {
+          const seatSnap = await this.fetchLiveRegionSeats(rawToken, region.id, targetDate);
+          const availSeats = (seatSnap.seats || []).filter((s) => s.available);
+          if (availSeats.length === 0) continue;
+
+          const orderedCandidates = [];
+          for (const wanted of wantedSeats) {
+            const cleanWanted = wanted.replace(/号座?$/, "").trim();
+            const found = availSeats.find(
+              (s) =>
+                s.seat_name === cleanWanted ||
+                s.short_name === cleanWanted ||
+                s.seat_name.endsWith(cleanWanted) ||
+                s.short_name.endsWith(cleanWanted) ||
+                String(s.id) === cleanWanted
+            );
+            if (found && !orderedCandidates.some((c) => c.id === found.id)) {
+              orderedCandidates.push(found);
+            }
+          }
+          if (orderedCandidates.length === 0 && allowAlt) {
+            orderedCandidates.push(...availSeats.slice(0, 3));
+          }
+
+          for (const seat of orderedCandidates.slice(0, 3)) {
+            const addRes = await this.wslibGetJson(
+              `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+                seat.id
+              )}&starttime=${encodeURIComponent(
+                seatSnap.start_full
+              )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
+              rawToken
+            );
+            lastMsg = String(addRes?.msg || "").trim();
+            if (addRes?.code === 200) {
+              const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
+              const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+              return {
+                outcome: "SUBMITTED",
+                externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
+                seatAlias: confirmed?.seatName || seat.seat_name,
+                regionAlias: confirmed?.regionName || region.region_name,
+                rawToken
+              };
+            }
+          }
+        }
+      }
+
+      return {
+        outcome: "FAILED",
+        errorCode: "SCHOOL_REJECTED",
+        diagnosticMessage: lastMsg || "目标自习室暂无可用空座或不在开放预约时段"
+      };
+    }
+
+    // Default deterministic mock reservation result (safe sandbox for unit/redteam tests)
     const seatAlias = plan.preferences_json?.preferred_seat_ids?.[0] || "N4-088";
     const regionAlias = plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区";
     const externalBookingId = `haut_mock_${job.booking_local_date}_${seatAlias}_${binding.id.slice(0, 6)}`;
@@ -204,13 +899,42 @@ export class HautLibraryProvider {
     };
   }
 
-  async verifyBookingAuthoritative({ job, binding, expectedExternalBookingId }) {
+  async verifyBookingAuthoritative({
+    job,
+    binding,
+    decryptedSecret = null,
+    expectedExternalBookingId
+  }) {
     if (this.mockBackend) {
       return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
     }
     if (!expectedExternalBookingId) {
       return { verified: false, officialStatus: "NOT_CREATED" };
     }
+
+    const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
+    if (credBundle.isLiveCredential && !String(expectedExternalBookingId).startsWith("haut_mock_")) {
+      const auth = await this.authenticateHautSession(credBundle, binding);
+      const active = await this.fetchCurrentActiveBooking(auth.rawToken);
+      if (active && active.bookingId) {
+        const evidenceSha256 = crypto
+          .createHash("sha256")
+          .update(`haut_live|${binding.id}|${active.bookingId}|${active.seatName}|CONFIRMED`)
+          .digest("hex");
+        return {
+          verified: true,
+          externalBookingId: active.bookingId,
+          officialStatus: "CONFIRMED",
+          seatAlias: active.seatName,
+          regionAlias: active.regionName,
+          startAt: active.startDate,
+          endAt: active.endDate,
+          evidenceSha256
+        };
+      }
+      return { verified: false, officialStatus: "NOT_FOUND_ON_WSLIB" };
+    }
+
     const evidenceSha256 = crypto
       .createHash("sha256")
       .update(`${job.school_id}|${binding.id}|${expectedExternalBookingId}|CONFIRMED`)
@@ -237,4 +961,18 @@ export function formatLocalTimeInShanghai(dateOrIso) {
   const m = parts.find((p) => p.type === "minute")?.value || "00";
   const s = parts.find((p) => p.type === "second")?.value || "00";
   return `${h}:${m}:${s}`;
+}
+
+export function formatLocalDateInShanghai(dateOrIso = new Date()) {
+  const d = typeof dateOrIso === "string" || typeof dateOrIso === "number" ? new Date(dateOrIso) : dateOrIso;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(d);
+  const y = parts.find((p) => p.type === "year")?.value || "2026";
+  const m = parts.find((p) => p.type === "month")?.value || "01";
+  const day = parts.find((p) => p.type === "day")?.value || "01";
+  return `${y}-${m}-${day}`;
 }

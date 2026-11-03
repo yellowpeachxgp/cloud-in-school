@@ -601,7 +601,10 @@ export function renderConsoleHtml(ctx = {}) {
 
           <!-- Step 2: 选择自习区域与下属座位号 -->
           <div class="card card-flat" style="padding: 18px;">
-            <h3 class="text-sm font-semibold" style="margin: 0 0 6px;">第二步：点选自习区域与座位号</h3>
+            <div class="cluster" style="justify-content: space-between; margin-bottom: 6px;">
+              <h3 class="text-sm font-semibold" style="margin: 0;">第二步：点选自习区域与座位号</h3>
+              <span class="badge badge-success" id="live-region-badge" style="display:none;">已连接河工大图书馆实时座位</span>
+            </div>
             <p class="text-xs text-muted" style="margin: 0 0 10px;">点击下方楼层标签或在列表中切换区域，直接点击座位卡片即可设为首选/备选座位。</p>
 
             <div class="area-pills" id="area-pills-bar">
@@ -718,9 +721,11 @@ export function renderConsoleHtml(ctx = {}) {
                           <td>${escapeHtml(p.slot_window || "08:00-22:00")}</td>
                           <td>${stateLabel}</td>
                           <td>${
-                            !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
-                              ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-job="${escapeHtml(j.id)}">取消预约</button>`
-                              : "-"
+                            j.state === "CONFIRMED"
+                              ? `<button type="button" class="btn btn-secondary btn-sm" data-cancel-seat-job="${escapeHtml(j.id)}">退座释放</button>`
+                              : !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
+                                ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-job="${escapeHtml(j.id)}">取消预约</button>`
+                                : "-"
                           }</td>
                         </tr>`;
                       })
@@ -1261,13 +1266,16 @@ export function renderConsoleHtml(ctx = {}) {
           dateInput.value = tmr.toISOString().slice(0, 10);
         }
 
-        // Interactive area pills + visual seat grid + dropdowns
+        // Interactive area pills + visual seat grid + dropdowns (with live HAUT library loader)
         var areaSelect = document.getElementById("plan-area");
+        var areaPillsBar = document.getElementById("area-pills-bar");
+        var liveBadge = document.getElementById("live-region-badge");
         var seat1 = document.getElementById("plan-seat-1");
         var seat2 = document.getElementById("plan-seat-2");
         var seat3 = document.getElementById("plan-seat-3");
         var seatGrid = document.getElementById("seat-visual-grid");
         var seatSummary = document.getElementById("seat-selection-summary");
+        var LIVE_REGIONS_MAP = {};
 
         function updateSeatGridHighlights() {
           if (!seatGrid || !seat1 || !seat2 || !seat3) return;
@@ -1289,70 +1297,181 @@ export function renderConsoleHtml(ctx = {}) {
           });
         }
 
-        function populateSeatsForArea() {
-          if (!areaSelect || !seat1 || !seat2 || !seat3) return;
-          var areaKey = areaSelect.value || "4F_NORTH";
-          var cfg = STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
+        function bindSeatChipsClick() {
+          if (!seatGrid || !seat1 || !seat2 || !seat3) return;
+          seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
+            chip.addEventListener("click", function () {
+              if (chip.disabled) return;
+              var code = chip.getAttribute("data-seat-code");
+              if (seat1.value === code) return;
+              if (seat2.value === code) {
+                seat2.value = seat1.value;
+                seat1.value = code;
+              } else if (seat3.value === code) {
+                seat3.value = seat2.value;
+                seat2.value = seat1.value;
+                seat1.value = code;
+              } else {
+                seat3.value = seat2.value;
+                seat2.value = seat1.value;
+                seat1.value = code;
+              }
+              updateSeatGridHighlights();
+            });
+          });
+        }
+
+        function populateSeatsFromList(seatItems) {
+          if (!seat1 || !seat2 || !seat3) return;
           var html1 = "";
           var html2 = '<option value="">不设置备选</option>';
           var html3 = '<option value="">不设置备选</option>';
           var gridHtml = "";
+          var availableCodes = [];
 
-          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
-            pill.classList.toggle("active", pill.getAttribute("data-area-pill") === areaKey);
-          });
-
-          for (var i = 1; i <= cfg.count; i++) {
-            var code = cfg.prefix + "-" + String(i).padStart(3, "0");
-            var tag = cfg.tags[(i - 1) % cfg.tags.length];
+          seatItems.forEach(function (item) {
+            var code = item.code;
+            var tag = item.tag;
+            var isAvail = item.available !== false;
             var label = code + "（" + tag + "）";
             html1 += '<option value="' + code + '">' + label + "</option>";
             html2 += '<option value="' + code + '">' + label + "</option>";
             html3 += '<option value="' + code + '">' + label + "</option>";
+            if (isAvail) availableCodes.push(code);
             gridHtml +=
-              '<button type="button" class="seat-chip" data-seat-code="' +
+              '<button type="button" class="seat-chip' + (isAvail ? "" : " occupied") + '" data-seat-code="' +
               code +
               '"><span class="seat-chip-code">' +
               code +
               '</span><span class="seat-chip-tag">' +
               tag +
               "</span></button>";
-          }
+          });
+
           seat1.innerHTML = html1;
           seat2.innerHTML = html2;
           seat3.innerHTML = html3;
           if (seatGrid) {
             seatGrid.innerHTML = gridHtml;
-            seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
-              chip.addEventListener("click", function () {
-                var code = chip.getAttribute("data-seat-code");
-                if (seat1.value === code) return;
-                if (seat2.value === code) {
-                  seat2.value = seat1.value;
-                  seat1.value = code;
-                } else if (seat3.value === code) {
-                  seat3.value = seat2.value;
-                  seat2.value = seat1.value;
-                  seat1.value = code;
-                } else {
-                  seat3.value = seat2.value;
-                  seat2.value = seat1.value;
-                  seat1.value = code;
-                }
-                updateSeatGridHighlights();
-              });
-            });
+            bindSeatChipsClick();
           }
-          if (cfg.count >= 3) {
-            seat1.value = cfg.prefix + "-001";
-            seat2.value = cfg.prefix + "-002";
-            seat3.value = cfg.prefix + "-003";
-          }
+          var pickPool = availableCodes.length >= 3 ? availableCodes : seatItems.map(function (x) { return x.code; });
+          if (pickPool.length >= 1) seat1.value = pickPool[0];
+          if (pickPool.length >= 2) seat2.value = pickPool[1];
+          if (pickPool.length >= 3) seat3.value = pickPool[2];
           updateSeatGridHighlights();
+        }
+
+        function populateSeatsForArea() {
+          if (!areaSelect || !seat1 || !seat2 || !seat3) return;
+          var areaKey = areaSelect.value || "4F_NORTH";
+          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+            pill.classList.toggle("active", pill.getAttribute("data-area-pill") === areaKey);
+          });
+
+          if (LIVE_REGIONS_MAP[areaKey]) {
+            var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+            apiFetch(
+              "/api/v1/schools/haut/library/live-seats?region_id=" +
+                encodeURIComponent(areaKey) +
+                "&booking_date=" +
+                encodeURIComponent(bDate),
+              { method: "GET" }
+            )
+              .then(function (res) {
+                var seats = (res.data && res.data.seats) || [];
+                if (seats.length > 0) {
+                  populateSeatsFromList(
+                    seats.map(function (s) {
+                      return {
+                        code: s.short_name || s.seat_name || String(s.seat_id),
+                        tag: s.available ? "空闲可选" : "已占",
+                        available: Boolean(s.available)
+                      };
+                    })
+                  );
+                }
+              })
+              .catch(function () {});
+            return;
+          }
+
+          var cfg = STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
+          var fallbackItems = [];
+          for (var i = 1; i <= cfg.count; i++) {
+            var code = cfg.prefix + "-" + String(i).padStart(3, "0");
+            var tag = cfg.tags[(i - 1) % cfg.tags.length];
+            fallbackItems.push({ code: code, tag: tag, available: true });
+          }
+          populateSeatsFromList(fallbackItems);
+        }
+
+        function loadLiveRegionsIfBound() {
+          if (!areaSelect) return;
+          var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+          apiFetch("/api/v1/schools/haut/library/live-regions?booking_date=" + encodeURIComponent(bDate), {
+            method: "GET"
+          })
+            .then(function (res) {
+              var regions = (res.data && res.data.regions) || [];
+              if (!regions.length) return;
+              LIVE_REGIONS_MAP = {};
+              var optHtml = "";
+              var pillsHtml = "";
+              regions.forEach(function (r, idx) {
+                var key = String(r.region_id);
+                LIVE_REGIONS_MAP[key] = {
+                  name: r.region_name,
+                  layerName: r.layer_name,
+                  totalSeats: r.total_seats,
+                  availableSeats: r.available_seats
+                };
+                optHtml +=
+                  '<option value="' +
+                  key +
+                  '">' +
+                  r.layer_name +
+                  " · " +
+                  r.region_name +
+                  "（空闲 " +
+                  r.available_seats +
+                  "/" +
+                  r.total_seats +
+                  "）</option>";
+                if (idx < 8) {
+                  pillsHtml +=
+                    '<button type="button" class="area-pill' +
+                    (idx === 0 ? " active" : "") +
+                    '" data-area-pill="' +
+                    key +
+                    '">' +
+                    r.region_name +
+                    " (" +
+                    r.available_seats +
+                    ")</button>";
+                }
+              });
+              areaSelect.innerHTML = optHtml;
+              if (areaPillsBar && pillsHtml) {
+                areaPillsBar.innerHTML = pillsHtml;
+                areaPillsBar.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+                  pill.addEventListener("click", function () {
+                    areaSelect.value = pill.getAttribute("data-area-pill");
+                    populateSeatsForArea();
+                  });
+                });
+              }
+              if (liveBadge) {
+                liveBadge.style.display = "inline-flex";
+              }
+              populateSeatsForArea();
+            })
+            .catch(function () {});
         }
 
         if (areaSelect) {
           areaSelect.addEventListener("change", populateSeatsForArea);
+          if (dateInput) dateInput.addEventListener("change", loadLiveRegionsIfBound);
           if (seat1) seat1.addEventListener("change", updateSeatGridHighlights);
           if (seat2) seat2.addEventListener("change", updateSeatGridHighlights);
           if (seat3) seat3.addEventListener("change", updateSeatGridHighlights);
@@ -1363,6 +1482,7 @@ export function renderConsoleHtml(ctx = {}) {
             });
           });
           populateSeatsForArea();
+          loadLiveRegionsIfBound();
         }
 
         // Clean up ?web_ticket query param if present
@@ -1399,37 +1519,30 @@ export function renderConsoleHtml(ctx = {}) {
           });
         }
 
-        // Save school binding
+        // Save school binding (live CAS verification + encrypted credential custody)
         var btnSaveBinding = document.getElementById("btn-save-binding");
         if (btnSaveBinding) {
           btnSaveBinding.addEventListener("click", function () {
             var schoolId = document.getElementById("bind-school").value || "haut";
             var studentNo = (document.getElementById("bind-student-no").value || "").trim();
-            var secret = (document.getElementById("bind-secret").value || "").trim() || "campus_pass";
+            var secret = (document.getElementById("bind-secret").value || "").trim();
             if (!studentNo) {
               showToast("请填写您的校园学号", true);
               return;
             }
+            if (!secret) {
+              showToast("请填写您的教务/图书馆通行密码", true);
+              return;
+            }
             btnSaveBinding.disabled = true;
-            apiFetch("/api/v1/school-bindings", {
+            btnSaveBinding.textContent = "正在验证学号…";
+            apiFetch("/api/v1/school-bindings/bind-live", {
               method: "POST",
-              body: JSON.stringify({ school_id: schoolId, student_no: studentNo })
+              body: JSON.stringify({ school_id: schoolId, student_no: studentNo, password: secret })
             })
-              .then(function (r1) {
-                var bindingId = r1.data.id;
-                return apiFetch("/api/v1/school-bindings/" + encodeURIComponent(bindingId) + "/complete", {
-                  method: "POST",
-                  body: JSON.stringify({ delegated_secret: secret })
-                });
-              })
-              .then(function () {
-                return apiFetch("/api/v1/me/consents", {
-                  method: "POST",
-                  body: JSON.stringify({ school_id: schoolId })
-                });
-              })
-              .then(function () {
-                showToast("学号 " + studentNo + " 绑定成功！");
+              .then(function (r) {
+                var uName = r.data && r.data.user_name ? "（" + r.data.user_name + "）" : "";
+                showToast("学号 " + studentNo + uName + " 验证并绑定成功！");
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {
@@ -1437,6 +1550,7 @@ export function renderConsoleHtml(ctx = {}) {
               })
               .finally(function () {
                 btnSaveBinding.disabled = false;
+                btnSaveBinding.textContent = "一键验证并绑定学号";
               });
           });
         }
@@ -1473,7 +1587,7 @@ export function renderConsoleHtml(ctx = {}) {
 
         function createReservationPlanFromSelection() {
           var areaKey = areaSelect ? areaSelect.value : "4F_NORTH";
-          var areaCfg = STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
+          var areaCfg = LIVE_REGIONS_MAP[areaKey] || STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
           var seats = [seat1.value, seat2.value, seat3.value].filter(Boolean);
           var targetDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
           var targetTime = document.getElementById("plan-time").value || "07:00:00";
@@ -1555,6 +1669,28 @@ export function renderConsoleHtml(ctx = {}) {
               })
               .catch(function (err) {
                 showToast(err.message, true);
+              });
+          });
+        });
+
+        // Release live confirmed seat booking buttons
+        document.querySelectorAll("[data-cancel-seat-job]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var jobId = btn.getAttribute("data-cancel-seat-job");
+            btn.disabled = true;
+            btn.textContent = "释放中…";
+            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/cancel-seat", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(function (r) {
+                showToast((r.data && r.data.message) || "座位已成功取消释放");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                showToast(err.message, true);
+                btn.disabled = false;
+                btn.textContent = "退座释放";
               });
           });
         });

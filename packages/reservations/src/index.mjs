@@ -288,7 +288,49 @@ export class TripleScheduleEngine {
     return true;
   }
 
-  async runScheduleEvent(jobId, kind, nowMs = Date.now()) {
+  _decryptBindingCredential(job, binding, nowMs = Date.now()) {
+    if (!binding?.credential_ref) return null;
+    const credRecord = this.store.encryptedCredentials.get(binding.credential_ref);
+    if (!credRecord || credRecord.revoked_at) return null;
+    const permit = this.kmsVault.issueAccessPermit({
+      taskId: job.id,
+      schoolId: job.school_id,
+      bindingId: binding.id,
+      credentialRef: binding.credential_ref,
+      ttlSeconds: 15,
+      nowMs
+    });
+    return this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+  }
+
+  _updateBindingCredentialTokens(binding, authResult, oldSecret, nowMs = Date.now()) {
+    if (!binding || !authResult?.rawToken) return;
+    try {
+      const parsed = oldSecret && String(oldSecret).trim().startsWith("{") ? JSON.parse(oldSecret) : {};
+      const nextPayload = JSON.stringify({
+        ...parsed,
+        raw_token: authResult.rawToken,
+        cas_tgc: authResult.casTgc || parsed.cas_tgc || "",
+        cas_jsessionid: authResult.casJsessionId || parsed.cas_jsessionid || "",
+        student_no: authResult.userInfo?.userNo || parsed.student_no || binding.student_no || "",
+        user_name: authResult.userInfo?.userName || parsed.user_name || ""
+      });
+      const encrypted = this.kmsVault.encryptSecret({
+        bindingId: binding.id,
+        schoolId: binding.school_id,
+        credentialKind: "DELEGATED_SESSION_BUNDLE",
+        plaintext: nextPayload,
+        expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+      });
+      this.store.encryptedCredentials.set(encrypted.id, encrypted);
+      binding.credential_ref = encrypted.id;
+      binding.credential_expires_at = encrypted.expires_at;
+    } catch {
+      // Keep existing credential on non-fatal refresh update error
+    }
+  }
+
+  async runScheduleEvent(jobId, kind, nowMs = Date.now(), options = {}) {
     const job = this.store.reservationJobs.get(jobId);
     if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
     const plan = this.store.reservationPlans.get(job.plan_id);
@@ -326,6 +368,18 @@ export class TripleScheduleEngine {
         });
         return { job, event };
       }
+      if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
+        const decrypted = this._decryptBindingCredential(job, binding, nowMs);
+        const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
+        if (bundle.isLiveCredential) {
+          try {
+            const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+            this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+          } catch {
+            // Will retry at FINAL_CHECK
+          }
+        }
+      }
       event.status = "PRECHECK_OK";
       event.actual_at = new Date(nowMs).toISOString();
       event.diagnostic_code = "READ_ONLY_PRECHECK_PASSED";
@@ -344,6 +398,14 @@ export class TripleScheduleEngine {
         });
         return { job, event };
       }
+      if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
+        const decrypted = this._decryptBindingCredential(job, binding, nowMs);
+        const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
+        if (bundle.isLiveCredential) {
+          const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+          this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+        }
+      }
       event.status = "FINAL_CHECK_OK";
       event.actual_at = new Date(nowMs).toISOString();
       event.diagnostic_code = "READ_ONLY_FINAL_CHECK_PASSED";
@@ -352,11 +414,14 @@ export class TripleScheduleEngine {
     }
 
     if (kind === "FIRE") {
+      const decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
+
       // Never blind-retry if already submitted or RESULT_UNKNOWN
       if (job.state === "RESULT_UNKNOWN" || job.attempt_count >= 1) {
         const readback = await this.schoolProvider.verifyBookingAuthoritative({
           job,
           binding,
+          decryptedSecret,
           expectedExternalBookingId: job.pending_external_booking_id
         });
         if (readback.verified) {
@@ -386,27 +451,15 @@ export class TripleScheduleEngine {
         return { job, event };
       }
 
-      // Decrypt credential via short-lived CredentialAccessPermit if escrowed
-      if (binding.credential_ref) {
-        const credRecord = this.store.encryptedCredentials.get(binding.credential_ref);
-        const permit = this.kmsVault.issueAccessPermit({
-          taskId: job.id,
-          schoolId: job.school_id,
-          bindingId: binding.id,
-          credentialRef: binding.credential_ref,
-          ttlSeconds: 15,
-          nowMs
-        });
-        this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
-      }
-
       const schoolIntegration = this.store.schoolIntegrations.get(job.school_id);
       const submitRes = await this.schoolProvider.executeMockOrAuthorizedCreate({
         job,
         plan,
         binding,
         schoolIntegration,
-        nowInstant: new Date(nowMs)
+        decryptedSecret,
+        nowInstant: new Date(nowMs),
+        allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
       });
 
       if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
@@ -423,7 +476,8 @@ export class TripleScheduleEngine {
         event.status = "FAILED";
         event.actual_at = new Date(nowMs).toISOString();
         this.casJobState(jobId, job.state_version, "FAILED", {
-          last_error_code: submitRes.errorCode || "SCHOOL_REJECTED"
+          last_error_code: submitRes.errorCode || "SCHOOL_REJECTED",
+          last_diagnostic_message: submitRes.diagnosticMessage || null
         });
         return { job, event };
       }
@@ -432,6 +486,7 @@ export class TripleScheduleEngine {
       const verifyRes = await this.schoolProvider.verifyBookingAuthoritative({
         job,
         binding,
+        decryptedSecret,
         expectedExternalBookingId: submitRes.externalBookingId
       });
       if (!verifyRes.verified) {
@@ -449,8 +504,8 @@ export class TripleScheduleEngine {
         binding,
         {
           ...verifyRes,
-          seatAlias: submitRes.seatAlias,
-          regionAlias: submitRes.regionAlias
+          seatAlias: verifyRes.seatAlias || submitRes.seatAlias,
+          regionAlias: verifyRes.regionAlias || submitRes.regionAlias
         },
         event,
         nowMs
@@ -458,6 +513,45 @@ export class TripleScheduleEngine {
     }
 
     throw new ContractError("BAD_REQUEST", `Unknown schedule event kind: ${kind}`);
+  }
+
+  async cancelConfirmedOrActiveJob(jobId, nowMs = Date.now()) {
+    const job = this.store.reservationJobs.get(jobId);
+    if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
+    const binding = this.store.schoolBindings.get(job.school_binding_id);
+    const schoolRes = this.store.schoolReservations.get(job.id);
+    let liveCancelResult = null;
+
+    if (
+      binding &&
+      typeof this.schoolProvider.cancelLiveSeatBooking === "function" &&
+      (job.state === "CONFIRMED" || schoolRes?.external_booking_id)
+    ) {
+      const decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
+      const bundle = this.schoolProvider.parseCredentialBundle(decryptedSecret, binding);
+      if (bundle.isLiveCredential) {
+        liveCancelResult = await this.schoolProvider.cancelLiveSeatBooking({
+          decryptedSecret,
+          binding,
+          externalBookingId: schoolRes?.external_booking_id
+        });
+      }
+    }
+
+    job.state = "CANCELLED";
+    job.state_version += 1;
+    if (schoolRes) {
+      schoolRes.official_status = "CANCELLED";
+    }
+    const plan = this.store.reservationPlans.get(job.plan_id);
+    if (plan) {
+      plan.enabled = false;
+    }
+    return {
+      job,
+      school_reservation: schoolRes || null,
+      live_cancel: liveCancelResult
+    };
   }
 
   async finalizeConfirmedBooking(job, binding, verifyRes, event, nowMs = Date.now()) {

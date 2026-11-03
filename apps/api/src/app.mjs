@@ -1617,6 +1617,18 @@ export function createCampusCloudApp(options = {}) {
                     : "***";
                 existingBinding.status = "DELEGATED_ACTIVE";
               }
+              if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
+                const encrypted = kmsVault.encryptSecret({
+                  bindingId: existingBinding.id,
+                  schoolId,
+                  credentialKind: "DELEGATED_SESSION_BUNDLE",
+                  plaintext: String(bItem.delegated_secret).trim(),
+                  expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+                });
+                store.encryptedCredentials.set(encrypted.id, encrypted);
+                existingBinding.credential_ref = encrypted.id;
+                existingBinding.credential_expires_at = encrypted.expires_at;
+              }
               const hasActiveConsent = Array.from(store.consents.values()).some(
                 (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
               );
@@ -1676,13 +1688,23 @@ export function createCampusCloudApp(options = {}) {
           if (Array.isArray(body.reservation_cancellations)) {
             for (const cancelId of body.reservation_cancellations) {
               const job = store.reservationJobs.get(cancelId);
-              if (job && job.cloud_user_id === auth.cloudUserId && !["CONFIRMED", "FAILED", "CANCELLED"].includes(job.state)) {
-                job.state = "CANCELLED";
-                job.state_version += 1;
+              if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
+                await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
+                  job.state = "CANCELLED";
+                  job.state_version += 1;
+                });
               }
               const plan = store.reservationPlans.get(cancelId);
               if (plan && plan.cloud_user_id === auth.cloudUserId) {
                 plan.enabled = false;
+                for (const j of store.reservationJobs.values()) {
+                  if (j.plan_id === plan.id && j.state !== "CANCELLED") {
+                    await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
+                      j.state = "CANCELLED";
+                      j.state_version += 1;
+                    });
+                  }
+                }
               }
             }
           }
@@ -1749,7 +1771,9 @@ export function createCampusCloudApp(options = {}) {
         const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
         await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
         await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", effectiveFireMs);
-        const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs);
+        const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs, {
+          allowDateFallbackToToday: true
+        });
         await syncUserToSso(auth.cloudUserId);
         return {
           status: 200,
@@ -1758,6 +1782,208 @@ export function createCampusCloudApp(options = {}) {
             "x-request-id": requestId
           },
           body: okEnvelope("RESERVATION_JOB_EXECUTED", fireRes, requestId)
+        };
+      }
+
+      const cancelSeatMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/cancel-seat$/);
+      if (upperMethod === "POST" && cancelSeatMatch) {
+        const auth = extractBearer(headers, nowMs);
+        const jobId = decodeURIComponent(cancelSeatMatch[1]);
+        const job = store.reservationJobs.get(jobId);
+        if (!job || job.cloud_user_id !== auth.cloudUserId) {
+          throw new ContractError("NOT_FOUND", "Reservation job not found");
+        }
+        const cancelRes = await reservationEngine.cancelConfirmedOrActiveJob(jobId, nowMs);
+        await syncUserToSso(auth.cloudUserId);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("RESERVATION_SEAT_CANCELLED", cancelRes, requestId)
+        };
+      }
+
+      if (upperMethod === "POST" && pathname === "/api/v1/school-bindings/bind-live") {
+        const auth = extractBearer(headers, nowMs);
+        const schoolId = body?.school_id || "haut";
+        const studentNoInput = String(body?.student_no || "").trim();
+        const passwordInput = String(body?.password || "").trim();
+        const rawTokenInput = String(body?.raw_token || "").trim();
+        const casTgcInput = String(body?.cas_tgc || "").trim();
+
+        const authRes = await schoolProvider.authenticateHautSession({
+          raw_token: rawTokenInput,
+          cas_tgc: casTgcInput,
+          cas_jsessionid: "",
+          student_no: studentNoInput,
+          password: passwordInput,
+          isLiveCredential: true
+        });
+
+        const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
+        let binding = Array.from(store.schoolBindings.values()).find(
+          (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
+        );
+        if (!binding) {
+          const bindingId = crypto.randomUUID();
+          binding = {
+            id: bindingId,
+            cloud_user_id: auth.cloudUserId,
+            school_id: schoolId,
+            student_no: resolvedStudentNo,
+            student_no_masked:
+              resolvedStudentNo.length >= 4
+                ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}`
+                : "***",
+            user_name: authRes.userInfo?.userName || "",
+            department: authRes.userInfo?.department || "",
+            status: "DELEGATED_ACTIVE",
+            credential_ref: null,
+            credential_expires_at: null,
+            created_at: new Date(nowMs).toISOString(),
+            revoked_at: null
+          };
+          store.schoolBindings.set(bindingId, binding);
+        } else {
+          binding.student_no = resolvedStudentNo;
+          binding.student_no_masked =
+            resolvedStudentNo.length >= 4
+              ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}`
+              : "***";
+          binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
+          binding.department = authRes.userInfo?.department || binding.department || "";
+          binding.status = "DELEGATED_ACTIVE";
+        }
+
+        const credBundleJson = JSON.stringify({
+          student_no: resolvedStudentNo,
+          password: passwordInput,
+          raw_token: authRes.rawToken,
+          cas_tgc: authRes.casTgc || "",
+          cas_jsessionid: authRes.casJsessionId || "",
+          user_name: authRes.userInfo?.userName || "",
+          department: authRes.userInfo?.department || ""
+        });
+        const encrypted = kmsVault.encryptSecret({
+          bindingId: binding.id,
+          schoolId,
+          credentialKind: "DELEGATED_SESSION_BUNDLE",
+          plaintext: credBundleJson,
+          expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
+        });
+        store.encryptedCredentials.set(encrypted.id, encrypted);
+        binding.credential_ref = encrypted.id;
+        binding.credential_expires_at = encrypted.expires_at;
+
+        let consent = Array.from(store.consents.values()).find(
+          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+        );
+        if (!consent) {
+          const cid = crypto.randomUUID();
+          consent = {
+            id: cid,
+            cloud_user_id: auth.cloudUserId,
+            school_id: schoolId,
+            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+            policy_version: "policy-2026-11-v4",
+            granted_at: new Date(nowMs).toISOString(),
+            withdrawn_at: null
+          };
+          store.consents.set(cid, consent);
+        }
+
+        await syncUserToSso(auth.cloudUserId);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope(
+            "SCHOOL_BINDING_LIVE_VERIFIED",
+            {
+              binding,
+              consent,
+              user_info: authRes.userInfo
+            },
+            requestId
+          )
+        };
+      }
+
+      if (upperMethod === "GET" && pathname === "/api/v1/schools/haut/library/live-regions") {
+        const auth = extractBearer(headers, nowMs);
+        const dateParam =
+          parsedUrl.searchParams.get("date") || new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        const binding = Array.from(store.schoolBindings.values()).find(
+          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+        );
+        if (!binding) {
+          throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
+        }
+        const credRecord = store.encryptedCredentials.get(binding.credential_ref);
+        const permit = kmsVault.issueAccessPermit({
+          taskId: `live_regions_${Date.now()}`,
+          schoolId: binding.school_id,
+          bindingId: binding.id,
+          credentialRef: binding.credential_ref,
+          ttlSeconds: 15,
+          nowMs
+        });
+        const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+        const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+        const snap = await schoolProvider.fetchLiveStudyRegions(authRes.rawToken, dateParam);
+        const currentBooking = await schoolProvider.fetchCurrentActiveBooking(authRes.rawToken);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope(
+            "LIVE_REGIONS_OK",
+            {
+              ...snap,
+              current_booking: currentBooking,
+              user_info: authRes.userInfo
+            },
+            requestId
+          )
+        };
+      }
+
+      if (upperMethod === "GET" && pathname === "/api/v1/schools/haut/library/live-seats") {
+        const auth = extractBearer(headers, nowMs);
+        const regionId = Number(parsedUrl.searchParams.get("region_id") || 7);
+        const dateParam =
+          parsedUrl.searchParams.get("date") || new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        const binding = Array.from(store.schoolBindings.values()).find(
+          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+        );
+        if (!binding) {
+          throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
+        }
+        const credRecord = store.encryptedCredentials.get(binding.credential_ref);
+        const permit = kmsVault.issueAccessPermit({
+          taskId: `live_seats_${Date.now()}`,
+          schoolId: binding.school_id,
+          bindingId: binding.id,
+          credentialRef: binding.credential_ref,
+          ttlSeconds: 15,
+          nowMs
+        });
+        const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+        const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+        const snap = await schoolProvider.fetchLiveRegionSeats(authRes.rawToken, regionId, dateParam);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("LIVE_SEATS_OK", snap, requestId)
         };
       }
 

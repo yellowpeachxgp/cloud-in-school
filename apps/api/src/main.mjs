@@ -1,4 +1,5 @@
 import { createCampusCloudApp } from "./app.mjs";
+import { scanDueScheduleEvents } from "../../scheduler/src/main.mjs";
 
 const port = Number(process.env.PORT || 8080);
 const host = process.env.HOST || "0.0.0.0";
@@ -9,6 +10,24 @@ const app = createCampusCloudApp({
   }
 });
 const server = app.createHttpServer();
+
+// 1-second background Triple-Schedule scanner (PRECHECK T-30m / FINAL_CHECK T-5m / FIRE T)
+let isScanning = false;
+const scannerTimer = setInterval(async () => {
+  if (isScanning) return;
+  isScanning = true;
+  try {
+    const executed = await scanDueScheduleEvents(app, Date.now());
+    if (executed && executed.length > 0 && typeof app.store.saveSnapshot === "function") {
+      app.store.saveSnapshot();
+    }
+  } catch {
+    // Non-fatal background tick error
+  } finally {
+    isScanning = false;
+  }
+}, 1000);
+scannerTimer.unref?.();
 
 server.listen(port, host, () => {
   console.log(
