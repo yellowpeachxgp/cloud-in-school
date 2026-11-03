@@ -809,94 +809,103 @@ export class HautLibraryProvider {
       const allowAlt = plan.preferences_json?.allow_alternative_seat !== false;
 
       let lastMsg = "";
-      for (const targetDate of datesToTry) {
-        const regSnap = await this.fetchLiveStudyRegions(rawToken, targetDate);
-        const allRegions = regSnap.regions || [];
-        if (allRegions.length === 0) continue;
-
-        // Match region by name/floor, or fall back to regions with available seats
-        const cleanWantedArea = String(preferredArea)
-          .replace(/^[1-9]F_[A-Z]+$/i, "")
-          .trim();
-        let matchedRegions = allRegions.filter(
-          (r) =>
-            r.region_name === cleanWantedArea ||
-            r.region_name.includes(cleanWantedArea) ||
-            cleanWantedArea.includes(r.region_name)
-        );
-        if (matchedRegions.length === 0) {
-          const floorHint = cleanWantedArea.match(/(一|二|三|四|五|六|七|八|九|十|[1-9])/)?.[1];
-          const floorMap = {
-            "1": "一层",
-            "2": "二层",
-            "3": "三层",
-            "4": "四层",
-            "5": "五层",
-            "6": "六层",
-            "7": "七层",
-            "8": "八层",
-            "9": "九层"
-          };
-          const floorCn = floorMap[floorHint] || (floorHint ? `${floorHint}层` : "");
-          if (floorCn) {
-            matchedRegions = allRegions.filter(
-              (r) => r.region_name.includes(floorCn) && r.available_seats > 0
-            );
-          }
+      for (let wave = 0; wave < 3; wave++) {
+        if (wave > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 750));
         }
-        if (allowAlt) {
-          const otherAvailRegions = allRegions.filter(
-            (r) => r.available_seats > 0 && !matchedRegions.some((m) => m.id === r.id)
-          );
-          matchedRegions = [...matchedRegions, ...otherAvailRegions.slice(0, 2)];
-        }
+        try {
+          for (const targetDate of datesToTry) {
+            const regSnap = await this.fetchLiveStudyRegions(rawToken, targetDate);
+            const allRegions = regSnap.regions || [];
+            if (allRegions.length === 0) continue;
 
-        for (const region of matchedRegions.slice(0, 3)) {
-          const seatSnap = await this.fetchLiveRegionSeats(rawToken, region.id, targetDate);
-          const availSeats = (seatSnap.seats || []).filter((s) => s.available);
-          if (availSeats.length === 0) continue;
-
-          const orderedCandidates = [];
-          for (const wanted of wantedSeats) {
-            const cleanWanted = wanted.replace(/号座?$/, "").trim();
-            const found = availSeats.find(
-              (s) =>
-                s.seat_name === cleanWanted ||
-                s.short_name === cleanWanted ||
-                s.seat_name.endsWith(cleanWanted) ||
-                s.short_name.endsWith(cleanWanted) ||
-                String(s.id) === cleanWanted
+            // Match region by name/floor, or fall back to regions with available seats
+            const cleanWantedArea = String(preferredArea)
+              .replace(/^[1-9]F_[A-Z]+$/i, "")
+              .trim();
+            let matchedRegions = allRegions.filter(
+              (r) =>
+                r.region_name === cleanWantedArea ||
+                r.region_name.includes(cleanWantedArea) ||
+                cleanWantedArea.includes(r.region_name)
             );
-            if (found && !orderedCandidates.some((c) => c.id === found.id)) {
-              orderedCandidates.push(found);
-            }
-          }
-          if (orderedCandidates.length === 0 && allowAlt) {
-            orderedCandidates.push(...availSeats.slice(0, 3));
-          }
-
-          for (const seat of orderedCandidates.slice(0, 3)) {
-            const addRes = await this.wslibGetJson(
-              `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                seat.id
-              )}&starttime=${encodeURIComponent(
-                seatSnap.start_full
-              )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
-              rawToken
-            );
-            lastMsg = String(addRes?.msg || "").trim();
-            if (addRes?.code === 200) {
-              const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-              const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-              return {
-                outcome: "SUBMITTED",
-                externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
-                seatAlias: confirmed?.seatName || seat.seat_name,
-                regionAlias: confirmed?.regionName || region.region_name,
-                rawToken
+            if (matchedRegions.length === 0) {
+              const floorHint = cleanWantedArea.match(/(一|二|三|四|五|六|七|八|九|十|[1-9])/)?.[1];
+              const floorMap = {
+                "1": "一层",
+                "2": "二层",
+                "3": "三层",
+                "4": "四层",
+                "5": "五层",
+                "6": "六层",
+                "7": "七层",
+                "8": "八层",
+                "9": "九层"
               };
+              const floorCn = floorMap[floorHint] || (floorHint ? `${floorHint}层` : "");
+              if (floorCn) {
+                matchedRegions = allRegions.filter(
+                  (r) => r.region_name.includes(floorCn) && r.available_seats > 0
+                );
+              }
+            }
+            if (allowAlt) {
+              const otherAvailRegions = allRegions.filter(
+                (r) => r.available_seats > 0 && !matchedRegions.some((m) => m.id === r.id)
+              );
+              matchedRegions = [...matchedRegions, ...otherAvailRegions.slice(0, 2)];
+            }
+
+            for (const region of matchedRegions.slice(0, 3)) {
+              const seatSnap = await this.fetchLiveRegionSeats(rawToken, region.id, targetDate);
+              const availSeats = (seatSnap.seats || []).filter((s) => s.available);
+              if (availSeats.length === 0) continue;
+
+              const orderedCandidates = [];
+              for (const wanted of wantedSeats) {
+                const cleanWanted = wanted.replace(/号座?$/, "").trim();
+                const found = availSeats.find(
+                  (s) =>
+                    s.seat_name === cleanWanted ||
+                    s.short_name === cleanWanted ||
+                    s.seat_name.endsWith(cleanWanted) ||
+                    s.short_name.endsWith(cleanWanted) ||
+                    String(s.id) === cleanWanted
+                );
+                if (found && !orderedCandidates.some((c) => c.id === found.id)) {
+                  orderedCandidates.push(found);
+                }
+              }
+              if (orderedCandidates.length === 0 && allowAlt) {
+                orderedCandidates.push(...availSeats.slice(0, 3));
+              }
+
+              for (const seat of orderedCandidates.slice(0, 3)) {
+                const addRes = await this.wslibGetJson(
+                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+                    seat.id
+                  )}&starttime=${encodeURIComponent(
+                    seatSnap.start_full
+                  )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
+                  rawToken
+                );
+                lastMsg = String(addRes?.msg || "").trim();
+                if (addRes?.code === 200) {
+                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
+                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+                  return {
+                    outcome: "SUBMITTED",
+                    externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
+                    seatAlias: confirmed?.seatName || seat.seat_name,
+                    regionAlias: confirmed?.regionName || region.region_name,
+                    rawToken
+                  };
+                }
+              }
             }
           }
+        } catch (err) {
+          lastMsg = err?.message || lastMsg;
         }
       }
 

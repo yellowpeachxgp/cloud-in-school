@@ -97,11 +97,11 @@ test("Triple-Schedule (ADR-005): Arbitrary user-selected Target T (07:00, 08:45,
       await app.reservationEngine.runScheduleEvent(data.job_id, "FIRE", expectedTargetMs - 1000);
     });
 
-    // 4. Execute FIRE at exact T -> CONFIRMED + Order PAID
+    // 4. Execute FIRE at T + 726ms (realistic timer tick jitter) -> CONFIRMED + Order PAID
     const fireRes = await app.reservationEngine.runScheduleEvent(
       data.job_id,
       "FIRE",
-      expectedTargetMs
+      expectedTargetMs + 726
     );
     assert.equal(fireRes.job.state, "CONFIRMED");
     assert.ok(fireRes.schoolReservation.evidence_sha256);

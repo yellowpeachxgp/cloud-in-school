@@ -11,22 +11,37 @@ const app = createCampusCloudApp({
 });
 const server = app.createHttpServer();
 
-// 1-second background Triple-Schedule scanner (PRECHECK T-30m / FINAL_CHECK T-5m / FIRE T)
+// 250ms high-precision background Triple-Schedule scanner (PRECHECK T-30m / FINAL_CHECK T-5m / FIRE T)
 let isScanning = false;
 const scannerTimer = setInterval(async () => {
   if (isScanning) return;
   isScanning = true;
   try {
     const executed = await scanDueScheduleEvents(app, Date.now());
-    if (executed && executed.length > 0 && typeof app.store.saveSnapshot === "function") {
-      app.store.saveSnapshot();
+    if (executed && executed.length > 0) {
+      console.log(
+        JSON.stringify({
+          service: "triple-schedule-scanner",
+          timestamp: new Date().toISOString(),
+          executed
+        })
+      );
+      if (typeof app.store.saveSnapshot === "function") {
+        app.store.saveSnapshot();
+      }
     }
-  } catch {
-    // Non-fatal background tick error
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        service: "triple-schedule-scanner",
+        timestamp: new Date().toISOString(),
+        error: err?.message || String(err)
+      })
+    );
   } finally {
     isScanning = false;
   }
-}, 1000);
+}, 250);
 scannerTimer.unref?.();
 
 server.listen(port, host, () => {

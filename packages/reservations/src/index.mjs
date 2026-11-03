@@ -30,7 +30,7 @@ export function computeTripleSchedule({
   rules,
   precheckLeadSeconds = 1800,
   finalCheckLeadSeconds = 300,
-  maxLatenessSeconds = 0,
+  maxLatenessSeconds = 1800,
   nowMs = Date.now()
 }) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetLocalDate || "")) {
@@ -53,10 +53,15 @@ export function computeTripleSchedule({
   // Parse in Asia/Shanghai (+08:00)
   let targetAtMs = Date.parse(`${targetLocalDate}T${normalizedTime}+08:00`);
   const windowEndMs = Date.parse(`${targetLocalDate}T${rules.window_end_exclusive}+08:00`);
-  const clampedLatenessMs = Math.min(Math.max(maxLatenessSeconds, 0), rules.max_lateness_seconds_limit || 1800) * 1000;
+  const effectiveLatenessSeconds =
+    typeof maxLatenessSeconds === "number" && maxLatenessSeconds > 0
+      ? maxLatenessSeconds
+      : rules.max_lateness_seconds_limit || 1800;
+  const clampedLatenessMs =
+    Math.min(Math.max(effectiveLatenessSeconds, 300), rules.max_lateness_seconds_limit || 1800) * 1000;
   let expiresAtMs = Math.min(targetAtMs + clampedLatenessMs, windowEndMs);
 
-  if (nowMs > expiresAtMs) {
+  if (nowMs > targetAtMs) {
     if (nowMs < windowEndMs) {
       // User selected today's date during open hours with an earlier default slot (e.g. 07:00:00);
       // upgrade to immediate catch-up within today's open window.
@@ -152,13 +157,18 @@ export class TripleScheduleEngine {
     }
 
     const rules = this.schoolProvider.getRules();
+    const defaultLatenessSec = rules.max_lateness_seconds_limit || 1800;
+    const requestedLatenessSec =
+      typeof payload.max_lateness_seconds === "number" && payload.max_lateness_seconds > 0
+        ? payload.max_lateness_seconds
+        : defaultLatenessSec;
     const schedule = computeTripleSchedule({
       targetLocalDate: payload.target_local_date,
       targetLocalTime: payload.target_local_time,
       rules,
       precheckLeadSeconds: payload.precheck_lead_seconds ?? 1800,
       finalCheckLeadSeconds: payload.final_check_lead_seconds ?? 300,
-      maxLatenessSeconds: payload.max_lateness_seconds ?? 0,
+      maxLatenessSeconds: requestedLatenessSec,
       nowMs
     });
 
@@ -184,7 +194,7 @@ export class TripleScheduleEngine {
       timezone_id: rules.time_zone,
       precheck_lead_seconds: 1800,
       final_check_lead_seconds: 300,
-      max_lateness_seconds: payload.max_lateness_seconds ?? 0,
+      max_lateness_seconds: requestedLatenessSec,
       policy_version: payload.accepted_policy_version || rules.rule_version,
       price_version: payload.accepted_price_version || "price-library-cloud-2026-11-v1",
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
@@ -445,11 +455,14 @@ export class TripleScheduleEngine {
         return { job, event };
       }
 
-      // Check window & expiration
-      if (nowMs < new Date(job.fire_at).getTime()) {
+      // Check window & expiration (ensure at least 30m grace window after fire_at even on legacy jobs where expires_at === fire_at)
+      const fireAtMs = new Date(job.fire_at).getTime();
+      const rawExpiresAtMs = new Date(job.expires_at).getTime();
+      const effectiveExpiresAtMs = Math.max(rawExpiresAtMs, fireAtMs + 1800 * 1000);
+      if (nowMs < fireAtMs) {
         throw new ContractError("BOOKING_WINDOW_CLOSED", "Cannot execute FIRE before target time T");
       }
-      if (nowMs > new Date(job.expires_at).getTime()) {
+      if (nowMs > effectiveExpiresAtMs) {
         event.status = "MISSED_WINDOW";
         event.actual_at = new Date(nowMs).toISOString();
         this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
@@ -467,15 +480,24 @@ export class TripleScheduleEngine {
       }
 
       const schoolIntegration = this.store.schoolIntegrations.get(job.school_id);
-      const submitRes = await this.schoolProvider.executeMockOrAuthorizedCreate({
-        job,
-        plan,
-        binding,
-        schoolIntegration,
-        decryptedSecret,
-        nowInstant: new Date(nowMs),
-        allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
-      });
+      let submitRes;
+      try {
+        submitRes = await this.schoolProvider.executeMockOrAuthorizedCreate({
+          job,
+          plan,
+          binding,
+          schoolIntegration,
+          decryptedSecret,
+          nowInstant: new Date(nowMs),
+          allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
+        });
+      } catch (err) {
+        submitRes = {
+          outcome: "FAILED",
+          errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
+          diagnosticMessage: err?.message || "学校选座接口请求异常"
+        };
+      }
 
       if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
         job.pending_external_booking_id = submitRes.externalBookingId || null;
