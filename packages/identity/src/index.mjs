@@ -48,7 +48,7 @@ export class CloudIdentityService {
     const serverNonce = crypto.randomBytes(24).toString("base64url");
     const serverVerifier = crypto.randomBytes(32).toString("base64url");
     const serverChallenge = computeS256Challenge(serverVerifier);
-    const expiresAtMs = nowMs + 10 * 60 * 1000;
+    const expiresAtMs = nowMs + 15 * 60 * 1000;
 
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
@@ -65,6 +65,7 @@ export class CloudIdentityService {
       expiresAtMs,
       status: "INITIATED"
     });
+    this.store.saveSnapshot?.();
 
     return {
       login_txn: loginTxn,
@@ -87,7 +88,7 @@ export class CloudIdentityService {
     const serverNonce = crypto.randomBytes(24).toString("base64url");
     const serverVerifier = crypto.randomBytes(32).toString("base64url");
     const serverChallenge = computeS256Challenge(serverVerifier);
-    const expiresAtMs = nowMs + 5 * 60 * 1000;
+    const expiresAtMs = nowMs + 15 * 60 * 1000;
 
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
@@ -102,6 +103,7 @@ export class CloudIdentityService {
       expiresAtMs,
       status: "INITIATED"
     });
+    this.store.saveSnapshot?.();
 
     return {
       login_txn: loginTxn,
@@ -112,10 +114,15 @@ export class CloudIdentityService {
 
   buildOidcRedirectUrl(loginTxn, nowMs = Date.now()) {
     const txn = this.store.authTransactions.get(loginTxn);
-    if (!txn || nowMs > txn.expiresAtMs || txn.status !== "INITIATED") {
+    if (
+      !txn ||
+      nowMs > txn.expiresAtMs ||
+      (txn.status !== "INITIATED" && txn.status !== "REDIRECTED_TO_SSO")
+    ) {
       throw new ContractError("BAD_REQUEST", "Invalid or expired login transaction");
     }
     txn.status = "REDIRECTED_TO_SSO";
+    this.store.saveSnapshot?.();
     const authEndpoint = `${this.expectedIssuer}/auth`;
     const params = new URLSearchParams({
       client_id: this.clientId,
@@ -125,9 +132,159 @@ export class CloudIdentityService {
       state: txn.serverState,
       nonce: txn.serverNonce,
       code_challenge: txn.serverChallenge,
-      code_challenge_method: "S256"
+      code_challenge_method: "S256",
+      sso_auto: "1"
     });
     return `${authEndpoint}?${params.toString()}`;
+  }
+
+  getMobileTransactionStatus(loginTxn, nowMs = Date.now()) {
+    if (!loginTxn || typeof loginTxn !== "string") {
+      throw new ContractError("BAD_REQUEST", "Missing login transaction id");
+    }
+    const txn = this.store.authTransactions.get(loginTxn);
+    if (!txn) {
+      return {
+        login_txn: loginTxn,
+        status: "NOT_FOUND",
+        app_ticket: null,
+        expired: true
+      };
+    }
+    const expired = nowMs > txn.expiresAtMs;
+    let activeTicket = null;
+    if (txn.appTicket) {
+      const ticketObj = this.store.exchangeTickets.get(txn.appTicket);
+      if (ticketObj && ticketObj.consumedAtMs === null && nowMs <= ticketObj.expiresAtMs) {
+        activeTicket = txn.appTicket;
+      }
+    }
+    return {
+      login_txn: loginTxn,
+      status: expired && txn.status !== "COMPLETED" ? "EXPIRED" : txn.status,
+      app_ticket: activeTicket,
+      expired,
+      expires_at: new Date(txn.expiresAtMs).toISOString()
+    };
+  }
+
+  async loginNativeWithSso(
+    { identifier, password, totpCode, installEphemeralId, deviceLabel },
+    nowMs = Date.now()
+  ) {
+    const cleanIdentifier = String(identifier || "").trim();
+    const rawPassword = typeof password === "string" ? password : "";
+    const cleanTotp = typeof totpCode === "string" ? totpCode.trim() : "";
+
+    if (!cleanIdentifier || !rawPassword) {
+      throw new ContractError("BAD_REQUEST", "请输入 XPeach 用户名（或邮箱）与登录密码");
+    }
+
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    };
+    if (this.internalServiceKey) {
+      headers["X-Internal-Service-Key"] = this.internalServiceKey;
+    }
+
+    const resp = await fetch(`${this.ssoBaseUrl.replace(/\/+$/, "")}/api/internal/native-auth`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        identifier: cleanIdentifier,
+        password: rawPassword,
+        totp_code: cleanTotp || undefined,
+        client_id: this.clientId,
+        tenant_slug: "acme",
+        install_ephemeral_id: installEphemeralId || undefined
+      })
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (data && data.totp_required && !data.ok) {
+      return {
+        ok: false,
+        totp_required: true,
+        error: data.error || "totp_required",
+        message: data.message || "该账号已开启两步验证 (2FA)，请输入 6 位动态验证码。"
+      };
+    }
+
+    if (!resp.ok || !data || !data.ok || !data.user) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        data?.message || "XPeach 用户名/邮箱或密码不正确"
+      );
+    }
+
+    const ssoUser = data.user;
+    let peachWallet = data.peach_wallet || ssoUser.peach_wallet || null;
+
+    if (ssoUser.sub && this.internalServiceKey) {
+      try {
+        const peachResp = await fetch(
+          `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoUser.sub)}/peach`,
+          {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "X-Internal-Service-Key": this.internalServiceKey
+            }
+          }
+        );
+        if (peachResp.ok) {
+          const peachData = await peachResp.json();
+          const pw = peachData?.peach || peachData?.wallet || peachData?.data;
+          if (pw && typeof pw === "object") {
+            const bal = Number(pw.peach_balance ?? pw.peachBalance ?? peachWallet?.peachBalance ?? 0);
+            const used = Number(pw.peach_used ?? pw.peachUsed ?? peachWallet?.peachUsed ?? 0);
+            peachWallet = {
+              ...(peachWallet || {}),
+              group: pw.group || ssoUser.group || peachWallet?.group || "默认分组",
+              affCode: pw.aff_code || pw.affCode || ssoUser.aff_code || peachWallet?.affCode || null,
+              peachBalance: bal,
+              peachBalanceFormatted: pw.peach_balance_formatted || pw.peachBalanceFormatted || bal.toFixed(2),
+              peachQuota: Number(pw.peach_quota ?? pw.peachQuota ?? Math.round(bal * 500000)),
+              peachUsed: used,
+              peachUsedFormatted: pw.peach_used_formatted || pw.peachUsedFormatted || used.toFixed(2)
+            };
+          }
+        }
+      } catch {
+        // Keep wallet from native-auth response if secondary fetch fails
+      }
+    }
+
+    const displayName =
+      ssoUser.name || ssoUser.preferred_username || ssoUser.username || ssoUser.email || "XPEACH User";
+
+    const cloudUser = this.store.findOrCreateCloudUser({
+      issuer: this.expectedIssuer,
+      subject: ssoUser.sub || ssoUser.id,
+      displayName,
+      username: ssoUser.username || ssoUser.preferred_username || displayName,
+      email: ssoUser.email || null,
+      emailVerified: Boolean(ssoUser.email_verified),
+      group: peachWallet?.group || ssoUser.group || "默认分组",
+      affCode: peachWallet?.affCode || ssoUser.aff_code || null,
+      role: ssoUser.role || "user",
+      peachWallet
+    });
+
+    const session = this.issueDeviceSession(
+      cloudUser,
+      deviceLabel || "Android Native OIDC Client",
+      null,
+      1,
+      nowMs
+    );
+
+    return {
+      ok: true,
+      totp_required: false,
+      session
+    };
   }
 
   async handleOidcCallback({ code, state, iss, simulatedIdTokenClaims }, nowMs = Date.now()) {
@@ -219,6 +376,7 @@ export class CloudIdentityService {
 
     txn.status = "CALLBACK_VERIFIED";
     const appTicket = `tkt_${crypto.randomBytes(24).toString("base64url")}`;
+    txn.appTicket = appTicket;
     this.store.exchangeTickets.set(appTicket, {
       appTicket,
       loginTxn: txn.loginTxn,
@@ -238,9 +396,10 @@ export class CloudIdentityService {
       ssoRefreshToken: verifiedClaims.sso_refresh_token || null,
       peachWallet: verifiedClaims.peach_wallet || null,
       issuedAtMs: nowMs,
-      expiresAtMs: nowMs + 60 * 1000,
+      expiresAtMs: nowMs + 10 * 60 * 1000,
       consumedAtMs: null
     });
+    this.store.saveSnapshot?.();
 
     let webSessionCookie = null;
     if (txn.flowKind === "WEB_CONSOLE") {
@@ -490,7 +649,23 @@ export class CloudIdentityService {
   issueDeviceSession(user, deviceLabel, existingFamilyId = null, generation = 1, nowMs = Date.now()) {
     const familyId = existingFamilyId || crypto.randomUUID();
     const sessionId = crypto.randomUUID();
-    const rawRefreshToken = `crs_${crypto.randomBytes(32).toString("base64url")}`;
+    const rtPayloadB64 = Buffer.from(
+      JSON.stringify({
+        sid: sessionId,
+        uid: user.id,
+        sso_sub: user.subject,
+        sso_iss: user.issuer,
+        fid: familyId,
+        gen: generation,
+        dl: deviceLabel || "Android Client",
+        exp: Math.floor((nowMs + 90 * 24 * 3600 * 1000) / 1000)
+      })
+    ).toString("base64url");
+    const rtSigB64 = crypto
+      .createHmac("sha256", this.sessionSecret)
+      .update(rtPayloadB64)
+      .digest("base64url");
+    const rawRefreshToken = `crs_${rtPayloadB64}.${rtSigB64}`;
     const refreshTokenHash = crypto.createHash("sha256").update(rawRefreshToken).digest("hex");
 
     const sessionRecord = {
@@ -500,7 +675,7 @@ export class CloudIdentityService {
       refresh_token_hash: refreshTokenHash,
       family_id: familyId,
       generation,
-      expires_at: new Date(nowMs + 30 * 24 * 3600 * 1000).toISOString(),
+      expires_at: new Date(nowMs + 90 * 24 * 3600 * 1000).toISOString(),
       revoked_at: null,
       consumed_at: null,
       created_at: new Date(nowMs).toISOString()
@@ -528,7 +703,7 @@ export class CloudIdentityService {
       cloud_user_id: user.id,
       access_token: accessToken,
       refresh_token: rawRefreshToken,
-      expires_in: 900,
+      expires_in: 30 * 86400,
       family_id: familyId,
       sso_issuer: user.issuer,
       sso_subject: user.subject,
@@ -692,6 +867,45 @@ export class CloudIdentityService {
       (s) => s.refresh_token_hash === hash
     );
     if (!session) {
+      if (rawRefreshToken.startsWith("crs_") && rawRefreshToken.includes(".")) {
+        const body = rawRefreshToken.slice(4);
+        const dotIdx = body.indexOf(".");
+        const payloadB64 = body.slice(0, dotIdx);
+        const sigB64 = body.slice(dotIdx + 1);
+        const expectedSig = crypto
+          .createHmac("sha256", this.sessionSecret)
+          .update(payloadB64)
+          .digest("base64url");
+        if (
+          sigB64.length === expectedSig.length &&
+          crypto.timingSafeEqual(Buffer.from(sigB64), Buffer.from(expectedSig))
+        ) {
+          try {
+            const parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+            if (!parsed.exp || parsed.exp * 1000 > nowMs) {
+              let user = this.store.users.get(parsed.uid);
+              if (!user && parsed.sso_sub) {
+                user = this.store.findOrCreateCloudUser({
+                  issuer: parsed.sso_iss || this.expectedIssuer,
+                  subject: parsed.sso_sub,
+                  displayName: parsed.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User"
+                });
+              }
+              if (user && user.status === "ACTIVE") {
+                return this.issueDeviceSession(
+                  user,
+                  parsed.dl || "Android Client",
+                  parsed.fid || null,
+                  (Number(parsed.gen) || 1) + 1,
+                  nowMs
+                );
+              }
+            }
+          } catch {
+            // Fall through to Unknown refresh_token
+          }
+        }
+      }
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Unknown refresh_token");
     }
 
@@ -762,7 +976,7 @@ export class CloudIdentityService {
         sso_sub: ssoSub,
         roles: roles || [],
         iat: Math.floor(nowMs / 1000),
-        exp: Math.floor(nowMs / 1000) + 900
+        exp: Math.floor(nowMs / 1000) + 30 * 86400
       })
     ).toString("base64url");
     const sig = crypto

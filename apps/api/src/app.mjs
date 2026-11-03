@@ -1582,6 +1582,53 @@ export function createCampusCloudApp(options = {}) {
         };
       }
 
+      if (upperMethod === "GET" && pathname === "/api/v1/auth/mobile/status") {
+        const statusRes = identity.getMobileTransactionStatus(
+          parsedUrl.searchParams.get("txn"),
+          nowMs
+        );
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("AUTH_TXN_STATUS", statusRes, requestId)
+        };
+      }
+
+      if (upperMethod === "POST" && pathname === "/api/v1/auth/oidc/native-login") {
+        const nativeRes = await identity.loginNativeWithSso(
+          {
+            identifier: body?.identifier ?? body?.username ?? body?.email,
+            password: body?.password,
+            totpCode: body?.totp_code ?? body?.totpCode ?? body?.code,
+            installEphemeralId: body?.install_ephemeral_id,
+            deviceLabel: body?.device_label
+          },
+          nowMs
+        );
+        if (nativeRes.totp_required && !nativeRes.ok) {
+          return {
+            status: 200,
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-request-id": requestId
+            },
+            body: okEnvelope("TOTP_REQUIRED", nativeRes, requestId)
+          };
+        }
+        await syncUserToSso(nativeRes.session.cloud_user_id);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("SESSION_ISSUED", nativeRes.session, requestId)
+        };
+      }
+
       if (pathname === "/api/v1/sync/snapshot" && (upperMethod === "GET" || upperMethod === "POST")) {
         const auth = extractBearer(headers, nowMs);
         if (upperMethod === "POST" && body && typeof body === "object") {

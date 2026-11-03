@@ -89,6 +89,8 @@ export class CloudDatabaseStore {
           this.userRoles.set(k, new Set(Array.isArray(arr) ? arr : ["USER"]));
         }
       }
+      loadMap(this.authTransactions, raw.authTransactions);
+      loadMap(this.exchangeTickets, raw.exchangeTickets);
       loadMap(this.deviceSessions, raw.deviceSessions);
       loadMap(this.schoolBindings, raw.schoolBindings);
       loadMap(this.encryptedCredentials, raw.encryptedCredentials);
@@ -121,6 +123,8 @@ export class CloudDatabaseStore {
       const data = {
         users: Array.from(this.users.entries()),
         userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
+        exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(this.deviceSessions.entries()),
         schoolBindings: Array.from(this.schoolBindings.entries()),
         encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
