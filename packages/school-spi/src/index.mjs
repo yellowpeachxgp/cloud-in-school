@@ -939,6 +939,41 @@ export class HautLibraryProvider {
                 break;
               }
             }
+            if (!needWaitOpening && allowAlt && prewarmed.region_id) {
+              const qJson = await this.wslibGetJson(
+                `/seatbook/layout/query?starttime=${encodeURIComponent(
+                  prewarmed.start_full
+                )}&endtime=${encodeURIComponent(
+                  prewarmed.end_full
+                )}&regionid=${encodeURIComponent(prewarmed.region_id)}`,
+                rawToken
+              );
+              const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
+              const freeSeats = rawSeats.filter((s) => s?.id && Number(s.seatStatus ?? 1) === 2);
+              for (const freeSeat of freeSeats.slice(0, 4)) {
+                const addRes = await this.wslibGetJson(
+                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+                    freeSeat.id
+                  )}&starttime=${encodeURIComponent(
+                    prewarmed.start_full
+                  )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
+                  rawToken
+                );
+                lastMsg = String(addRes?.msg || "").trim();
+                if (addRes?.code === 200) {
+                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
+                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+                  return {
+                    outcome: "SUBMITTED",
+                    externalBookingId: confirmed?.bookingId || bookedId || String(freeSeat.id),
+                    seatAlias:
+                      confirmed?.seatName || cleanSpiText(freeSeat.seatName, String(freeSeat.id)),
+                    regionAlias: confirmed?.regionName || prewarmed.region_name,
+                    rawToken
+                  };
+                }
+              }
+            }
             if (!needWaitOpening) break;
           } catch (err) {
             if (err?.code === "SCHOOL_AUTH_EXPIRED") {
