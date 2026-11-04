@@ -11,6 +11,26 @@ export function computeS256Challenge(codeVerifier) {
     .digest("base64url");
 }
 
+export function sanitizeReturnToPath(raw) {
+  if (typeof raw !== "string") return "/";
+  const trimmed = raw.trim();
+  if (
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/\\") ||
+    /[\r\n\0]/.test(trimmed)
+  ) {
+    return "/";
+  }
+  try {
+    const parsed = new URL(trimmed, "https://campus.yellowpeachxgp.com");
+    if (parsed.origin !== "https://campus.yellowpeachxgp.com") return "/";
+    return `${parsed.pathname}${parsed.search || ""}`;
+  } catch {
+    return "/";
+  }
+}
+
 export class CloudIdentityService {
   constructor(store, options = {}) {
     this.store = store;
@@ -40,6 +60,10 @@ export class CloudIdentityService {
       .update(options.sessionSecret || process.env.CLOUD_SESSION_SIGNING_KEY_REF || "cloud-session-key-v1")
       .digest();
     this.ssoCodeExchanger = options.ssoCodeExchanger || null;
+    this.allowSyntheticTestCodes =
+      options.allowSyntheticTestCodes !== undefined
+        ? Boolean(options.allowSyntheticTestCodes)
+        : !this.clientSecret && process.env.NODE_ENV !== "production";
   }
 
   startWebTransaction({ returnTo = "/" } = {}, nowMs = Date.now()) {
@@ -53,7 +77,7 @@ export class CloudIdentityService {
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
       flowKind: "WEB_CONSOLE",
-      returnTo: typeof returnTo === "string" && returnTo.startsWith("/") ? returnTo : "/",
+      returnTo: sanitizeReturnToPath(returnTo),
       installEphemeralId: "web_console_session",
       mobileCodeChallenge: null,
       deviceLabel: "Campus Cloud Web Console",
@@ -295,12 +319,17 @@ export class CloudIdentityService {
     if (!txn) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid OIDC state parameter");
     }
-    if (nowMs > txn.expiresAtMs || txn.status === "COMPLETED") {
+    if (
+      nowMs > txn.expiresAtMs ||
+      (txn.status !== "INITIATED" && txn.status !== "REDIRECTED_TO_SSO")
+    ) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "OIDC login transaction expired or already consumed");
     }
     if (iss && iss !== this.expectedIssuer) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", `Untrusted OIDC issuer: ${iss}`);
     }
+
+    txn.status = "CALLBACK_IN_PROGRESS";
 
     let verifiedClaims;
     const isSyntheticTestCode =
@@ -316,7 +345,7 @@ export class CloudIdentityService {
         expectedClientId: this.clientId,
         expectedNonce: txn.serverNonce
       });
-    } else if (simulatedIdTokenClaims) {
+    } else if (simulatedIdTokenClaims && this.allowSyntheticTestCodes) {
       verifiedClaims = simulatedIdTokenClaims;
     } else if (!isSyntheticTestCode && this.clientSecret) {
       verifiedClaims = await this.exchangeRealOidcCode({
@@ -324,7 +353,7 @@ export class CloudIdentityService {
         codeVerifier: txn.serverVerifier,
         expectedNonce: txn.serverNonce
       });
-    } else {
+    } else if (this.allowSyntheticTestCodes) {
       verifiedClaims = {
         iss: this.expectedIssuer,
         aud: this.clientId,
@@ -332,6 +361,8 @@ export class CloudIdentityService {
         nonce: txn.serverNonce,
         preferred_username: "campus_student"
       };
+    } else {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Synthetic OIDC test codes are disabled in production");
     }
 
     const audMatches = Array.isArray(verifiedClaims.aud)
@@ -411,9 +442,11 @@ export class CloudIdentityService {
       });
     }
 
+    const safeReturnTo = sanitizeReturnToPath(txn.returnTo || "/");
+    const joiner = safeReturnTo.includes("?") ? "&" : "?";
     const appLinkUrl =
       txn.flowKind === "WEB_CONSOLE"
-        ? `${this.publicBaseUrl}${txn.returnTo || "/"}?web_ticket=${encodeURIComponent(
+        ? `${this.publicBaseUrl}${safeReturnTo}${joiner}web_ticket=${encodeURIComponent(
             appTicket
           )}&txn=${encodeURIComponent(txn.loginTxn)}`
         : `${this.publicBaseUrl}/app-link/auth/callback?ticket=${encodeURIComponent(
@@ -561,7 +594,7 @@ export class CloudIdentityService {
 
   exchangeWebTicket({ loginTxn, webTicket }, nowMs = Date.now()) {
     const ticket = this.store.exchangeTickets.get(webTicket);
-    if (!ticket || ticket.loginTxn !== loginTxn) {
+    if (!ticket || ticket.loginTxn !== loginTxn || (ticket.flowKind && ticket.flowKind !== "WEB_CONSOLE")) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid web_ticket or transaction mismatch");
     }
     if (ticket.consumedAtMs !== null) {
@@ -601,7 +634,7 @@ export class CloudIdentityService {
 
   exchangeMobileTicket({ loginTxn, appTicket, codeVerifier }, nowMs = Date.now()) {
     const ticket = this.store.exchangeTickets.get(appTicket);
-    if (!ticket || ticket.loginTxn !== loginTxn) {
+    if (!ticket || ticket.loginTxn !== loginTxn || (ticket.flowKind && ticket.flowKind !== "MOBILE_APP")) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid app_ticket or transaction mismatch");
     }
     if (ticket.consumedAtMs !== null) {
@@ -799,7 +832,17 @@ export class CloudIdentityService {
       let jwtPayload = null;
       if (typeof parsed.at === "string" && parsed.at.split(".").length === 3) {
         try {
-          jwtPayload = JSON.parse(Buffer.from(parsed.at.split(".")[1], "base64url").toString("utf8"));
+          const [atHeader, atPayload, atSig] = parsed.at.split(".");
+          const expectedAtSig = crypto
+            .createHmac("sha256", this.sessionSecret)
+            .update(`${atHeader}.${atPayload}`)
+            .digest("base64url");
+          if (
+            atSig.length === expectedAtSig.length &&
+            crypto.timingSafeEqual(Buffer.from(atSig), Buffer.from(expectedAtSig))
+          ) {
+            jwtPayload = JSON.parse(Buffer.from(atPayload, "base64url").toString("utf8"));
+          }
         } catch {
           jwtPayload = null;
         }
@@ -825,14 +868,18 @@ export class CloudIdentityService {
           created_at: new Date(nowMs).toISOString()
         };
         this.store.users.set(user.id, user);
-        if (Array.isArray(jwtPayload.roles) && jwtPayload.roles.length > 0) {
-          this.store.setUserRoles(user.id, jwtPayload.roles);
-        } else {
-          this.store._syncAdminRoleIfEligible?.(user);
-        }
+        this.store._syncAdminRoleIfEligible?.(user);
         this.store.saveSnapshot?.();
       }
       if (!user || user.status !== "ACTIVE") return null;
+      if (jwtPayload?.family_id) {
+        const famSessions = Array.from(this.store.deviceSessions.values()).filter(
+          (s) => s.family_id === jwtPayload.family_id
+        );
+        if (famSessions.length > 0 && famSessions.every((s) => s.revoked_at !== null)) {
+          return null;
+        }
+      }
       const roles = this.store.getUserRoles(user.id);
       let activeAccessToken = parsed.at;
       if (!jwtPayload || !jwtPayload.exp || jwtPayload.exp * 1000 <= nowMs + 300_000) {
@@ -883,6 +930,22 @@ export class CloudIdentityService {
           try {
             const parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
             if (!parsed.exp || parsed.exp * 1000 > nowMs) {
+              if (parsed.fid) {
+                const famSessions = Array.from(this.store.deviceSessions.values()).filter(
+                  (s) => s.family_id === parsed.fid
+                );
+                if (
+                  famSessions.some(
+                    (s) => s.revoked_at !== null || s.generation >= Number(parsed.gen || 1)
+                  )
+                ) {
+                  this.revokeSessionFamily(parsed.fid, "REFRESH_TOKEN_REPLAY", nowMs);
+                  throw new ContractError(
+                    "SESSION_REPLAY_DETECTED",
+                    "Refresh token replay detected; entire device session family has been revoked"
+                  );
+                }
+              }
               let user = this.store.users.get(parsed.uid);
               if (!user && parsed.sso_sub) {
                 user = this.store.findOrCreateCloudUser({
@@ -901,7 +964,8 @@ export class CloudIdentityService {
                 );
               }
             }
-          } catch {
+          } catch (err) {
+            if (err instanceof ContractError) throw err;
             // Fall through to Unknown refresh_token
           }
         }
@@ -995,6 +1059,15 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Malformed Bearer access token");
     }
     const [headerB64, payloadB64, sigB64] = parts;
+    let headerObj;
+    try {
+      headerObj = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
+    } catch {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Malformed JWT header");
+    }
+    if (!headerObj || headerObj.alg !== "HS256") {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "Unsupported JWT signing algorithm");
+    }
     const expectedSig = crypto
       .createHmac("sha256", this.sessionSecret)
       .update(`${headerB64}.${payloadB64}`)
@@ -1031,15 +1104,17 @@ export class CloudIdentityService {
         created_at: new Date(nowMs).toISOString()
       };
       this.store.users.set(user.id, user);
-      if (Array.isArray(payload.roles) && payload.roles.length > 0) {
-        this.store.setUserRoles(user.id, payload.roles);
-      } else {
-        this.store._syncAdminRoleIfEligible?.(user);
-      }
+      this.store._syncAdminRoleIfEligible?.(user);
       this.store.saveSnapshot?.();
     }
     if (!user || user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user is inactive or deleted");
+    }
+    if (payload.sid) {
+      const specificSess = this.store.deviceSessions.get(payload.sid);
+      if (specificSess && specificSess.revoked_at !== null) {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "Device session has been revoked");
+      }
     }
     const familySessions = Array.from(this.store.deviceSessions.values()).filter(
       (s) => s.family_id === payload.family_id

@@ -13,6 +13,8 @@ const PRIVATE_IP_PATTERNS = [
   /^172\.(1[6-9]|2\d|3[0-1])\./,
   /^0\./,
   /^::1$/,
+  /^::ffff:/i,
+  /^\[::/i,
   /^fc00:/i,
   /^fd00:/i,
   /^fe80:/i,
@@ -36,6 +38,12 @@ export function validateAllowedSchoolUrl(urlString, allowedHosts) {
   }
   if (parsed.protocol !== "https:") {
     throw new ContractError("FORBIDDEN", "Outbound school requests must use HTTPS");
+  }
+  if (parsed.username || parsed.password) {
+    throw new ContractError("FORBIDDEN", "Outbound school URLs must not contain userinfo credentials");
+  }
+  if (parsed.port && parsed.port !== "443") {
+    throw new ContractError("FORBIDDEN", `Disallowed outbound port: ${parsed.port}`);
   }
   const hostname = parsed.hostname.toLowerCase();
   for (const pat of PRIVATE_IP_PATTERNS) {
@@ -273,6 +281,7 @@ export class HautLibraryProvider {
     try {
       const res = await fetch(url, {
         method: "GET",
+        redirect: "error",
         headers: {
           "User-Agent": HAUT_USER_AGENT,
           Authorization: `Bearer ${cleanToken}`,
@@ -318,22 +327,33 @@ export class HautLibraryProvider {
       }
     }
 
-    // Helper for cookie jar & redirect chain on mapp.haut.edu.cn -> wslib.haut.edu.cn
-    const jar = new Map();
-    const saveCookies = (res) => {
+    // Host-scoped cookie jar so mapp.haut.edu.cn CASTGC is never leaked to wslib.haut.edu.cn
+    const jarByHost = new Map();
+    const getHostJar = (urlStr) => {
+      const host = new URL(urlStr).hostname.toLowerCase();
+      if (!jarByHost.has(host)) {
+        jarByHost.set(host, new Map());
+      }
+      return jarByHost.get(host);
+    };
+    const saveCookies = (res, urlStr) => {
+      const hostJar = getHostJar(urlStr);
       const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
       for (const sc of setCookies) {
         const [pair] = String(sc).split(";");
         const eq = pair.indexOf("=");
         if (eq > 0) {
-          jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+          hostJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
         }
       }
     };
-    const cookieHeader = () =>
-      Array.from(jar.entries())
+    const cookieHeader = (urlStr) => {
+      const hostJar = getHostJar(urlStr);
+      return Array.from(hostJar.entries())
         .map(([k, v]) => `${k}=${v}`)
         .join("; ");
+    };
+    const casHostJar = () => getHostJar(HAUT_CAS_LOGIN_URL);
 
     const followRedirectsForToken = async (initialResp, startUrl) => {
       let r = initialResp;
@@ -350,16 +370,17 @@ export class HautLibraryProvider {
           return this.normalizeRawToken(decodeURIComponent(tokenMatch[1]));
         }
         currUrl = nextUrl;
+        const hostCookies = cookieHeader(currUrl);
         r = await fetch(currUrl, {
           method: "GET",
           redirect: "manual",
           headers: {
             "User-Agent": HAUT_USER_AGENT,
-            ...(jar.size > 0 ? { Cookie: cookieHeader() } : {})
+            ...(hostCookies ? { Cookie: hostCookies } : {})
           },
           signal: AbortSignal.timeout(9000)
         });
-        saveCookies(r);
+        saveCookies(r, currUrl);
       }
       return null;
     };
@@ -367,19 +388,19 @@ export class HautLibraryProvider {
     // Level 2: Silent CASTGC cookie exchange
     if (bundle.cas_tgc) {
       try {
-        jar.set("CASTGC", bundle.cas_tgc);
-        if (bundle.cas_jsessionid) jar.set("JSESSIONID", bundle.cas_jsessionid);
+        casHostJar().set("CASTGC", bundle.cas_tgc);
+        if (bundle.cas_jsessionid) casHostJar().set("JSESSIONID", bundle.cas_jsessionid);
         validateAllowedSchoolUrl(HAUT_CAS_LOGIN_URL, this.allowedHosts);
         const r0 = await fetch(HAUT_CAS_LOGIN_URL, {
           method: "GET",
           redirect: "manual",
           headers: {
             "User-Agent": HAUT_USER_AGENT,
-            Cookie: cookieHeader()
+            Cookie: cookieHeader(HAUT_CAS_LOGIN_URL)
           },
           signal: AbortSignal.timeout(9000)
         });
-        saveCookies(r0);
+        saveCookies(r0, HAUT_CAS_LOGIN_URL);
         if ([301, 302, 303, 307, 308].includes(r0.status)) {
           const freshToken = await followRedirectsForToken(r0, HAUT_CAS_LOGIN_URL);
           if (freshToken) {
@@ -387,8 +408,8 @@ export class HautLibraryProvider {
             if (userInfo) {
               return {
                 rawToken: freshToken,
-                casTgc: jar.get("CASTGC") || bundle.cas_tgc,
-                casJsessionId: jar.get("JSESSIONID") || bundle.cas_jsessionid || "",
+                casTgc: casHostJar().get("CASTGC") || bundle.cas_tgc,
+                casJsessionId: casHostJar().get("JSESSIONID") || bundle.cas_jsessionid || "",
                 userInfo,
                 source: "PERSISTED_COOKIE"
               };
@@ -402,7 +423,7 @@ export class HautLibraryProvider {
 
     // Level 3: Full CAS login with student_no + password
     if (bundle.student_no && bundle.password) {
-      jar.clear();
+      jarByHost.clear();
       validateAllowedSchoolUrl(HAUT_CAS_LOGIN_URL, this.allowedHosts);
       const r1 = await fetch(HAUT_CAS_LOGIN_URL, {
         method: "GET",
@@ -410,7 +431,7 @@ export class HautLibraryProvider {
         headers: { "User-Agent": HAUT_USER_AGENT },
         signal: AbortSignal.timeout(10000)
       });
-      saveCookies(r1);
+      saveCookies(r1, HAUT_CAS_LOGIN_URL);
       if ([301, 302, 303, 307, 308].includes(r1.status)) {
         const directToken = await followRedirectsForToken(r1, HAUT_CAS_LOGIN_URL);
         if (directToken) {
@@ -418,8 +439,8 @@ export class HautLibraryProvider {
           if (userInfo) {
             return {
               rawToken: directToken,
-              casTgc: jar.get("CASTGC") || "",
-              casJsessionId: jar.get("JSESSIONID") || "",
+              casTgc: casHostJar().get("CASTGC") || "",
+              casJsessionId: casHostJar().get("JSESSIONID") || "",
               userInfo,
               source: "CAS_DIRECT"
             };
@@ -453,18 +474,19 @@ export class HautLibraryProvider {
         _eventId: "submit"
       }).toString();
 
+      const postHostCookies = cookieHeader(postUrl);
       const r2 = await fetch(postUrl, {
         method: "POST",
         redirect: "manual",
         headers: {
           "User-Agent": HAUT_USER_AGENT,
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          ...(jar.size > 0 ? { Cookie: cookieHeader() } : {})
+          ...(postHostCookies ? { Cookie: postHostCookies } : {})
         },
         body: formBody,
         signal: AbortSignal.timeout(10000)
       });
-      saveCookies(r2);
+      saveCookies(r2, postUrl);
       if (!r2.headers.get("location")) {
         const errBody = await r2.text();
         if (errBody.includes("验证码") || /captcha/i.test(errBody)) {
@@ -494,8 +516,8 @@ export class HautLibraryProvider {
       };
       return {
         rawToken: freshToken,
-        casTgc: jar.get("CASTGC") || "",
-        casJsessionId: jar.get("JSESSIONID") || "",
+        casTgc: casHostJar().get("CASTGC") || "",
+        casJsessionId: casHostJar().get("JSESSIONID") || "",
         userInfo,
         source: "BACKGROUND_PASSWORD_LOGIN"
       };
@@ -513,6 +535,7 @@ export class HautLibraryProvider {
     validateAllowedSchoolUrl(url, this.allowedHosts);
     const res = await fetch(url, {
       method: "GET",
+      redirect: "error",
       headers: {
         "User-Agent": HAUT_USER_AGENT,
         Authorization: `Bearer ${cleanToken}`,

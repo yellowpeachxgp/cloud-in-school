@@ -119,7 +119,28 @@ export function createCampusCloudApp(options = {}) {
     });
   }
 
-  function extractBearer(headers, nowMs) {
+  const SECURITY_HEADERS = {
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer"
+  };
+
+  function isAdminOrOperatorAuth(auth) {
+    if (!auth) return false;
+    const roles = Array.isArray(auth.roles) ? auth.roles : [];
+    const user = store.users.get(auth.cloudUserId);
+    return (
+      roles.includes("ADMIN") ||
+      roles.includes("OPERATOR") ||
+      roles.includes("PLATFORM_OWNER") ||
+      roles.includes("OPERATIONS_ADMIN") ||
+      roles.includes("SCHOOL_OPERATOR") ||
+      user?.role === "admin"
+    );
+  }
+
+  function extractBearer(headers, nowMs, method = "GET") {
     const authHeader = headers?.authorization || headers?.Authorization || "";
     const m = String(authHeader).match(/^Bearer\s+(.+)$/i);
     let bearerErr = null;
@@ -135,6 +156,34 @@ export function createCampusCloudApp(options = {}) {
       nowMs
     );
     if (cookieAuth) {
+      const upper = String(method || "GET").toUpperCase();
+      if (upper === "POST" || upper === "PUT" || upper === "PATCH" || upper === "DELETE") {
+        const secFetchSite = String(
+          headers?.["sec-fetch-site"] || headers?.["Sec-Fetch-Site"] || ""
+        ).toLowerCase();
+        if (secFetchSite === "cross-site") {
+          throw new ContractError(
+            "FORBIDDEN",
+            "Cross-site state-changing cookie request rejected"
+          );
+        }
+        const originHeader = String(headers?.origin || headers?.Origin || "").trim();
+        const hostHeader = String(headers?.host || headers?.Host || "").trim();
+        if (originHeader && hostHeader) {
+          try {
+            const parsedOrigin = new URL(originHeader);
+            if (parsedOrigin.host.toLowerCase() !== hostHeader.toLowerCase()) {
+              throw new ContractError(
+                "FORBIDDEN",
+                "Cross-origin state-changing cookie request rejected"
+              );
+            }
+          } catch (originErr) {
+            if (originErr instanceof ContractError) throw originErr;
+            throw new ContractError("FORBIDDEN", "Invalid Origin header");
+          }
+        }
+      }
       return {
         cloudUserId: cookieAuth.cloudUserId,
         familyId: "web_cookie_family",
@@ -1161,10 +1210,26 @@ export function createCampusCloudApp(options = {}) {
 
   register("POST", "/api/v1/plugins/install", "installSignedPlugin", "bearer", async ({ auth, body }) => {
     if (body?.manifest) {
+      const canOverridePublicKey =
+        Array.isArray(auth?.roles) &&
+        (auth.roles.includes("PLATFORM_OWNER") || auth.roles.includes("ADMIN"));
+      if (
+        body.public_key_base64 &&
+        body.public_key_base64 !== pluginBroker.publicKeyBase64 &&
+        process.env.NODE_ENV === "production" &&
+        !canOverridePublicKey
+      ) {
+        throw new ContractError(
+          "FORBIDDEN",
+          "Custom plugin public_key_base64 registration in production requires PLATFORM_OWNER or ADMIN role"
+        );
+      }
       pluginBroker.registerPluginPackage({
         manifest: body.manifest,
         artifactMap: body.artifact_map || {},
-        publicKeyBase64: body.public_key_base64 || pluginBroker.publicKeyBase64
+        publicKeyBase64: body.public_key_base64 || pluginBroker.publicKeyBase64,
+        actorUserId: auth.cloudUserId,
+        isAdmin: canOverridePublicKey
       });
     }
     const pluginId = body?.plugin_id || body?.manifest?.plugin_id;
@@ -1440,9 +1505,19 @@ export function createCampusCloudApp(options = {}) {
           nowMs
         );
         const referer = String(headers?.referer || headers?.Referer || "");
+        let isTrustedSsoReferer = false;
+        if (referer) {
+          try {
+            const parsedRef = new URL(referer);
+            isTrustedSsoReferer =
+              parsedRef.protocol === "https:" && parsedRef.hostname === "sso.xpeach.codes";
+          } catch {
+            isTrustedSsoReferer = false;
+          }
+        }
         if (
           !cookieAuth &&
-          referer.includes("sso.xpeach.codes") &&
+          isTrustedSsoReferer &&
           !parsedUrl.searchParams.has("web_ticket") &&
           !parsedUrl.searchParams.has("code")
         ) {
@@ -1567,9 +1642,17 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (upperMethod === "GET" && pathname === "/api/v1/auth/web/logout") {
+        const cookieAuth = identity.verifyWebSessionCookie(
+          headers?.cookie || headers?.Cookie || "",
+          nowMs
+        );
+        if (cookieAuth?.cloudUserId) {
+          identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+        }
         return {
           status: 302,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "text/html; charset=utf-8",
             "x-request-id": requestId,
             "set-cookie": "dis_web_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
@@ -1655,7 +1738,7 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (pathname === "/api/v1/sync/snapshot" && (upperMethod === "GET" || upperMethod === "POST")) {
-        const auth = extractBearer(headers, nowMs);
+        const auth = extractBearer(headers, nowMs, upperMethod);
         if (upperMethod === "POST" && body && typeof body === "object") {
           // 1) School binding upserts from Android App
           if (Array.isArray(body.school_binding_upserts)) {
@@ -1742,7 +1825,7 @@ export function createCampusCloudApp(options = {}) {
                 itemTitle: pItem.item_title || "",
                 rawNotificationText: pItem.raw_notification_text || "",
                 checkpoints: Array.isArray(pItem.checkpoints) ? pItem.checkpoints : [],
-                sandboxOverride: true
+                sandboxOverride: false
               });
             }
           }
@@ -1803,11 +1886,12 @@ export function createCampusCloudApp(options = {}) {
 
       const quickRefundMatch = pathname.match(/^\/api\/v1\/admin\/orders\/([^/]+)\/quick-refund$/);
       if (upperMethod === "POST" && quickRefundMatch) {
-        const auth = extractBearer(headers, nowMs);
+        const auth = extractBearer(headers, nowMs, upperMethod);
         const isAdminUser =
           auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
+          auth.roles.includes("PLATFORM_OWNER") ||
           auth.roles.includes("FINANCE") ||
+          auth.roles.includes("FINANCE_OPERATOR") ||
           store.users.get(auth.cloudUserId)?.role === "admin";
         if (!isAdminUser) {
           throw new ContractError("FORBIDDEN", "Admin privileges required for quick refund");
@@ -1831,6 +1915,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -1840,7 +1925,7 @@ export function createCampusCloudApp(options = {}) {
 
       const execNowMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/execute-now$/);
       if (upperMethod === "POST" && execNowMatch) {
-        const auth = extractBearer(headers, nowMs);
+        const auth = extractBearer(headers, nowMs, upperMethod);
         const jobId = decodeURIComponent(execNowMatch[1]);
         const job = store.reservationJobs.get(jobId);
         if (!job || job.cloud_user_id !== auth.cloudUserId) {
@@ -1856,6 +1941,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -1865,7 +1951,7 @@ export function createCampusCloudApp(options = {}) {
 
       const cancelSeatMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/cancel-seat$/);
       if (upperMethod === "POST" && cancelSeatMatch) {
-        const auth = extractBearer(headers, nowMs);
+        const auth = extractBearer(headers, nowMs, upperMethod);
         const jobId = decodeURIComponent(cancelSeatMatch[1]);
         const job = store.reservationJobs.get(jobId);
         if (!job || job.cloud_user_id !== auth.cloudUserId) {
@@ -1876,6 +1962,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -1884,7 +1971,7 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (upperMethod === "POST" && pathname === "/api/v1/school-bindings/bind-live") {
-        const auth = extractBearer(headers, nowMs);
+        const auth = extractBearer(headers, nowMs, upperMethod);
         const schoolId = body?.school_id || "haut";
         const studentNoInput = String(body?.student_no || "").trim();
         const passwordInput = String(body?.password || "").trim();
@@ -2089,12 +2176,8 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (pathname === "/api/v1/admin/campus-content" && (upperMethod === "GET" || upperMethod === "PUT")) {
-        const auth = extractBearer(headers, nowMs);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道与社团云控内容");
         }
         const schoolId = parsedUrl.searchParams.get("school_id") || body?.school_id || "haut";
@@ -2102,6 +2185,7 @@ export function createCampusCloudApp(options = {}) {
           return {
             status: 200,
             headers: {
+              ...SECURITY_HEADERS,
               "content-type": "application/json; charset=utf-8",
               "x-request-id": requestId
             },
@@ -2117,6 +2201,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -2125,12 +2210,8 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/channels") {
-        const auth = extractBearer(headers, nowMs);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道");
         }
         const schoolId = body?.school_id || "haut";
@@ -2139,6 +2220,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -2148,12 +2230,8 @@ export function createCampusCloudApp(options = {}) {
 
       const deleteChannelMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/channels\/([^/]+)$/);
       if (upperMethod === "DELETE" && deleteChannelMatch) {
-        const auth = extractBearer(headers, nowMs);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限删除校园频道");
         }
         const channelId = decodeURIComponent(deleteChannelMatch[1]);
@@ -2163,6 +2241,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -2171,12 +2250,8 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/clubs") {
-        const auth = extractBearer(headers, nowMs);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理学生社团");
         }
         const schoolId = body?.school_id || "haut";
@@ -2185,6 +2260,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -2194,12 +2270,8 @@ export function createCampusCloudApp(options = {}) {
 
       const deleteClubMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/clubs\/([^/]+)$/);
       if (upperMethod === "DELETE" && deleteClubMatch) {
-        const auth = extractBearer(headers, nowMs);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限删除学生社团");
         }
         const clubId = decodeURIComponent(deleteClubMatch[1]);
@@ -2209,6 +2281,7 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "x-request-id": requestId
           },
@@ -2236,7 +2309,7 @@ export function createCampusCloudApp(options = {}) {
 
       let auth = null;
       if (matchedRoute.auth === "bearer" || matchedRoute.auth === "bearer_rbac") {
-        auth = extractBearer(headers, nowMs);
+        auth = extractBearer(headers, nowMs, upperMethod);
       }
 
       const result = await matchedRoute.handler({
@@ -2256,6 +2329,7 @@ export function createCampusCloudApp(options = {}) {
       return {
         status,
         headers: {
+          ...SECURITY_HEADERS,
           "content-type": "application/json; charset=utf-8",
           "x-request-id": requestId,
           ...(result.headers || {})
@@ -2267,6 +2341,7 @@ export function createCampusCloudApp(options = {}) {
       return {
         status: errEnv.httpStatus,
         headers: {
+          ...SECURITY_HEADERS,
           "content-type": "application/json; charset=utf-8",
           "x-request-id": requestId
         },
@@ -2275,10 +2350,31 @@ export function createCampusCloudApp(options = {}) {
     }
   }
 
+  const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+
   function createHttpServer() {
     return http.createServer(async (req, res) => {
       const chunks = [];
+      let totalBytes = 0;
       for await (const chunk of req) {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_HTTP_BODY_BYTES) {
+          res.writeHead(413, {
+            ...SECURITY_HEADERS,
+            "content-type": "application/json; charset=utf-8"
+          });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: {
+                code: "PAYLOAD_TOO_LARGE",
+                message: "Request body exceeds 1 MB limit"
+              }
+            })
+          );
+          req.destroy();
+          return;
+        }
         chunks.push(chunk);
       }
       const rawBody = Buffer.concat(chunks).toString("utf8");
@@ -2296,7 +2392,10 @@ export function createCampusCloudApp(options = {}) {
         headers: req.headers,
         body: parsedBody
       });
-      res.writeHead(response.status, response.headers);
+      res.writeHead(response.status, {
+        ...SECURITY_HEADERS,
+        ...(response.headers || {})
+      });
       if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
         res.end(response.rawBody);
       } else {

@@ -215,7 +215,7 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
     <script src="/static/app.js" defer></script>
     <script>
       (function () {
-        var target = ${JSON.stringify(customSchemeUrl)};
+        var target = ${JSON.stringify(customSchemeUrl).replace(/</g, "\\u003c")};
         setTimeout(function () {
           window.location.href = target;
         }, 180);
@@ -1520,7 +1520,15 @@ export function renderConsoleHtml(ctx = {}) {
     <script src="/static/app.js" defer></script>
     <script>
       (function () {
-        var SERVER_TOKEN = ${JSON.stringify(accessToken)};
+        var SERVER_TOKEN = ${JSON.stringify(accessToken).replace(/</g, "\\u003c")};
+        function escHtml(v) {
+          return String(v == null ? "" : v)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
         var STUDY_AREAS = {
           "4F_NORTH": { name: "4楼北自习区", prefix: "4N", count: 60, tags: ["靠窗·插座", "带插座", "安静区", "临走道"] },
           "2F_EAST":  { name: "2楼东报刊阅览区", prefix: "2E", count: 50, tags: ["临窗采光", "木桌座位", "靠窗", "安静区"] },
@@ -1628,21 +1636,23 @@ export function renderConsoleHtml(ctx = {}) {
           var availableCodes = [];
 
           seatItems.forEach(function (item) {
-            var code = item.code;
-            var tag = item.tag;
+            var code = String(item.code || "");
+            var tag = String(item.tag || "");
+            var safeCode = escHtml(code);
+            var safeTag = escHtml(tag);
             var isAvail = item.available !== false;
-            var label = code + "（" + tag + "）";
-            html1 += '<option value="' + code + '">' + label + "</option>";
-            html2 += '<option value="' + code + '">' + label + "</option>";
-            html3 += '<option value="' + code + '">' + label + "</option>";
+            var label = safeCode + "（" + safeTag + "）";
+            html1 += '<option value="' + safeCode + '">' + label + "</option>";
+            html2 += '<option value="' + safeCode + '">' + label + "</option>";
+            html3 += '<option value="' + safeCode + '">' + label + "</option>";
             if (isAvail) availableCodes.push(code);
             gridHtml +=
               '<button type="button" class="seat-chip' + (isAvail ? "" : " occupied") + '" data-seat-code="' +
-              code +
+              safeCode +
               '"><span class="seat-chip-code">' +
-              code +
+              safeCode +
               '</span><span class="seat-chip-tag">' +
-              tag +
+              safeTag +
               "</span></button>";
           });
 
@@ -1728,6 +1738,11 @@ export function renderConsoleHtml(ctx = {}) {
               var pillsHtml = "";
               regions.forEach(function (r, idx) {
                 var key = String(r.region_id);
+                var safeKey = escHtml(key);
+                var safeLayer = escHtml(r.layer_name);
+                var safeName = escHtml(r.region_name);
+                var safeAvail = escHtml(r.available_seats);
+                var safeTotal = escHtml(r.total_seats);
                 LIVE_REGIONS_MAP[key] = {
                   name: r.region_name,
                   layerName: r.layer_name,
@@ -1736,26 +1751,26 @@ export function renderConsoleHtml(ctx = {}) {
                 };
                 optHtml +=
                   '<option value="' +
-                  key +
+                  safeKey +
                   '">' +
-                  r.layer_name +
+                  safeLayer +
                   " · " +
-                  r.region_name +
+                  safeName +
                   "（空闲 " +
-                  r.available_seats +
+                  safeAvail +
                   "/" +
-                  r.total_seats +
+                  safeTotal +
                   "）</option>";
                 if (idx < 8) {
                   pillsHtml +=
                     '<button type="button" class="area-pill' +
                     (idx === 0 ? " active" : "") +
                     '" data-area-pill="' +
-                    key +
+                    safeKey +
                     '">' +
-                    r.region_name +
+                    safeName +
                     " (" +
-                    r.available_seats +
+                    safeAvail +
                     ")</button>";
                 }
               });
@@ -2073,7 +2088,7 @@ export function renderConsoleHtml(ctx = {}) {
             }
             var parsed = parseSmsText(val);
             if (parsed.pickupCode) {
-              smsPreview.innerHTML = "✅ 已识别取件码：<strong style='color:#E86A33;'>" + parsed.pickupCode + "</strong> · 驿站：<strong>" + parsed.stationName + "</strong> · 快递：<strong>" + parsed.carrierName + "</strong>";
+              smsPreview.innerHTML = "✅ 已识别取件码：<strong style='color:#E86A33;'>" + escHtml(parsed.pickupCode) + "</strong> · 驿站：<strong>" + escHtml(parsed.stationName) + "</strong> · 快递：<strong>" + escHtml(parsed.carrierName) + "</strong>";
             } else {
               smsPreview.textContent = "正在识别取件码格式（例如 3-2-1048）…";
             }
@@ -2394,13 +2409,18 @@ export function renderConsoleHtml(ctx = {}) {
 }
 
 export function createConsoleServer(port = Number(process.env.CONSOLE_PORT || 8081)) {
+  const securityHeaders = {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "strict-origin-when-cross-origin"
+  };
   const server = http.createServer((req, res) => {
     if (req.url === "/healthz") {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { ...securityHeaders, "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, service: "console", views: CONSOLE_VIEWS.length }));
       return;
     }
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.writeHead(200, { ...securityHeaders, "content-type": "text/html; charset=utf-8" });
     res.end(renderConsoleHtml());
   });
   return server;

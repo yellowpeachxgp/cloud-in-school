@@ -176,3 +176,77 @@ test("Security Red-Team: DLP redaction strips cookies, passwords, tokens, and in
   assert.equal(redacted.password, "[REDACTED]");
   assert.equal(redacted.nested.internal_service_key, "[REDACTED]");
 });
+
+test("Security Red-Team: Synthetic OIDC code bypass, cross-flow ticket confusion, open redirects, CSRF, and javascript: URLs are blocked", async () => {
+  const app = createCampusCloudApp();
+
+  // 1) Open redirect in return_to is neutralized to '/'
+  const webTxn = app.identity.startWebTransaction({ returnTo: "//evil.example.com/phish" });
+  const internalTxn = app.store.authTransactions.get(webTxn.login_txn);
+  assert.equal(internalTxn.returnTo, "/");
+
+  // 2) Cross-flow ticket confusion (WEB_CONSOLE ticket cannot be exchanged on mobile endpoint)
+  const cbRes = await app.identity.handleOidcCallback({
+    state: internalTxn.serverState,
+    code: "sso_code_redteam_flow"
+  });
+  assert.throws(
+    () =>
+      app.identity.exchangeMobileTicket({
+        loginTxn: cbRes.login_txn,
+        appTicket: cbRes.web_ticket,
+        codeVerifier: "not_used_for_web"
+      }),
+    /Invalid app_ticket or transaction mismatch/
+  );
+
+  // 3) Synthetic OIDC code is rejected when clientSecret is configured
+  app.identity.allowSyntheticTestCodes = false;
+  const prodTxn = app.identity.startWebTransaction({ returnTo: "/console" });
+  const prodInternalTxn = app.store.authTransactions.get(prodTxn.login_txn);
+  await assert.rejects(
+    async () =>
+      app.identity.handleOidcCallback({
+        state: prodInternalTxn.serverState,
+        code: "sub:856f-cf51-b064-5d84"
+      }),
+    /Synthetic OIDC test codes are disabled/
+  );
+  app.identity.allowSyntheticTestCodes = true;
+
+  // 4) Cross-site CSRF on cookie-authenticated POST is blocked
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "csrf_victim",
+    displayName: "CSRF Victim"
+  });
+  const sess = app.identity.issueDeviceSession(user, "Web");
+  const cookieVal = app.identity.signWebSessionCookie({
+    cloudUserId: user.id,
+    accessToken: sess.access_token,
+    refreshToken: sess.refresh_token
+  });
+  const csrfAttempt = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: {
+      cookie: `dis_web_session=${cookieVal}`,
+      "sec-fetch-site": "cross-site"
+    },
+    body: {}
+  });
+  assert.equal(csrfAttempt.status, 403);
+
+  // 5) javascript: and http:// URLs in campus content are sanitized
+  const sanitized = app.store.upsertCampusChannel(
+    "haut",
+    {
+      id: "xss_test_ch",
+      title: "Test",
+      invite_url: "javascript:alert(document.cookie)"
+    },
+    "admin"
+  );
+  const ch = sanitized.channels.find((c) => c.id === "xss_test_ch");
+  assert.ok(ch.invite_url.startsWith("https://"));
+});

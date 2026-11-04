@@ -239,6 +239,8 @@ export class PluginRegistryAndBroker {
     this.packages = new Map(); // `${pluginId}@${version}` -> { manifest, artifactMap, commandHandlers }
     this.latestVersionByPlugin = new Map();
     this.versionsByPlugin = new Map();
+    this.ownerKeyByPlugin = new Map(); // pluginId -> publicKeyBase64
+    this.ownerUserByPlugin = new Map(); // pluginId -> userId
     this.userInstallations = new Map(); // `${userId}:${pluginId}` -> installation
   }
 
@@ -246,7 +248,9 @@ export class PluginRegistryAndBroker {
     manifest,
     artifactMap = {},
     commandHandlers = {},
-    publicKeyBase64 = this.publicKeyBase64
+    publicKeyBase64 = this.publicKeyBase64,
+    actorUserId = null,
+    isAdmin = false
   }) {
     const verified = verifySignedPluginPackage({
       manifest,
@@ -254,6 +258,27 @@ export class PluginRegistryAndBroker {
       publicKeyBase64,
       hostApiVersion: this.hostApiVersion
     });
+
+    const existingKey = this.ownerKeyByPlugin.get(verified.plugin_id);
+    if (existingKey && existingKey !== publicKeyBase64 && !isAdmin) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        `Plugin '${verified.plugin_id}' is pinned to a different signing public key`
+      );
+    }
+    const existingOwner = this.ownerUserByPlugin.get(verified.plugin_id);
+    if (existingOwner && actorUserId && existingOwner !== actorUserId && !isAdmin) {
+      throw new ContractError(
+        "FORBIDDEN",
+        `Plugin '${verified.plugin_id}' is owned by another publisher`
+      );
+    }
+    if (!existingKey) {
+      this.ownerKeyByPlugin.set(verified.plugin_id, publicKeyBase64);
+    }
+    if (!existingOwner && actorUserId) {
+      this.ownerUserByPlugin.set(verified.plugin_id, actorUserId);
+    }
 
     const key = `${verified.plugin_id}@${verified.version}`;
     this.packages.set(key, {

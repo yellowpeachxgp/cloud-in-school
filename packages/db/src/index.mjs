@@ -530,6 +530,18 @@ export class CloudDatabaseStore {
     };
   }
 
+  sanitizeSafeHttpsUrl(rawUrl, fallback = "") {
+    const trimmed = String(rawUrl ?? "").trim();
+    if (!trimmed) return fallback;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== "https:") return fallback;
+      return parsed.toString();
+    } catch {
+      return fallback;
+    }
+  }
+
   updateCampusContent(schoolId = "haut", payload = {}, actorRef = "admin") {
     const key = String(schoolId || "haut").toLowerCase();
     const current = this.getCampusContent(key, { includeDisabled: true });
@@ -540,7 +552,7 @@ export class CloudDatabaseStore {
         title: String(payload.bulletin.title ?? current.bulletin?.title ?? "").trim(),
         content: String(payload.bulletin.content ?? current.bulletin?.content ?? "").trim(),
         tag: String(payload.bulletin.tag ?? current.bulletin?.tag ?? "云端实时同步").trim() || "云端实时同步",
-        action_url: String(payload.bulletin.action_url ?? current.bulletin?.action_url ?? "").trim()
+        action_url: this.sanitizeSafeHttpsUrl(payload.bulletin.action_url ?? current.bulletin?.action_url ?? "")
       };
     }
     if (Array.isArray(payload.channels)) {
@@ -549,7 +561,7 @@ export class CloudDatabaseStore {
         title: String(ch.title || "").trim(),
         subtitle: String(ch.subtitle || "").trim(),
         tag_label: String(ch.tag_label || ch.tagLabel || "频道").trim(),
-        invite_url: String(ch.invite_url || ch.defaultInviteUrl || "").trim(),
+        invite_url: this.sanitizeSafeHttpsUrl(ch.invite_url || ch.defaultInviteUrl || "", "https://pd.qq.com/s/hautcampus"),
         channel_number_hint: String(ch.channel_number_hint || ch.channelNumberHint || "点击加入").trim(),
         enabled: ch.enabled !== false,
         pinned: Boolean(ch.pinned),
@@ -610,7 +622,10 @@ export class CloudDatabaseStore {
       title: String(channelInput.title ?? prev.title ?? "").trim(),
       subtitle: String(channelInput.subtitle ?? prev.subtitle ?? "").trim(),
       tag_label: String(channelInput.tag_label ?? channelInput.tagLabel ?? prev.tag_label ?? "频道").trim() || "频道",
-      invite_url: String(channelInput.invite_url ?? channelInput.defaultInviteUrl ?? prev.invite_url ?? "").trim(),
+      invite_url: this.sanitizeSafeHttpsUrl(
+        channelInput.invite_url ?? channelInput.defaultInviteUrl ?? prev.invite_url ?? "",
+        "https://pd.qq.com/s/hautcampus"
+      ),
       channel_number_hint:
         String(channelInput.channel_number_hint ?? channelInput.channelNumberHint ?? prev.channel_number_hint ?? "点击加入").trim() ||
         "点击加入",
@@ -829,14 +844,17 @@ export class CloudDatabaseStore {
     if (!user) return;
     if (
       user.role === "admin" ||
-      user.subject === "856f-cf51-b064-5d84" ||
-      user.username === "yellowpeach" ||
-      user.group === "管理员分组"
+      user.subject === "856f-cf51-b064-5d84"
     ) {
       const roles = this.userRoles.get(user.id) || new Set(["USER"]);
       roles.add("ADMIN");
       roles.add("OPERATOR");
       roles.add("FINANCE");
+      roles.add("PLATFORM_OWNER");
+      roles.add("OPERATIONS_ADMIN");
+      roles.add("SCHOOL_OPERATOR");
+      roles.add("FINANCE_OPERATOR");
+      roles.add("SECURITY_AUDITOR");
       this.userRoles.set(user.id, roles);
     }
   }
