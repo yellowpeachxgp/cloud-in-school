@@ -549,6 +549,12 @@ export function renderConsoleHtml(ctx = {}) {
                     .map((j) => {
                       const p = plans.find((x) => x.id === j.plan_id) || {};
                       const seats = Array.isArray(p.candidate_seats) ? p.candidate_seats.join(" / ") : "4N-001";
+                      const repDays = Number(p.repeat_days || j.repeat_days || 1);
+                      const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
+                      const repeatBadge =
+                        repDays > 1
+                          ? `<span class="badge badge-primary">连续 ${repDays} 天 (剩 ${remDays} 天)</span>`
+                          : "";
                       const badge =
                         j.state === "CONFIRMED"
                           ? '<span class="badge badge-success">已占座成功</span>'
@@ -559,6 +565,7 @@ export function renderConsoleHtml(ctx = {}) {
                           <div class="text-xs text-muted">日期：${escapeHtml(j.booking_local_date || p.target_local_date || "-")} · 时段：${escapeHtml(p.slot_window || "08:00-22:00")}</div>
                         </div>
                         <div class="cluster">
+                          ${repeatBadge}
                           ${badge}
                           ${
                             j.state !== "CONFIRMED"
@@ -677,9 +684,9 @@ export function renderConsoleHtml(ctx = {}) {
                 </div>
               </div>
 
-              <div class="grid gap-3" style="grid-template-columns: 1fr 1fr;">
+              <div class="grid gap-3" style="grid-template-columns: 1fr 1fr 1fr;">
                 <div class="field">
-                  <label class="label" for="plan-date">预约用座日期</label>
+                  <label class="label" for="plan-date">预约开始日期</label>
                   <input class="input" id="plan-date" type="date" />
                 </div>
                 <div class="field">
@@ -692,6 +699,16 @@ export function renderConsoleHtml(ctx = {}) {
                     <option value="14:00:00">14:00（下午场次）</option>
                     <option value="18:00:00">18:00（晚间场次）</option>
                     <option value="21:00:00">21:00（夜间预约次日）</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="label" for="plan-repeat-days">连续自动抢座周期</label>
+                  <select class="input" id="plan-repeat-days">
+                    <option value="1">仅抢 1 天（单次）</option>
+                    <option value="3">连续 3 天自动抢座</option>
+                    <option value="7">连续 7 天（一整周每天早间自动抢）</option>
+                    <option value="14">连续 14 天（两周自动续期）</option>
+                    <option value="30">连续 30 天（整月自动续期）</option>
                   </select>
                 </div>
               </div>
@@ -721,7 +738,7 @@ export function renderConsoleHtml(ctx = {}) {
               <tr>
                 <th>用座日期与开抢时间</th>
                 <th>自习区域与候选座位</th>
-                <th>用座时段</th>
+                <th>用座时段 / 连续周期</th>
                 <th>当前状态</th>
                 <th>操作</th>
               </tr>
@@ -734,6 +751,12 @@ export function renderConsoleHtml(ctx = {}) {
                       .map((j) => {
                         const p = plans.find((x) => x.id === j.plan_id) || {};
                         const seats = Array.isArray(p.candidate_seats) ? p.candidate_seats.join(" / ") : "自动分配";
+                        const repDays = Number(p.repeat_days || j.repeat_days || 1);
+                        const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
+                        const repeatInfo =
+                          repDays > 1
+                            ? ` · <span class="badge badge-primary">连续 ${repDays} 天 (剩 ${remDays} 天)</span>`
+                            : " · 单日";
                         const stateLabel =
                           j.state === "CONFIRMED"
                             ? '<span class="badge badge-success">已占座成功 (扣除 0.1 🍑)</span>'
@@ -745,9 +768,9 @@ export function renderConsoleHtml(ctx = {}) {
                                   ? '<span class="badge badge-danger">已过开抢时间窗 (未扣费)</span>'
                                   : '<span class="badge badge-primary">已就绪 · 等待到点开抢</span>';
                         return `<tr>
-                          <td>${escapeHtml(p.target_local_date || j.booking_local_date || "-")} ${escapeHtml(p.target_local_time || j.target_local_time || "07:00:00")}</td>
+                          <td>${escapeHtml(j.booking_local_date || p.target_local_date || "-")} ${escapeHtml(p.target_local_time || j.target_local_time || "07:00:00")}</td>
                           <td><strong>${escapeHtml(p.area_name || p.area_code || "4楼北自习区")}</strong> · <code>${escapeHtml(seats)}</code></td>
-                          <td>${escapeHtml(p.slot_window || "08:00-22:00")}</td>
+                          <td>${escapeHtml(p.slot_window || "08:00-22:00")}${repeatInfo}</td>
                           <td>${stateLabel}</td>
                           <td>${
                             j.state === "CONFIRMED"
@@ -940,6 +963,21 @@ export function renderConsoleHtml(ctx = {}) {
     const allOrders = Array.isArray(ctx.allOrders) ? ctx.allOrders : orders;
     const schools = Array.isArray(ctx.schools) ? ctx.schools : [];
     const auditEvents = Array.isArray(ctx.auditEvents) ? ctx.auditEvents : [];
+    const campusContent = ctx.campusContent || {
+      version: 1,
+      updated_at: "",
+      bulletin: {
+        enabled: true,
+        title: "河工大社团纳新与校园频道云端直通车",
+        content: "全校学生社团招新 QQ 群与校园互助频道已接入云端实时下发。",
+        tag: "云端实时同步"
+      },
+      channels: [],
+      clubs: []
+    };
+    const ccBulletin = campusContent.bulletin || {};
+    const ccChannels = Array.isArray(campusContent.channels) ? campusContent.channels : [];
+    const ccClubs = Array.isArray(campusContent.clubs) ? campusContent.clubs : [];
 
     return `
       <section class="bento-grid bento-4" aria-label="站点运行指标">
@@ -1003,6 +1041,228 @@ export function renderConsoleHtml(ctx = {}) {
                 .join("")}
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <section class="panel" id="section-campus-content-admin">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">📢 校园频道与学生社团云控中心 (实时热更新)</h2>
+            <p class="panel-subtitle">在后台动态新增、置顶、隐藏或修改校园 QQ 频道与学生社团群号，保存后所有「日在校园」App 客户端实时生效（当前云控版本：v${escapeHtml(String(campusContent.version || 1))}）。</p>
+          </div>
+          <span class="badge badge-success">云原生实时下发 · ${ccChannels.length} 频道 / ${ccClubs.length} 社团</span>
+        </div>
+
+        <!-- 1. 顶部社区横幅公告云控 -->
+        <div class="card card-flat" style="padding: 16px; margin-bottom: 16px;">
+          <div class="cluster" style="justify-content: space-between; margin-bottom: 10px;">
+            <h3 class="text-sm font-semibold" style="margin: 0;">1. 社区顶部横幅公告 (App 社团与频道页置顶展示)</h3>
+            <span class="badge badge-primary">${ccBulletin.enabled !== false ? "当前已展示" : "当前已隐藏"}</span>
+          </div>
+          <div class="grid gap-3" style="grid-template-columns: 2fr 1fr 1fr;">
+            <div class="field">
+              <label class="label" for="cc-bulletin-title">公告标题</label>
+              <input class="input" id="cc-bulletin-title" type="text" value="${escapeHtml(ccBulletin.title || "")}" placeholder="例如：2026 秋季社团百团大战招新开启" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-bulletin-tag">角标标签</label>
+              <input class="input" id="cc-bulletin-tag" type="text" value="${escapeHtml(ccBulletin.tag || "云端实时同步")}" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-bulletin-enabled">展示状态</label>
+              <select class="input" id="cc-bulletin-enabled">
+                <option value="true" ${ccBulletin.enabled !== false ? "selected" : ""}>启用展示</option>
+                <option value="false" ${ccBulletin.enabled === false ? "selected" : ""}>隐藏横幅</option>
+              </select>
+            </div>
+          </div>
+          <div class="field" style="margin-top: 10px;">
+            <label class="label" for="cc-bulletin-content">公告正文</label>
+            <input class="input" id="cc-bulletin-content" type="text" value="${escapeHtml(ccBulletin.content || "")}" placeholder="输入向全校学生展示的引导说明文案" />
+          </div>
+          <div style="margin-top: 10px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-save-bulletin">保存并下发横幅公告</button>
+          </div>
+        </div>
+
+        <!-- 2. 校园频道云控管理 -->
+        <div class="card card-flat" style="padding: 16px; margin-bottom: 16px;">
+          <div class="cluster" style="justify-content: space-between; margin-bottom: 10px;">
+            <h3 class="text-sm font-semibold" style="margin: 0;">2. 校园频道云控列表 (${ccChannels.length} 个频道)</h3>
+          </div>
+          <div class="table-wrap" style="margin-bottom: 14px;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>排序 / 状态</th>
+                  <th>频道名称 & 标签</th>
+                  <th>副标题描述</th>
+                  <th>跳转链接 (invite_url)</th>
+                  <th>云控操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  ccChannels.length === 0
+                    ? `<tr><td colspan="5" class="text-muted">暂无校园频道配置</td></tr>`
+                    : ccChannels
+                        .map(
+                          (ch) => `<tr>
+                            <td>
+                              <code>#${escapeHtml(String(ch.sort_order ?? 100))}</code>
+                              ${ch.pinned ? '<span class="badge badge-primary">置顶</span>' : ""}
+                              ${
+                                ch.enabled !== false
+                                  ? '<span class="badge badge-success">启用</span>'
+                                  : '<span class="badge badge-danger">已隐藏</span>'
+                              }
+                            </td>
+                            <td><strong>${escapeHtml(ch.title)}</strong> <span class="badge">${escapeHtml(ch.tag_label || "频道")}</span><div class="text-xs text-muted"><code>${escapeHtml(ch.id)}</code></div></td>
+                            <td>${escapeHtml(ch.subtitle || "-")}</td>
+                            <td><code>${escapeHtml(ch.invite_url || "-")}</code></td>
+                            <td>
+                              <div class="cluster">
+                                <button type="button" class="btn btn-secondary btn-sm" data-edit-channel='${escapeHtml(JSON.stringify(ch))}'>编辑</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-toggle-pin-channel='${escapeHtml(JSON.stringify(ch))}'>${ch.pinned ? "取消置顶" : "置顶"}</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-toggle-enable-channel='${escapeHtml(JSON.stringify(ch))}'>${ch.enabled !== false ? "隐藏" : "启用"}</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-delete-channel="${escapeHtml(ch.id)}">删除</button>
+                              </div>
+                            </td>
+                          </tr>`
+                        )
+                        .join("")
+                }
+              </tbody>
+            </table>
+          </div>
+          <div class="grid gap-3" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+            <div class="field">
+              <label class="label" for="cc-ch-id">频道 ID (编辑自动填入，留空自动生成)</label>
+              <input class="input" id="cc-ch-id" type="text" placeholder="如 ch_official_main" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-ch-title">频道名称</label>
+              <input class="input" id="cc-ch-title" type="text" placeholder="如 工大主频道" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-ch-tag">分类标签</label>
+              <input class="input" id="cc-ch-tag" type="text" placeholder="如 主频道 / 新生 / 学习" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-ch-url">频道邀请链接</label>
+              <input class="input" id="cc-ch-url" type="text" placeholder="https://pd.qq.com/s/..." />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-ch-subtitle">副标题简介</label>
+              <input class="input" id="cc-ch-subtitle" type="text" placeholder="版本更新 · 校园消息 · 答疑" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-ch-sort">排序权重 (越小越靠前)</label>
+              <input class="input" id="cc-ch-sort" type="number" value="10" />
+            </div>
+          </div>
+          <div class="cluster" style="margin-top: 10px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-save-channel">新增 / 更新校园频道</button>
+          </div>
+        </div>
+
+        <!-- 3. 学生社团云控管理 -->
+        <div class="card card-flat" style="padding: 16px;">
+          <div class="cluster" style="justify-content: space-between; margin-bottom: 10px;">
+            <h3 class="text-sm font-semibold" style="margin: 0;">3. 学生社团名录云控管理 (${ccClubs.length} 个社团)</h3>
+          </div>
+          <div class="table-wrap" style="margin-bottom: 14px; max-height: 420px; overflow-y: auto;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>排序 / 状态</th>
+                  <th>社团名称 & 分类</th>
+                  <th>指导单位 & 活动场地</th>
+                  <th>纳新 QQ 群号</th>
+                  <th>云控操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  ccClubs.length === 0
+                    ? `<tr><td colspan="5" class="text-muted">暂无学生社团配置</td></tr>`
+                    : ccClubs
+                        .map(
+                          (cl) => `<tr>
+                            <td>
+                              <code>#${escapeHtml(String(cl.sort_order ?? 100))}</code>
+                              ${cl.pinned ? '<span class="badge badge-primary">置顶</span>' : ""}
+                              ${
+                                cl.enabled !== false
+                                  ? '<span class="badge badge-success">启用</span>'
+                                  : '<span class="badge badge-danger">已隐藏</span>'
+                              }
+                            </td>
+                            <td><strong>${escapeHtml(cl.name)}</strong> <span class="badge">${escapeHtml(cl.category_label || cl.category)}</span><div class="text-xs text-muted">${escapeHtml((cl.highlights || []).join(" · "))}</div></td>
+                            <td>${escapeHtml(cl.affiliated_unit || "-")} · ${escapeHtml(cl.activity_venue || "-")}</td>
+                            <td><code>${escapeHtml(cl.qq_group_number || "-")}</code></td>
+                            <td>
+                              <div class="cluster">
+                                <button type="button" class="btn btn-secondary btn-sm" data-edit-club='${escapeHtml(JSON.stringify(cl))}'>编辑/改群号</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-toggle-pin-club='${escapeHtml(JSON.stringify(cl))}'>${cl.pinned ? "取消置顶" : "置顶"}</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-toggle-enable-club='${escapeHtml(JSON.stringify(cl))}'>${cl.enabled !== false ? "隐藏" : "启用"}</button>
+                                <button type="button" class="btn btn-ghost btn-sm" data-delete-club="${escapeHtml(cl.id)}">删除</button>
+                              </div>
+                            </td>
+                          </tr>`
+                        )
+                        .join("")
+                }
+              </tbody>
+            </table>
+          </div>
+          <div class="grid gap-3" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+            <div class="field">
+              <label class="label" for="cc-club-id">社团 ID (编辑自动填入，留空自动生成)</label>
+              <input class="input" id="cc-club-id" type="text" placeholder="如 club_acm" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-name">社团名称</label>
+              <input class="input" id="cc-club-name" type="text" placeholder="如 ACM 程序设计协会" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-category">社团分类</label>
+              <select class="input" id="cc-club-category">
+                <option value="TECH_INNOVATION">科技创新</option>
+                <option value="ACADEMIC_CULTURE">学术文化</option>
+                <option value="ART_PERFORMANCE">文艺展演</option>
+                <option value="SPORTS_FITNESS">体育竞技</option>
+                <option value="VOLUNTEER_ORG">志愿与组织</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-qq">纳新 QQ 群号</label>
+              <input class="input" id="cc-club-qq" type="text" placeholder="如 784512903" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-unit">挂靠/指导单位</label>
+              <input class="input" id="cc-club-unit" type="text" placeholder="如 信息科学与工程学院" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-venue">常规活动场地</label>
+              <input class="input" id="cc-club-venue" type="text" placeholder="如 8号教学楼机房" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-highlights">亮点标签 (逗号分隔)</label>
+              <input class="input" id="cc-club-highlights" type="text" placeholder="如 蓝桥杯,ACM集训,算法入门" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-club-sort">排序权重</label>
+              <input class="input" id="cc-club-sort" type="number" value="50" />
+            </div>
+          </div>
+          <div class="field" style="margin-top: 10px;">
+            <label class="label" for="cc-club-summary">社团活动简介</label>
+            <input class="input" id="cc-club-summary" type="text" placeholder="简要介绍社团主要活动与新人福利" />
+          </div>
+          <div class="cluster" style="margin-top: 10px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-save-club">新增 / 更新学生社团</button>
+          </div>
         </div>
       </section>
 
@@ -1639,6 +1899,8 @@ export function renderConsoleHtml(ctx = {}) {
           var seats = [seat1.value, seat2.value, seat3.value].filter(Boolean);
           var targetDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
           var targetTime = document.getElementById("plan-time").value || "07:00:00";
+          var repeatEl = document.getElementById("plan-repeat-days");
+          var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
           var slot = document.getElementById("plan-slot").value || "08:00-22:00";
 
           return ensureBindingAndConsent().then(function (ids) {
@@ -1653,6 +1915,8 @@ export function renderConsoleHtml(ctx = {}) {
                 slot_window: slot,
                 target_local_date: targetDate,
                 target_local_time: targetTime,
+                repeat_days: repeatDays,
+                remaining_days: repeatDays,
                 replace_existing: true
               })
             });
@@ -1663,9 +1927,15 @@ export function renderConsoleHtml(ctx = {}) {
         if (btnCreatePlan) {
           btnCreatePlan.addEventListener("click", function () {
             btnCreatePlan.disabled = true;
+            var repeatEl = document.getElementById("plan-repeat-days");
+            var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
             createReservationPlanFromSelection()
               .then(function () {
-                showToast("自动抢座计划已保存！到点将自动为您抢座，并已同步至日在校园 App。");
+                showToast(
+                  repeatDays > 1
+                    ? "已保存连续 " + repeatDays + " 天自动抢座计划！每天早间将自动为您准点抢座并续期次日任务。"
+                    : "自动抢座计划已保存！到点将自动为您抢座，并已同步至日在校园 App。"
+                );
                 setTimeout(function () { window.location.reload(); }, 700);
               })
               .catch(function (err) {
@@ -1909,6 +2179,212 @@ export function renderConsoleHtml(ctx = {}) {
                 btn.textContent = "退还 🍑";
                 showToast(err.message, true);
               });
+          });
+        });
+
+        // Admin: Cloud-Controlled Campus Channels & Student Clubs
+        var btnSaveBulletin = document.getElementById("btn-save-bulletin");
+        if (btnSaveBulletin) {
+          btnSaveBulletin.addEventListener("click", function () {
+            btnSaveBulletin.disabled = true;
+            apiFetch("/api/v1/admin/campus-content", {
+              method: "PUT",
+              body: JSON.stringify({
+                school_id: "haut",
+                bulletin: {
+                  title: (document.getElementById("cc-bulletin-title").value || "").trim(),
+                  tag: (document.getElementById("cc-bulletin-tag").value || "云端实时同步").trim(),
+                  content: (document.getElementById("cc-bulletin-content").value || "").trim(),
+                  enabled: document.getElementById("cc-bulletin-enabled").value !== "false"
+                }
+              })
+            })
+              .then(function () {
+                showToast("社区横幅公告已更新并实时下发至全校客户端！");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btnSaveBulletin.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
+
+        var btnSaveChannel = document.getElementById("btn-save-channel");
+        if (btnSaveChannel) {
+          btnSaveChannel.addEventListener("click", function () {
+            var title = (document.getElementById("cc-ch-title").value || "").trim();
+            if (!title) {
+              showToast("请填写校园频道名称", true);
+              return;
+            }
+            btnSaveChannel.disabled = true;
+            apiFetch("/api/v1/admin/campus-content/channels", {
+              method: "POST",
+              body: JSON.stringify({
+                school_id: "haut",
+                id: (document.getElementById("cc-ch-id").value || "").trim() || undefined,
+                title: title,
+                tag_label: (document.getElementById("cc-ch-tag").value || "频道").trim(),
+                invite_url: (document.getElementById("cc-ch-url").value || "").trim(),
+                subtitle: (document.getElementById("cc-ch-subtitle").value || "").trim(),
+                sort_order: Number(document.getElementById("cc-ch-sort").value || 50)
+              })
+            })
+              .then(function () {
+                showToast("校园频道已保存并下发！");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btnSaveChannel.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
+
+        document.querySelectorAll("[data-edit-channel]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            try {
+              var ch = JSON.parse(btn.getAttribute("data-edit-channel"));
+              document.getElementById("cc-ch-id").value = ch.id || "";
+              document.getElementById("cc-ch-title").value = ch.title || "";
+              document.getElementById("cc-ch-tag").value = ch.tag_label || "";
+              document.getElementById("cc-ch-url").value = ch.invite_url || "";
+              document.getElementById("cc-ch-subtitle").value = ch.subtitle || "";
+              document.getElementById("cc-ch-sort").value = ch.sort_order || 10;
+              document.getElementById("cc-ch-title").focus();
+            } catch (e) {}
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-pin-channel]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var ch = JSON.parse(btn.getAttribute("data-toggle-pin-channel"));
+            apiFetch("/api/v1/admin/campus-content/channels", {
+              method: "POST",
+              body: JSON.stringify({ id: ch.id, title: ch.title, pinned: !ch.pinned })
+            }).then(function () {
+              showToast(!ch.pinned ? "已置顶频道" : "已取消置顶");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-enable-channel]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var ch = JSON.parse(btn.getAttribute("data-toggle-enable-channel"));
+            var nextEnabled = ch.enabled === false;
+            apiFetch("/api/v1/admin/campus-content/channels", {
+              method: "POST",
+              body: JSON.stringify({ id: ch.id, title: ch.title, enabled: nextEnabled })
+            }).then(function () {
+              showToast(nextEnabled ? "已启用频道" : "已隐藏频道");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-delete-channel]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var id = btn.getAttribute("data-delete-channel");
+            apiFetch("/api/v1/admin/campus-content/channels/" + encodeURIComponent(id), {
+              method: "DELETE"
+            }).then(function () {
+              showToast("频道已删除");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        var btnSaveClub = document.getElementById("btn-save-club");
+        if (btnSaveClub) {
+          btnSaveClub.addEventListener("click", function () {
+            var name = (document.getElementById("cc-club-name").value || "").trim();
+            if (!name) {
+              showToast("请填写学生社团名称", true);
+              return;
+            }
+            btnSaveClub.disabled = true;
+            apiFetch("/api/v1/admin/campus-content/clubs", {
+              method: "POST",
+              body: JSON.stringify({
+                school_id: "haut",
+                id: (document.getElementById("cc-club-id").value || "").trim() || undefined,
+                name: name,
+                category: document.getElementById("cc-club-category").value || "TECH_INNOVATION",
+                qq_group_number: (document.getElementById("cc-club-qq").value || "").trim(),
+                affiliated_unit: (document.getElementById("cc-club-unit").value || "").trim(),
+                activity_venue: (document.getElementById("cc-club-venue").value || "").trim(),
+                highlights: (document.getElementById("cc-club-highlights").value || "").trim(),
+                summary: (document.getElementById("cc-club-summary").value || "").trim(),
+                sort_order: Number(document.getElementById("cc-club-sort").value || 50)
+              })
+            })
+              .then(function () {
+                showToast("学生社团信息已保存并实时下发！");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btnSaveClub.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
+
+        document.querySelectorAll("[data-edit-club]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            try {
+              var cl = JSON.parse(btn.getAttribute("data-edit-club"));
+              document.getElementById("cc-club-id").value = cl.id || "";
+              document.getElementById("cc-club-name").value = cl.name || "";
+              document.getElementById("cc-club-category").value = cl.category || "TECH_INNOVATION";
+              document.getElementById("cc-club-qq").value = cl.qq_group_number || "";
+              document.getElementById("cc-club-unit").value = cl.affiliated_unit || "";
+              document.getElementById("cc-club-venue").value = cl.activity_venue || "";
+              document.getElementById("cc-club-highlights").value = (cl.highlights || []).join(",");
+              document.getElementById("cc-club-summary").value = cl.summary || "";
+              document.getElementById("cc-club-sort").value = cl.sort_order || 50;
+              document.getElementById("cc-club-name").focus();
+            } catch (e) {}
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-pin-club]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var cl = JSON.parse(btn.getAttribute("data-toggle-pin-club"));
+            apiFetch("/api/v1/admin/campus-content/clubs", {
+              method: "POST",
+              body: JSON.stringify({ id: cl.id, name: cl.name, pinned: !cl.pinned })
+            }).then(function () {
+              showToast(!cl.pinned ? "已置顶社团" : "已取消置顶");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-enable-club]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var cl = JSON.parse(btn.getAttribute("data-toggle-enable-club"));
+            var nextEnabled = cl.enabled === false;
+            apiFetch("/api/v1/admin/campus-content/clubs", {
+              method: "POST",
+              body: JSON.stringify({ id: cl.id, name: cl.name, enabled: nextEnabled })
+            }).then(function () {
+              showToast(nextEnabled ? "已启用社团展示" : "已隐藏社团");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-delete-club]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var id = btn.getAttribute("data-delete-club");
+            apiFetch("/api/v1/admin/campus-content/clubs/" + encodeURIComponent(id), {
+              method: "DELETE"
+            }).then(function () {
+              showToast("社团已删除");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
           });
         });
       })();

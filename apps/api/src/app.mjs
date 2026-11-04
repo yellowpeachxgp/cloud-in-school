@@ -18,7 +18,10 @@ import {
   HautLibraryProvider,
   ScopedSchoolCookieVault
 } from "../../../packages/school-spi/src/index.mjs";
-import { TripleScheduleEngine } from "../../../packages/reservations/src/index.mjs";
+import {
+  TripleScheduleEngine,
+  addDaysToLocalDate
+} from "../../../packages/reservations/src/index.mjs";
 import {
   IsolatedFinanceBridge,
   FinanceSagaService
@@ -226,6 +229,9 @@ export function createCampusCloudApp(options = {}) {
           area_name: p.area_name || "4楼北自习区",
           candidate_seats: p.candidate_seats || [],
           slot_window: p.slot_window || "08:00-22:00",
+          repeat_days: Number(p.repeat_days ?? j.repeat_days ?? 1),
+          remaining_days: Number(p.remaining_days ?? j.remaining_days ?? 1),
+          end_local_date: p.end_local_date || j.end_local_date || j.booking_local_date,
           school_reservation: sr
         };
       });
@@ -237,6 +243,7 @@ export function createCampusCloudApp(options = {}) {
       }));
     const parcels = parcelHub.listUserParcels(cloudUserId);
     const parcelConnections = parcelHub.listConnections(cloudUserId);
+    const campusContent = store.getCampusContent("haut", { includeDisabled: false });
     return {
       user: {
         cloud_user_id: user.id,
@@ -265,6 +272,7 @@ export function createCampusCloudApp(options = {}) {
       orders,
       parcels,
       parcel_connections: parcelConnections,
+      campus_content: campusContent,
       synced_at: new Date().toISOString()
     };
   }
@@ -826,6 +834,22 @@ export function createCampusCloudApp(options = {}) {
       }
       if (body?.preferred_area_ids) {
         plan.preferences_json.preferred_area_ids = body.preferred_area_ids;
+      }
+      if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
+        const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
+        plan.repeat_days = nextRepeat;
+        plan.remaining_days = Math.min(
+          Math.max(Number(body.remaining_days ?? body.remainingDays ?? nextRepeat) || nextRepeat, 1),
+          nextRepeat
+        );
+        plan.end_local_date = addDaysToLocalDate(plan.target_local_date, plan.remaining_days - 1);
+        for (const j of store.reservationJobs.values()) {
+          if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+            j.repeat_days = plan.repeat_days;
+            j.remaining_days = plan.remaining_days;
+            j.end_local_date = plan.end_local_date;
+          }
+        }
       }
       plan.generation += 1;
       await syncUserToSso(auth.cloudUserId);
@@ -1480,6 +1504,7 @@ export function createCampusCloudApp(options = {}) {
               }),
               allJobs: Array.from(store.reservationJobs.values()),
               schools: Array.from(store.schoolIntegrations.values()),
+              campusContent: store.getCampusContent("haut", { includeDisabled: true }),
               auditEvents: store.auditEvents.slice(-50).reverse(),
               financeMatrix
             };
@@ -2045,6 +2070,149 @@ export function createCampusCloudApp(options = {}) {
             "x-request-id": requestId
           },
           body: okEnvelope("LIVE_SEATS_OK", snap, requestId)
+        };
+      }
+
+      // --- Cloud-Controlled Campus Channels & Student Clubs Control Plane ---
+      if (upperMethod === "GET" && pathname === "/api/v1/campus-content") {
+        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const content = store.getCampusContent(schoolId, { includeDisabled: false });
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store, no-cache, must-revalidate",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CONTENT_OK", content, requestId)
+        };
+      }
+
+      if (pathname === "/api/v1/admin/campus-content" && (upperMethod === "GET" || upperMethod === "PUT")) {
+        const auth = extractBearer(headers, nowMs);
+        const isAdminUser =
+          auth.roles.includes("ADMIN") ||
+          auth.roles.includes("OPERATOR") ||
+          store.users.get(auth.cloudUserId)?.role === "admin";
+        if (!isAdminUser) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道与社团云控内容");
+        }
+        const schoolId = parsedUrl.searchParams.get("school_id") || body?.school_id || "haut";
+        if (upperMethod === "GET") {
+          return {
+            status: 200,
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-request-id": requestId
+            },
+            body: okEnvelope(
+              "ADMIN_CAMPUS_CONTENT_OK",
+              store.getCampusContent(schoolId, { includeDisabled: true }),
+              requestId
+            )
+          };
+        }
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.updateCampusContent(schoolId, body || {}, actorName);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CONTENT_UPDATED", updated, requestId)
+        };
+      }
+
+      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/channels") {
+        const auth = extractBearer(headers, nowMs);
+        const isAdminUser =
+          auth.roles.includes("ADMIN") ||
+          auth.roles.includes("OPERATOR") ||
+          store.users.get(auth.cloudUserId)?.role === "admin";
+        if (!isAdminUser) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道");
+        }
+        const schoolId = body?.school_id || "haut";
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.upsertCampusChannel(schoolId, body || {}, actorName);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CHANNEL_UPSERTED", updated, requestId)
+        };
+      }
+
+      const deleteChannelMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/channels\/([^/]+)$/);
+      if (upperMethod === "DELETE" && deleteChannelMatch) {
+        const auth = extractBearer(headers, nowMs);
+        const isAdminUser =
+          auth.roles.includes("ADMIN") ||
+          auth.roles.includes("OPERATOR") ||
+          store.users.get(auth.cloudUserId)?.role === "admin";
+        if (!isAdminUser) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限删除校园频道");
+        }
+        const channelId = decodeURIComponent(deleteChannelMatch[1]);
+        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.deleteCampusChannel(schoolId, channelId, actorName);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CHANNEL_DELETED", updated, requestId)
+        };
+      }
+
+      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/clubs") {
+        const auth = extractBearer(headers, nowMs);
+        const isAdminUser =
+          auth.roles.includes("ADMIN") ||
+          auth.roles.includes("OPERATOR") ||
+          store.users.get(auth.cloudUserId)?.role === "admin";
+        if (!isAdminUser) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限管理学生社团");
+        }
+        const schoolId = body?.school_id || "haut";
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.upsertCampusClub(schoolId, body || {}, actorName);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CLUB_UPSERTED", updated, requestId)
+        };
+      }
+
+      const deleteClubMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/clubs\/([^/]+)$/);
+      if (upperMethod === "DELETE" && deleteClubMatch) {
+        const auth = extractBearer(headers, nowMs);
+        const isAdminUser =
+          auth.roles.includes("ADMIN") ||
+          auth.roles.includes("OPERATOR") ||
+          store.users.get(auth.cloudUserId)?.role === "admin";
+        if (!isAdminUser) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限删除学生社团");
+        }
+        const clubId = decodeURIComponent(deleteClubMatch[1]);
+        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.deleteCampusClub(schoolId, clubId, actorName);
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_CLUB_DELETED", updated, requestId)
         };
       }
 

@@ -232,3 +232,114 @@ test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via 
   assert.equal(reconcileRes.job.attempt_count, 1, "Readback must not blind-retry submission");
   assert.equal(reconcileRes.order.payment_state, "PAID");
 });
+
+test("Triple-Schedule: Multi-day continuous reservation (repeat_days=7) automatically rolls over and arms next day's job after FIRE", async () => {
+  const mockSchool = new DeterministicMockSchoolBackend();
+  const app = createCampusCloudApp({
+    schoolProviderOptions: { mockBackend: mockSchool }
+  });
+
+  const nowMs = Date.parse("2026-11-04T06:00:00+08:00");
+  const { authHeaders } = setupBoundUser(app, nowMs);
+
+  const bindRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: authHeaders,
+    body: { school_id: "haut", student_no: "20237777" },
+    nowMs
+  });
+  const bindingId = bindRes.body.data.id;
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${bindingId}/complete`,
+    headers: authHeaders,
+    body: { delegated_secret: "secret_bundle" },
+    nowMs
+  });
+  const consentRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: authHeaders,
+    body: { school_id: "haut" },
+    nowMs
+  });
+
+  const createRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: authHeaders,
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentRes.body.data.id,
+      target_local_date: "2026-11-04",
+      target_local_time: "07:00:00",
+      repeat_days: 7
+    },
+    nowMs
+  });
+  assert.equal(createRes.status, 201);
+  assert.equal(createRes.body.data.repeat_days, 7);
+  assert.equal(createRes.body.data.remaining_days, 7);
+  assert.equal(createRes.body.data.end_local_date, "2026-11-10");
+
+  const day1JobId = createRes.body.data.job_id;
+  const day1FireMs = Date.parse("2026-11-04T07:00:00+08:00");
+  const fireRes = await app.reservationEngine.runScheduleEvent(day1JobId, "FIRE", day1FireMs + 200);
+  assert.equal(fireRes.job.state, "CONFIRMED");
+  assert.ok(fireRes.next_job_id, "Must spawn next day's job automatically when remaining_days > 1");
+  assert.equal(fireRes.remaining_days, 6);
+
+  const nextJob = app.store.reservationJobs.get(fireRes.next_job_id);
+  assert.ok(nextJob);
+  assert.equal(nextJob.booking_local_date, "2026-11-05");
+  assert.equal(nextJob.repeat_days, 7);
+  assert.equal(nextJob.remaining_days, 6);
+  assert.equal(nextJob.state, "ARMED");
+});
+
+test("Cloud-Native Campus Content: Public /api/v1/campus-content and Admin control plane dynamically publish channels & clubs", async () => {
+  const app = createCampusCloudApp();
+  const nowMs = Date.now();
+  const adminUser = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes",
+    subject: "856f-cf51-b064-5d84",
+    username: "yellowpeach",
+    role: "admin"
+  });
+  const session = app.identity.issueDeviceSession(adminUser, "Admin Console", null, 1, nowMs);
+  const adminHeaders = { authorization: `Bearer ${session.access_token}` };
+
+  const pubRes1 = await app.inject({
+    method: "GET",
+    url: "/api/v1/campus-content?school_id=haut"
+  });
+  assert.equal(pubRes1.status, 200);
+  assert.equal(pubRes1.body.code, "CAMPUS_CONTENT_OK");
+  assert.ok(pubRes1.body.data.channels.length >= 4);
+  assert.ok(pubRes1.body.data.clubs.length >= 16);
+
+  const upsertCh = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/campus-content/channels",
+    headers: adminHeaders,
+    body: {
+      school_id: "haut",
+      id: "ch_ai_lab",
+      title: "AI 创新实践频道",
+      subtitle: "大模型应用 · 开源项目交流",
+      tag_label: "科技",
+      invite_url: "https://pd.qq.com/s/hautai",
+      pinned: true,
+      sort_order: 1
+    }
+  });
+  assert.equal(upsertCh.status, 200);
+
+  const pubRes2 = await app.inject({
+    method: "GET",
+    url: "/api/v1/campus-content?school_id=haut"
+  });
+  assert.equal(pubRes2.body.data.channels[0].id, "ch_ai_lab");
+  assert.equal(pubRes2.body.data.channels[0].pinned, true);
+});

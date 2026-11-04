@@ -2051,6 +2051,19 @@ components:
           type: string
         accepted_policy_version:
           type: string
+        repeat_days:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 1
+        remaining_days:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 1
+        end_local_date:
+          type: string
+          format: date
     UpdateReservationPlanRequest:
       type: object
       additionalProperties: false
@@ -2070,6 +2083,14 @@ components:
           type: boolean
         enabled:
           type: boolean
+        repeat_days:
+          type: integer
+          minimum: 1
+          maximum: 30
+        remaining_days:
+          type: integer
+          minimum: 0
+          maximum: 30
     ReservationPlanEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
@@ -2103,6 +2124,12 @@ components:
             target_local_date:
               type: string
             target_local_time:
+              type: string
+            repeat_days:
+              type: integer
+            remaining_days:
+              type: integer
+            end_local_date:
               type: string
             target_at:
               type: string

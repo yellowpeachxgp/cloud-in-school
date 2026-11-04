@@ -571,26 +571,52 @@ export class HautLibraryProvider {
     };
   }
 
+  getShanghaiTodayDateString() {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date());
+  }
+
   async fetchLiveStudyRegions(rawToken, bookingDate) {
-    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, 7, bookingDate);
+    const shanghaiToday = this.getShanghaiTodayDateString();
+    const isFutureDate = Boolean(bookingDate && String(bookingDate) > shanghaiToday);
+    const queryDate = isFutureDate ? shanghaiToday : bookingDate || shanghaiToday;
+    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, 7, queryDate);
     const bJson = await this.wslibGetJson("/seatbook/layout/building", rawToken);
     const buildings = bJson?.builderInfo || bJson?.data?.builderInfo || [{ id: "1", buildingName: "莲花街图书馆" }];
     const regions = [];
     for (const b of buildings) {
       const bId = cleanSpiText(b?.id, "1") || "1";
       const bName = cleanSpiText(b?.buildingName, "莲花街图书馆") || "莲花街图书馆";
-      const rJson = await this.wslibGetJson(
+      let rJson = await this.wslibGetJson(
         `/seatbook/layout/region?buildingId=${encodeURIComponent(
           bId
         )}&layerid=&starttime=${encodeURIComponent(windowInfo.startFull)}&endtime=${encodeURIComponent(
           windowInfo.endFull
         )}`,
         rawToken
-      );
-      const list = rJson?.regionList || rJson?.data?.regionList || [];
+      ).catch(() => null);
+      let list = rJson?.regionList || rJson?.data?.regionList || [];
+      if (list.length === 0 && queryDate !== shanghaiToday) {
+        const fallbackWindow = await this.resolveDefaultBookingWindow(rawToken, 7, shanghaiToday);
+        rJson = await this.wslibGetJson(
+          `/seatbook/layout/region?buildingId=${encodeURIComponent(
+            bId
+          )}&layerid=&starttime=${encodeURIComponent(fallbackWindow.startFull)}&endtime=${encodeURIComponent(
+            fallbackWindow.endFull
+          )}`,
+          rawToken
+        ).catch(() => null);
+        list = rJson?.regionList || rJson?.data?.regionList || [];
+      }
       for (const r of list) {
         const regionName = cleanSpiText(r?.regionName, "");
         if (!r?.id || !regionName) continue;
+        const totalSeats = Number(r.num || 0);
+        const rawAvailable = Number(r.cannum || 0);
         regions.push({
           id: Number(r.id),
           region_id: Number(r.id),
@@ -600,30 +626,43 @@ export class HautLibraryProvider {
           layer_name: inferFloorFromRegionName(regionName, r.layerName),
           open_time: cleanSpiText(r.openDate, "07:30") || "07:30",
           close_time: cleanSpiText(r.closeDate, "22:00") || "22:00",
-          total_seats: Number(r.num || 0),
-          available_seats: Number(r.cannum || 0),
+          total_seats: totalSeats,
+          available_seats: isFutureDate && totalSeats > 0 ? totalSeats : rawAvailable,
           is_open: Number(r.isOpen ?? 1) !== 0
         });
       }
     }
     return {
-      booking_date: bookingDate,
-      start_full: windowInfo.startFull,
-      end_full: windowInfo.endFull,
+      booking_date: bookingDate || shanghaiToday,
+      start_full: isFutureDate ? `${bookingDate} 07:30:00` : windowInfo.startFull,
+      end_full: isFutureDate ? `${bookingDate} 22:00:00` : windowInfo.endFull,
       regions
     };
   }
 
   async fetchLiveRegionSeats(rawToken, regionId, bookingDate) {
-    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, regionId, bookingDate);
-    const qJson = await this.wslibGetJson(
+    const shanghaiToday = this.getShanghaiTodayDateString();
+    const isFutureDate = Boolean(bookingDate && String(bookingDate) > shanghaiToday);
+    const initialDate = isFutureDate ? shanghaiToday : bookingDate || shanghaiToday;
+    const windowInfo = await this.resolveDefaultBookingWindow(rawToken, regionId, initialDate);
+    let qJson = await this.wslibGetJson(
       `/seatbook/layout/query?starttime=${encodeURIComponent(
         windowInfo.startFull
       )}&endtime=${encodeURIComponent(windowInfo.endFull)}&regionid=${encodeURIComponent(regionId)}`,
       rawToken
-    );
+    ).catch(() => null);
+    let rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
+    if (rawSeats.length === 0 && initialDate !== shanghaiToday) {
+      const todayWindow = await this.resolveDefaultBookingWindow(rawToken, regionId, shanghaiToday);
+      qJson = await this.wslibGetJson(
+        `/seatbook/layout/query?starttime=${encodeURIComponent(
+          todayWindow.startFull
+        )}&endtime=${encodeURIComponent(todayWindow.endFull)}&regionid=${encodeURIComponent(regionId)}`,
+        rawToken
+      ).catch(() => null);
+      rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
+    }
     const regionName = cleanSpiText(qJson?.layout?.regionName, "");
-    const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
     const seats = rawSeats
       .filter((s) => s?.id && cleanSpiText(s?.seatName, ""))
       .map((s) => {
@@ -632,7 +671,8 @@ export class HautLibraryProvider {
           regionName && fullName.startsWith(regionName)
             ? fullName.slice(regionName.length).trim()
             : fullName;
-        const seatStatus = Number(s.seatStatus ?? 1);
+        const rawStatus = Number(s.seatStatus ?? 1);
+        const seatStatus = isFutureDate ? 2 : rawStatus;
         return {
           id: Number(s.id),
           seat_id: Number(s.id),
@@ -645,9 +685,9 @@ export class HautLibraryProvider {
     return {
       region_id: Number(regionId),
       region_name: regionName,
-      booking_date: bookingDate,
-      start_full: windowInfo.startFull,
-      end_full: windowInfo.endFull,
+      booking_date: bookingDate || shanghaiToday,
+      start_full: isFutureDate ? `${bookingDate} 07:30:00` : windowInfo.startFull,
+      end_full: isFutureDate ? `${bookingDate} 22:00:00` : windowInfo.endFull,
       seats
     };
   }

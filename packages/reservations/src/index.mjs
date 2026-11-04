@@ -24,6 +24,15 @@ export function normalizeLocalTimeString(timeStr) {
   throw new ContractError("BAD_REQUEST", `Invalid target_local_time format: ${timeStr}`);
 }
 
+export function addDaysToLocalDate(yyyyMmDd, deltaDays) {
+  const [y, m, d] = String(yyyyMmDd || "")
+    .split("-")
+    .map(Number);
+  if (!y || !m || !d) return String(yyyyMmDd || "");
+  const dt = new Date(Date.UTC(y, m - 1, d + Number(deltaDays || 0)));
+  return dt.toISOString().slice(0, 10);
+}
+
 export function computeTripleSchedule({
   targetLocalDate,
   targetLocalTime,
@@ -181,6 +190,15 @@ export class TripleScheduleEngine {
     const planId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
     const generation = 1;
+    const repeatDays = Math.min(
+      Math.max(Number(payload.repeat_days ?? payload.repeatDays ?? 1) || 1, 1),
+      30
+    );
+    const remainingDays = Math.min(
+      Math.max(Number(payload.remaining_days ?? payload.remainingDays ?? repeatDays) || repeatDays, 1),
+      repeatDays
+    );
+    const endLocalDate = addDaysToLocalDate(schedule.targetLocalDate, remainingDays - 1);
 
     const plan = {
       id: planId,
@@ -191,6 +209,9 @@ export class TripleScheduleEngine {
       execution_mode: "CLOUD_HOSTED",
       target_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: remainingDays,
+      end_local_date: endLocalDate,
       timezone_id: rules.time_zone,
       precheck_lead_seconds: 1800,
       final_check_lead_seconds: 300,
@@ -255,6 +276,9 @@ export class TripleScheduleEngine {
       school_id: binding.school_id,
       booking_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: remainingDays,
+      end_local_date: endLocalDate,
       precheck_at: schedule.precheckAtIso,
       final_check_at: schedule.finalCheckAtIso,
       fire_at: schedule.targetAtIso,
@@ -315,6 +339,9 @@ export class TripleScheduleEngine {
       execution_mode: "CLOUD_HOSTED",
       target_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: remainingDays,
+      end_local_date: endLocalDate,
       target_at: schedule.targetAtIso,
       precheck_at: schedule.precheckAtIso,
       final_check_at: schedule.finalCheckAtIso,
@@ -531,6 +558,7 @@ export class TripleScheduleEngine {
         event.status = "MISSED_WINDOW";
         event.actual_at = new Date(nowMs).toISOString();
         this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
+        this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
         return { job, event };
       }
 
@@ -590,6 +618,7 @@ export class TripleScheduleEngine {
           last_error_code: submitRes.errorCode || "SCHOOL_REJECTED",
           last_diagnostic_message: submitRes.diagnosticMessage || null
         });
+        this.rolloverMultiDayPlanIfEligible(plan, job, submitRes.diagnosticMessage || "当日未抢到", nowMs);
         return { job, event };
       }
 
@@ -666,6 +695,134 @@ export class TripleScheduleEngine {
     };
   }
 
+  rolloverMultiDayPlanIfEligible(plan, finishedJob, outcomeSummary, nowMs = Date.now()) {
+    if (!plan || !plan.enabled) return null;
+    const rem = Number(plan.remaining_days ?? finishedJob?.remaining_days ?? 1);
+    if (rem <= 1) {
+      plan.remaining_days = 0;
+      if (finishedJob) finishedJob.remaining_days = 0;
+      return null;
+    }
+
+    const baseDate = finishedJob?.booking_local_date || plan.target_local_date;
+    const nextDate = addDaysToLocalDate(baseDate, 1);
+    const existingNext = Array.from(this.store.reservationJobs.values()).find(
+      (j) =>
+        j.plan_id === plan.id &&
+        j.booking_local_date === nextDate &&
+        !["CANCELLED", "FAILED", "EXPIRED"].includes(j.state)
+    );
+    if (existingNext) return existingNext;
+
+    const nextRemaining = rem - 1;
+    const repeatDays = Number(plan.repeat_days || rem);
+    const nextEndDate = addDaysToLocalDate(nextDate, nextRemaining - 1);
+    const nextGen = (Number(plan.generation) || 1) + 1;
+
+    plan.remaining_days = nextRemaining;
+    plan.repeat_days = repeatDays;
+    plan.target_local_date = nextDate;
+    plan.end_local_date = nextEndDate;
+    plan.generation = nextGen;
+    plan.updated_at = new Date(nowMs).toISOString();
+
+    const rules = this.schoolProvider.getRules();
+    const nextSchedule = computeTripleSchedule({
+      targetLocalDate: nextDate,
+      targetLocalTime: plan.target_local_time || "07:00:00",
+      rules,
+      precheckLeadSeconds: 1800,
+      finalCheckLeadSeconds: 300,
+      maxLatenessSeconds: plan.max_lateness_seconds || 1800,
+      nowMs
+    });
+
+    const nextJobId = crypto.randomUUID();
+    const nextEvents = [
+      {
+        id: crypto.randomUUID(),
+        job_id: nextJobId,
+        plan_id: plan.id,
+        kind: "PRECHECK",
+        due_at: nextSchedule.precheckAtIso,
+        actual_at: nextSchedule.precheckDiagnostic ? new Date(nowMs).toISOString() : null,
+        status: nextSchedule.precheckInitialStatus,
+        generation: nextGen,
+        diagnostic_code: nextSchedule.precheckDiagnostic
+      },
+      {
+        id: crypto.randomUUID(),
+        job_id: nextJobId,
+        plan_id: plan.id,
+        kind: "FINAL_CHECK",
+        due_at: nextSchedule.finalCheckAtIso,
+        actual_at: nextSchedule.finalCheckDiagnostic ? new Date(nowMs).toISOString() : null,
+        status: nextSchedule.finalCheckInitialStatus,
+        generation: nextGen,
+        diagnostic_code: nextSchedule.finalCheckDiagnostic
+      },
+      {
+        id: crypto.randomUUID(),
+        job_id: nextJobId,
+        plan_id: plan.id,
+        kind: "FIRE",
+        due_at: nextSchedule.targetAtIso,
+        actual_at: null,
+        status: "ARMED",
+        generation: nextGen,
+        diagnostic_code: null
+      }
+    ];
+
+    const nextJob = {
+      id: nextJobId,
+      plan_id: plan.id,
+      cloud_user_id: plan.cloud_user_id,
+      school_binding_id: plan.school_binding_id,
+      school_id: plan.school_id,
+      booking_local_date: nextDate,
+      target_local_time: nextSchedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: nextRemaining,
+      end_local_date: nextEndDate,
+      precheck_at: nextSchedule.precheckAtIso,
+      final_check_at: nextSchedule.finalCheckAtIso,
+      fire_at: nextSchedule.targetAtIso,
+      due_at: nextSchedule.targetAtIso,
+      expires_at: nextSchedule.expiresAtIso,
+      state: nextSchedule.finalCheckDiagnostic
+        ? "FINAL_CHECK_OK"
+        : nextSchedule.precheckDiagnostic
+          ? "PRECHECK_OK"
+          : "ARMED",
+      capability: finishedJob?.capability || "AUTHORIZED_AUTOMATION",
+      state_version: 1,
+      lock_token: 0,
+      generation: nextGen,
+      attempt_count: 0,
+      attempt_started_at: null,
+      result_verified_at: null,
+      last_error_code: null,
+      last_diagnostic_message: `连续抢座已自动续期次日 ${nextDate}（剩余 ${nextRemaining}/${repeatDays} 天 · 上一轮：${outcomeSummary || "已完成"}）`,
+      prewarmed_targets: finishedJob?.prewarmed_targets || null,
+      created_at: new Date(nowMs).toISOString()
+    };
+
+    if (finishedJob) {
+      finishedJob.remaining_days = 0;
+      finishedJob.next_job_id = nextJobId;
+    }
+
+    this.store.reservationJobs.set(nextJobId, nextJob);
+    for (const ev of nextEvents) {
+      this.store.scheduleEvents.set(ev.id, ev);
+    }
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
+    return nextJob;
+  }
+
   async finalizeConfirmedBooking(job, binding, verifyRes, event, nowMs = Date.now()) {
     const plan = this.store.reservationPlans.get(job.plan_id);
     const schoolReservation = {
@@ -697,13 +854,29 @@ export class TripleScheduleEngine {
       nowMs
     });
 
+    const nextJob = this.rolloverMultiDayPlanIfEligible(
+      plan,
+      job,
+      `已约 ${schoolReservation.region_alias} ${schoolReservation.seat_alias}`,
+      nowMs
+    );
+
     this.store.addNotification({
       cloudUserId: job.cloud_user_id,
       category: "RESERVATION_CONFIRMED",
       title: "图书馆座位预约已核实成功",
-      body: `座位 ${schoolReservation.region_alias} ${schoolReservation.seat_alias} 已通过学校记录核验，请本人按校规到馆刷脸签到。订单状态：${order.payment_state}`
+      body: `座位 ${schoolReservation.region_alias} ${schoolReservation.seat_alias} 已通过学校记录核验，请本人按校规到馆刷脸签到。订单状态：${order.payment_state}${
+        nextJob ? ` · 已自动续期次日 ${nextJob.booking_local_date} 抢座（剩余 ${nextJob.remaining_days}/${nextJob.repeat_days} 天）` : ""
+      }`
     });
 
-    return { job, event, schoolReservation, order };
+    return {
+      job,
+      event,
+      schoolReservation,
+      order,
+      next_job_id: nextJob?.id || null,
+      remaining_days: plan?.remaining_days ?? 0
+    };
   }
 }
