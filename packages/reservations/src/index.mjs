@@ -282,6 +282,33 @@ export class TripleScheduleEngine {
       this.store.scheduleEvents.set(ev.id, ev);
     }
 
+    // Asynchronously prewarm target region & candidate seat IDs on job creation when live credentials exist
+    if (
+      binding.credential_ref &&
+      typeof this.schoolProvider.prewarmJobTargetSeats === "function"
+    ) {
+      Promise.resolve()
+        .then(async () => {
+          const decrypted = this._decryptBindingCredential(job, binding, Date.now());
+          const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
+            job,
+            plan,
+            binding,
+            decryptedSecret: decrypted
+          });
+          if (prewarmRes?.auth) {
+            this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, Date.now());
+          }
+          if (prewarmRes?.prewarmed) {
+            job.prewarmed_targets = prewarmRes.prewarmed;
+          }
+          if (typeof this.store.saveSnapshot === "function") {
+            this.store.saveSnapshot();
+          }
+        })
+        .catch(() => {});
+    }
+
     return {
       plan_id: planId,
       job_id: jobId,
@@ -383,23 +410,42 @@ export class TripleScheduleEngine {
 
     if (kind === "PRECHECK") {
       // Read-only precheck at T-30m: check binding, rules, wallet availability
-      const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
-      if (wallet.micropeach_balance < this.store.pricingMicropeach) {
-        event.status = "PRECHECK_NEEDS_USER";
-        event.diagnostic_code = "WALLET_INSUFFICIENT";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "SKIPPED_FINANCE", {
-          last_error_code: "WALLET_INSUFFICIENT"
-        });
-        return { job, event };
+      try {
+        const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
+        if (wallet.micropeach_balance < this.store.pricingMicropeach) {
+          event.status = "PRECHECK_NEEDS_USER";
+          event.diagnostic_code = "WALLET_INSUFFICIENT";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "SKIPPED_FINANCE", {
+            last_error_code: "WALLET_INSUFFICIENT"
+          });
+          return { job, event };
+        }
+      } catch {
+        // Proceed if wallet check encounters transient network issue
       }
       if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
         const decrypted = this._decryptBindingCredential(job, binding, nowMs);
         const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
         if (bundle.isLiveCredential) {
           try {
-            const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-            this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+            if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
+              const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
+                job,
+                plan,
+                binding,
+                decryptedSecret: decrypted
+              });
+              if (prewarmRes?.auth) {
+                this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+              }
+              if (prewarmRes?.prewarmed) {
+                job.prewarmed_targets = prewarmRes.prewarmed;
+              }
+            } else {
+              const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+              this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+            }
           } catch {
             // Will retry at FINAL_CHECK
           }
@@ -427,13 +473,32 @@ export class TripleScheduleEngine {
         const decrypted = this._decryptBindingCredential(job, binding, nowMs);
         const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
         if (bundle.isLiveCredential) {
-          const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-          this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+          try {
+            if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
+              const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
+                job,
+                plan,
+                binding,
+                decryptedSecret: decrypted
+              });
+              if (prewarmRes?.auth) {
+                this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+              }
+              if (prewarmRes?.prewarmed) {
+                job.prewarmed_targets = prewarmRes.prewarmed;
+              }
+            } else {
+              const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+              this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+            }
+          } catch (err) {
+            event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
+          }
         }
       }
       event.status = "FINAL_CHECK_OK";
       event.actual_at = new Date(nowMs).toISOString();
-      event.diagnostic_code = "READ_ONLY_FINAL_CHECK_PASSED";
+      event.diagnostic_code = event.diagnostic_code || "READ_ONLY_FINAL_CHECK_PASSED";
       this.casJobState(jobId, job.state_version, "FINAL_CHECK_OK");
       return { job, event };
     }
@@ -499,6 +564,15 @@ export class TripleScheduleEngine {
         };
       }
 
+      if (submitRes.rawToken) {
+        this._updateBindingCredentialTokens(
+          binding,
+          { rawToken: submitRes.rawToken },
+          decryptedSecret,
+          nowMs
+        );
+      }
+
       if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
         job.pending_external_booking_id = submitRes.externalBookingId || null;
         event.status = "RESULT_UNKNOWN";
@@ -524,6 +598,7 @@ export class TripleScheduleEngine {
         job,
         binding,
         decryptedSecret,
+        rawToken: submitRes.rawToken || null,
         expectedExternalBookingId: submitRes.externalBookingId
       });
       if (!verifyRes.verified) {

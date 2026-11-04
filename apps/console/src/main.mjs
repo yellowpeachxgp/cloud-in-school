@@ -1295,11 +1295,13 @@ export function renderConsoleHtml(ctx = {}) {
           });
         }
 
-        // Populate date default (tomorrow)
+        // Populate date default in Asia/Shanghai (today if before 07:00, tomorrow if 07:00 or later)
         var dateInput = document.getElementById("plan-date");
         if (dateInput && !dateInput.value) {
-          var tmr = new Date(Date.now() + 86400000);
-          dateInput.value = tmr.toISOString().slice(0, 10);
+          var shNow = new Date(Date.now() + 8 * 3600000);
+          var shHour = shNow.getUTCHours();
+          var targetSh = shHour < 7 ? shNow : new Date(shNow.getTime() + 86400000);
+          dateInput.value = targetSh.toISOString().slice(0, 10);
         }
 
         // Interactive area pills + visual seat grid + dropdowns (with live HAUT library loader)
