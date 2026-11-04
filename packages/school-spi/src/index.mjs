@@ -381,6 +381,31 @@ export class HautLibraryProvider {
           signal: AbortSignal.timeout(9000)
         });
         saveCookies(r, currUrl);
+        // When wslib's /stage-api/ Nginx upstream returns 502/503/504, the CAS ST ticket is unconsumed;
+        // seamlessly fail over to the healthy /spacelink/api/caslogin/ticketlogin upstream.
+        if (
+          !r.headers.get("location") &&
+          r.status >= 500 &&
+          currUrl.includes("/stage-api/api/caslogin/ticketlogin")
+        ) {
+          const fallbackUrl = currUrl.replace(
+            "/stage-api/api/caslogin/ticketlogin",
+            "/spacelink/api/caslogin/ticketlogin"
+          );
+          validateAllowedSchoolUrl(fallbackUrl, this.allowedHosts);
+          currUrl = fallbackUrl;
+          const fbCookies = cookieHeader(currUrl);
+          r = await fetch(currUrl, {
+            method: "GET",
+            redirect: "manual",
+            headers: {
+              "User-Agent": HAUT_USER_AGENT,
+              ...(fbCookies ? { Cookie: fbCookies } : {})
+            },
+            signal: AbortSignal.timeout(9000)
+          });
+          saveCookies(r, currUrl);
+        }
       }
       return null;
     };
