@@ -28,6 +28,7 @@ export const ERROR_CODES = Object.freeze({
   SCHOOL_AUTH_EXPIRED: { status: 401, retryable: false, userAction: "REAUTHORIZE_SCHOOL_BINDING" },
   CAPTCHA_OR_MFA_REQUIRED: { status: 409, retryable: false, userAction: "COMPLETE_MANUAL_VERIFICATION" },
   SCHOOL_RATE_LIMITED: { status: 429, retryable: true, userAction: "WAIT_FOR_RATE_LIMIT_WINDOW" },
+  RATE_LIMITED: { status: 429, retryable: true, userAction: "WAIT_FOR_RATE_LIMIT_WINDOW" },
   BOOKING_WINDOW_CLOSED: { status: 422, retryable: false, userAction: "SELECT_TARGET_TIME_WITHIN_SCHOOL_WINDOW" },
   BOOKING_RESULT_UNKNOWN: { status: 202, retryable: false, userAction: "AWAIT_AUTHORITATIVE_READBACK" },
   WALLET_INSUFFICIENT: { status: 409, retryable: false, userAction: "RECHARGE_PEACH_WALLET" },

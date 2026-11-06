@@ -23,6 +23,7 @@ test("Contract Parity: 100% bidirectional parity between registered HTTP routes,
     const reg = regByKey.get(key);
     assert.ok(reg, `Missing registered route for inventory entry: ${key}`);
     assert.equal(reg.operationId, inv.operationId, `operationId mismatch on ${key}`);
+    assert.equal(reg.auth, inv.auth, `auth mode mismatch on ${key} (${reg.operationId})`);
     assert.ok(
       openApiText.includes(`operationId: ${inv.operationId}`),
       `OpenAPI 3.1.2 spec missing operationId: ${inv.operationId}`

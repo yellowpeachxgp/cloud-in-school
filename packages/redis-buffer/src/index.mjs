@@ -317,8 +317,10 @@ export class RedisGatewayBuffer {
 
     // L1 in-memory hot burst cache: key -> { value, expiresAtMs, cachedAtIso }
     this.l1Cache = new Map();
-    // Singleflight in-flight promises: key -> Promise
+    // Singleflight in-flight promises: key -> Promise<{ value, fromRedis }>
     this.inFlight = new Map();
+    // Local fallback rate limit buckets when Redis is disabled or unreachable
+    this.localRateLimits = new Map();
 
     // Telemetry counters
     this.metrics = {
@@ -389,8 +391,8 @@ export class RedisGatewayBuffer {
       // 2) Singleflight coalescing check (if another request is already fetching L2/computing)
       if (this.inFlight.has(fullKey)) {
         this.metrics.singleflight_coalesced += 1;
-        const coalescedVal = await this.inFlight.get(fullKey);
-        return { value: coalescedVal, cacheStatus: "COALESCED" };
+        const coalescedRes = await this.inFlight.get(fullKey);
+        return { value: coalescedRes.value, cacheStatus: "COALESCED" };
       }
 
       const flightPromise = (async () => {
@@ -450,10 +452,7 @@ export class RedisGatewayBuffer {
         }
       })();
 
-      this.inFlight.set(
-        fullKey,
-        flightPromise.then((r) => r.value)
-      );
+      this.inFlight.set(fullKey, flightPromise);
 
       try {
         const res = await flightPromise;
@@ -524,19 +523,47 @@ export class RedisGatewayBuffer {
   }
 
   /**
-   * Redis-backed atomic fixed-window rate limiter (`INCR` + `PEXPIRE`).
+   * Redis-backed atomic fixed-window rate limiter (`INCR` + `PEXPIRE`) with local in-memory fallback.
    */
-  async checkRateLimit(bucketKey, maxRequests = 120, windowSeconds = 60) {
+  async checkRateLimit(bucketKey, maxRequests = 120, windowSeconds = 60, nowMs = Date.now()) {
     this.metrics.rate_limit_checks += 1;
-    const slot = Math.floor(Date.now() / (windowSeconds * 1000));
+    const windowMs = Math.max(1000, windowSeconds * 1000);
+    const slot = Math.floor(nowMs / windowMs);
     const rlKey = `${this.keyPrefix}rl:${bucketKey}:${slot}`;
+
+    const checkLocalFallback = () => {
+      if (this.localRateLimits.size > 4096) {
+        for (const [k, v] of this.localRateLimits.entries()) {
+          if (nowMs > v.expiresAtMs) this.localRateLimits.delete(k);
+        }
+        if (this.localRateLimits.size > 4096) {
+          const oldest = this.localRateLimits.keys().next().value;
+          if (oldest !== undefined) this.localRateLimits.delete(oldest);
+        }
+      }
+      let entry = this.localRateLimits.get(rlKey);
+      if (!entry || nowMs > entry.expiresAtMs) {
+        entry = { count: 0, expiresAtMs: (slot + 1) * windowMs };
+        this.localRateLimits.set(rlKey, entry);
+      }
+      entry.count += 1;
+      const allowed = entry.count <= maxRequests;
+      if (!allowed) this.metrics.rate_limit_blocked += 1;
+      return {
+        allowed,
+        current: entry.count,
+        limit: maxRequests,
+        remaining: Math.max(0, maxRequests - entry.count)
+      };
+    };
+
     if (!this.client.enabled) {
-      return { allowed: true, current: 1, limit: maxRequests, remaining: maxRequests - 1 };
+      return checkLocalFallback();
     }
     try {
       const count = Number(await this.client.sendCommand(["INCR", rlKey]));
       if (count === 1) {
-        this.client.sendCommand(["PEXPIRE", rlKey, String(windowSeconds * 1000)]).catch(() => {});
+        this.client.sendCommand(["PEXPIRE", rlKey, String(windowMs)]).catch(() => {});
       }
       const allowed = count <= maxRequests;
       if (!allowed) this.metrics.rate_limit_blocked += 1;
@@ -547,7 +574,7 @@ export class RedisGatewayBuffer {
         remaining: Math.max(0, maxRequests - count)
       };
     } catch {
-      return { allowed: true, current: 1, limit: maxRequests, remaining: maxRequests - 1 };
+      return checkLocalFallback();
     }
   }
 

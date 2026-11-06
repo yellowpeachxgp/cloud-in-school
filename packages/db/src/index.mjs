@@ -632,8 +632,14 @@ export class CloudDatabaseStore {
   }
 
   getCampusContent(schoolId = "haut", { includeDisabled = false } = {}) {
-    const key = String(schoolId || "haut").toLowerCase();
+    const key = String(schoolId || "haut").trim().toLowerCase();
+    if (!/^[a-z0-9_-]{2,32}$/.test(key)) {
+      throw new ContractError("BAD_REQUEST", `Invalid school_id: ${key}`);
+    }
     if (!this.campusContent.has(key)) {
+      if (!this.schoolIntegrations.has(key) && key !== "haut") {
+        throw new ContractError("NOT_FOUND", `Campus content not found for school_id: ${key}`);
+      }
       this.campusContent.set(key, {
         ...createDefaultHautCampusContent(),
         school_id: key

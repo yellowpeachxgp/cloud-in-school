@@ -18,6 +18,14 @@ export function buildRefundEventKey(orderId) {
   return `dis:reservation:${orderId}:refund:v1`;
 }
 
+export function isSafeSsoSubject(ssoSubject) {
+  if (!ssoSubject || typeof ssoSubject !== "string") return false;
+  const trimmed = ssoSubject.trim();
+  if (!trimmed || trimmed === "." || trimmed === "..") return false;
+  if (/[\/\\?#\0\r\n\s]/.test(trimmed)) return false;
+  return /^[a-zA-Z0-9._:-]{2,128}$/.test(trimmed);
+}
+
 export class IsolatedFinanceBridge {
   constructor(options = {}) {
     this.ssoBaseUrl = options.ssoBaseUrl || process.env.SSO_FINANCE_BASE_URL || "https://sso.xpeach.codes";
@@ -27,7 +35,12 @@ export class IsolatedFinanceBridge {
       options.realDebitsEnabled !== undefined
         ? Boolean(options.realDebitsEnabled)
         : Boolean(this.internalServiceKey || process.env.FINANCE_ENABLE_REAL_DEBITS === "true");
-    // Only used when unit tests explicitly call setSandboxBalance() or use synthetic test subjects
+    this.allowSandboxFallback =
+      options.allowSandboxFallback !== undefined
+        ? Boolean(options.allowSandboxFallback)
+        : process.env.NODE_ENV !== "production" && !this.realDebitsEnabled;
+    this.httpTimeoutMs = Number(options.httpTimeoutMs) || 8_000;
+    // Only used when unit tests explicitly call setSandboxBalance() or use synthetic test subjects in non-production
     this.sandboxBalancesMicropeach = new Map();
     this.processedIdempotencyKeys = new Map();
     this.inFlightLocks = new Map();
@@ -38,24 +51,24 @@ export class IsolatedFinanceBridge {
   }
 
   getSandboxBalance(cloudUserId) {
-    if (!this.sandboxBalancesMicropeach.has(cloudUserId)) {
-      this.sandboxBalancesMicropeach.set(cloudUserId, 50_000);
+    if (this.sandboxBalancesMicropeach.has(cloudUserId)) {
+      return this.sandboxBalancesMicropeach.get(cloudUserId);
     }
-    return this.sandboxBalancesMicropeach.get(cloudUserId);
+    if (this.allowSandboxFallback) {
+      this.sandboxBalancesMicropeach.set(cloudUserId, 50_000);
+      return 50_000;
+    }
+    return 0;
   }
 
   _isSyntheticTestSubject(ssoSubject) {
+    if (!this.allowSandboxFallback) return false;
     if (!ssoSubject || typeof ssoSubject !== "string") return true;
-    if (
+    return (
       ssoSubject.startsWith("xpeach_user_") ||
       ssoSubject.startsWith("sso_") ||
       ssoSubject.startsWith("sub_") ||
       ssoSubject.startsWith("test_")
-    ) {
-      return true;
-    }
-    return !/^[0-9a-fA-F]{4}(?:-[0-9a-fA-F]{4}){3}$|^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(
-      ssoSubject
     );
   }
 
@@ -81,7 +94,7 @@ export class IsolatedFinanceBridge {
 
     // 2) Live XPEACH SSO query for real SSO users
     const isRealUser = !this._isSyntheticTestSubject(ssoSubject);
-    if (isRealUser && (this.internalServiceKey || userObj?.sso_access_token)) {
+    if (isRealUser && isSafeSsoSubject(ssoSubject) && (this.internalServiceKey || userObj?.sso_access_token)) {
       try {
         const headers = { Accept: "application/json" };
         if (this.internalServiceKey) {
@@ -91,7 +104,11 @@ export class IsolatedFinanceBridge {
         }
         const resp = await fetch(
           `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoSubject)}/peach`,
-          { method: "GET", headers }
+          {
+            method: "GET",
+            headers,
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
+          }
         );
         if (resp.ok) {
           const data = await resp.json();
@@ -166,8 +183,8 @@ export class IsolatedFinanceBridge {
       };
     }
 
-    // 4) If real user has no wallet yet, return 0.00 🍑 (never fake 5.0 🍑)
-    if (isRealUser) {
+    // 4) If real user has no wallet yet (or sandbox fallback is disabled), return 0.00 🍑 (never fake 5.0 🍑)
+    if (isRealUser || !this.allowSandboxFallback) {
       return {
         cloud_user_id: cloudUserId,
         sso_subject: ssoSubject,
@@ -187,7 +204,7 @@ export class IsolatedFinanceBridge {
       };
     }
 
-    // 5) Synthetic unit-test fallback
+    // 5) Synthetic unit-test fallback (only when allowSandboxFallback is true)
     const micro = this.getSandboxBalance(cloudUserId);
     const peach = micro / MICROPEACH_PER_PEACH;
     return {
@@ -246,11 +263,16 @@ export class IsolatedFinanceBridge {
         return { ...cached, deduplicated: true };
       }
 
-      const isRealUser =
-        !this.sandboxBalancesMicropeach.has(cloudUserId) &&
-        !this._isSyntheticTestSubject(ssoSubject);
+      const hasExplicitSandbox = this.sandboxBalancesMicropeach.has(cloudUserId);
+      const isRealUser = !hasExplicitSandbox && !this._isSyntheticTestSubject(ssoSubject);
 
-      if (this.realDebitsEnabled && this.internalServiceKey && isRealUser) {
+      if (this.realDebitsEnabled && !hasExplicitSandbox) {
+        if (!this.internalServiceKey || !isSafeSsoSubject(ssoSubject)) {
+          throw new ContractError(
+            "SSO_UNAVAILABLE",
+            "Real SSO 🍑 debit requires valid SSO subject and internal service key"
+          );
+        }
         const resp = await fetch(
           `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoSubject)}/peach/adjust`,
           {
@@ -265,7 +287,8 @@ export class IsolatedFinanceBridge {
               idempotency_key: eventKey,
               source_site: "dis",
               reason
-            })
+            }),
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
           }
         );
         const body = await resp.json().catch(() => ({}));
@@ -296,19 +319,23 @@ export class IsolatedFinanceBridge {
             body: JSON.stringify({
               site_short_code: "dis",
               site_name: "日在校园",
+              user_id: ssoSubject,
               user_uuid: ssoSubject,
               username: userObj?.username || userObj?.display_name || ssoSubject,
               event_type: resolvedPeach < 0 ? "library_seat_reservation_debit" : "library_seat_reservation_refund",
               direction: resolvedPeach < 0 ? "debit" : "credit",
               peach_amount: Math.abs(resolvedPeach),
+              delta_peach: Math.abs(resolvedPeach),
               currency: "PEACH",
+              order_ref: eventKey,
               order_no: eventKey,
               idempotency_key: `${eventKey}:ledger`,
               already_applied_on_source: true,
               apply_wallet_sync: false,
               description: reason,
               occurred_at: new Date().toISOString()
-            })
+            }),
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
           });
         } catch {
           // Best-effort cross-site ledger reporting
@@ -322,6 +349,10 @@ export class IsolatedFinanceBridge {
         };
         this.processedIdempotencyKeys.set(eventKey, out);
         return out;
+      }
+
+      if (!hasExplicitSandbox && !this.allowSandboxFallback && isRealUser) {
+        throw new ContractError("SSO_UNAVAILABLE", "Sandbox balance fallback is disabled in production");
       }
 
       const currentMicro = this.getSandboxBalance(cloudUserId);
@@ -363,7 +394,8 @@ export class IsolatedFinanceBridge {
           headers: {
             Accept: "application/json",
             "X-Internal-Service-Key": this.internalServiceKey
-          }
+          },
+          signal: AbortSignal.timeout(this.httpTimeoutMs)
         }
       );
       if (!resp.ok) return null;
@@ -378,6 +410,24 @@ export class FinanceSagaService {
   constructor(store, financeBridge) {
     this.store = store;
     this.financeBridge = financeBridge;
+    this.orderLocks = new Map();
+  }
+
+  async withOrderLock(lockKey, fn) {
+    while (this.orderLocks.has(lockKey)) {
+      await this.orderLocks.get(lockKey);
+    }
+    let release;
+    const p = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.orderLocks.set(lockKey, p);
+    try {
+      return await fn();
+    } finally {
+      this.orderLocks.delete(lockKey);
+      release();
+    }
   }
 
   async getWalletSnapshot(cloudUserId) {
@@ -431,129 +481,162 @@ export class FinanceSagaService {
   }
 
   async executeDebitForOrder(orderId, nowMs = Date.now()) {
-    const order = this.store.reservationOrders.get(orderId);
-    if (!order) throw new ContractError("NOT_FOUND", "Reservation order not found");
-    if (order.school_result !== "CONFIRMED") {
-      throw new ContractError("CONFLICT", "Cannot debit an unconfirmed school reservation");
-    }
+    return this.withOrderLock(orderId, async () => {
+      const order = this.store.reservationOrders.get(orderId);
+      if (!order) throw new ContractError("NOT_FOUND", "Reservation order not found");
+      if (order.school_result !== "CONFIRMED") {
+        throw new ContractError("CONFLICT", "Cannot debit an unconfirmed school reservation");
+      }
+      if (order.payment_state === "REFUNDED") {
+        throw new ContractError("CONFLICT", "Cannot debit an order that has already been refunded");
+      }
+      if (order.payment_state === "PAID" || order.payment_state === "NOT_REQUIRED") {
+        return order;
+      }
 
-    const eventKey = buildDebitEventKey(order.id);
-    let op = this.store.financeOperations.get(eventKey);
-    const pricePeach = order.price_peach ?? order.price_micropeach / MICROPEACH_PER_PEACH;
-    if (!op) {
-      op = {
-        id: crypto.randomUUID(),
-        order_id: order.id,
-        kind: "DEBIT",
-        event_key: eventKey,
-        peach_amount: pricePeach,
-        amount_micropeach: order.price_micropeach,
-        status: "IN_FLIGHT",
-        sso_request_id: null,
-        last_error_code: null,
-        attempt_count: 0,
-        created_at: new Date(nowMs).toISOString(),
-        updated_at: new Date(nowMs).toISOString()
-      };
-      this.store.financeOperations.set(eventKey, op);
-    }
+      const eventKey = buildDebitEventKey(order.id);
+      let op = this.store.financeOperations.get(eventKey);
+      const pricePeach = order.price_peach ?? order.price_micropeach / MICROPEACH_PER_PEACH;
+      if (!op) {
+        op = {
+          id: crypto.randomUUID(),
+          order_id: order.id,
+          kind: "DEBIT",
+          event_key: eventKey,
+          peach_amount: pricePeach,
+          amount_micropeach: order.price_micropeach,
+          status: "IN_FLIGHT",
+          sso_request_id: null,
+          last_error_code: null,
+          attempt_count: 0,
+          created_at: new Date(nowMs).toISOString(),
+          updated_at: new Date(nowMs).toISOString()
+        };
+        this.store.financeOperations.set(eventKey, op);
+      }
 
-    op.attempt_count += 1;
-    op.updated_at = new Date(nowMs).toISOString();
-    const user = this.store.users.get(order.cloud_user_id);
+      op.attempt_count += 1;
+      op.updated_at = new Date(nowMs).toISOString();
+      const user = this.store.users.get(order.cloud_user_id);
 
-    const bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
-      cloudUserId: order.cloud_user_id,
-      ssoSubject: user?.subject,
-      deltaPeach: -pricePeach,
-      deltaMicropeach: -order.price_micropeach,
-      eventKey,
-      reason: `日在校园图书馆占座预约扣费 (${order.id})`,
-      userObj: user
-    });
+      let bridgeRes;
+      try {
+        bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
+          cloudUserId: order.cloud_user_id,
+          ssoSubject: user?.subject,
+          deltaPeach: -pricePeach,
+          deltaMicropeach: -order.price_micropeach,
+          eventKey,
+          reason: `日在校园图书馆占座预约扣费 (${order.id})`,
+          userObj: user
+        });
+      } catch (err) {
+        op.status = "FAILED_RETRYABLE";
+        op.last_error_code = err?.code || "SSO_UNAVAILABLE";
+        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        throw err;
+      }
 
-    if (!bridgeRes.ok && bridgeRes.error === "WALLET_INSUFFICIENT") {
-      op.status = "FAILED_INSUFFICIENT";
-      op.last_error_code = "WALLET_INSUFFICIENT";
-      order.payment_state = "PAYMENT_DUE";
+      if (!bridgeRes.ok && bridgeRes.error === "WALLET_INSUFFICIENT") {
+        op.status = "FAILED_INSUFFICIENT";
+        op.last_error_code = "WALLET_INSUFFICIENT";
+        order.payment_state = "PAYMENT_DUE";
+        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        return order;
+      }
+
+      op.status = "SUCCEEDED";
+      op.sso_request_id = bridgeRes.ssoRequestId;
+      order.payment_state = "PAID";
+      order.paid_at = order.paid_at || new Date(nowMs).toISOString();
       if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
       return order;
-    }
-
-    op.status = "SUCCEEDED";
-    op.sso_request_id = bridgeRes.ssoRequestId;
-    order.payment_state = "PAID";
-    order.paid_at = order.paid_at || new Date(nowMs).toISOString();
-    if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
-    return order;
+    });
   }
 
   async issueRefundForOrder(orderId, { peachAmount, amountMicropeach, reason, actorRef, secondApproverRef }, nowMs = Date.now()) {
-    const order = this.store.reservationOrders.get(orderId);
-    if (!order) throw new ContractError("NOT_FOUND", "Order not found");
-    if (order.payment_state !== "PAID" && order.payment_state !== "REFUNDED") {
-      throw new ContractError("CONFLICT", "Only PAID orders are eligible for refund");
-    }
-    if (!secondApproverRef || secondApproverRef === actorRef) {
-      throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
-    }
-    const resolvedMicro =
-      typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
-        ? amountMicropeach
-        : typeof peachAmount === "number"
-          ? Math.round(peachAmount * MICROPEACH_PER_PEACH)
-          : 0;
-    if (!Number.isInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
-      throw new ContractError(
-        "BAD_REQUEST",
-        `Refund amount must be between 0.01 🍑 and paid amount`
-      );
-    }
+    return this.withOrderLock(orderId, async () => {
+      const order = this.store.reservationOrders.get(orderId);
+      if (!order) throw new ContractError("NOT_FOUND", "Order not found");
+      if (order.payment_state === "REFUNDED") {
+        return order;
+      }
+      if (order.payment_state !== "PAID") {
+        throw new ContractError("CONFLICT", "Only PAID orders are eligible for refund");
+      }
+      const cleanActor = typeof actorRef === "string" ? actorRef.trim() : "";
+      const cleanSecond = typeof secondApproverRef === "string" ? secondApproverRef.trim() : "";
+      if (!cleanActor || !cleanSecond || cleanSecond === cleanActor) {
+        throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
+      }
+      const resolvedMicro =
+        typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
+          ? amountMicropeach
+          : typeof peachAmount === "number"
+            ? Math.round(peachAmount * MICROPEACH_PER_PEACH)
+            : 0;
+      if (!Number.isInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
+        throw new ContractError(
+          "BAD_REQUEST",
+          `Refund amount must be between 0.01 🍑 and paid amount`
+        );
+      }
 
-    const eventKey = buildRefundEventKey(order.id);
-    const resolvedPeach = resolvedMicro / MICROPEACH_PER_PEACH;
-    let op = this.store.financeOperations.get(eventKey);
-    if (!op) {
-      op = {
-        id: crypto.randomUUID(),
-        order_id: order.id,
-        kind: "REFUND",
-        event_key: eventKey,
-        peach_amount: resolvedPeach,
-        amount_micropeach: resolvedMicro,
-        status: "IN_FLIGHT",
-        sso_request_id: null,
-        last_error_code: null,
-        attempt_count: 0,
-        created_at: new Date(nowMs).toISOString(),
-        updated_at: new Date(nowMs).toISOString()
-      };
-      this.store.financeOperations.set(eventKey, op);
-    }
+      const eventKey = buildRefundEventKey(order.id);
+      const resolvedPeach = resolvedMicro / MICROPEACH_PER_PEACH;
+      let op = this.store.financeOperations.get(eventKey);
+      if (!op) {
+        op = {
+          id: crypto.randomUUID(),
+          order_id: order.id,
+          kind: "REFUND",
+          event_key: eventKey,
+          peach_amount: resolvedPeach,
+          amount_micropeach: resolvedMicro,
+          status: "IN_FLIGHT",
+          sso_request_id: null,
+          last_error_code: null,
+          attempt_count: 0,
+          created_at: new Date(nowMs).toISOString(),
+          updated_at: new Date(nowMs).toISOString()
+        };
+        this.store.financeOperations.set(eventKey, op);
+      }
 
-    op.attempt_count += 1;
-    const user = this.store.users.get(order.cloud_user_id);
-    const bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
-      cloudUserId: order.cloud_user_id,
-      ssoSubject: user?.subject,
-      deltaPeach: resolvedPeach,
-      deltaMicropeach: resolvedMicro,
-      eventKey,
-      reason: `日在校园预约订单退还 (${order.id}): ${reason}`,
-      userObj: user
+      op.attempt_count += 1;
+      op.updated_at = new Date(nowMs).toISOString();
+      const user = this.store.users.get(order.cloud_user_id);
+      let bridgeRes;
+      try {
+        bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
+          cloudUserId: order.cloud_user_id,
+          ssoSubject: user?.subject,
+          deltaPeach: resolvedPeach,
+          deltaMicropeach: resolvedMicro,
+          eventKey,
+          reason: `日在校园预约订单退还 (${order.id}): ${reason}`,
+          userObj: user
+        });
+      } catch (err) {
+        op.status = "FAILED_RETRYABLE";
+        op.last_error_code = err?.code || "SSO_UNAVAILABLE";
+        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        throw err;
+      }
+
+      op.status = "SUCCEEDED";
+      op.sso_request_id = bridgeRes.ssoRequestId;
+      order.payment_state = "REFUNDED";
+      this.store.recordAudit({
+        actor_kind: "FINANCE_OPERATOR",
+        actor_ref: `${cleanActor}+${cleanSecond}`,
+        action: "REFUND_ORDER",
+        resource_kind: "reservation_order",
+        resource_ref: order.id,
+        outcome: "REFUNDED"
+      });
+      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+      return order;
     });
-
-    op.status = "SUCCEEDED";
-    op.sso_request_id = bridgeRes.ssoRequestId;
-    order.payment_state = "REFUNDED";
-    this.store.recordAudit({
-      actor_kind: "FINANCE_OPERATOR",
-      actor_ref: `${actorRef}+${secondApproverRef}`,
-      action: "REFUND_ORDER",
-      resource_kind: "reservation_order",
-      resource_ref: order.id,
-      outcome: "REFUNDED"
-    });
-    return order;
   }
 }

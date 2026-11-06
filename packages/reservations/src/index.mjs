@@ -127,6 +127,24 @@ export class TripleScheduleEngine {
     this.schoolProvider = schoolProvider;
     this.financeService = financeService;
     this.kmsVault = kmsVault;
+    this.inFlightJobs = new Map();
+  }
+
+  async withJobLock(jobId, fn) {
+    while (this.inFlightJobs.has(jobId)) {
+      await this.inFlightJobs.get(jobId);
+    }
+    let release;
+    const p = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.inFlightJobs.set(jobId, p);
+    try {
+      return await fn();
+    } finally {
+      this.inFlightJobs.delete(jobId);
+      release();
+    }
   }
 
   createPlanAndJob(cloudUserId, payload, nowMs = Date.now()) {
@@ -410,250 +428,297 @@ export class TripleScheduleEngine {
   }
 
   async runScheduleEvent(jobId, kind, nowMs = Date.now(), options = {}) {
-    const job = this.store.reservationJobs.get(jobId);
-    if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
-    const plan = this.store.reservationPlans.get(job.plan_id);
-    const binding = this.store.schoolBindings.get(job.school_binding_id);
-    const consent = plan ? this.store.consents.get(plan.consent_id) : null;
+    return this.withJobLock(jobId, async () => {
+      const job = this.store.reservationJobs.get(jobId);
+      if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
+      const plan = this.store.reservationPlans.get(job.plan_id);
+      const binding = this.store.schoolBindings.get(job.school_binding_id);
+      const consent = plan ? this.store.consents.get(plan.consent_id) : null;
 
-    const event = Array.from(this.store.scheduleEvents.values()).find(
-      (e) => e.job_id === jobId && e.kind === kind && e.generation === job.generation
-    );
-    if (!event) {
-      throw new ContractError("NOT_FOUND", `Schedule event ${kind} not found for job ${jobId}`);
-    }
-    if (["CONFIRMED", "FAILED", "CANCELLED", "REVOKED"].includes(job.state)) {
-      event.status = "SKIPPED_TERMINAL";
-      return { job, event };
-    }
+      const event = Array.from(this.store.scheduleEvents.values()).find(
+        (e) => e.job_id === jobId && e.kind === kind && e.generation === job.generation
+      );
+      if (!event) {
+        throw new ContractError("NOT_FOUND", `Schedule event ${kind} not found for job ${jobId}`);
+      }
+      if (["CONFIRMED", "FAILED", "CANCELLED", "REVOKED"].includes(job.state)) {
+        if (event.status === "ARMED") {
+          event.status = "SKIPPED_TERMINAL";
+        }
+        const schoolReservation = this.store.schoolReservations.get(job.id) || null;
+        return { job, event, schoolReservation };
+      }
 
-    // Revocation check before any stage
-    if (!plan?.enabled || !binding || binding.revoked_at || !consent || consent.withdrawn_at) {
-      event.status = "ABORTED_REVOKED";
-      event.actual_at = new Date(nowMs).toISOString();
-      this.casJobState(jobId, job.state_version, "CANCELLED", { last_error_code: "CONSENT_WITHDRAWN" });
-      return { job, event };
-    }
+      // Revocation check before any stage
+      if (!plan?.enabled || !binding || binding.revoked_at || !consent || consent.withdrawn_at) {
+        event.status = "ABORTED_REVOKED";
+        event.actual_at = new Date(nowMs).toISOString();
+        this.casJobState(jobId, job.state_version, "CANCELLED", { last_error_code: "CONSENT_WITHDRAWN" });
+        return { job, event };
+      }
 
-    if (kind === "PRECHECK") {
-      // Read-only precheck at T-30m: check binding, rules, wallet availability
-      try {
-        const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
-        if (wallet.micropeach_balance < this.store.pricingMicropeach) {
-          event.status = "PRECHECK_NEEDS_USER";
-          event.diagnostic_code = "WALLET_INSUFFICIENT";
+      if (kind === "PRECHECK") {
+        // Read-only precheck at T-30m: check binding, rules, wallet availability
+        try {
+          const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
+          if (wallet.micropeach_balance < this.store.pricingMicropeach) {
+            event.status = "PRECHECK_NEEDS_USER";
+            event.diagnostic_code = "WALLET_INSUFFICIENT";
+            event.actual_at = new Date(nowMs).toISOString();
+            this.casJobState(jobId, job.state_version, "SKIPPED_FINANCE", {
+              last_error_code: "WALLET_INSUFFICIENT"
+            });
+            return { job, event };
+          }
+        } catch {
+          // Proceed if wallet check encounters transient network issue
+        }
+        if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
+          let decrypted = null;
+          try {
+            decrypted = this._decryptBindingCredential(job, binding, nowMs);
+          } catch (decErr) {
+            event.status = "PRECHECK_NEEDS_USER";
+            event.diagnostic_code = decErr?.code || "SCHOOL_AUTH_EXPIRED";
+            event.actual_at = new Date(nowMs).toISOString();
+            this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
+              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED"
+            });
+            return { job, event };
+          }
+          const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
+          if (bundle.isLiveCredential) {
+            try {
+              if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
+                const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
+                  job,
+                  plan,
+                  binding,
+                  decryptedSecret: decrypted
+                });
+                if (prewarmRes?.auth) {
+                  this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+                }
+                if (prewarmRes?.prewarmed) {
+                  job.prewarmed_targets = prewarmRes.prewarmed;
+                }
+              } else {
+                const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+                this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+              }
+            } catch {
+              // Will retry at FINAL_CHECK
+            }
+          }
+        }
+        event.status = "PRECHECK_OK";
+        event.actual_at = new Date(nowMs).toISOString();
+        event.diagnostic_code = "READ_ONLY_PRECHECK_PASSED";
+        this.casJobState(jobId, job.state_version, "PRECHECK_OK");
+        return { job, event };
+      }
+
+      if (kind === "FINAL_CHECK") {
+        // Read-only final quality gate at T-5m
+        if (binding.credential_expires_at && new Date(binding.credential_expires_at).getTime() <= nowMs) {
+          event.status = "FINAL_CHECK_NEEDS_USER";
+          event.diagnostic_code = "SCHOOL_AUTH_EXPIRED";
           event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "SKIPPED_FINANCE", {
-            last_error_code: "WALLET_INSUFFICIENT"
+          this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
+            last_error_code: "SCHOOL_AUTH_EXPIRED"
           });
           return { job, event };
         }
-      } catch {
-        // Proceed if wallet check encounters transient network issue
-      }
-      if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
-        const decrypted = this._decryptBindingCredential(job, binding, nowMs);
-        const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
-        if (bundle.isLiveCredential) {
+        if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
+          let decrypted = null;
           try {
-            if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
-              const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
-                job,
-                plan,
-                binding,
-                decryptedSecret: decrypted
-              });
-              if (prewarmRes?.auth) {
-                this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+            decrypted = this._decryptBindingCredential(job, binding, nowMs);
+          } catch (decErr) {
+            event.status = "FINAL_CHECK_NEEDS_USER";
+            event.diagnostic_code = decErr?.code || "SCHOOL_AUTH_EXPIRED";
+            event.actual_at = new Date(nowMs).toISOString();
+            this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
+              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED"
+            });
+            return { job, event };
+          }
+          const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
+          if (bundle.isLiveCredential) {
+            try {
+              if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
+                const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
+                  job,
+                  plan,
+                  binding,
+                  decryptedSecret: decrypted
+                });
+                if (prewarmRes?.auth) {
+                  this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+                }
+                if (prewarmRes?.prewarmed) {
+                  job.prewarmed_targets = prewarmRes.prewarmed;
+                }
+              } else {
+                const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
+                this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
               }
-              if (prewarmRes?.prewarmed) {
-                job.prewarmed_targets = prewarmRes.prewarmed;
-              }
-            } else {
-              const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-              this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+            } catch (err) {
+              event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
+            }
+          }
+        }
+        event.status = "FINAL_CHECK_OK";
+        event.actual_at = new Date(nowMs).toISOString();
+        event.diagnostic_code = event.diagnostic_code || "READ_ONLY_FINAL_CHECK_PASSED";
+        this.casJobState(jobId, job.state_version, "FINAL_CHECK_OK");
+        return { job, event };
+      }
+
+      if (kind === "FIRE") {
+        let decryptedSecret;
+        try {
+          decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
+        } catch (decErr) {
+          event.status = "FAILED";
+          event.diagnostic_code = decErr?.code || "SCHOOL_AUTH_EXPIRED";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "FAILED", {
+            last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED"
+          });
+          return { job, event };
+        }
+
+        // Never blind-retry if already submitted or RESULT_UNKNOWN
+        if (job.state === "RESULT_UNKNOWN" || job.attempt_count >= 1) {
+          try {
+            const readback = await this.schoolProvider.verifyBookingAuthoritative({
+              job,
+              binding,
+              decryptedSecret,
+              expectedExternalBookingId: job.pending_external_booking_id
+            });
+            if (readback.verified) {
+              return this.finalizeConfirmedBooking(job, binding, readback, event, nowMs);
             }
           } catch {
-            // Will retry at FINAL_CHECK
+            // Keep RESULT_UNKNOWN on transient verification failure
           }
+          return { job, event };
         }
-      }
-      event.status = "PRECHECK_OK";
-      event.actual_at = new Date(nowMs).toISOString();
-      event.diagnostic_code = "READ_ONLY_PRECHECK_PASSED";
-      this.casJobState(jobId, job.state_version, "PRECHECK_OK");
-      return { job, event };
-    }
 
-    if (kind === "FINAL_CHECK") {
-      // Read-only final quality gate at T-5m
-      if (binding.credential_expires_at && new Date(binding.credential_expires_at).getTime() <= nowMs) {
-        event.status = "FINAL_CHECK_NEEDS_USER";
-        event.diagnostic_code = "SCHOOL_AUTH_EXPIRED";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
-          last_error_code: "SCHOOL_AUTH_EXPIRED"
+        // Check window & expiration (ensure at least 30m grace window after fire_at even on legacy jobs where expires_at === fire_at)
+        const fireAtMs = new Date(job.fire_at).getTime();
+        const rawExpiresAtMs = new Date(job.expires_at).getTime();
+        const effectiveExpiresAtMs = Math.max(rawExpiresAtMs, fireAtMs + 1800 * 1000);
+        if (nowMs < fireAtMs) {
+          throw new ContractError("BOOKING_WINDOW_CLOSED", "Cannot execute FIRE before target time T");
+        }
+        if (nowMs > effectiveExpiresAtMs) {
+          event.status = "MISSED_WINDOW";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
+          this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
+          return { job, event };
+        }
+
+        // Acquire CAS execution lock
+        const locked = this.casJobState(jobId, job.state_version, "EXECUTING", {
+          lock_token: job.lock_token + 1,
+          attempt_count: job.attempt_count + 1,
+          attempt_started_at: new Date(nowMs).toISOString()
         });
-        return { job, event };
-      }
-      if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
-        const decrypted = this._decryptBindingCredential(job, binding, nowMs);
-        const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
-        if (bundle.isLiveCredential) {
-          try {
-            if (typeof this.schoolProvider.prewarmJobTargetSeats === "function") {
-              const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
-                job,
-                plan,
-                binding,
-                decryptedSecret: decrypted
-              });
-              if (prewarmRes?.auth) {
-                this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
-              }
-              if (prewarmRes?.prewarmed) {
-                job.prewarmed_targets = prewarmRes.prewarmed;
-              }
-            } else {
-              const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-              this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
-            }
-          } catch (err) {
-            event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
-          }
+        if (!locked) {
+          return { job, event };
         }
-      }
-      event.status = "FINAL_CHECK_OK";
-      event.actual_at = new Date(nowMs).toISOString();
-      event.diagnostic_code = event.diagnostic_code || "READ_ONLY_FINAL_CHECK_PASSED";
-      this.casJobState(jobId, job.state_version, "FINAL_CHECK_OK");
-      return { job, event };
-    }
 
-    if (kind === "FIRE") {
-      const decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
+        const schoolIntegration = this.store.schoolIntegrations.get(job.school_id);
+        let submitRes;
+        try {
+          submitRes = await this.schoolProvider.executeMockOrAuthorizedCreate({
+            job,
+            plan,
+            binding,
+            schoolIntegration,
+            decryptedSecret,
+            nowInstant: new Date(nowMs),
+            allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
+          });
+        } catch (err) {
+          submitRes = {
+            outcome: "FAILED",
+            errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
+            diagnosticMessage: err?.message || "学校选座接口请求异常"
+          };
+        }
 
-      // Never blind-retry if already submitted or RESULT_UNKNOWN
-      if (job.state === "RESULT_UNKNOWN" || job.attempt_count >= 1) {
-        const readback = await this.schoolProvider.verifyBookingAuthoritative({
+        if (submitRes.rawToken) {
+          this._updateBindingCredentialTokens(
+            binding,
+            { rawToken: submitRes.rawToken },
+            decryptedSecret,
+            nowMs
+          );
+        }
+
+        if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
+          job.pending_external_booking_id = submitRes.externalBookingId || null;
+          event.status = "RESULT_UNKNOWN";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
+            last_error_code: "BOOKING_RESULT_UNKNOWN"
+          });
+          return { job, event };
+        }
+
+        if (submitRes.outcome === "FAILED") {
+          event.status = "FAILED";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "FAILED", {
+            last_error_code: submitRes.errorCode || "SCHOOL_REJECTED",
+            last_diagnostic_message: submitRes.diagnosticMessage || null
+          });
+          this.rolloverMultiDayPlanIfEligible(plan, job, submitRes.diagnosticMessage || "当日未抢到", nowMs);
+          return { job, event };
+        }
+
+        // Authoritative readback verification (HTTP 200 alone is never sufficient!)
+        let verifyRes = { verified: false };
+        try {
+          verifyRes = await this.schoolProvider.verifyBookingAuthoritative({
+            job,
+            binding,
+            decryptedSecret,
+            rawToken: submitRes.rawToken || null,
+            expectedExternalBookingId: submitRes.externalBookingId
+          });
+        } catch {
+          verifyRes = { verified: false };
+        }
+        if (!verifyRes.verified) {
+          job.pending_external_booking_id = submitRes.externalBookingId;
+          event.status = "RESULT_UNKNOWN";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
+            last_error_code: "BOOKING_RESULT_UNKNOWN"
+          });
+          return { job, event };
+        }
+
+        return this.finalizeConfirmedBooking(
           job,
           binding,
-          decryptedSecret,
-          expectedExternalBookingId: job.pending_external_booking_id
-        });
-        if (readback.verified) {
-          return this.finalizeConfirmedBooking(job, binding, readback, event, nowMs);
-        }
-        return { job, event };
-      }
-
-      // Check window & expiration (ensure at least 30m grace window after fire_at even on legacy jobs where expires_at === fire_at)
-      const fireAtMs = new Date(job.fire_at).getTime();
-      const rawExpiresAtMs = new Date(job.expires_at).getTime();
-      const effectiveExpiresAtMs = Math.max(rawExpiresAtMs, fireAtMs + 1800 * 1000);
-      if (nowMs < fireAtMs) {
-        throw new ContractError("BOOKING_WINDOW_CLOSED", "Cannot execute FIRE before target time T");
-      }
-      if (nowMs > effectiveExpiresAtMs) {
-        event.status = "MISSED_WINDOW";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
-        this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
-        return { job, event };
-      }
-
-      // Acquire CAS execution lock
-      const locked = this.casJobState(jobId, job.state_version, "EXECUTING", {
-        lock_token: job.lock_token + 1,
-        attempt_count: job.attempt_count + 1,
-        attempt_started_at: new Date(nowMs).toISOString()
-      });
-      if (!locked) {
-        return { job, event };
-      }
-
-      const schoolIntegration = this.store.schoolIntegrations.get(job.school_id);
-      let submitRes;
-      try {
-        submitRes = await this.schoolProvider.executeMockOrAuthorizedCreate({
-          job,
-          plan,
-          binding,
-          schoolIntegration,
-          decryptedSecret,
-          nowInstant: new Date(nowMs),
-          allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
-        });
-      } catch (err) {
-        submitRes = {
-          outcome: "FAILED",
-          errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
-          diagnosticMessage: err?.message || "学校选座接口请求异常"
-        };
-      }
-
-      if (submitRes.rawToken) {
-        this._updateBindingCredentialTokens(
-          binding,
-          { rawToken: submitRes.rawToken },
-          decryptedSecret,
+          {
+            ...verifyRes,
+            seatAlias: verifyRes.seatAlias || submitRes.seatAlias,
+            regionAlias: verifyRes.regionAlias || submitRes.regionAlias
+          },
+          event,
           nowMs
         );
       }
 
-      if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
-        job.pending_external_booking_id = submitRes.externalBookingId || null;
-        event.status = "RESULT_UNKNOWN";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
-          last_error_code: "BOOKING_RESULT_UNKNOWN"
-        });
-        return { job, event };
-      }
-
-      if (submitRes.outcome === "FAILED") {
-        event.status = "FAILED";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "FAILED", {
-          last_error_code: submitRes.errorCode || "SCHOOL_REJECTED",
-          last_diagnostic_message: submitRes.diagnosticMessage || null
-        });
-        this.rolloverMultiDayPlanIfEligible(plan, job, submitRes.diagnosticMessage || "当日未抢到", nowMs);
-        return { job, event };
-      }
-
-      // Authoritative readback verification (HTTP 200 alone is never sufficient!)
-      const verifyRes = await this.schoolProvider.verifyBookingAuthoritative({
-        job,
-        binding,
-        decryptedSecret,
-        rawToken: submitRes.rawToken || null,
-        expectedExternalBookingId: submitRes.externalBookingId
-      });
-      if (!verifyRes.verified) {
-        job.pending_external_booking_id = submitRes.externalBookingId;
-        event.status = "RESULT_UNKNOWN";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
-          last_error_code: "BOOKING_RESULT_UNKNOWN"
-        });
-        return { job, event };
-      }
-
-      return this.finalizeConfirmedBooking(
-        job,
-        binding,
-        {
-          ...verifyRes,
-          seatAlias: verifyRes.seatAlias || submitRes.seatAlias,
-          regionAlias: verifyRes.regionAlias || submitRes.regionAlias
-        },
-        event,
-        nowMs
-      );
-    }
-
-    throw new ContractError("BAD_REQUEST", `Unknown schedule event kind: ${kind}`);
+      throw new ContractError("BAD_REQUEST", `Unknown schedule event kind: ${kind}`);
+    });
   }
 
   async cancelConfirmedOrActiveJob(jobId, nowMs = Date.now()) {
@@ -701,6 +766,9 @@ export class TripleScheduleEngine {
     if (rem <= 1) {
       plan.remaining_days = 0;
       if (finishedJob) finishedJob.remaining_days = 0;
+      if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
       return null;
     }
 
@@ -774,6 +842,22 @@ export class TripleScheduleEngine {
       }
     ];
 
+    let rolledPrewarmed = null;
+    if (finishedJob?.prewarmed_targets && typeof finishedJob.prewarmed_targets === "object") {
+      rolledPrewarmed = {
+        ...finishedJob.prewarmed_targets,
+        start_full:
+          typeof finishedJob.prewarmed_targets.start_full === "string"
+            ? finishedJob.prewarmed_targets.start_full.replace(/^\d{4}-\d{2}-\d{2}/, nextDate)
+            : `${nextDate} 08:00:00`,
+        end_full:
+          typeof finishedJob.prewarmed_targets.end_full === "string"
+            ? finishedJob.prewarmed_targets.end_full.replace(/^\d{4}-\d{2}-\d{2}/, nextDate)
+            : `${nextDate} 22:00:00`,
+        prewarmed_at: new Date(nowMs).toISOString()
+      };
+    }
+
     const nextJob = {
       id: nextJobId,
       plan_id: plan.id,
@@ -804,7 +888,7 @@ export class TripleScheduleEngine {
       result_verified_at: null,
       last_error_code: null,
       last_diagnostic_message: `连续抢座已自动续期次日 ${nextDate}（剩余 ${nextRemaining}/${repeatDays} 天 · 上一轮：${outcomeSummary || "已完成"}）`,
-      prewarmed_targets: finishedJob?.prewarmed_targets || null,
+      prewarmed_targets: rolledPrewarmed,
       created_at: new Date(nowMs).toISOString()
     };
 

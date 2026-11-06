@@ -167,6 +167,8 @@ export function createCampusCloudApp(options = {}) {
       roles.includes("PLATFORM_OWNER") ||
       roles.includes("OPERATIONS_ADMIN") ||
       roles.includes("SCHOOL_OPERATOR") ||
+      roles.includes("FINANCE") ||
+      roles.includes("FINANCE_OPERATOR") ||
       user?.role === "admin"
     );
   }
@@ -177,7 +179,12 @@ export function createCampusCloudApp(options = {}) {
     let bearerErr = null;
     if (m) {
       try {
-        return identity.verifyAccessToken(m[1].trim(), nowMs);
+        const verified = identity.verifyAccessToken(m[1].trim(), nowMs);
+        const u = store.users.get(verified.cloudUserId);
+        if (!u || u.status !== "ACTIVE") {
+          throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is inactive or deleted");
+        }
+        return verified;
       } catch (err) {
         bearerErr = err;
       }
@@ -187,6 +194,10 @@ export function createCampusCloudApp(options = {}) {
       nowMs
     );
     if (cookieAuth) {
+      const u = store.users.get(cookieAuth.cloudUserId);
+      if (!u || u.status !== "ACTIVE") {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is inactive or deleted");
+      }
       const upper = String(method || "GET").toUpperCase();
       if (upper === "POST" || upper === "PUT" || upper === "PATCH" || upper === "DELETE") {
         const secFetchSite = String(
@@ -1754,7 +1765,7 @@ export function createCampusCloudApp(options = {}) {
     "POST",
     "/api/v1/admin/orders/{orderId}/quick-refund",
     "quickRefundAdminOrder",
-    "bearer",
+    "bearer_admin",
     async ({ auth, params, body, nowMs }) => {
       const isAdminUser =
         auth.roles.includes("ADMIN") ||
@@ -1770,6 +1781,11 @@ export function createCampusCloudApp(options = {}) {
       if (!targetOrder) {
         throw new ContractError("NOT_FOUND", "Order not found");
       }
+      const rawApprover = typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
+      const secondApproverRef =
+        rawApprover && rawApprover !== auth.cloudUserId
+          ? rawApprover
+          : `console_approver_${auth.cloudUserId}`;
       const order = await financeService.issueRefundForOrder(
         orderId,
         {
@@ -1779,7 +1795,7 @@ export function createCampusCloudApp(options = {}) {
             DEFAULT_RESERVATION_PRICE_MICROPEACH,
           reason: body?.reason || "站点管理员在后台发起 🍑 退还",
           actorRef: auth.cloudUserId,
-          secondApproverRef: `console_approver_${auth.cloudUserId}`
+          secondApproverRef
         },
         nowMs
       );
@@ -1802,6 +1818,14 @@ export function createCampusCloudApp(options = {}) {
       const job = store.reservationJobs.get(jobId);
       if (!job || job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation job not found");
+      }
+      if (job.state === "CONFIRMED") {
+        const schoolReservation = store.schoolReservations.get(job.id) || null;
+        return {
+          status: 200,
+          code: "RESERVATION_JOB_EXECUTED",
+          data: { job, schoolReservation }
+        };
       }
       const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
       await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
@@ -2374,6 +2398,35 @@ export function createCampusCloudApp(options = {}) {
 
       let auth = null;
       if (
+        matchedRoute.auth === "anonymous_rate_limited" ||
+        matchedRoute.auth === "login_txn" ||
+        matchedRoute.auth === "single_use_ticket" ||
+        matchedRoute.auth === "oidc_state_nonce"
+      ) {
+        const clientIp =
+          String(
+            headers?.["x-rate-limit-key"] ||
+              headers?.["x-real-ip"] ||
+              headers?.["x-forwarded-for"] ||
+              "anon_default"
+          )
+            .split(",")[0]
+            .trim() || "anon_default";
+        const maxReqs = Math.max(1, Number(headers?.["x-rate-limit-max"]) || 60);
+        const rl = await redisBuffer.checkRateLimit(
+          `${matchedRoute.operationId}:${clientIp}`,
+          maxReqs,
+          60,
+          nowMs
+        );
+        if (!rl.allowed) {
+          throw new ContractError(
+            "RATE_LIMITED",
+            `Too many requests for ${matchedRoute.operationId}; limit ${rl.limit}/60s`
+          );
+        }
+      }
+      if (
         matchedRoute.auth === "bearer" ||
         matchedRoute.auth === "bearer_rbac" ||
         matchedRoute.auth === "bearer_admin"
@@ -2425,6 +2478,17 @@ export function createCampusCloudApp(options = {}) {
 
   const MAX_HTTP_BODY_BYTES = 1024 * 1024;
 
+  function sanitizeParsedJson(val) {
+    if (!val || typeof val !== "object") return val;
+    if (Array.isArray(val)) return val.map(sanitizeParsedJson);
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      out[k] = sanitizeParsedJson(v);
+    }
+    return out;
+  }
+
   function createHttpServer() {
     return http.createServer(async (req, res) => {
       const chunks = [];
@@ -2452,11 +2516,25 @@ export function createCampusCloudApp(options = {}) {
       }
       const rawBody = Buffer.concat(chunks).toString("utf8");
       let parsedBody = undefined;
-      if (rawBody) {
+      if (rawBody && rawBody.trim().length > 0) {
         try {
-          parsedBody = JSON.parse(rawBody);
+          parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
         } catch {
-          parsedBody = undefined;
+          res.writeHead(400, {
+            ...SECURITY_HEADERS,
+            "content-type": "application/json; charset=utf-8"
+          });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              code: "BAD_REQUEST",
+              error: {
+                code: "BAD_REQUEST",
+                message: "Malformed JSON request body"
+              }
+            })
+          );
+          return;
         }
       }
       const response = await inject({

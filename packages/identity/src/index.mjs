@@ -11,6 +11,31 @@ export function computeS256Challenge(codeVerifier) {
     .digest("base64url");
 }
 
+function isSafeSsoSubject(ssoSubject) {
+  if (!ssoSubject || typeof ssoSubject !== "string") return false;
+  const trimmed = ssoSubject.trim();
+  if (!trimmed || trimmed === "." || trimmed === "..") return false;
+  if (/[\/\\?#\0\r\n\s]/.test(trimmed)) return false;
+  return /^[a-zA-Z0-9._:-]{2,128}$/.test(trimmed);
+}
+
+const SENSITIVE_SITE_DATA_KEYS = new Set([
+  "delegated_secret",
+  "password",
+  "raw_token",
+  "cas_tgc",
+  "cas_jsessionid",
+  "sso_access_token",
+  "sso_refresh_token",
+  "accessToken",
+  "apiKey",
+  "quota",
+  "usedQuota",
+  "peachBalance",
+  "peachUsed",
+  "processedIdempotencyKeys"
+]);
+
 export function sanitizeReturnToPath(raw) {
   if (typeof raw !== "string") return "/";
   const trimmed = raw.trim();
@@ -60,6 +85,7 @@ export class CloudIdentityService {
       .update(options.sessionSecret || process.env.CLOUD_SESSION_SIGNING_KEY_REF || "cloud-session-key-v1")
       .digest();
     this.ssoCodeExchanger = options.ssoCodeExchanger || null;
+    this.httpTimeoutMs = Number(options.httpTimeoutMs) || 8_000;
     this.allowSyntheticTestCodes =
       options.allowSyntheticTestCodes !== undefined
         ? Boolean(options.allowSyntheticTestCodes)
@@ -222,7 +248,8 @@ export class CloudIdentityService {
         client_id: this.clientId,
         tenant_slug: "acme",
         install_ephemeral_id: installEphemeralId || undefined
-      })
+      }),
+      signal: AbortSignal.timeout(this.httpTimeoutMs)
     });
 
     const data = await resp.json().catch(() => ({}));
@@ -245,7 +272,7 @@ export class CloudIdentityService {
     const ssoUser = data.user;
     let peachWallet = data.peach_wallet || ssoUser.peach_wallet || null;
 
-    if (ssoUser.sub && this.internalServiceKey) {
+    if (ssoUser.sub && isSafeSsoSubject(ssoUser.sub) && this.internalServiceKey) {
       try {
         const peachResp = await fetch(
           `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/users/${encodeURIComponent(ssoUser.sub)}/peach`,
@@ -254,7 +281,8 @@ export class CloudIdentityService {
             headers: {
               Accept: "application/json",
               "X-Internal-Service-Key": this.internalServiceKey
-            }
+            },
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
           }
         );
         if (peachResp.ok) {
@@ -374,7 +402,7 @@ export class CloudIdentityService {
     if (!audMatches) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token client_id / audience mismatch");
     }
-    if (verifiedClaims.nonce && verifiedClaims.nonce !== txn.serverNonce) {
+    if (!verifiedClaims.nonce || verifiedClaims.nonce !== txn.serverNonce) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token nonce mismatch");
     }
     if (!verifiedClaims.sub || typeof verifiedClaims.sub !== "string") {
@@ -476,7 +504,8 @@ export class CloudIdentityService {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json"
       },
-      body
+      body,
+      signal: AbortSignal.timeout(this.httpTimeoutMs)
     });
     const tokenData = await resp.json().catch(() => ({}));
     if (!resp.ok || !tokenData.id_token) {
@@ -490,6 +519,9 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Malformed ID Token from XPEACH SSO");
     }
     const claims = JSON.parse(Buffer.from(idTokenParts[1], "base64url").toString("utf8"));
+    if (expectedNonce && (!claims.nonce || claims.nonce !== expectedNonce)) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token nonce mismatch");
+    }
     if (tokenData.access_token) {
       claims.sso_access_token = tokenData.access_token;
       if (tokenData.refresh_token) {
@@ -506,7 +538,8 @@ export class CloudIdentityService {
         }
         const profileResp = await fetch(`${this.ssoBaseUrl}/api/internal/user-profile`, {
           method: "GET",
-          headers
+          headers,
+          signal: AbortSignal.timeout(this.httpTimeoutMs)
         });
         if (profileResp.ok) {
           const profileData = await profileResp.json();
@@ -532,7 +565,7 @@ export class CloudIdentityService {
         // Fallback below
       }
 
-      // 2) Standard OIDC userinfo fallback
+      // 2) Standard OIDC userinfo fallback (whitelist profile fields only; never overwrite iss/aud/nonce/sub/role)
       if (!claims.username) {
         try {
           const meResp = await fetch(`${this.expectedIssuer.replace(/\/+$/, "")}/me`, {
@@ -540,11 +573,29 @@ export class CloudIdentityService {
             headers: {
               Authorization: `Bearer ${tokenData.access_token}`,
               Accept: "application/json"
-            }
+            },
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
           });
           if (meResp.ok) {
             const meData = await meResp.json();
-            Object.assign(claims, meData);
+            if (meData && typeof meData === "object") {
+              if (typeof meData.preferred_username === "string" && meData.preferred_username) {
+                claims.preferred_username = meData.preferred_username;
+                claims.username = claims.username || meData.preferred_username;
+              }
+              if (typeof meData.username === "string" && meData.username) {
+                claims.username = claims.username || meData.username;
+              }
+              if (typeof meData.name === "string" && meData.name) {
+                claims.name = claims.name || meData.name;
+              }
+              if (typeof meData.email === "string" && meData.email) {
+                claims.email = claims.email || meData.email;
+              }
+              if (typeof meData.email_verified === "boolean") {
+                claims.email_verified = meData.email_verified;
+              }
+            }
           }
         } catch {
           // Keep id_token claims
@@ -553,7 +604,12 @@ export class CloudIdentityService {
     }
 
     // 3) Ensure live 🍑 wallet is synced from /api/v1/users/:uuid/peach
-    if (!claims.peach_wallet && claims.sub && (this.internalServiceKey || tokenData.access_token)) {
+    if (
+      !claims.peach_wallet &&
+      claims.sub &&
+      isSafeSsoSubject(claims.sub) &&
+      (this.internalServiceKey || tokenData.access_token)
+    ) {
       try {
         const headers = { Accept: "application/json" };
         if (this.internalServiceKey) {
@@ -563,7 +619,11 @@ export class CloudIdentityService {
         }
         const peachResp = await fetch(
           `${this.ssoBaseUrl}/api/v1/users/${encodeURIComponent(claims.sub)}/peach`,
-          { method: "GET", headers }
+          {
+            method: "GET",
+            headers,
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
+          }
         );
         if (peachResp.ok) {
           const pd = await peachResp.json();
@@ -586,9 +646,6 @@ export class CloudIdentityService {
       }
     }
 
-    if (!claims.nonce) {
-      claims.nonce = expectedNonce;
-    }
     return claims;
   }
 
@@ -648,7 +705,11 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing login transaction");
     }
     const computedChallenge = computeS256Challenge(codeVerifier || "");
-    if (computedChallenge !== txn.mobileCodeChallenge) {
+    const expectedChallenge = String(txn.mobileCodeChallenge || "");
+    if (
+      computedChallenge.length !== expectedChallenge.length ||
+      !crypto.timingSafeEqual(Buffer.from(computedChallenge), Buffer.from(expectedChallenge))
+    ) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Mobile PKCE code_verifier verification failed");
     }
 
@@ -760,6 +821,14 @@ export class CloudIdentityService {
       return { ok: false, skipped: "no_sso_access_token" };
     }
     try {
+      const sanitizedPatch = {};
+      if (siteDataPatch && typeof siteDataPatch === "object") {
+        for (const [k, v] of Object.entries(siteDataPatch)) {
+          if (!SENSITIVE_SITE_DATA_KEYS.has(k)) {
+            sanitizedPatch[k] = v;
+          }
+        }
+      }
       const headers = {
         "Content-Type": "application/json",
         Accept: "application/json",
@@ -777,9 +846,10 @@ export class CloudIdentityService {
           site_data: {
             cloud_user_id: user.id,
             synced_at: new Date().toISOString(),
-            ...siteDataPatch
+            ...sanitizedPatch
           }
-        })
+        }),
+        signal: AbortSignal.timeout(this.httpTimeoutMs)
       });
       if (!resp.ok) {
         return { ok: false, status: resp.status };

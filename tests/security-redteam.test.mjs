@@ -250,3 +250,260 @@ test("Security Red-Team: Synthetic OIDC code bypass, cross-flow ticket confusion
   const ch = sanitized.channels.find((c) => c.id === "xss_test_ch");
   assert.ok(ch.invite_url.startsWith("https://"));
 });
+
+test("Security Red-Team: Production Finance Bridge never grants fake 5.0 🍑 sandbox balance or allows unbacked debits (FIN-REDTEAM-001)", async () => {
+  const app = createCampusCloudApp({
+    financeBridgeOptions: {
+      realDebitsEnabled: true,
+      allowSandboxFallback: false,
+      internalServiceKey: ""
+    }
+  });
+  const realUser = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "custom_sso_subject_non_uuid",
+    displayName: "Real User Without Sandbox"
+  });
+
+  const wallet = await app.financeService.getWalletSnapshot(realUser.id);
+  assert.equal(wallet.peach_balance, 0);
+  assert.equal(wallet.micropeach_balance, 0);
+  assert.equal(wallet.source, "xpeach-sso-uninitialized");
+  assert.equal(
+    app.financeBridge.sandboxBalancesMicropeach.has(realUser.id),
+    false,
+    "readWallet must never pollute sandboxBalancesMicropeach for real production users"
+  );
+
+  await assert.rejects(
+    async () =>
+      app.financeBridge.adjustBalanceIdempotent({
+        cloudUserId: realUser.id,
+        ssoSubject: realUser.subject,
+        deltaMicropeach: -10_000,
+        eventKey: "dis:reservation:11111111-2222-3333-4444-555555555555:debit:v1",
+        reason: "Red-team unbacked debit attempt"
+      }),
+    (err) => err?.code === "SSO_UNAVAILABLE"
+  );
+});
+
+test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whitespace approver rejection (FIN-REDTEAM-002)", async () => {
+  const app = createCampusCloudApp();
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "test_fin_mutex_user",
+    displayName: "Fin Mutex User"
+  });
+  app.financeBridge.setSandboxBalance(user.id, 50_000);
+
+  const order = await app.financeService.createAndSettleOrderForConfirmedJob({
+    job: { id: "job_fin_mutex_1", cloud_user_id: user.id },
+    plan: { id: "plan_fin_mutex_1" }
+  });
+  assert.equal(order.payment_state, "PAID");
+  assert.equal(app.financeBridge.getSandboxBalance(user.id), 40_000);
+
+  // Whitespace-only secondApproverRef must be rejected
+  await assert.rejects(
+    async () =>
+      app.financeService.issueRefundForOrder(order.id, {
+        amountMicropeach: 10_000,
+        reason: "Whitespace approver bypass attempt",
+        actorRef: "admin_1",
+        secondApproverRef: "   "
+      }),
+    (err) => err?.code === "FORBIDDEN"
+  );
+
+  // Concurrent refund attempts must serialize and only refund once
+  const [r1, r2] = await Promise.all([
+    app.financeService.issueRefundForOrder(order.id, {
+      amountMicropeach: 10_000,
+      reason: "Concurrent refund 1",
+      actorRef: "admin_1",
+      secondApproverRef: "admin_2"
+    }),
+    app.financeService.issueRefundForOrder(order.id, {
+      amountMicropeach: 10_000,
+      reason: "Concurrent refund 2",
+      actorRef: "admin_1",
+      secondApproverRef: "admin_2"
+    })
+  ]);
+  assert.equal(r1.payment_state, "REFUNDED");
+  assert.equal(r2.payment_state, "REFUNDED");
+  assert.equal(app.financeBridge.getSandboxBalance(user.id), 50_000);
+
+  // Calling executeDebitForOrder on a REFUNDED order must fail with CONFLICT (never clobber REFUNDED back to PAID)
+  await assert.rejects(
+    async () => app.financeService.executeDebitForOrder(order.id),
+    (err) => err?.code === "CONFLICT"
+  );
+});
+
+test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS guard, and active rate limiting (GATEWAY-REDTEAM-003)", async () => {
+  const app = createCampusCloudApp();
+
+  // 1) Missing nonce in OIDC claims must be rejected
+  const webTxn = app.identity.startWebTransaction({ returnTo: "/" });
+  const txnObj = app.store.authTransactions.get(webTxn.login_txn);
+  await assert.rejects(
+    async () =>
+      app.identity.handleOidcCallback({
+        state: txnObj.serverState,
+        code: "simulated_missing_nonce",
+        simulatedIdTokenClaims: {
+          iss: app.identity.expectedIssuer,
+          aud: app.identity.clientId,
+          sub: "victim_sub"
+          // nonce intentionally omitted
+        }
+      }),
+    /ID Token nonce mismatch/
+  );
+
+  // 2) Unknown school_id on GET /api/v1/campus-content returns 404 without allocating store.campusContent entries
+  const sizeBefore = app.store.campusContent.size;
+  const [miss1, miss2] = await Promise.all([
+    app.inject({ method: "GET", url: "/api/v1/campus-content?school_id=nonexistent_school_dos_1" }),
+    app.inject({ method: "GET", url: "/api/v1/campus-content?school_id=nonexistent_school_dos_1" })
+  ]);
+  assert.equal(miss1.status, 404);
+  assert.equal(miss2.status, 404);
+  assert.equal(
+    app.store.campusContent.size,
+    sizeBefore,
+    "Unknown school_id must not allocate memory in store.campusContent"
+  );
+
+  // 3) Active rate limiting on anonymous_rate_limited endpoints
+  const rlHeaders = {
+    "x-rate-limit-key": "attacker_ip_198_51_100_99",
+    "x-rate-limit-max": "2"
+  };
+  const req1 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  const req2 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  const req3 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  assert.equal(req1.status, 200);
+  assert.equal(req2.status, 200);
+  assert.equal(req3.status, 429);
+  assert.equal(req3.body.code, "RATE_LIMITED");
+
+  // 4) DELETED user cannot authenticate with a pre-deletion JWT
+  const delUser = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "deleted_user_sub",
+    displayName: "Deleted User"
+  });
+  const delSess = app.identity.issueDeviceSession(delUser, "Phone");
+  delUser.status = "DELETED";
+  const afterDel = await app.inject({
+    method: "GET",
+    url: "/api/v1/me",
+    headers: { authorization: `Bearer ${delSess.access_token}` }
+  });
+  assert.equal(afterDel.status, 401);
+});
+
+test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency, and multi-day rollover prewarmed date rewrite (SCHED-REDTEAM-004)", async () => {
+  const app = createCampusCloudApp();
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "test_sched_redteam_user",
+    displayName: "Sched User"
+  });
+  app.financeBridge.setSandboxBalance(user.id, 100_000);
+  const sess = app.identity.issueDeviceSession(user, "Phone");
+
+  const bindInit = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: { school_id: "haut", student_no: "20249988" }
+  });
+  const bindingId = bindInit.body.data.id;
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${bindingId}/complete`,
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: { credential_kind: "DELEGATED_SESSION_BUNDLE", delegated_secret: "mock_secret" }
+  });
+  const consentRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: { school_id: "haut" }
+  });
+  const consentId = consentRes.body.data.id;
+
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      authorization: `Bearer ${sess.access_token}`,
+      "idempotency-key": "idem_sched_redteam_1"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      area_code: "5F_MID",
+      area_name: "五层中区",
+      candidate_seats: ["001", "002"],
+      target_local_date: "2026-11-08",
+      target_local_time: "07:00:00",
+      repeat_days: 2
+    }
+  });
+  assert.equal(planRes.status, 201);
+  const jobId = planRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+  job.prewarmed_targets = {
+    region_id: 7,
+    start_full: "2026-11-08 08:00:00",
+    end_full: "2026-11-08 22:00:00"
+  };
+
+  // Execute now -> confirms Day 1 and rolls over to Day 2 (2026-11-09)
+  const exec1 = await app.inject({
+    method: "POST",
+    url: `/api/v1/reservation-jobs/${jobId}/execute-now`,
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: {}
+  });
+  assert.equal(exec1.status, 200);
+  assert.equal(exec1.body.data.job.state, "CONFIRMED");
+
+  // Calling execute-now again on an already-CONFIRMED job must return idempotently without clobbering PRECHECK_OK/FINAL_CHECK_OK
+  const exec2 = await app.inject({
+    method: "POST",
+    url: `/api/v1/reservation-jobs/${jobId}/execute-now`,
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: {}
+  });
+  assert.equal(exec2.status, 200);
+  assert.equal(exec2.body.data.job.state, "CONFIRMED");
+  const precheckEv = Array.from(app.store.scheduleEvents.values()).find(
+    (e) => e.job_id === jobId && e.kind === "PRECHECK"
+  );
+  assert.notEqual(precheckEv.status, "SKIPPED_TERMINAL");
+
+  // Verify rolled-over Day 2 job has rewritten prewarmed_targets date to 2026-11-09
+  const nextJob = app.store.reservationJobs.get(job.next_job_id);
+  assert.ok(nextJob);
+  assert.equal(nextJob.booking_local_date, "2026-11-09");
+  assert.equal(nextJob.prewarmed_targets.start_full, "2026-11-09 08:00:00");
+  assert.equal(nextJob.prewarmed_targets.end_full, "2026-11-09 22:00:00");
+});
