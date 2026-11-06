@@ -343,7 +343,7 @@ export function listMigrations() {
 }
 
 export class CloudDatabaseStore {
-  constructor({ snapshotPath = null, pricingMicropeach = 1000 } = {}) {
+  constructor({ snapshotPath = null, pricingMicropeach = 10000 } = {}) {
     this.snapshotPath = snapshotPath;
     this.pricingMicropeach = pricingMicropeach;
     this.appliedMigrations = new Set();

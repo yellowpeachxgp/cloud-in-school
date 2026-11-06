@@ -274,7 +274,7 @@ function renderUnauthenticatedLandingHtml() {
         <div class="grid gap-3" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
           <div class="card card-flat" style="padding: 1rem;">
             <div class="text-sm font-semibold" style="margin-bottom: 0.25rem;">📚 图书馆自动预约</div>
-            <p class="text-xs text-muted" style="margin: 0;">可视化点选自习区域与座位号，到点自动占座，预约成功仅消耗 0.1 🍑，失败不扣费。</p>
+            <p class="text-xs text-muted" style="margin: 0;">可视化点选自习区域与座位号，到点自动占座，预约成功仅消耗 1 🍑，失败不扣费。</p>
           </div>
           <div class="card card-flat" style="padding: 1rem;">
             <div class="text-sm font-semibold" style="margin-bottom: 0.25rem;">📦 快递取件码汇总</div>
@@ -392,7 +392,7 @@ export function renderConsoleHtml(ctx = {}) {
     },
     reservations: {
       title: "📚 图书馆座位自动预约",
-      subtitle: "点选楼层自习区与心仪座位号（支持首选 + 2 个备选），到点自动占座；成功仅扣 0.1 🍑，未成功不扣费。"
+      subtitle: "点选楼层自习区与心仪座位号（支持首选 + 2 个备选），到点自动占座；成功仅扣 1 🍑，未成功不扣费。"
     },
     parcels: {
       title: "📦 我的快递与取件码",
@@ -436,7 +436,7 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="identity-wallet-label">通用 🍑 余额 (XPeach 实时同步)</div>
             <div class="identity-wallet-value" id="wallet-balance-text">🍑 ${escapeHtml(peachBalanceFormatted)}</div>
             <div class="identity-wallet-sub" id="wallet-used-text">
-              累计已用 🍑 ${escapeHtml(peachUsedFormatted)} · 占座成功每次扣除 0.1 🍑（未成功不扣费）
+              累计已用 🍑 ${escapeHtml(peachUsedFormatted)} · 占座成功每次扣除 1 🍑（未成功不扣费）
             </div>
           </div>
         </div>
@@ -456,7 +456,7 @@ export function renderConsoleHtml(ctx = {}) {
         <div class="stat">
           <div class="stat-label">进行中占座预约</div>
           <div class="stat-value" id="stat-plans-count">${activePlans.length}</div>
-          <div class="stat-hint">成功占座仅消耗 0.1 🍑</div>
+          <div class="stat-hint">成功占座仅消耗 1 🍑</div>
         </div>
         <div class="stat">
           <div class="stat-label">待取快递包裹</div>
@@ -590,7 +590,7 @@ export function renderConsoleHtml(ctx = {}) {
             <h2 class="panel-title">📚 图书馆座位自动预约</h2>
             <p class="panel-subtitle">第一步绑定您的学号，第二步点选楼层区域与座位号即可，无需手写任何复杂代码。</p>
           </div>
-          <span class="badge badge-primary">0.1 🍑 / 次（仅占座成功扣费 · 余额 🍑 ${escapeHtml(peachBalanceFormatted)}）</span>
+          <span class="badge badge-primary">1 🍑 / 次（仅占座成功扣费 · 余额 🍑 ${escapeHtml(peachBalanceFormatted)}）</span>
         </div>
 
         <div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));">
@@ -759,7 +759,7 @@ export function renderConsoleHtml(ctx = {}) {
                             : " · 单日";
                         const stateLabel =
                           j.state === "CONFIRMED"
-                            ? '<span class="badge badge-success">已占座成功 (扣除 0.1 🍑)</span>'
+                            ? '<span class="badge badge-success">已占座成功 (扣除 1 🍑)</span>'
                             : j.state === "CANCELLED"
                               ? '<span class="badge">已取消 (未扣费)</span>'
                               : j.state === "FAILED"
@@ -925,10 +925,10 @@ export function renderConsoleHtml(ctx = {}) {
             <tbody id="orders-tbody">
               ${
                 orders.length === 0
-                  ? `<tr><td colspan="5" class="text-muted">暂无 🍑 消费记录（仅在图书馆自动占座核验成功后扣除 0.1 🍑）。</td></tr>`
+                  ? `<tr><td colspan="5" class="text-muted">暂无 🍑 消费记录（仅在图书馆自动占座核验成功后扣除 1 🍑）。</td></tr>`
                   : orders
                       .map((o) => {
-                        const peachAmt = Number(o.price_peach ?? (o.price_micropeach || 1000) / 10000).toFixed(2);
+                        const peachAmt = Number(o.price_peach ?? (o.price_micropeach || 10000) / 10000).toFixed(2);
                         const stBadge =
                           o.payment_state === "PAID"
                             ? '<span class="badge badge-success">已从 XPeach 扣除</span>'
@@ -1291,7 +1291,7 @@ export function renderConsoleHtml(ctx = {}) {
                   ? `<tr><td colspan="6" class="text-muted">暂无全站 🍑 消费账单记录。</td></tr>`
                   : allOrders
                       .map((o) => {
-                        const peachAmt = Number(o.price_peach ?? (o.price_micropeach || 1000) / 10000).toFixed(2);
+                        const peachAmt = Number(o.price_peach ?? (o.price_micropeach || 10000) / 10000).toFixed(2);
                         const stBadge =
                           o.payment_state === "PAID"
                             ? '<span class="badge badge-success">已扣费</span>'
@@ -1829,7 +1829,7 @@ export function renderConsoleHtml(ctx = {}) {
                 var el3 = document.getElementById("wallet-used-text");
                 if (el1) el1.textContent = "🍑 " + bal;
                 if (el2) el2.textContent = "🍑 " + bal;
-                if (el3) el3.textContent = "累计已用 🍑 " + used + " · 占座成功每次扣除 0.1 🍑（未成功不扣费）";
+                if (el3) el3.textContent = "累计已用 🍑 " + used + " · 占座成功每次扣除 1 🍑（未成功不扣费）";
                 showToast("已与 XPeach 主站同步最新余额：🍑 " + bal);
               })
               .catch(function (err) {
@@ -1968,7 +1968,7 @@ export function renderConsoleHtml(ctx = {}) {
           var sr = data.schoolReservation || data.school_reservation || {};
           if (job.state === "CONFIRMED") {
             var alias = sr.seat_alias ? "（" + sr.seat_alias + "）" : "";
-            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 0.1 🍑。");
+            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 1 🍑。");
           } else {
             showToast("未能锁定所选座位（座位已被占用或未绑定正确图书馆密码），本次未扣费", true);
           }
@@ -2186,7 +2186,7 @@ export function renderConsoleHtml(ctx = {}) {
               body: JSON.stringify({ reason: "管理员在站点后台执行一键退还 🍑" })
             })
               .then(function () {
-                showToast("已将 0.1 🍑 原路退还至用户 XPeach 账户！");
+                showToast("已将 1 🍑 原路退还至用户 XPeach 账户！");
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {

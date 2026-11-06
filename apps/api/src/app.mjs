@@ -288,7 +288,7 @@ export function createCampusCloudApp(options = {}) {
       .filter((o) => o.cloud_user_id === cloudUserId)
       .map((o) => ({
         ...o,
-        price_peach: Number(o.price_peach ?? (o.price_micropeach || 1000) / 10000)
+        price_peach: Number(o.price_peach ?? (o.price_micropeach || 10000) / 10000)
       }));
     const parcels = parcelHub.listUserParcels(cloudUserId);
     const parcelConnections = parcelHub.listConnections(cloudUserId);
@@ -1904,7 +1904,7 @@ export function createCampusCloudApp(options = {}) {
         const order = await financeService.issueRefundForOrder(
           orderId,
           {
-            amountMicropeach: targetOrder.price_micropeach || 1000,
+            amountMicropeach: targetOrder.price_micropeach || 10000,
             reason: body?.reason || "站点管理员在后台发起 🍑 退还",
             actorRef: auth.cloudUserId,
             secondApproverRef: `console_approver_${auth.cloudUserId}`
