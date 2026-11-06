@@ -7,6 +7,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
 
 export const API_VERSION = "v1";
+export const DEFAULT_SCHOOL_ID = "haut";
+export const MICROPEACH_PER_PEACH = 10_000;
+export const DEFAULT_RESERVATION_PRICE_MICROPEACH = 10_000; // 1 🍑 per confirmed reservation
+
+export function formatPeachFromMicropeach(micropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH, fractionDigits = null) {
+  const num = Number(micropeach ?? DEFAULT_RESERVATION_PRICE_MICROPEACH) / MICROPEACH_PER_PEACH;
+  if (!Number.isFinite(num)) return "1";
+  if (typeof fractionDigits === "number") return num.toFixed(fractionDigits);
+  return Number.isInteger(num) ? String(num) : num.toFixed(2).replace(/\.?0+$/, "");
+}
 
 export const ERROR_CODES = Object.freeze({
   CLOUD_AUTH_REQUIRED: { status: 401, retryable: false, userAction: "RECONNECT_XPEACH_BROWSER" },

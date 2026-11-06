@@ -19,7 +19,7 @@ test("Finance Saga (PAY-001..020): 100 concurrent debit calls for the same confi
     id: orderId,
     job_id: jobId,
     cloud_user_id: user.id,
-    price_micropeach: 10_000, // 1 🍑
+    price_micropeach: 1_000, // 0.1 🍑
     price_version: "price-library-cloud-2026-11-v1",
     accepted_at: new Date().toISOString(),
     school_result: "CONFIRMED",
@@ -40,8 +40,8 @@ test("Finance Saga (PAY-001..020): 100 concurrent debit calls for the same confi
   const finalWallet = await app.financeService.getWalletSnapshot(user.id);
   assert.equal(
     finalWallet.micropeach_balance,
-    40_000,
-    "100 concurrent debits with deterministic event_key must deduct 10,000 micropeach (1 🍑) exactly once"
+    49_000,
+    "100 concurrent debits with deterministic event_key must deduct 1,000 micropeach exactly once"
   );
   const op = app.store.financeOperations.get(buildDebitEventKey(orderId));
   assert.ok(op);

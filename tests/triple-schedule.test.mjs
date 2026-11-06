@@ -316,8 +316,8 @@ test("Cloud-Native Campus Content: Public /api/v1/campus-content and Admin contr
   });
   assert.equal(pubRes1.status, 200);
   assert.equal(pubRes1.body.code, "CAMPUS_CONTENT_OK");
-  assert.ok(pubRes1.body.data.channels.length >= 4);
-  assert.ok(pubRes1.body.data.clubs.length >= 16);
+  assert.equal(pubRes1.body.data.channels.length, 0);
+  assert.equal(pubRes1.body.data.clubs.length, 3);
 
   const upsertCh = await app.inject({
     method: "POST",

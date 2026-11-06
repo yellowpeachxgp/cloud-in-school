@@ -5,6 +5,9 @@ import fs from "node:fs";
 import {
   REPO_ROOT,
   ContractError,
+  DEFAULT_RESERVATION_PRICE_MICROPEACH,
+  DEFAULT_SCHOOL_ID,
+  MICROPEACH_PER_PEACH,
   generateRequestId,
   okEnvelope,
   errorEnvelope,
@@ -106,9 +109,23 @@ export function createCampusCloudApp(options = {}) {
   }
 
   const routes = [];
+  const extensionRoutes = [];
   function register(method, pathTemplate, operationId, auth, handler) {
     const { regex, paramNames } = compileRoutePattern(pathTemplate);
     routes.push({
+      method: method.toUpperCase(),
+      path: pathTemplate,
+      operationId,
+      auth,
+      regex,
+      paramNames,
+      handler
+    });
+  }
+
+  function registerExtension(method, pathTemplate, operationId, auth, handler) {
+    const { regex, paramNames } = compileRoutePattern(pathTemplate);
+    extensionRoutes.push({
       method: method.toUpperCase(),
       path: pathTemplate,
       operationId,
@@ -288,11 +305,13 @@ export function createCampusCloudApp(options = {}) {
       .filter((o) => o.cloud_user_id === cloudUserId)
       .map((o) => ({
         ...o,
-        price_peach: Number(o.price_peach ?? (o.price_micropeach || 10000) / 10000)
+        price_peach: Number(
+          o.price_peach ?? (o.price_micropeach || store.pricingMicropeach || DEFAULT_RESERVATION_PRICE_MICROPEACH) / MICROPEACH_PER_PEACH
+        )
       }));
     const parcels = parcelHub.listUserParcels(cloudUserId);
     const parcelConnections = parcelHub.listConnections(cloudUserId);
-    const campusContent = store.getCampusContent("haut", { includeDisabled: false });
+    const campusContent = store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false });
     return {
       user: {
         cloud_user_id: user.id,
@@ -1493,6 +1512,7 @@ export function createCampusCloudApp(options = {}) {
         ["/portal", "portal"],
         ["/reservations", "reservations"],
         ["/parcels", "parcels"],
+        ["/community", "community"],
         ["/orders", "orders"],
         ["/console", "console"],
         ["/console/", "console"]
@@ -1534,7 +1554,11 @@ export function createCampusCloudApp(options = {}) {
           };
         }
 
-        let consoleCtx = { activeNav };
+        let consoleCtx = {
+          activeNav,
+          pricingMicropeach: store.pricingMicropeach,
+          campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false })
+        };
         if (cookieAuth) {
           const wallet = await financeService.getWalletSnapshot(cookieAuth.cloudUserId);
           const bindings = Array.from(store.schoolBindings.values()).filter(
@@ -1579,7 +1603,7 @@ export function createCampusCloudApp(options = {}) {
               }),
               allJobs: Array.from(store.reservationJobs.values()),
               schools: Array.from(store.schoolIntegrations.values()),
-              campusContent: store.getCampusContent("haut", { includeDisabled: true }),
+              campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: true }),
               auditEvents: store.auditEvents.slice(-50).reverse(),
               financeMatrix
             };
@@ -1594,6 +1618,8 @@ export function createCampusCloudApp(options = {}) {
             jobs,
             parcels,
             orders,
+            pricingMicropeach: store.pricingMicropeach,
+            campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false }),
             accessToken: cookieAuth.accessToken,
             ...adminCtx
           };
@@ -1904,7 +1930,10 @@ export function createCampusCloudApp(options = {}) {
         const order = await financeService.issueRefundForOrder(
           orderId,
           {
-            amountMicropeach: targetOrder.price_micropeach || 10000,
+            amountMicropeach:
+              targetOrder.price_micropeach ||
+              store.pricingMicropeach ||
+              DEFAULT_RESERVATION_PRICE_MICROPEACH,
             reason: body?.reason || "站点管理员在后台发起 🍑 退还",
             actorRef: auth.cloudUserId,
             secondApproverRef: `console_approver_${auth.cloudUserId}`
@@ -2162,11 +2191,12 @@ export function createCampusCloudApp(options = {}) {
 
       // --- Cloud-Controlled Campus Channels & Student Clubs Control Plane ---
       if (upperMethod === "GET" && pathname === "/api/v1/campus-content") {
-        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
         const content = store.getCampusContent(schoolId, { includeDisabled: false });
         return {
           status: 200,
           headers: {
+            ...SECURITY_HEADERS,
             "content-type": "application/json; charset=utf-8",
             "cache-control": "no-store, no-cache, must-revalidate",
             "x-request-id": requestId
@@ -2180,7 +2210,7 @@ export function createCampusCloudApp(options = {}) {
         if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道与社团云控内容");
         }
-        const schoolId = parsedUrl.searchParams.get("school_id") || body?.school_id || "haut";
+        const schoolId = parsedUrl.searchParams.get("school_id") || body?.school_id || DEFAULT_SCHOOL_ID;
         if (upperMethod === "GET") {
           return {
             status: 200,
@@ -2214,7 +2244,7 @@ export function createCampusCloudApp(options = {}) {
         if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道");
         }
-        const schoolId = body?.school_id || "haut";
+        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
         const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
         const updated = store.upsertCampusChannel(schoolId, body || {}, actorName);
         return {
@@ -2235,7 +2265,7 @@ export function createCampusCloudApp(options = {}) {
           throw new ContractError("FORBIDDEN", "需要管理员权限删除校园频道");
         }
         const channelId = decodeURIComponent(deleteChannelMatch[1]);
-        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
         const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
         const updated = store.deleteCampusChannel(schoolId, channelId, actorName);
         return {
@@ -2254,7 +2284,7 @@ export function createCampusCloudApp(options = {}) {
         if (!isAdminOrOperatorAuth(auth)) {
           throw new ContractError("FORBIDDEN", "需要管理员权限管理学生社团");
         }
-        const schoolId = body?.school_id || "haut";
+        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
         const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
         const updated = store.upsertCampusClub(schoolId, body || {}, actorName);
         return {
@@ -2275,7 +2305,7 @@ export function createCampusCloudApp(options = {}) {
           throw new ContractError("FORBIDDEN", "需要管理员权限删除学生社团");
         }
         const clubId = decodeURIComponent(deleteClubMatch[1]);
-        const schoolId = parsedUrl.searchParams.get("school_id") || "haut";
+        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
         const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
         const updated = store.deleteCampusClub(schoolId, clubId, actorName);
         return {
@@ -2291,7 +2321,8 @@ export function createCampusCloudApp(options = {}) {
 
       let matchedRoute = null;
       let params = {};
-      for (const route of routes) {
+      const allRoutes = [...routes, ...extensionRoutes];
+      for (const route of allRoutes) {
         if (route.method !== upperMethod) continue;
         const m = pathname.match(route.regex);
         if (m) {
