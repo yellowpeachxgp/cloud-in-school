@@ -318,6 +318,27 @@ test("Cloud-Native Campus Content: Public /api/v1/campus-content and Admin contr
   assert.equal(pubRes1.body.code, "CAMPUS_CONTENT_OK");
   assert.equal(pubRes1.body.data.channels.length, 0);
   assert.equal(pubRes1.body.data.clubs.length, 3);
+  assert.ok(pubRes1.body.data.competitions.length >= 14);
+  assert.ok(pubRes1.body.data.competitions.every((c) => c.official_website_url.startsWith("https://")));
+
+  const upsertComp = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/campus-content/competitions",
+    headers: adminHeaders,
+    body: {
+      school_id: "haut",
+      id: "comp_raicom",
+      title: "睿抗机器人开发者大赛 (RAICOM)",
+      short_title: "睿抗机器人大赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ELECTRONICS_ROBO",
+      official_website_url: "https://www.raicom.com.cn",
+      recommended_major_tracks: ["CS_AI_SOFTWARE", "EE_AUTOMATION_IOT"],
+      pinned: true,
+      sort_order: 1
+    }
+  });
+  assert.equal(upsertComp.status, 200);
 
   const upsertCh = await app.inject({
     method: "POST",

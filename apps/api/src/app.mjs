@@ -2319,6 +2319,46 @@ export function createCampusCloudApp(options = {}) {
         };
       }
 
+      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/competitions") {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限管理学科竞赛指南");
+        }
+        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.upsertCampusCompetition(schoolId, body || {}, actorName);
+        return {
+          status: 200,
+          headers: {
+            ...SECURITY_HEADERS,
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_COMPETITION_UPSERTED", updated, requestId)
+        };
+      }
+
+      const deleteCompMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/competitions\/([^/]+)$/);
+      if (upperMethod === "DELETE" && deleteCompMatch) {
+        const auth = extractBearer(headers, nowMs, upperMethod);
+        if (!isAdminOrOperatorAuth(auth)) {
+          throw new ContractError("FORBIDDEN", "需要管理员权限删除学科竞赛词条");
+        }
+        const compId = decodeURIComponent(deleteCompMatch[1]);
+        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
+        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+        const updated = store.deleteCampusCompetition(schoolId, compId, actorName);
+        return {
+          status: 200,
+          headers: {
+            ...SECURITY_HEADERS,
+            "content-type": "application/json; charset=utf-8",
+            "x-request-id": requestId
+          },
+          body: okEnvelope("CAMPUS_COMPETITION_DELETED", updated, requestId)
+        };
+      }
+
       let matchedRoute = null;
       let params = {};
       const allRoutes = [...routes, ...extensionRoutes];

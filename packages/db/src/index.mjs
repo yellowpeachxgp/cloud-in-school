@@ -20,17 +20,395 @@ const CLUB_CATEGORY_LABELS = {
   VOLUNTEER_ORG: "志愿与组织"
 };
 
+const COMPETITION_CATEGORY_LABELS = {
+  ALGO_PROGRAMMING: "算法与程序设计",
+  ELECTRONICS_ROBO: "电子与机器人硬件",
+  MATH_MODELING: "数学建模与数据分析",
+  INNOVATION_ENTREPRENEURSHIP: "创新创业与双创孵化",
+  CYBER_SECURITY_AI: "网安与人工智能",
+  DIGITAL_MEDIA_ART: "数媒创意与外语综合"
+};
+
+export function createDefaultHautCompetitions(nowIso = new Date().toISOString()) {
+  return [
+    {
+      id: "comp_lanqiao",
+      title: "蓝桥杯全国软件和信息技术专业人才大赛",
+      short_title: "蓝桥杯",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ALGO_PROGRAMMING",
+      category_label: "算法与程序设计",
+      recommended_major_tracks: ["CS_AI_SOFTWARE", "EE_AUTOMATION_IOT", "MATH_PHYSICS_CIVIL"],
+      interest_tags: ["算法编程", "单片机/EDA", "大厂笔试直通", "保研/综测加分"],
+      organizer: "工业和信息化部人才交流中心",
+      haut_host_college: "信息科学与工程学院 / 人工智能与大数据学院",
+      registration_window: "每年 10月–12月报名 · 次年 4月省赛 / 6月国赛",
+      team_mode: "个人赛（软件类 C/C++/Java/Python · 电子类单片机/EDA）",
+      difficulty_label: "大一友好 · 零基础可冲省奖",
+      beginner_friendly: true,
+      summary: "国内参赛规模最大的个人编程与电子设计赛事，分 C/C++、Java、Python、Web 及单片机/嵌入式赛道，是理工科学生大一练手、斩获首个省级/国家级奖项的最佳跳板。",
+      skill_roadmap: "掌握一门主力语言 (C++/Python/Java) → 熟悉数组、字符串、搜索 (BFS/DFS) 与贪心 → 攻克动态规划与图论基础 → 刷透近 5 年省赛真题",
+      official_website_url: "https://dasai.lanqiao.cn",
+      partner_club_id: "club_partner_computer_service",
+      partner_club_name: "计算机服务社",
+      partner_club_qq: "1043885481",
+      enabled: true,
+      pinned: true,
+      sort_order: 10,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_nuedc",
+      title: "全国大学生电子设计竞赛 (NUEDC)",
+      short_title: "全国电赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ELECTRONICS_ROBO",
+      category_label: "电子与机器人硬件",
+      recommended_major_tracks: ["EE_AUTOMATION_IOT", "MECH_VEHICLE_ROBO", "CS_AI_SOFTWARE"],
+      interest_tags: ["STM32/嵌入式", "PCB硬件设计", "电源与信号调理", "视觉控制"],
+      organizer: "教育部高等教育司 / 工业和信息化部人事教育司",
+      haut_host_college: "电气工程学院 / 信息科学与工程学院",
+      registration_window: "每年 5月–6月报名 · 8月四天三夜封闭极限竞赛",
+      team_mode: "3人组队（硬件电路 + 嵌入式控制 + 信号算法/报告）",
+      difficulty_label: "硬核工程 · 实验室实战集训",
+      beginner_friendly: false,
+      summary: "电子信息、电气工程与自动化专业含金量最高的国家级学科竞赛，采用全国统一命题、四天三夜半封闭制作实物的极限赛制，全面检验硬件电路与嵌入式系统功底。",
+      skill_roadmap: "大一入门 STM32 单片机与立创 EDA 画板 → 掌握 PID 控制、运放电路与传感器驱动 → 参加硬件技术联盟日常实训与暑期集训",
+      official_website_url: "https://nuedc-training.com.cn",
+      partner_club_id: "club_partner_hardware_alliance",
+      partner_club_name: "硬件技术联盟",
+      partner_club_qq: "789860526",
+      enabled: true,
+      pinned: true,
+      sort_order: 12,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_cumcm",
+      title: "高教社杯全国大学生数学建模竞赛",
+      short_title: "全国数模国赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "MATH_MODELING",
+      category_label: "数学建模与数据分析",
+      recommended_major_tracks: ["ALL_MAJORS", "MATH_PHYSICS_CIVIL", "CS_AI_SOFTWARE", "EE_AUTOMATION_IOT", "ECON_MGMT_FINANCE"],
+      interest_tags: ["MATLAB/Python", "数据分析与优化", "LaTeX科研排版", "保研核心加分"],
+      organizer: "中国工业与应用数学学会 (CSIAM)",
+      haut_host_college: "理学院",
+      registration_window: "每年 6月–8月校内选拔培训 · 9月上旬三天三夜正赛",
+      team_mode: "3人组队（数学建模手 + MATLAB/Python 编程手 + 论文写作手）",
+      difficulty_label: "大一/大二友好 · 跨专业组队首选",
+      beginner_friendly: true,
+      summary: "全国规模最大、覆盖全部专业的基础性学科竞赛，通过建立数学模型与计算机仿真解决工程、经济或社会实际问题，是保研加分与培养科研论文撰写能力的必修课。",
+      skill_roadmap: "组建建模+编程+写作铁三角 → 掌握评价类(TOPSIS/熵权法)、预测类(时间序列/机器学习)、优化类(规划模型/启发式算法) → 熟练使用 MATLAB/Python 与 LaTeX 排版",
+      official_website_url: "https://www.mcm.edu.cn",
+      partner_club_id: "club_partner_computer_service",
+      partner_club_name: "计算机服务社",
+      partner_club_qq: "1043885481",
+      enabled: true,
+      pinned: true,
+      sort_order: 14,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_cyds",
+      title: "中国国际大学生创新大赛（原“互联网+”）",
+      short_title: "中国国际大学生创新大赛",
+      tier_badge: "教育部白名单顶尖双创赛事",
+      category: "INNOVATION_ENTREPRENEURSHIP",
+      category_label: "创新创业与双创孵化",
+      recommended_major_tracks: ["ALL_MAJORS", "FOOD_BIO_CHEM_MAT", "CS_AI_SOFTWARE", "ECON_MGMT_FINANCE", "MECH_VEHICLE_ROBO"],
+      interest_tags: ["双创最高奖", "粮油食品特色赛道", "商业计划书", "路演答辩"],
+      organizer: "教育部等十二部委联合主办",
+      haut_host_college: "创新创业学院 / 教务处",
+      registration_window: "每年 4月–6月校赛网评 · 7月–8月省赛 · 10月全国总决赛",
+      team_mode: "3–15人跨学科组队（技术研发 + 商业模式 + 财务法务 + 路演PPT）",
+      difficulty_label: "大一友好 · 全专业皆可参与",
+      beginner_friendly: true,
+      summary: "教育部排名第一的国家级顶尖双创赛事（含高教主赛道、红旅赛道、产业命题赛道），河工大在智慧粮油、食品工程、智能装备与新材料等交叉领域极具冲金优势。",
+      skill_roadmap: "结合导师科研课题或河工大粮油食品/智能制造学科优势 → 撰写真实落地的商业计划书(BP) → 准备专利/软著/企业应用证明与高水准路演 PPT",
+      official_website_url: "https://cy.ncss.cn",
+      partner_club_id: "",
+      partner_club_name: "",
+      partner_club_qq: "",
+      enabled: true,
+      pinned: true,
+      sort_order: 16,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_icpc_ccpc",
+      title: "ICPC 国际大学生程序设计竞赛 & CCPC 中国大学生程序设计竞赛",
+      short_title: "ICPC / CCPC 算法赛",
+      tier_badge: "教育部白名单顶尖赛事",
+      category: "ALGO_PROGRAMMING",
+      category_label: "算法与程序设计",
+      recommended_major_tracks: ["CS_AI_SOFTWARE", "MATH_PHYSICS_CIVIL"],
+      interest_tags: ["ACM集训", "算法巅峰", "团队极限编程", "名企免笔试"],
+      organizer: "ICPC 国际大学生程序设计竞赛基金会 / CCPC 组委会",
+      haut_host_college: "信息科学与工程学院",
+      registration_window: "每年 3月–5月省赛/邀请赛 · 9月–11月网络赛与区域赛",
+      team_mode: "3人组队（共用 1 台电脑限时 5 小时攻克 10–13 道算法题）",
+      difficulty_label: "硬核算法 · 冲击名企与保研顶峰",
+      beginner_friendly: false,
+      summary: "全球含金量最高的大学生算法与程序设计巅峰赛事，代表高校计算机学科硬核编程实力，获奖选手深受字节、腾讯、华为等核心研发部门青睐。",
+      skill_roadmap: "洛谷/Codeforces 入门刷题 → 系统学习高级数据结构（线段树/树状数组/并查集） → 图论网络流、数论与博弈论 → 3 人组队分工模拟赛",
+      official_website_url: "https://ccpc.io",
+      partner_club_id: "club_partner_computer_service",
+      partner_club_name: "计算机服务社",
+      partner_club_qq: "1043885481",
+      enabled: true,
+      pinned: false,
+      sort_order: 20,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_smartcar",
+      title: "全国大学生智能汽车竞赛",
+      short_title: "智能汽车竞赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ELECTRONICS_ROBO",
+      category_label: "电子与机器人硬件",
+      recommended_major_tracks: ["EE_AUTOMATION_IOT", "MECH_VEHICLE_ROBO", "CS_AI_SOFTWARE"],
+      interest_tags: ["自动驾驶竞速", "PID控制算法", "嵌入式硬件", "机器视觉"],
+      organizer: "中国自动化学会",
+      haut_host_college: "电气工程学院 / 机电工程学院",
+      registration_window: "每年 11月发布赛题 → 次年 7月分赛区赛 / 8月全国总决赛",
+      team_mode: "3–5人组队（机械车模调校 + 硬件驱动板 + 视觉/电磁循迹控制）",
+      difficulty_label: "进阶实战 · 软硬件全栈闭环",
+      beginner_friendly: true,
+      summary: "以竞速智能车为载体的综合工程探索赛事，涵盖电磁循迹、摄像头视觉识别、平衡控制、越野信标等组别，亲手打造一辆风驰电掣的微型自动驾驶赛车。",
+      skill_roadmap: "学习 C 语言与微控制器 PWM/编码器驱动 → 自行设计电机驱动与电源稳压 PCB → 图像二值化赛道提取与串级 PID 转向/速度闭环调参",
+      official_website_url: "https://smartcar.cdstm.cn",
+      partner_club_id: "club_partner_hardware_alliance",
+      partner_club_name: "硬件技术联盟",
+      partner_club_qq: "789860526",
+      enabled: true,
+      pinned: false,
+      sort_order: 22,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_robomaster",
+      title: "全国大学生机器人大赛 (RoboMaster / ROBOCON)",
+      short_title: "RoboMaster 机器人赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ELECTRONICS_ROBO",
+      category_label: "电子与机器人硬件",
+      recommended_major_tracks: ["MECH_VEHICLE_ROBO", "EE_AUTOMATION_IOT", "CS_AI_SOFTWARE"],
+      interest_tags: ["机甲大师", "SolidWorks机械", "ROS2/机器视觉", "电控开发"],
+      organizer: "共青团中央 / 全国学联",
+      haut_host_college: "机电工程学院 / 电气工程学院",
+      registration_window: "每年 9月–10月招新与赛季注册 · 次年 5月区域赛 / 8月全国赛",
+      team_mode: "战队协作（机械结构 + 嵌入式电控 + 机器视觉算法 + 战队运营）",
+      difficulty_label: "硬核工程 · 多学科团队协同",
+      beginner_friendly: true,
+      summary: "专为青年工程师打造的机器人科创盛事，融合机械传动设计、嵌入式电控、OpenCV/深度学习装甲板识别与战术对抗，堪称工科生的热血赛场。",
+      skill_roadmap: "按方向选修：机械组掌握 SolidWorks 三维建模；电控组掌握 FreeRTOS 与 CAN 总线电机控制；算法组掌握相机标定、PNP 解算与神经网络推理",
+      official_website_url: "https://www.robomaster.com",
+      partner_club_id: "club_partner_hardware_alliance",
+      partner_club_name: "硬件技术联盟",
+      partner_club_qq: "789860526",
+      enabled: true,
+      pinned: false,
+      sort_order: 24,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_tiaozhanbei",
+      title: "“挑战杯”全国大学生课外学术科技作品竞赛与创业计划竞赛",
+      short_title: "“挑战杯”双创赛",
+      tier_badge: "教育部白名单顶尖双创赛事",
+      category: "INNOVATION_ENTREPRENEURSHIP",
+      category_label: "创新创业与双创孵化",
+      recommended_major_tracks: ["ALL_MAJORS", "FOOD_BIO_CHEM_MAT", "MECH_VEHICLE_ROBO", "CS_AI_SOFTWARE", "ECON_MGMT_FINANCE"],
+      interest_tags: ["学术奥林匹克", "科技发明制作", "社会调研报告", "团委核心赛事"],
+      organizer: "共青团中央 / 中国科协 / 教育部 / 全国学联",
+      haut_host_college: "校团委",
+      registration_window: "每年 11月–次年3月校赛立项 · 5月省赛 · 10月全国终审决赛",
+      team_mode: "3–10人组队（大挑：学术科技发明制作/哲学社科调查；小挑：创业计划）",
+      difficulty_label: "进阶科研 · 学术与社会调研并重",
+      beginner_friendly: true,
+      summary: "被誉为当代大学生科技创新的“奥林匹克”盛会，奇数年举办课外学术科技作品竞赛（大挑），偶数年举办中国大学生创业计划竞赛（小挑），文理工商学子均可找到专属赛道。",
+      skill_roadmap: "大一加入导师课题组或大创项目 → 理工科聚焦硬核实物样机与核心论文/专利，人文经管聚焦扎实的田野调查问卷与政策建议报告",
+      official_website_url: "https://www.tiaozhanbei.net",
+      partner_club_id: "",
+      partner_club_name: "",
+      partner_club_qq: "",
+      enabled: true,
+      pinned: false,
+      sort_order: 26,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_ciscn",
+      title: "全国大学生信息安全竞赛 (CISCN)",
+      short_title: "全国信息安全竞赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "CYBER_SECURITY_AI",
+      category_label: "网安与人工智能",
+      recommended_major_tracks: ["CS_AI_SOFTWARE", "EE_AUTOMATION_IOT"],
+      interest_tags: ["CTF夺旗赛", "Web渗透与逆向", "密码学", "安全创新作品"],
+      organizer: "教育部高等学校网络空间安全专业教学指导委员会",
+      haut_host_college: "信息科学与工程学院",
+      registration_window: "每年 3月–4月报名 · 5月分区赛 · 7月全国总决赛",
+      team_mode: "4人组队（创新实践能力赛 CTF 解题/AWD 攻防 · 安全作品赛）",
+      difficulty_label: "进阶挑战 · 网络攻防实战",
+      beginner_friendly: false,
+      summary: "网络空间安全与计算机领域权威国家级赛事，分为 CTF 夺旗攻防实战赛与信息安全作品赛两大方向，全面锤炼漏洞挖掘、逆向工程、密码学与安全系统研发能力。",
+      skill_roadmap: "入门 Linux 与计算机网络协议 → 选定 Web 渗透、Reverse 逆向、Pwn 二进制漏洞或 Crypto 密码学方向 → 在 CTFHub/BUUCTF 靶场持续刷题实战",
+      official_website_url: "https://www.ciscn.cn",
+      partner_club_id: "club_partner_computer_service",
+      partner_club_name: "计算机服务社",
+      partner_club_qq: "1043885481",
+      enabled: true,
+      pinned: false,
+      sort_order: 28,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_jsjds_4c",
+      title: "中国大学生计算机设计大赛 (4C)",
+      short_title: "计算机设计大赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "CYBER_SECURITY_AI",
+      category_label: "网安与人工智能",
+      recommended_major_tracks: ["CS_AI_SOFTWARE", "DESIGN_MEDIA_FOREIGN", "EE_AUTOMATION_IOT", "ALL_MAJORS"],
+      interest_tags: ["App/小程序开发", "AI大模型应用", "数据可视化", "数媒交互设计"],
+      organizer: "教育部高等学校计算机类专业教学指导委员会等",
+      haut_host_college: "人工智能与大数据学院 / 信息科学与工程学院",
+      registration_window: "每年 3月–4月校赛选拔 · 5月省赛 · 7月–8月全国总决赛",
+      team_mode: "1–5人组队（软件应用开发 / 人工智能应用 / 信息可视化 / 数媒动漫游戏）",
+      difficulty_label: "大一友好 · 作品导向极易上手",
+      beginner_friendly: true,
+      summary: "面向全校各专业学生的作品类计算机大赛，不考限时算法题，而是提交完整软件、小程序、AI 应用、数据可视化或数媒动画作品，非常适合喜欢做项目的同学。",
+      skill_roadmap: "确定实用选题（如校园工具、智慧农业/粮仓监测、中华传统文化数媒展示） → 完成前后端/移动端开发或交互设计 → 录制高清演示视频与设计说明书",
+      official_website_url: "https://jsjds.blcu.edu.cn",
+      partner_club_id: "club_partner_computer_service",
+      partner_club_name: "计算机服务社",
+      partner_club_qq: "1043885481",
+      enabled: true,
+      pinned: false,
+      sort_order: 30,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_umic",
+      title: "全国大学生机械创新设计大赛",
+      short_title: "全国机械创新大赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "ELECTRONICS_ROBO",
+      category_label: "电子与机器人硬件",
+      recommended_major_tracks: ["MECH_VEHICLE_ROBO", "EE_AUTOMATION_IOT"],
+      interest_tags: ["机械结构创新", "SolidWorks/UG", "机电一体化", "实物样机"],
+      organizer: "全国大学生机械创新设计大赛组委会",
+      haut_host_college: "机电工程学院",
+      registration_window: "每两年一届（奇数年发布主题，偶数年 4月省赛 / 7月国赛）",
+      team_mode: "3–5人组队（机构创新设计 + 力学仿真 + 样机加工装配）",
+      difficulty_label: "进阶工程 · 机械学科王牌赛",
+      beginner_friendly: true,
+      summary: "国内机械工程领域最高水平的大学生学科竞赛，聚焦兴农机械、仿生机械、高性能智能装备等主题，要求完成从机构原理构思、三维建模仿真到全尺寸实物样机制作。",
+      skill_roadmap: "学透机械原理与机械设计基础 → 熟练掌握 SolidWorks/UG 三维装配、运动仿真与 ANSYS 有限元分析 → 联合电控同学完成样机加工调试",
+      official_website_url: "https://umic.ckcest.cn",
+      partner_club_id: "club_partner_hardware_alliance",
+      partner_club_name: "硬件技术联盟",
+      partner_club_qq: "789860526",
+      enabled: true,
+      pinned: false,
+      sort_order: 32,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_3chuang",
+      title: "全国大学生电子商务“创新、创意及创业”挑战赛（三创赛）",
+      short_title: "电子商务“三创赛”",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "INNOVATION_ENTREPRENEURSHIP",
+      category_label: "创新创业与双创孵化",
+      recommended_major_tracks: ["ECON_MGMT_FINANCE", "CS_AI_SOFTWARE", "FOOD_BIO_CHEM_MAT", "DESIGN_MEDIA_FOREIGN", "ALL_MAJORS"],
+      interest_tags: ["电商运营与实战", "乡村振兴助农", "新媒体营销", "零门槛双创"],
+      organizer: "全国电子商务产教融合创新联盟",
+      haut_host_college: "经济贸易学院 / 管理学院",
+      registration_window: "每年 10月–12月官网注册报名 · 次年 3月–4月校赛 / 5月省赛 / 7月国赛",
+      team_mode: "3–5人组队（常规赛 + 跨境电商/乡村振兴/产学用实战赛）",
+      difficulty_label: "大一友好 · 经管与工科跨界首选",
+      beginner_friendly: true,
+      summary: "教育部白名单中对经贸、管理、营销与工科交叉最友好的全国性大赛，强调真实商业策划、跨境电商、直播助农与数字经济创新，大一新生即可快速组队参赛。",
+      skill_roadmap: "年底前务必在官网完成团队注册 → 结合河南农产品/粮油品牌或校园数字化需求选定赛道 → 打磨市场调研数据、盈利模型与实战运营佐证材料",
+      official_website_url: "https://www.3chuang.net",
+      partner_club_id: "",
+      partner_club_name: "",
+      partner_club_qq: "",
+      enabled: true,
+      pinned: false,
+      sort_order: 34,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_sun_ada",
+      title: "全国大学生广告艺术大赛（大广赛）",
+      short_title: "全国大广赛",
+      tier_badge: "教育部白名单 A 类赛事",
+      category: "DIGITAL_MEDIA_ART",
+      category_label: "数媒创意与外语综合",
+      recommended_major_tracks: ["DESIGN_MEDIA_FOREIGN", "ECON_MGMT_FINANCE", "ALL_MAJORS"],
+      interest_tags: ["海报/IP插画", "二维/三维动画", "短视频拍摄", "品牌广告策划"],
+      organizer: "中国高等教育学会广告教育专业委员会",
+      haut_host_college: "设计艺术学院 / 新闻与传播学院",
+      registration_window: "每年 3月–5月企业命题发布与创作 · 6月省赛 · 8月全国评审",
+      team_mode: "1–3人（平面/文案/UI）或 1–5人（视频/动画/广播/策划案）",
+      difficulty_label: "大一友好 · 创意与ACG爱好者天堂",
+      beginner_friendly: true,
+      summary: "文科、艺术设计与数字媒体领域规模最大的教育部白名单赛事，由知名品牌提供真实商业命题，涵盖平面设计、动画、短视频、互动H5、广播与广告语创作。",
+      skill_roadmap: "下载当季企业命题策略单 → 针对品牌痛点提炼核心创意概念 → 运用 PS/AI/Blender/AE/PR 完成视觉、动画或视频成片，严守原创规范",
+      official_website_url: "https://www.sun-ada.net",
+      partner_club_id: "club_partner_chiyekong_acg",
+      partner_club_name: "炽夜空动漫社",
+      partner_club_qq: "314623763",
+      enabled: true,
+      pinned: false,
+      sort_order: 36,
+      updated_at: nowIso
+    },
+    {
+      id: "comp_neccs",
+      title: "全国大学生英语竞赛 (NECCS)",
+      short_title: "全国大学生英语竞赛",
+      tier_badge: "国家级学科综合赛事",
+      category: "DIGITAL_MEDIA_ART",
+      category_label: "数媒创意与外语综合",
+      recommended_major_tracks: ["ALL_MAJORS", "DESIGN_MEDIA_FOREIGN", "ECON_MGMT_FINANCE"],
+      interest_tags: ["英语综合能力", "四六级/考研神助攻", "保研外语加分", "个人赛"],
+      organizer: "国际英语外语教师协会中国英语外语教师协会 / 高等学校大学外语教学研究会",
+      haut_host_college: "外语学院",
+      registration_window: "每年 2月–3月报名 · 4月中旬初赛 / 5月中旬全国决赛",
+      team_mode: "个人赛（A类研究生 / B类英语专业 / C类非英语本科 / D类艺体类）",
+      difficulty_label: "大一友好 · 按校内比例评奖",
+      beginner_friendly: true,
+      summary: "全国唯一统考的大学生英语综合能力竞赛（C类面向全校非英语专业本科生），按各校参赛人数比例直接评定全国特等奖及一、二、三等奖，获奖率高且保研综测高度认可。",
+      skill_roadmap: "巩固四六级高频词汇与长难句阅读 → 针对性训练赛题特有的智力推理题(IQ)、篇章改错、英汉翻译与图表应用文写作 → 限时刷近 5 年真题卷",
+      official_website_url: "https://www.chinaneccs.cn",
+      partner_club_id: "",
+      partner_club_name: "",
+      partner_club_qq: "",
+      enabled: true,
+      pinned: false,
+      sort_order: 38,
+      updated_at: nowIso
+    }
+  ];
+}
+
 export function createDefaultHautCampusContent() {
   const nowIso = new Date().toISOString();
   return {
     school_id: "haut",
-    version: 2,
+    version: 3,
     updated_at: nowIso,
     updated_by: "system",
     bulletin: {
       enabled: true,
-      title: "河工大合作社团与交流群云端直通车",
-      content: "合作学生社团招新与技术交流 QQ 群已接入云端实时下发，点击即可一键呼起手机 QQ 加群；校园频道暂时置空。",
+      title: "河工大合作社团与学科竞赛云端直通车",
+      content: "官方合作社团招新 QQ 群与教育部白名单学科竞赛指南已接入云端实时下发，支持按专业与兴趣匹配赛事、直达官网并一键呼起手机 QQ 加群组队。",
       tag: "云端实时同步",
       action_url: ""
     },
@@ -81,7 +459,8 @@ export function createDefaultHautCampusContent() {
         sort_order: 30,
         updated_at: nowIso
       }
-    ]
+    ],
+    competitions: createDefaultHautCompetitions(nowIso)
   };
 }
 
@@ -261,6 +640,10 @@ export class CloudDatabaseStore {
       });
     }
     const raw = this.campusContent.get(key);
+    if (!Array.isArray(raw.competitions) || raw.competitions.length === 0) {
+      raw.competitions = createDefaultHautCompetitions();
+      raw.version = Math.max(Number(raw.version || 2), 3);
+    }
     const sortFn = (a, b) => {
       const pinDiff = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       if (pinDiff !== 0) return pinDiff;
@@ -274,9 +657,13 @@ export class CloudDatabaseStore {
       .filter((cl) => includeDisabled || cl.enabled !== false)
       .slice()
       .sort(sortFn);
+    const competitions = (Array.isArray(raw.competitions) ? raw.competitions : [])
+      .filter((cp) => includeDisabled || cp.enabled !== false)
+      .slice()
+      .sort(sortFn);
     return {
       school_id: raw.school_id || key,
-      version: Number(raw.version || 1),
+      version: Number(raw.version || 3),
       updated_at: raw.updated_at || new Date().toISOString(),
       updated_by: raw.updated_by || "system",
       bulletin: raw.bulletin || {
@@ -287,7 +674,8 @@ export class CloudDatabaseStore {
         action_url: ""
       },
       channels,
-      clubs
+      clubs,
+      competitions
     };
   }
 
@@ -507,6 +895,103 @@ export class CloudDatabaseStore {
       action: "DELETE_CAMPUS_CLUB",
       resource_kind: "campus_club",
       resource_ref: String(clubId || ""),
+      outcome: "SUCCESS"
+    });
+    return this.getCampusContent(key, { includeDisabled: true });
+  }
+
+  upsertCampusCompetition(schoolId = "haut", compInput = {}, actorRef = "admin") {
+    const key = String(schoolId || "haut").toLowerCase();
+    const current = this.getCampusContent(key, { includeDisabled: true });
+    const nowIso = new Date().toISOString();
+    const id = String(compInput.id || `comp_${Date.now()}`).trim();
+    const existingIdx = current.competitions.findIndex((c) => c.id === id);
+    const prev = existingIdx >= 0 ? current.competitions[existingIdx] : {};
+    const rawCat = String(compInput.category ?? prev.category ?? "INNOVATION_ENTREPRENEURSHIP").trim().toUpperCase();
+    const category = COMPETITION_CATEGORY_LABELS[rawCat] ? rawCat : "INNOVATION_ENTREPRENEURSHIP";
+    const tracksRaw = compInput.recommended_major_tracks ?? compInput.recommendedMajorTracks ?? prev.recommended_major_tracks ?? ["ALL_MAJORS"];
+    const recommended_major_tracks = Array.isArray(tracksRaw)
+      ? tracksRaw.map((x) => String(x).trim().toUpperCase()).filter(Boolean)
+      : String(tracksRaw || "ALL_MAJORS")
+          .split(/[,，、|/]/)
+          .map((x) => x.trim().toUpperCase())
+          .filter(Boolean);
+    const tagsRaw = compInput.interest_tags ?? compInput.interestTags ?? prev.interest_tags ?? [];
+    const interest_tags = Array.isArray(tagsRaw)
+      ? tagsRaw.map((x) => String(x).trim()).filter(Boolean)
+      : String(tagsRaw || "")
+          .split(/[,，、|/]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+
+    const title = String(compInput.title ?? compInput.name ?? prev.title ?? "").trim();
+    if (!title) {
+      throw new ContractError("BAD_REQUEST", "竞赛名称不能为空");
+    }
+    const nextItem = {
+      id,
+      title,
+      short_title: String(compInput.short_title ?? compInput.shortTitle ?? prev.short_title ?? title).trim() || title,
+      tier_badge: String(compInput.tier_badge ?? compInput.tierBadge ?? prev.tier_badge ?? "教育部白名单 A 类赛事").trim() || "教育部白名单 A 类赛事",
+      category,
+      category_label: COMPETITION_CATEGORY_LABELS[category] || "创新创业与双创孵化",
+      recommended_major_tracks: recommended_major_tracks.length > 0 ? recommended_major_tracks : ["ALL_MAJORS"],
+      interest_tags,
+      organizer: String(compInput.organizer ?? prev.organizer ?? "教育部/全国竞赛组委会").trim(),
+      haut_host_college: String(compInput.haut_host_college ?? compInput.hautHostCollege ?? prev.haut_host_college ?? "创新创业学院").trim(),
+      registration_window: String(compInput.registration_window ?? compInput.registrationWindow ?? prev.registration_window ?? "关注赛事官网通知").trim(),
+      team_mode: String(compInput.team_mode ?? compInput.teamMode ?? prev.team_mode ?? "1–5人组队").trim(),
+      difficulty_label: String(compInput.difficulty_label ?? compInput.difficultyLabel ?? prev.difficulty_label ?? "大一友好").trim(),
+      beginner_friendly: compInput.beginner_friendly !== undefined ? Boolean(compInput.beginner_friendly) : prev.beginner_friendly !== false,
+      summary: String(compInput.summary ?? prev.summary ?? "").trim(),
+      skill_roadmap: String(compInput.skill_roadmap ?? compInput.skillRoadmap ?? prev.skill_roadmap ?? "").trim(),
+      official_website_url: this.sanitizeSafeHttpsUrl(
+        compInput.official_website_url ?? compInput.officialWebsiteUrl ?? prev.official_website_url ?? "",
+        "https://cy.ncss.cn"
+      ),
+      partner_club_id: String(compInput.partner_club_id ?? compInput.partnerClubId ?? prev.partner_club_id ?? "").trim(),
+      partner_club_name: String(compInput.partner_club_name ?? compInput.partnerClubName ?? prev.partner_club_name ?? "").trim(),
+      partner_club_qq: String(compInput.partner_club_qq ?? compInput.partnerClubQq ?? prev.partner_club_qq ?? "").trim(),
+      enabled: compInput.enabled !== undefined ? Boolean(compInput.enabled) : prev.enabled !== false,
+      pinned: compInput.pinned !== undefined ? Boolean(compInput.pinned) : Boolean(prev.pinned),
+      sort_order: Number(compInput.sort_order ?? compInput.sortOrder ?? prev.sort_order ?? (current.competitions.length + 1) * 10) || 100,
+      updated_at: nowIso
+    };
+    if (existingIdx >= 0) {
+      current.competitions[existingIdx] = nextItem;
+    } else {
+      current.competitions.push(nextItem);
+    }
+    current.version = Number(current.version || 2) + 1;
+    current.updated_at = nowIso;
+    current.updated_by = actorRef;
+    this.campusContent.set(key, current);
+    this.recordAudit({
+      actor_kind: "ADMIN",
+      actor_ref: actorRef,
+      action: "UPSERT_CAMPUS_COMPETITION",
+      resource_kind: "campus_competition",
+      resource_ref: id,
+      outcome: "SUCCESS",
+      detail: { title: nextItem.title, official_website_url: nextItem.official_website_url }
+    });
+    return this.getCampusContent(key, { includeDisabled: true });
+  }
+
+  deleteCampusCompetition(schoolId = "haut", compId, actorRef = "admin") {
+    const key = String(schoolId || "haut").toLowerCase();
+    const current = this.getCampusContent(key, { includeDisabled: true });
+    current.competitions = current.competitions.filter((c) => c.id !== compId);
+    current.version = Number(current.version || 2) + 1;
+    current.updated_at = new Date().toISOString();
+    current.updated_by = actorRef;
+    this.campusContent.set(key, current);
+    this.recordAudit({
+      actor_kind: "ADMIN",
+      actor_ref: actorRef,
+      action: "DELETE_CAMPUS_COMPETITION",
+      resource_kind: "campus_competition",
+      resource_ref: String(compId || ""),
       outcome: "SUCCESS"
     });
     return this.getCampusContent(key, { includeDisabled: true });

@@ -13,7 +13,8 @@ import {
   xpeachEmptyState,
   xpeachBulletinHeroCard,
   xpeachClubCard,
-  xpeachChannelCard
+  xpeachChannelCard,
+  xpeachCompetitionCard
 } from "./ui-sdk.mjs";
 
 export const CONSOLE_VIEWS = [
@@ -325,6 +326,7 @@ export function renderConsoleHtml(ctx = {}) {
   const ccBulletin = campusContent.bulletin || {};
   const ccChannels = Array.isArray(campusContent.channels) ? campusContent.channels : [];
   const ccClubs = Array.isArray(campusContent.clubs) ? campusContent.clubs : [];
+  const ccCompetitions = Array.isArray(campusContent.competitions) ? campusContent.competitions : [];
 
   const accessToken = ctx.accessToken || "";
 
@@ -342,8 +344,8 @@ export function renderConsoleHtml(ctx = {}) {
       subtitle: "按校园驿站分组展示大字号取件码，支持粘贴取件短信智能提取，并与日在校园 App 双向同步。"
     },
     community: {
-      title: "合作社团与校园频道",
-      subtitle: "河南工业大学 · 官方合作学生社团与技术交流群（云端实时下发，与 Android 客户端 100% 同步）。"
+      title: "合作社团 · 学科竞赛指南 · 校园频道",
+      subtitle: "河南工业大学 · 官方合作社团、教育部白名单赛事专业匹配与官网直通（云端实时同步）。"
     },
     orders: {
       title: "🍑 消费与退还明细",
@@ -540,19 +542,36 @@ export function renderConsoleHtml(ctx = {}) {
       </div>
 
       <!-- 官方合作社团直通预览 -->
-      <section class="xp-card">
+      <section class="xp-card" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
           <div class="xp-icon-box" aria-hidden="true">🤝</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
               <h2 class="xp-entity-title">官方合作社团与技术交流群</h2>
-              <a class="xp-pill xp-pill--compact" href="/community">查看全部 (${ccClubs.length}) →</a>
+              <a class="xp-pill xp-pill--compact" href="/community">进入社团与竞赛中心 (${ccClubs.length}社团 · ${ccCompetitions.length}竞赛) →</a>
             </div>
             <p class="xp-entity-summary" style="margin-top: 2px;">云端实时下发最新合作社团招新与技术交流 QQ 群，与 Android 客户端保持实时一致。</p>
           </div>
         </div>
         <div class="xp-card-grid">
           ${ccClubs.map((club) => xpeachClubCard(club, { isAdmin: false })).join("")}
+        </div>
+      </section>
+
+      <!-- 核心学科竞赛指南预览 -->
+      <section class="xp-card">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">教育部白名单学科竞赛与专业发展指南</h2>
+              <a class="xp-pill xp-pill--active xp-pill--compact" href="/community#section-community-competitions">按专业匹配全部 ${ccCompetitions.length} 项赛事 →</a>
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">不知自己专业适合参加什么比赛？一键按学院/专业方向匹配高含金量白名单赛事、直达官网并关联合作社团组队。</p>
+          </div>
+        </div>
+        <div class="xp-card-grid">
+          ${ccCompetitions.slice(0, 4).map((comp) => xpeachCompetitionCard(comp, { isAdmin: false })).join("")}
         </div>
       </section>`;
   }
@@ -566,13 +585,23 @@ export function renderConsoleHtml(ctx = {}) {
                 title: ccBulletin.title,
                 content: ccBulletin.content,
                 tag: ccBulletin.tag || "云端实时同步",
-                version: campusContent.version || 2,
-                clubsCount: ccClubs.length
+                version: campusContent.version || 3,
+                clubsCount: ccClubs.length,
+                competitionsCount: ccCompetitions.length
               })
             : ""
         }
 
         <section class="xp-card">
+          <div class="xp-entity-header" style="margin-bottom: 12px;">
+            <div class="xp-icon-box" aria-hidden="true">🤝</div>
+            <div class="xp-entity-title-col">
+              <div class="xp-badge-flow" style="justify-content: space-between;">
+                <h2 class="xp-entity-title">官方合作学生社团 (${ccClubs.length})</h2>
+                ${xpeachStatusDot("一键复制群号或唤醒手机 QQ 加群", "success")}
+              </div>
+            </div>
+          </div>
           <div class="xp-search-bar" style="margin-bottom: 12px;">
             <input class="input xp-search-input" id="community-club-search" type="search" placeholder="搜索社团名称、活动方向、场地或 QQ 群号…" />
             <div class="xp-pill-bar" id="community-category-pills">
@@ -591,6 +620,61 @@ export function renderConsoleHtml(ctx = {}) {
                     subtitle: "管理员可在站点后台动态发布合作社团与招新群号。"
                   })
                 : ccClubs.map((club) => xpeachClubCard(club, { isAdmin: false })).join("")
+            }
+          </div>
+        </section>
+
+        <section class="xp-card" id="section-community-competitions">
+          <div class="xp-entity-header" style="margin-bottom: 12px;">
+            <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
+            <div class="xp-entity-title-col">
+              <div class="xp-badge-flow" style="justify-content: space-between;">
+                <h2 class="xp-entity-title">大学生学科竞赛清单与专业/兴趣发展指南 (${ccCompetitions.length})</h2>
+                ${xpeachBadge("教育部白名单赛事 · 官网直达", "peach")}
+              </div>
+              <p class="xp-entity-summary" style="margin-top: 2px;">选择您的专业赛道或兴趣方向，快速了解本专业必打的高含金量比赛、报名窗口、能力成长路线与校内组队社团。</p>
+            </div>
+          </div>
+
+          <div class="xp-well" style="margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px;">
+            <input class="input" id="community-comp-search" type="search" placeholder="搜索竞赛名称、主办单位、适合专业、技能标签或合作社团…" />
+            <div>
+              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">🎓 按专业赛道匹配适合你的比赛：</div>
+              <div class="xp-pill-bar" id="community-comp-major-pills">
+                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-major="ALL">全部专业 (${ccCompetitions.length})</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="CS_AI_SOFTWARE">计算机/软件/AI</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="EE_AUTOMATION_IOT">电气/自动化/物联</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="MECH_VEHICLE_ROBO">机械/机电/机器人</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="FOOD_BIO_CHEM_MAT">粮油/食品/化工</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="ECON_MGMT_FINANCE">经管/金融/电商</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="DESIGN_MEDIA_FOREIGN">艺术/新传/外语</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="MATH_PHYSICS_CIVIL">数理/土木/建筑</button>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">🧭 按兴趣发展方向与入门难度筛选：</div>
+              <div class="xp-pill-bar" id="community-comp-cat-pills">
+                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-cat="ALL">全部方向</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-beginner-toggle="true">✨ 大一/零基础友好</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ALGO_PROGRAMMING">算法编程</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ELECTRONICS_ROBO">硬件机器人</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="MATH_MODELING">数学建模</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="INNOVATION_ENTREPRENEURSHIP">创新创业</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="CYBER_SECURITY_AI">网安与AI</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="DIGITAL_MEDIA_ART">数媒与综合</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="xp-card-grid" id="community-competitions-grid">
+            ${
+              ccCompetitions.length === 0
+                ? xpeachEmptyState({
+                    icon: "🏆",
+                    title: "暂无竞赛指南配置",
+                    subtitle: "管理员可在站点后台动态下发学科竞赛与官网名录。"
+                  })
+                : ccCompetitions.map((comp) => xpeachCompetitionCard(comp, { isAdmin: false })).join("")
             }
           </div>
         </section>
@@ -1196,10 +1280,104 @@ export function renderConsoleHtml(ctx = {}) {
           </div>
         </div>
 
-        <!-- 3. 校园频道云控管理 -->
+        <!-- 3. 学科竞赛清单与专业发展指南云控管理 -->
+        <div class="xp-well" style="padding: 16px; margin-bottom: 18px;">
+          <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 12px;">
+            <h3 class="xp-entity-title" style="font-size: 15px;">3. 学科竞赛清单与专业指南云控管理 (${ccCompetitions.length} 项赛事)</h3>
+            ${xpeachBadge("支持按专业赛道与合作社团联动下发", "peach")}
+          </div>
+          <div class="xp-card-grid" style="margin-bottom: 16px;">
+            ${
+              ccCompetitions.length === 0
+                ? xpeachEmptyState({
+                    icon: "🏆",
+                    title: "暂无学科竞赛配置",
+                    subtitle: "在下方表单填写竞赛名称与官网链接即可新增并实时下发。"
+                  })
+                : ccCompetitions.map((cp) => xpeachCompetitionCard(cp, { isAdmin: true })).join("")
+            }
+          </div>
+          <div class="xp-form-grid-3">
+            <div class="field">
+              <label class="label" for="cc-comp-id">竞赛 ID (编辑自动填入，留空自动生成)</label>
+              <input class="input" id="cc-comp-id" type="text" placeholder="如 comp_lanqiao" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-title">竞赛完整名称</label>
+              <input class="input" id="cc-comp-title" type="text" placeholder="如 蓝桥杯全国软件和信息技术专业人才大赛" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-short">竞赛简称</label>
+              <input class="input" id="cc-comp-short" type="text" placeholder="如 蓝桥杯" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-tier">赛事级别徽标</label>
+              <input class="input" id="cc-comp-tier" type="text" value="教育部白名单 A 类赛事" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-category">兴趣发展分类</label>
+              <select class="input" id="cc-comp-category">
+                <option value="ALGO_PROGRAMMING">算法与程序设计</option>
+                <option value="ELECTRONICS_ROBO">电子与机器人硬件</option>
+                <option value="MATH_MODELING">数学建模与数据分析</option>
+                <option value="INNOVATION_ENTREPRENEURSHIP">创新创业与双创孵化</option>
+                <option value="CYBER_SECURITY_AI">网安与人工智能</option>
+                <option value="DIGITAL_MEDIA_ART">数媒创意与外语综合</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-url">官方网站 (HTTPS)</label>
+              <input class="input" id="cc-comp-url" type="url" placeholder="https://dasai.lanqiao.cn" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-majors">适合专业赛道 (逗号分隔枚举)</label>
+              <input class="input" id="cc-comp-majors" type="text" placeholder="CS_AI_SOFTWARE,EE_AUTOMATION_IOT,ALL_MAJORS" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-tags">能力/兴趣标签 (逗号分隔)</label>
+              <input class="input" id="cc-comp-tags" type="text" placeholder="算法编程,单片机/EDA,保研加分" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-window">报名与赛程时间窗</label>
+              <input class="input" id="cc-comp-window" type="text" placeholder="每年 10月–12月报名 · 次年 4月省赛" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-college">校内承办学院</label>
+              <input class="input" id="cc-comp-college" type="text" placeholder="信息科学与工程学院" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-club-name">关联组队合作社团名称</label>
+              <input class="input" id="cc-comp-club-name" type="text" placeholder="如 计算机服务社 / 硬件技术联盟" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-club-qq">关联社团 QQ 群号</label>
+              <input class="input" id="cc-comp-club-qq" type="text" placeholder="如 1043885481" />
+            </div>
+          </div>
+          <div class="xp-form-grid-3" style="margin-top: 10px;">
+            <div class="field" style="grid-column: span 2;">
+              <label class="label" for="cc-comp-roadmap">备赛成长路线</label>
+              <input class="input" id="cc-comp-roadmap" type="text" placeholder="从零基础入门到冲奖的学习路径建议" />
+            </div>
+            <div class="field">
+              <label class="label" for="cc-comp-sort">排序权重</label>
+              <input class="input" id="cc-comp-sort" type="number" value="20" />
+            </div>
+          </div>
+          <div class="field" style="margin-top: 10px;">
+            <label class="label" for="cc-comp-summary">赛事简介与参赛价值</label>
+            <input class="input" id="cc-comp-summary" type="text" placeholder="介绍赛事含金量、考察形式与适合人群" />
+          </div>
+          <div class="xp-action-bar">
+            <span class="text-xs text-muted">保存后实时同步下发至全校 Android 客户端与网页端「竞赛指南」</span>
+            <button type="button" class="xp-pill xp-pill--active" id="btn-save-comp">新增 / 更新学科竞赛</button>
+          </div>
+        </div>
+
+        <!-- 4. 校园频道云控管理 -->
         <div class="xp-well" style="padding: 16px;">
           <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 12px;">
-            <h3 class="xp-entity-title" style="font-size: 15px;">3. 校园频道云控列表 (${ccChannels.length} 个频道 · 当前默认置空)</h3>
+            <h3 class="xp-entity-title" style="font-size: 15px;">4. 校园频道云控列表 (${ccChannels.length} 个频道 · 当前默认置空)</h3>
             ${xpeachBadge(ccChannels.length === 0 ? "已置空" : `${ccChannels.length} 个启用`, "neutral")}
           </div>
           ${
@@ -1612,6 +1790,68 @@ export function renderConsoleHtml(ctx = {}) {
               p.classList.toggle("xp-pill--active", p === pill);
             });
             filterCommunityClubs();
+          });
+        });
+
+        // Copy Official Competition URL & Filter Competitions by Major / Category / Beginner
+        document.querySelectorAll("[data-copy-url]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var url = btn.getAttribute("data-copy-url") || "";
+            var name = btn.getAttribute("data-copy-comp-name") || "学科竞赛";
+            if (navigator.clipboard && url) {
+              navigator.clipboard.writeText(url).catch(function () {});
+            }
+            showToast("已复制「" + name + "」官网链接：" + url);
+          });
+        });
+
+        var compSearchInput = document.getElementById("community-comp-search");
+        var activeCompMajor = "ALL";
+        var activeCompCat = "ALL";
+        var onlyCompBeginner = false;
+        function filterCommunityCompetitions() {
+          var q = compSearchInput ? compSearchInput.value.trim().toLowerCase() : "";
+          document.querySelectorAll("[data-comp-card]").forEach(function (card) {
+            var cat = card.getAttribute("data-comp-category") || "";
+            var majors = (card.getAttribute("data-comp-majors") || "").split(",");
+            var isBeg = card.getAttribute("data-comp-beginner") === "true";
+            var haystack = card.getAttribute("data-comp-search") || "";
+            var majorOk =
+              activeCompMajor === "ALL" ||
+              majors.indexOf("ALL_MAJORS") !== -1 ||
+              majors.indexOf(activeCompMajor) !== -1;
+            var catOk = activeCompCat === "ALL" || cat === activeCompCat;
+            var begOk = !onlyCompBeginner || isBeg;
+            var qOk = !q || haystack.indexOf(q) !== -1;
+            card.style.display = majorOk && catOk && begOk && qOk ? "" : "none";
+          });
+        }
+        if (compSearchInput) {
+          compSearchInput.addEventListener("input", filterCommunityCompetitions);
+        }
+        document.querySelectorAll("[data-comp-major]").forEach(function (pill) {
+          pill.addEventListener("click", function () {
+            activeCompMajor = pill.getAttribute("data-comp-major") || "ALL";
+            document.querySelectorAll("[data-comp-major]").forEach(function (p) {
+              p.classList.toggle("xp-pill--active", p === pill);
+            });
+            filterCommunityCompetitions();
+          });
+        });
+        document.querySelectorAll("[data-comp-cat]").forEach(function (pill) {
+          pill.addEventListener("click", function () {
+            activeCompCat = pill.getAttribute("data-comp-cat") || "ALL";
+            document.querySelectorAll("[data-comp-cat]").forEach(function (p) {
+              p.classList.toggle("xp-pill--active", p === pill);
+            });
+            filterCommunityCompetitions();
+          });
+        });
+        document.querySelectorAll("[data-comp-beginner-toggle]").forEach(function (pill) {
+          pill.addEventListener("click", function () {
+            onlyCompBeginner = !onlyCompBeginner;
+            pill.classList.toggle("xp-pill--active", onlyCompBeginner);
+            filterCommunityCompetitions();
           });
         });
 
@@ -2450,6 +2690,110 @@ export function renderConsoleHtml(ctx = {}) {
               method: "DELETE"
             }).then(function () {
               showToast("社团已删除");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        var btnSaveComp = document.getElementById("btn-save-comp");
+        if (btnSaveComp) {
+          btnSaveComp.addEventListener("click", function () {
+            var title = (document.getElementById("cc-comp-title").value || "").trim();
+            if (!title) {
+              showToast("请填写学科竞赛名称", true);
+              return;
+            }
+            btnSaveComp.disabled = true;
+            apiFetch("/api/v1/admin/campus-content/competitions", {
+              method: "POST",
+              body: JSON.stringify({
+                school_id: "haut",
+                id: (document.getElementById("cc-comp-id").value || "").trim() || undefined,
+                title: title,
+                short_title: (document.getElementById("cc-comp-short").value || title).trim(),
+                tier_badge: (document.getElementById("cc-comp-tier").value || "教育部白名单 A 类赛事").trim(),
+                category: document.getElementById("cc-comp-category").value || "INNOVATION_ENTREPRENEURSHIP",
+                official_website_url: (document.getElementById("cc-comp-url").value || "").trim(),
+                recommended_major_tracks: (document.getElementById("cc-comp-majors").value || "ALL_MAJORS").trim(),
+                interest_tags: (document.getElementById("cc-comp-tags").value || "").trim(),
+                registration_window: (document.getElementById("cc-comp-window").value || "").trim(),
+                haut_host_college: (document.getElementById("cc-comp-college").value || "").trim(),
+                partner_club_name: (document.getElementById("cc-comp-club-name").value || "").trim(),
+                partner_club_qq: (document.getElementById("cc-comp-club-qq").value || "").trim(),
+                skill_roadmap: (document.getElementById("cc-comp-roadmap").value || "").trim(),
+                summary: (document.getElementById("cc-comp-summary").value || "").trim(),
+                sort_order: Number(document.getElementById("cc-comp-sort").value || 20)
+              })
+            })
+              .then(function () {
+                showToast("学科竞赛信息已保存并实时下发！");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btnSaveComp.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
+
+        document.querySelectorAll("[data-edit-comp]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            try {
+              var cp = JSON.parse(btn.getAttribute("data-edit-comp"));
+              document.getElementById("cc-comp-id").value = cp.id || "";
+              document.getElementById("cc-comp-title").value = cp.title || "";
+              document.getElementById("cc-comp-short").value = cp.short_title || "";
+              document.getElementById("cc-comp-tier").value = cp.tier_badge || "教育部白名单 A 类赛事";
+              document.getElementById("cc-comp-category").value = cp.category || "INNOVATION_ENTREPRENEURSHIP";
+              document.getElementById("cc-comp-url").value = cp.official_website_url || "";
+              document.getElementById("cc-comp-majors").value = (cp.recommended_major_tracks || []).join(",");
+              document.getElementById("cc-comp-tags").value = (cp.interest_tags || []).join(",");
+              document.getElementById("cc-comp-window").value = cp.registration_window || "";
+              document.getElementById("cc-comp-college").value = cp.haut_host_college || "";
+              document.getElementById("cc-comp-club-name").value = cp.partner_club_name || "";
+              document.getElementById("cc-comp-club-qq").value = cp.partner_club_qq || "";
+              document.getElementById("cc-comp-roadmap").value = cp.skill_roadmap || "";
+              document.getElementById("cc-comp-summary").value = cp.summary || "";
+              document.getElementById("cc-comp-sort").value = cp.sort_order || 20;
+              document.getElementById("cc-comp-title").focus();
+            } catch (e) {}
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-pin-comp]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var cp = JSON.parse(btn.getAttribute("data-toggle-pin-comp"));
+            apiFetch("/api/v1/admin/campus-content/competitions", {
+              method: "POST",
+              body: JSON.stringify({ id: cp.id, title: cp.title, pinned: !cp.pinned })
+            }).then(function () {
+              showToast(!cp.pinned ? "已置顶竞赛" : "已取消置顶");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-toggle-enable-comp]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var cp = JSON.parse(btn.getAttribute("data-toggle-enable-comp"));
+            var nextEnabled = cp.enabled === false;
+            apiFetch("/api/v1/admin/campus-content/competitions", {
+              method: "POST",
+              body: JSON.stringify({ id: cp.id, title: cp.title, enabled: nextEnabled })
+            }).then(function () {
+              showToast(nextEnabled ? "已启用竞赛展示" : "已隐藏竞赛");
+              setTimeout(function () { window.location.reload(); }, 400);
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-delete-comp]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var id = btn.getAttribute("data-delete-comp");
+            apiFetch("/api/v1/admin/campus-content/competitions/" + encodeURIComponent(id), {
+              method: "DELETE"
+            }).then(function () {
+              showToast("竞赛已删除");
               setTimeout(function () { window.location.reload(); }, 400);
             });
           });
