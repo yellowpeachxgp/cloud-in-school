@@ -40,6 +40,7 @@ import {
   renderConsoleHtml,
   renderMobileCallbackHtml
 } from "../../console/src/main.mjs";
+import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs";
 
 function compileRoutePattern(pathTemplate) {
   const paramNames = [];
@@ -80,6 +81,19 @@ export function createCampusCloudApp(options = {}) {
       environment: options.environment || process.env.NODE_ENV || "production"
     });
   const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker();
+  const redisBuffer =
+    options.redisBuffer ||
+    new RedisGatewayBuffer({
+      enabled:
+        options.redisEnabled !== undefined
+          ? Boolean(options.redisEnabled)
+          : Boolean(process.env.REDIS_URL || process.env.REDIS_HOST || process.env.REDIS_PASSWORD),
+      ...options.redisOptions
+    });
+
+  if (redisBuffer.client.enabled) {
+    redisBuffer.auditAndTuneServerConfig({ applyTuning: true }).catch(() => {});
+  }
 
   // Pre-register the two signed reference plugins
   try {
@@ -346,25 +360,38 @@ export function createCampusCloudApp(options = {}) {
   }
 
   // --- 1..3 System & OpenAPI ---
-  register("GET", "/healthz", "getHealthz", "none", async () => ({
-    status: 200,
-    code: "HEALTH_OK",
-    data: {
-      service: "cloud-in-school",
-      status: "ok",
-      version: "4.0.0"
-    }
-  }));
+  register("GET", "/healthz", "getHealthz", "none", async () => {
+    const redisTelemetry = await redisBuffer.getTelemetrySnapshot();
+    return {
+      status: 200,
+      code: "HEALTH_OK",
+      data: {
+        service: "cloud-in-school",
+        status: "ok",
+        version: "4.1.0",
+        redis_buffer: {
+          enabled: redisTelemetry.enabled,
+          connected: redisTelemetry.connected,
+          hit_rate_pct: redisTelemetry.hit_rate_pct,
+          l1_entries: redisTelemetry.l1_entries
+        }
+      }
+    };
+  });
 
-  register("GET", "/readyz", "getReadyz", "none", async () => ({
-    status: 200,
-    code: "READY_OK",
-    data: {
-      ready: kmsVault.kmsOnline,
-      migrations_applied: Array.from(store.appliedMigrations),
-      school_providers: ["school.haut.library"]
-    }
-  }));
+  register("GET", "/readyz", "getReadyz", "none", async () => {
+    const redisTelemetry = await redisBuffer.getTelemetrySnapshot();
+    return {
+      status: 200,
+      code: "READY_OK",
+      data: {
+        ready: kmsVault.kmsOnline,
+        migrations_applied: Array.from(store.appliedMigrations),
+        school_providers: ["school.haut.library"],
+        redis_buffer: redisTelemetry
+      }
+    };
+  });
 
   register("GET", "/api/v1/openapi.json", "getOpenApiSpec", "none", async () => ({
     status: 200,
@@ -643,19 +670,27 @@ export function createCampusCloudApp(options = {}) {
   });
 
   // --- 21..29 Schools & School Bindings ---
-  register("GET", "/api/v1/schools", "listSchools", "public", async () => ({
-    status: 200,
-    code: "SCHOOLS_LISTED",
-    data: {
-      schools: Array.from(store.schoolIntegrations.values()).map((s) => ({
-        school_id: s.school_id,
-        display_name: s.display_name,
-        provider_id: s.provider_id,
-        enabled: s.enabled,
-        kill_switch: s.kill_switch
-      }))
-    }
-  }));
+  register("GET", "/api/v1/schools", "listSchools", "public", async () => {
+    const { value: schools, cacheStatus } = await redisBuffer.getOrCompute(
+      "schools",
+      "list",
+      300,
+      async () =>
+        Array.from(store.schoolIntegrations.values()).map((s) => ({
+          school_id: s.school_id,
+          display_name: s.display_name,
+          provider_id: s.provider_id,
+          enabled: s.enabled,
+          kill_switch: s.kill_switch
+        }))
+    );
+    return {
+      status: 200,
+      headers: { "x-cache": cacheStatus },
+      code: "SCHOOLS_LISTED",
+      data: { schools }
+    };
+  });
 
   register(
     "GET",
@@ -663,12 +698,21 @@ export function createCampusCloudApp(options = {}) {
     "getSchoolLibraryCapabilities",
     "public",
     async ({ params }) => {
-      const integ = store.schoolIntegrations.get(params.schoolId);
-      if (!integ) throw new ContractError("NOT_FOUND", `Unknown school: ${params.schoolId}`);
+      const { value: capabilities, cacheStatus } = await redisBuffer.getOrCompute(
+        "schools",
+        `caps:${params.schoolId}`,
+        300,
+        async () => {
+          const integ = store.schoolIntegrations.get(params.schoolId);
+          if (!integ) throw new ContractError("NOT_FOUND", `Unknown school: ${params.schoolId}`);
+          return schoolProvider.getCapabilities(integ);
+        }
+      );
       return {
         status: 200,
+        headers: { "x-cache": cacheStatus },
         code: "SCHOOL_CAPABILITIES_OK",
-        data: { capabilities: schoolProvider.getCapabilities(integ) }
+        data: { capabilities }
       };
     }
   );
@@ -1309,6 +1353,7 @@ export function createCampusCloudApp(options = {}) {
       "FINANCE_OPERATOR",
       "SECURITY_AUDITOR"
     ]);
+    const redisTelemetry = await redisBuffer.getTelemetrySnapshot();
     return {
       status: 200,
       code: "ADMIN_OVERVIEW_OK",
@@ -1320,7 +1365,8 @@ export function createCampusCloudApp(options = {}) {
         jobs_count: store.reservationJobs.size,
         orders_count: store.reservationOrders.size,
         parcels_count: store.parcels.size,
-        audit_events_count: store.auditEvents.length
+        audit_events_count: store.auditEvents.length,
+        redis_buffer: redisTelemetry
       }
     };
   });
@@ -1351,6 +1397,7 @@ export function createCampusCloudApp(options = {}) {
       if (!school) throw new ContractError("NOT_FOUND", "School not found");
       school.kill_switch = Boolean(body?.kill_switch);
       school.updated_at = new Date().toISOString();
+      await redisBuffer.invalidate("schools");
       store.recordAudit({
         actor_kind: "ADMIN",
         actor_ref: auth.cloudUserId,
@@ -1976,16 +2023,29 @@ export function createCampusCloudApp(options = {}) {
 
   register("GET", "/api/v1/campus-content", "getCampusContent", "public", async ({ query }) => {
     const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
-    const content = store.getCampusContent(schoolId, { includeDisabled: false });
+    const { value: content, cacheStatus } = await redisBuffer.getOrCompute(
+      "campus_content",
+      schoolId.toLowerCase(),
+      120,
+      async () => store.getCampusContent(schoolId, { includeDisabled: false })
+    );
     return {
       status: 200,
       headers: {
-        "cache-control": "no-store, no-cache, must-revalidate"
+        "cache-control": "no-store, no-cache, must-revalidate",
+        "x-cache": cacheStatus
       },
       code: "CAMPUS_CONTENT_OK",
       data: content
     };
   });
+
+  async function refreshCampusContentCache(schoolId) {
+    const key = String(schoolId || DEFAULT_SCHOOL_ID).toLowerCase();
+    await redisBuffer.invalidate("campus_content", key);
+    const publicSnapshot = store.getCampusContent(key, { includeDisabled: false });
+    await redisBuffer.setAndWarm("campus_content", key, publicSnapshot, 120);
+  }
 
   register("GET", "/api/v1/admin/campus-content", "getAdminCampusContent", "bearer_admin", async ({ query }) => {
     const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
@@ -2000,6 +2060,7 @@ export function createCampusCloudApp(options = {}) {
     const schoolId = query.get("school_id") || body?.school_id || DEFAULT_SCHOOL_ID;
     const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
     const updated = store.updateCampusContent(schoolId, body || {}, actorName);
+    await refreshCampusContentCache(schoolId);
     return {
       status: 200,
       code: "CAMPUS_CONTENT_UPDATED",
@@ -2011,6 +2072,7 @@ export function createCampusCloudApp(options = {}) {
     const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
     const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
     const updated = store.upsertCampusChannel(schoolId, body || {}, actorName);
+    await refreshCampusContentCache(schoolId);
     return {
       status: 200,
       code: "CAMPUS_CHANNEL_UPSERTED",
@@ -2027,6 +2089,7 @@ export function createCampusCloudApp(options = {}) {
       const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
       const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
       const updated = store.deleteCampusChannel(schoolId, params.channelId, actorName);
+      await refreshCampusContentCache(schoolId);
       return {
         status: 200,
         code: "CAMPUS_CHANNEL_DELETED",
@@ -2039,6 +2102,7 @@ export function createCampusCloudApp(options = {}) {
     const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
     const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
     const updated = store.upsertCampusClub(schoolId, body || {}, actorName);
+    await refreshCampusContentCache(schoolId);
     return {
       status: 200,
       code: "CAMPUS_CLUB_UPSERTED",
@@ -2055,6 +2119,7 @@ export function createCampusCloudApp(options = {}) {
       const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
       const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
       const updated = store.deleteCampusClub(schoolId, params.clubId, actorName);
+      await refreshCampusContentCache(schoolId);
       return {
         status: 200,
         code: "CAMPUS_CLUB_DELETED",
@@ -2072,6 +2137,7 @@ export function createCampusCloudApp(options = {}) {
       const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
       const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
       const updated = store.upsertCampusCompetition(schoolId, body || {}, actorName);
+      await refreshCampusContentCache(schoolId);
       return {
         status: 200,
         code: "CAMPUS_COMPETITION_UPSERTED",
@@ -2089,6 +2155,7 @@ export function createCampusCloudApp(options = {}) {
       const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
       const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
       const updated = store.deleteCampusCompetition(schoolId, params.competitionId, actorName);
+      await refreshCampusContentCache(schoolId);
       return {
         status: 200,
         code: "CAMPUS_COMPETITION_DELETED",
@@ -2430,6 +2497,7 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     pluginBroker,
+    redisBuffer,
     inject,
     createHttpServer,
     getRegisteredRoutes
