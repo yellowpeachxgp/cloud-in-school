@@ -1404,6 +1404,212 @@ paths:
                 $ref: '#/components/schemas/AuditEventListEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/v1/auth/web/start:
+    get:
+      operationId: startWebOidcRedirect
+      tags: [identity]
+      summary: Initiate web OIDC redirect flow to XPeach SSO
+      responses:
+        '302':
+          description: Redirect to XPeach SSO authorize endpoint
+  /api/v1/auth/web/logout:
+    get:
+      operationId: logoutWebSession
+      tags: [identity]
+      summary: Revoke active web session cookie and redirect to portal landing
+      responses:
+        '302':
+          description: Session cleared and redirected
+  /api/v1/auth/web/exchange:
+    post:
+      operationId: exchangeWebAuthTicket
+      tags: [identity]
+      summary: Exchange single-use web ticket for web session cookie and access token
+      responses:
+        '200':
+          description: Web session issued
+  /api/v1/auth/mobile/status:
+    get:
+      operationId: getMobileAuthTransactionStatus
+      tags: [identity]
+      summary: Poll mobile OIDC PKCE transaction completion status
+      responses:
+        '200':
+          description: Mobile transaction status
+  /api/v1/auth/oidc/native-login:
+    post:
+      operationId: loginNativeWithSso
+      tags: [identity]
+      summary: Perform native OIDC login against XPeach SSO with optional TOTP verification
+      responses:
+        '200':
+          description: Session issued or TOTP challenge required
+  /api/v1/sync/snapshot:
+    get:
+      operationId: getUserSyncSnapshot
+      tags: [identity]
+      security:
+        - bearerAuth: []
+      summary: Pull unified user sync snapshot (wallet, bindings, reservations, parcels, campus content)
+      responses:
+        '200':
+          description: Unified sync snapshot
+    post:
+      operationId: pushUserSyncSnapshot
+      tags: [identity]
+      security:
+        - bearerAuth: []
+      summary: Bidirectional sync of school bindings, parcels, reservation cancellations and snapshot pull
+      responses:
+        '200':
+          description: Unified sync snapshot after push
+  /api/v1/admin/orders/{orderId}/quick-refund:
+    post:
+      operationId: quickRefundAdminOrder
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Issue an immediate admin 1-click refund to the user's XPeach wallet
+      responses:
+        '200':
+          description: Order refunded
+  /api/v1/reservation-jobs/{jobId}/execute-now:
+    post:
+      operationId: executeReservationJobNow
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Trigger immediate PRECHECK -> FINAL_CHECK -> FIRE execution for an armed reservation job
+      responses:
+        '200':
+          description: Reservation job executed
+  /api/v1/reservation-jobs/{jobId}/cancel-seat:
+    post:
+      operationId: cancelConfirmedReservationSeat
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Release a live confirmed or active library seat reservation
+      responses:
+        '200':
+          description: Seat reservation released
+  /api/v1/school-bindings/bind-live:
+    post:
+      operationId: bindLiveSchoolAccount
+      tags: [schools]
+      security:
+        - bearerAuth: []
+      summary: Verify live HAUT CAS/library credentials and store KMS-encrypted session bundle
+      responses:
+        '201':
+          description: Live school binding verified and stored
+  /api/v1/schools/haut/library/live-regions:
+    get:
+      operationId: getHautLibraryLiveRegions
+      tags: [schools]
+      security:
+        - bearerAuth: []
+      summary: Query live HAUT library study regions and active seat bookings
+      responses:
+        '200':
+          description: Live study regions
+  /api/v1/schools/haut/library/live-seats:
+    get:
+      operationId: getHautLibraryLiveSeats
+      tags: [schools]
+      security:
+        - bearerAuth: []
+      summary: Query live HAUT library seat availability for a target region and date
+      responses:
+        '200':
+          description: Live region seats
+  /api/v1/campus-content:
+    get:
+      operationId: getCampusContent
+      tags: [schools]
+      summary: Public cloud-controlled catalog of campus bulletin, partner clubs, competitions, and channels
+      responses:
+        '200':
+          description: Campus community and competition catalog
+  /api/v1/admin/campus-content:
+    get:
+      operationId: getAdminCampusContent
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Retrieve full campus content catalog including disabled entries for admin console
+      responses:
+        '200':
+          description: Admin campus content catalog
+    put:
+      operationId: updateAdminCampusContent
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Update campus bulletin, channels, clubs, or competitions in bulk
+      responses:
+        '200':
+          description: Updated campus content catalog
+  /api/v1/admin/campus-content/channels:
+    post:
+      operationId: upsertAdminCampusChannel
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Create or update a cloud-controlled campus channel item
+      responses:
+        '200':
+          description: Upserted channel catalog
+  /api/v1/admin/campus-content/channels/{channelId}:
+    delete:
+      operationId: deleteAdminCampusChannel
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Delete a campus channel item by ID
+      responses:
+        '200':
+          description: Updated channel catalog
+  /api/v1/admin/campus-content/clubs:
+    post:
+      operationId: upsertAdminCampusClub
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Create or update a cloud-controlled partner student club item
+      responses:
+        '200':
+          description: Upserted club catalog
+  /api/v1/admin/campus-content/clubs/{clubId}:
+    delete:
+      operationId: deleteAdminCampusClub
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Delete a student club item by ID
+      responses:
+        '200':
+          description: Updated club catalog
+  /api/v1/admin/campus-content/competitions:
+    post:
+      operationId: upsertAdminCampusCompetition
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Create or update a cloud-controlled university competition item
+      responses:
+        '200':
+          description: Upserted competition catalog
+  /api/v1/admin/campus-content/competitions/{competitionId}:
+    delete:
+      operationId: deleteAdminCampusCompetition
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Delete a university competition item by ID
+      responses:
+        '200':
+          description: Updated competition catalog
 components:
   securitySchemes:
     bearerAuth:

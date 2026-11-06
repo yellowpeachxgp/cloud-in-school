@@ -371,3 +371,207 @@ export function xpeachCompetitionCard(comp, { isAdmin = false } = {}) {
       </div>
     </article>`;
 }
+
+export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) {
+  const j = job || {};
+  const p = plan || {};
+  const areaLabel = cleanDisplayText(p.area_name || p.area_code, "4楼北自习区");
+  const seats =
+    Array.isArray(p.candidate_seats) && p.candidate_seats.length > 0
+      ? p.candidate_seats.join(" / ")
+      : "自动分配";
+  const bookingDate = cleanDisplayText(j.booking_local_date || p.target_local_date, "-");
+  const fireTime = cleanDisplayText(p.target_local_time || j.target_local_time, "07:00:00");
+  const slotWindow = cleanDisplayText(p.slot_window, "08:00-22:00");
+  const repDays = Number(p.repeat_days || j.repeat_days || 1);
+  const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
+
+  const repeatBadge =
+    repDays > 1
+      ? xpeachBadge(`连续 ${repDays} 天 (剩 ${remDays} 天)`, "primary")
+      : xpeachBadge("单日", "neutral");
+
+  const stateBadge =
+    j.state === "CONFIRMED"
+      ? xpeachBadge(`已占座成功 (扣除 ${pricePeachText} 🍑)`, "success")
+      : j.state === "CANCELLED"
+        ? xpeachBadge("已取消 (未扣费)", "neutral")
+        : j.state === "FAILED"
+          ? xpeachBadge("未抢到座位 (未扣费)", "danger")
+          : j.state === "EXPIRED"
+            ? xpeachBadge("已过开抢时间窗 (未扣费)", "danger")
+            : xpeachBadge("已就绪 · 等待到点开抢", "primary");
+
+  const actionHtml =
+    j.state === "CONFIRMED"
+      ? `<button type="button" class="xp-pill xp-pill--compact" data-cancel-seat-job="${escapeHtml(j.id)}">退座释放</button>`
+      : !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
+        ? `<div class="xp-action-group">
+            <button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-execute-now-job="${escapeHtml(j.id)}">⚡ 立即抢一次</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}">取消预约</button>
+          </div>`
+        : "";
+
+  return `
+    <article class="xp-row-card" data-job-row="${escapeHtml(j.id)}">
+      <div class="xp-row-card-main">
+        <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">💺</div>
+        <div class="xp-entity-title-col">
+          <div class="xp-badge-flow">
+            <span class="xp-row-card-title">${escapeHtml(areaLabel)}</span>
+            <code class="xp-code-pill">${escapeHtml(seats)}</code>
+            ${repeatBadge}
+            ${stateBadge}
+          </div>
+          <div class="xp-row-card-meta">
+            <span>🗓️ 用座日期：<strong>${escapeHtml(bookingDate)}</strong></span>
+            <span>⏰ 准点开抢：<code>${escapeHtml(fireTime)}</code></span>
+            <span>🕒 用座时段：${escapeHtml(slotWindow)}</span>
+          </div>
+        </div>
+      </div>
+      ${actionHtml ? `<div class="xp-row-card-actions">${actionHtml}</div>` : ""}
+    </article>`;
+}
+
+export function xpeachParcelRowCard(parcel) {
+  const p = parcel || {};
+  const carrierLabel = cleanDisplayText(p.carrier_name || p.carrier_code, "校园快递");
+  const trackingNo = cleanDisplayText(p.tracking_number, "-");
+  const stationLabel = cleanDisplayText(p.station_name, "校内菜鸟驿站");
+  const codeDisplay = p.pickup_code
+    ? p.pickup_code
+    : p.status === "PICKED_UP"
+      ? "已签收"
+      : "待出码";
+  const statusBadge =
+    p.status === "PICKED_UP"
+      ? xpeachBadge("已取件", "neutral")
+      : p.pickup_code || p.status === "READY_FOR_PICKUP"
+        ? xpeachBadge("待取件", "success")
+        : xpeachBadge("运输派送中", "primary");
+
+  return `
+    <article class="xp-row-card" data-parcel-row="${escapeHtml(p.id)}">
+      <div class="xp-row-card-main">
+        <div class="xp-icon-box xp-icon-box--sm xp-icon-box--peach" aria-hidden="true">📦</div>
+        <div class="xp-entity-title-col">
+          <div class="xp-badge-flow">
+            <span class="pickup-code-number xp-pickup-code-inline">${escapeHtml(codeDisplay)}</span>
+            ${statusBadge}
+            ${xpeachBadge(`📍 ${stationLabel}`, "neutral")}
+          </div>
+          <div class="xp-row-card-meta">
+            <span>🚚 <strong>${escapeHtml(carrierLabel)}</strong></span>
+            <span>单号：<code>${escapeHtml(trackingNo)}</code></span>
+            ${p.item_title ? `<span>物品：${escapeHtml(p.item_title)}</span>` : ""}
+          </div>
+        </div>
+      </div>
+      ${
+        p.status !== "PICKED_UP"
+          ? `<div class="xp-row-card-actions">
+              <button type="button" class="xp-pill xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">标记已取</button>
+            </div>`
+          : ""
+      }
+    </article>`;
+}
+
+export function xpeachOrderRowCard(
+  order,
+  { isAdmin = false, pricingMicropeach = 10000, micropeachPerPeach = 10000 } = {}
+) {
+  const o = order || {};
+  const shortId = String(o.id || "").slice(0, 12);
+  const peachAmt = Number(
+    o.price_peach ?? (o.price_micropeach || pricingMicropeach) / micropeachPerPeach
+  ).toFixed(2);
+  const stBadge =
+    o.payment_state === "PAID"
+      ? xpeachBadge(isAdmin ? "已扣费" : "已从 XPeach 扣除", "success")
+      : o.payment_state === "REFUNDED"
+        ? xpeachBadge(isAdmin ? "已退还 🍑" : "已退还 🍑 至 XPeach", "neutral")
+        : xpeachBadge("待结算", "warning");
+  const timeText = cleanDisplayText((o.paid_at || o.created_at || "").replace("T", " ").slice(0, 19), "-");
+
+  return `
+    <article class="xp-row-card" data-order-row="${escapeHtml(o.id)}">
+      <div class="xp-row-card-main">
+        <div class="xp-icon-box xp-icon-box--sm xp-icon-box--peach" aria-hidden="true">🍑</div>
+        <div class="xp-entity-title-col">
+          <div class="xp-badge-flow">
+            <span class="xp-row-card-title">图书馆座位自动预约</span>
+            <span class="xp-meta-highlight">🍑 ${escapeHtml(peachAmt)}</span>
+            ${stBadge}
+          </div>
+          <div class="xp-row-card-meta">
+            <span>🧾 账单号：<code>${escapeHtml(shortId)}</code></span>
+            ${
+              isAdmin
+                ? `<span>👤 用户：<strong>${escapeHtml(o.username || "-")}</strong> (<code>${escapeHtml(o.sso_subject || "-")}</code>)</span>`
+                : ""
+            }
+            <span>🕒 时间：${escapeHtml(timeText)}</span>
+          </div>
+        </div>
+      </div>
+      ${
+        isAdmin && o.payment_state === "PAID"
+          ? `<div class="xp-row-card-actions">
+              <button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}">退还 🍑</button>
+            </div>`
+          : ""
+      }
+    </article>`;
+}
+
+export function xpeachSchoolControlCard(school) {
+  const s = school || {};
+  const isKilled = Boolean(s.kill_switch);
+  return `
+    <article class="xp-row-card" data-school-row="${escapeHtml(s.school_id)}">
+      <div class="xp-row-card-main">
+        <div class="xp-icon-box xp-icon-box--sm ${isKilled ? "xp-icon-box--peach" : "xp-icon-box--success"}" aria-hidden="true">🏫</div>
+        <div class="xp-entity-title-col">
+          <div class="xp-badge-flow">
+            <span class="xp-row-card-title">${escapeHtml(s.display_name || "河南工业大学")}</span>
+            ${isKilled ? xpeachBadge("维护暂停中", "danger") : xpeachBadge("运行正常", "success")}
+          </div>
+          <div class="xp-row-card-meta">
+            <span>🏛️ 服务模块：莲花街校区图书馆选座系统</span>
+            <span>学校标识：<code>${escapeHtml(s.school_id || "haut")}</code></span>
+          </div>
+        </div>
+      </div>
+      <div class="xp-row-card-actions">
+        <button type="button" class="xp-pill xp-pill--compact" data-toggle-kill="${escapeHtml(s.school_id)}" data-current-kill="${isKilled ? "true" : "false"}">
+          ${isKilled ? "恢复预约服务" : "暂停预约服务"}
+        </button>
+      </div>
+    </article>`;
+}
+
+export function xpeachAuditRowCard(event) {
+  const ev = event || {};
+  const timeText = cleanDisplayText((ev.created_at || "").replace("T", " ").slice(0, 19), "-");
+  const resourceLabel = `${cleanDisplayText(ev.resource_kind, "resource")}:${String(ev.resource_ref || "").slice(0, 16)}`;
+  const outcomeTone = ev.outcome === "DENY" || ev.outcome === "ERROR" ? "danger" : "success";
+
+  return `
+    <article class="xp-row-card">
+      <div class="xp-row-card-main">
+        <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">🛡️</div>
+        <div class="xp-entity-title-col">
+          <div class="xp-badge-flow">
+            <span class="xp-row-card-title">${escapeHtml(ev.action || "AUDIT_EVENT")}</span>
+            ${xpeachBadge(ev.outcome || "ALLOW", outcomeTone)}
+          </div>
+          <div class="xp-row-card-meta">
+            <span>🎯 目标资源：<code>${escapeHtml(resourceLabel)}</code></span>
+            <span>🕒 时间：${escapeHtml(timeText)}</span>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}

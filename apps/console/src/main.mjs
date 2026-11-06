@@ -14,7 +14,12 @@ import {
   xpeachBulletinHeroCard,
   xpeachClubCard,
   xpeachChannelCard,
-  xpeachCompetitionCard
+  xpeachCompetitionCard,
+  xpeachJobRowCard,
+  xpeachParcelRowCard,
+  xpeachOrderRowCard,
+  xpeachSchoolControlCard,
+  xpeachAuditRowCard
 } from "./ui-sdk.mjs";
 
 export const CONSOLE_VIEWS = [
@@ -855,60 +860,22 @@ export function renderConsoleHtml(ctx = {}) {
 
         <div class="divider"></div>
 
-        <h3 class="xp-entity-title" style="font-size: 15px; margin-bottom: 10px;">我的预约与抢座记录</h3>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>用座日期与开抢时间</th>
-                <th>自习区域与候选座位</th>
-                <th>用座时段 / 连续周期</th>
-                <th>当前状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="jobs-tbody">
-              ${
-                jobs.length === 0
-                  ? `<tr><td colspan="5" class="text-muted">暂无预约记录，在上方选择自习区域与座位号即可创建。</td></tr>`
-                  : jobs
-                      .map((j) => {
-                        const p = plans.find((x) => x.id === j.plan_id) || {};
-                        const seats = Array.isArray(p.candidate_seats) ? p.candidate_seats.join(" / ") : "自动分配";
-                        const repDays = Number(p.repeat_days || j.repeat_days || 1);
-                        const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
-                        const repeatInfo =
-                          repDays > 1
-                            ? ` · ${xpeachBadge(`连续 ${repDays} 天 (剩 ${remDays} 天)`, "primary")}`
-                            : " · 单日";
-                        const stateLabel =
-                          j.state === "CONFIRMED"
-                            ? xpeachBadge(`已占座成功 (扣除 ${pricePeachText} 🍑)`, "success")
-                            : j.state === "CANCELLED"
-                              ? xpeachBadge("已取消 (未扣费)", "neutral")
-                              : j.state === "FAILED"
-                                ? xpeachBadge("未抢到座位 (未扣费)", "danger")
-                                : j.state === "EXPIRED"
-                                  ? xpeachBadge("已过开抢时间窗 (未扣费)", "danger")
-                                  : xpeachBadge("已就绪 · 等待到点开抢", "primary");
-                        return `<tr>
-                          <td>${escapeHtml(j.booking_local_date || p.target_local_date || "-")} ${escapeHtml(p.target_local_time || j.target_local_time || "07:00:00")}</td>
-                          <td><strong>${escapeHtml(p.area_name || p.area_code || "4楼北自习区")}</strong> · <code>${escapeHtml(seats)}</code></td>
-                          <td>${escapeHtml(p.slot_window || "08:00-22:00")}${repeatInfo}</td>
-                          <td>${stateLabel}</td>
-                          <td>${
-                            j.state === "CONFIRMED"
-                              ? `<button type="button" class="xp-pill xp-pill--compact" data-cancel-seat-job="${escapeHtml(j.id)}">退座释放</button>`
-                              : !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
-                                ? `<div class="xp-action-group"><button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-execute-now-job="${escapeHtml(j.id)}">⚡ 立即抢一次</button><button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}">取消预约</button></div>`
-                                : "-"
-                          }</td>
-                        </tr>`;
-                      })
-                      .join("")
-              }
-            </tbody>
-          </table>
+        <h3 class="xp-section-subtitle">我的预约与抢座记录</h3>
+        <div class="xp-row-list" id="jobs-tbody">
+          ${
+            jobs.length === 0
+              ? xpeachEmptyState({
+                  icon: "💺",
+                  title: "暂无预约记录",
+                  subtitle: "在上方选择自习区域与座位号即可创建自动抢座计划。"
+                })
+              : jobs
+                  .map((j) => {
+                    const p = plans.find((x) => x.id === j.plan_id) || {};
+                    return xpeachJobRowCard(j, p, { pricePeachText });
+                  })
+                  .join("")
+          }
         </div>
       </section>`;
   }
@@ -980,51 +947,17 @@ export function renderConsoleHtml(ctx = {}) {
             : ""
         }
 
-        <h3 class="xp-entity-title" style="font-size: 15px; margin-bottom: 10px;">全部快递记录</h3>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>快递品牌与单号</th>
-                <th>取件码</th>
-                <th>校园驿站</th>
-                <th>当前状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="parcels-tbody">
-              ${
-                parcels.length === 0
-                  ? `<tr><td colspan="5" class="text-muted">暂无快递记录，可在上方粘贴取件短信或在日在校园 App 中绑定手机号自动同步。</td></tr>`
-                  : parcels
-                      .map((p) => {
-                        const codeDisplay = p.pickup_code
-                          ? p.pickup_code
-                          : p.status === "PICKED_UP"
-                            ? "已签收"
-                            : "待出码";
-                        const statusBadge =
-                          p.status === "PICKED_UP"
-                            ? xpeachBadge("已取件", "neutral")
-                            : p.pickup_code || p.status === "READY_FOR_PICKUP"
-                              ? xpeachBadge("待取件", "success")
-                              : xpeachBadge("运输派送中", "primary");
-                        return `<tr>
-                          <td><strong>${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")}</strong> · <code>${escapeHtml(p.tracking_number)}</code></td>
-                          <td><span class="xp-meta-highlight">${escapeHtml(codeDisplay)}</span></td>
-                          <td>${escapeHtml(p.station_name || "校内菜鸟驿站")}</td>
-                          <td>${statusBadge}</td>
-                          <td>${
-                            p.status !== "PICKED_UP"
-                              ? `<button type="button" class="xp-pill xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">标记已取</button>`
-                              : "-"
-                          }</td>
-                        </tr>`;
-                      })
-                      .join("")
-              }
-            </tbody>
-          </table>
+        <h3 class="xp-section-subtitle">全部快递记录</h3>
+        <div class="xp-row-list" id="parcels-tbody">
+          ${
+            parcels.length === 0
+              ? xpeachEmptyState({
+                  icon: "📦",
+                  title: "暂无快递记录",
+                  subtitle: "可在上方粘贴取件短信或在日在校园 App 中绑定手机号自动同步。"
+                })
+              : parcels.map((p) => xpeachParcelRowCard(p)).join("")
+          }
         </div>
       </section>`;
   }
@@ -1043,44 +976,24 @@ export function renderConsoleHtml(ctx = {}) {
             <p class="xp-entity-summary" style="margin-top: 2px;">所有消费直接以 XPeach 通用 🍑 结算并实时同步至 XPeach 主站，预约未成功或取消不扣取任何 🍑。</p>
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>账单编号</th>
-                <th>服务项目</th>
-                <th>🍑 数量</th>
-                <th>结算状态</th>
-                <th>时间</th>
-              </tr>
-            </thead>
-            <tbody id="orders-tbody">
-              ${
-                orders.length === 0
-                  ? `<tr><td colspan="5" class="text-muted">暂无 🍑 消费记录（仅在图书馆自动占座核验成功后扣除 ${escapeHtml(pricePeachText)} 🍑）。</td></tr>`
-                  : orders
-                      .map((o) => {
-                        const peachAmt = Number(
-                          o.price_peach ?? (o.price_micropeach || pricingMicropeach) / MICROPEACH_PER_PEACH
-                        ).toFixed(2);
-                        const stBadge =
-                          o.payment_state === "PAID"
-                            ? xpeachBadge("已从 XPeach 扣除", "success")
-                            : o.payment_state === "REFUNDED"
-                              ? xpeachBadge("已退还 🍑 至 XPeach", "neutral")
-                              : xpeachBadge("待结算", "warning");
-                        return `<tr>
-                          <td><code>${escapeHtml(o.id.slice(0, 12))}</code></td>
-                          <td>图书馆座位自动预约</td>
-                          <td><strong>🍑 ${escapeHtml(peachAmt)}</strong></td>
-                          <td>${stBadge}</td>
-                          <td>${escapeHtml((o.paid_at || o.created_at || "").replace("T", " ").slice(0, 19))}</td>
-                        </tr>`;
-                      })
-                      .join("")
-              }
-            </tbody>
-          </table>
+        <div class="xp-row-list" id="orders-tbody">
+          ${
+            orders.length === 0
+              ? xpeachEmptyState({
+                  icon: "🍑",
+                  title: "暂无 🍑 消费记录",
+                  subtitle: `仅在图书馆自动占座核验成功后扣除 ${pricePeachText} 🍑。`
+                })
+              : orders
+                  .map((o) =>
+                    xpeachOrderRowCard(o, {
+                      isAdmin: false,
+                      pricingMicropeach,
+                      micropeachPerPeach: MICROPEACH_PER_PEACH
+                    })
+                  )
+                  .join("")
+          }
         </div>
       </section>`;
   }
@@ -1134,37 +1047,8 @@ export function renderConsoleHtml(ctx = {}) {
             <p class="xp-entity-summary" style="margin-top: 2px;">当学校图书馆系统临时维护时，可在此一键开启/恢复预约保护熔断开关。</p>
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>学校名称</th>
-                <th>服务模块</th>
-                <th>当前状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${schools
-                .map(
-                  (s) => `<tr>
-                    <td><strong>${escapeHtml(s.display_name)}</strong></td>
-                    <td>莲花街校区图书馆选座系统</td>
-                    <td>${
-                      s.kill_switch
-                        ? xpeachBadge("维护暂停中", "danger")
-                        : xpeachBadge("运行正常", "success")
-                    }</td>
-                    <td>
-                      <button type="button" class="xp-pill xp-pill--compact" data-toggle-kill="${escapeHtml(s.school_id)}" data-current-kill="${s.kill_switch ? "true" : "false"}">
-                        ${s.kill_switch ? "恢复预约服务" : "暂停预约服务"}
-                      </button>
-                    </td>
-                  </tr>`
-                )
-                .join("")}
-            </tbody>
-          </table>
+        <div class="xp-row-list">
+          ${schools.map((s) => xpeachSchoolControlCard(s)).join("")}
         </div>
       </section>
 
@@ -1426,52 +1310,23 @@ export function renderConsoleHtml(ctx = {}) {
             <p class="xp-entity-summary" style="margin-top: 2px;">每一笔扣费与退还均通过幂等密钥实时同步至 XPeach 主站用户钱包与跨站财务大盘。</p>
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>账单号</th>
-                <th>所属用户</th>
-                <th>消费 🍑</th>
-                <th>状态</th>
-                <th>结算时间</th>
-                <th>管理员操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${
-                allOrders.length === 0
-                  ? `<tr><td colspan="6" class="text-muted">暂无全站 🍑 消费账单记录。</td></tr>`
-                  : allOrders
-                      .map((o) => {
-                        const peachAmt = Number(
-                          o.price_peach ?? (o.price_micropeach || pricingMicropeach) / MICROPEACH_PER_PEACH
-                        ).toFixed(2);
-                        const stBadge =
-                          o.payment_state === "PAID"
-                            ? xpeachBadge("已扣费", "success")
-                            : o.payment_state === "REFUNDED"
-                              ? xpeachBadge("已退还 🍑", "neutral")
-                              : xpeachBadge("待结算", "warning");
-                        return `<tr>
-                          <td><code>${escapeHtml(o.id.slice(0, 12))}</code></td>
-                          <td><strong>${escapeHtml(o.username || "-")}</strong> · <code>${escapeHtml(o.sso_subject || "-")}</code></td>
-                          <td><strong>🍑 ${escapeHtml(peachAmt)}</strong></td>
-                          <td>${stBadge}</td>
-                          <td>${escapeHtml((o.paid_at || o.created_at || "").replace("T", " ").slice(0, 19))}</td>
-                          <td>
-                            ${
-                              o.payment_state === "PAID"
-                                ? `<button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}">退还 🍑</button>`
-                                : "-"
-                            }
-                          </td>
-                        </tr>`;
-                      })
-                      .join("")
-              }
-            </tbody>
-          </table>
+        <div class="xp-row-list">
+          ${
+            allOrders.length === 0
+              ? xpeachEmptyState({
+                  icon: "🍑",
+                  title: "暂无全站 🍑 消费账单记录"
+                })
+              : allOrders
+                  .map((o) =>
+                    xpeachOrderRowCard(o, {
+                      isAdmin: true,
+                      pricingMicropeach,
+                      micropeachPerPeach: MICROPEACH_PER_PEACH
+                    })
+                  )
+                  .join("")
+          }
         </div>
       </section>
 
@@ -1483,34 +1338,18 @@ export function renderConsoleHtml(ctx = {}) {
             <p class="xp-entity-summary" style="margin-top: 2px;">自动记录凭据加密托管、预约执行、社团云控变更与账单退还操作。</p>
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>操作类型</th>
-                <th>目标资源</th>
-                <th>结果</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${
-                auditEvents.length === 0
-                  ? `<tr><td colspan="4" class="text-muted">暂无操作记录。</td></tr>`
-                  : auditEvents
-                      .slice(0, 15)
-                      .map(
-                        (ev) => `<tr>
-                          <td>${escapeHtml((ev.created_at || "").replace("T", " ").slice(0, 19))}</td>
-                          <td><strong>${escapeHtml(ev.action)}</strong></td>
-                          <td><code>${escapeHtml(ev.resource_kind)}:${escapeHtml(String(ev.resource_ref || "").slice(0, 16))}</code></td>
-                          <td>${xpeachBadge(ev.outcome, "success")}</td>
-                        </tr>`
-                      )
-                      .join("")
-              }
-            </tbody>
-          </table>
+        <div class="xp-row-list">
+          ${
+            auditEvents.length === 0
+              ? xpeachEmptyState({
+                  icon: "🛡️",
+                  title: "暂无操作记录"
+                })
+              : auditEvents
+                  .slice(0, 15)
+                  .map((ev) => xpeachAuditRowCard(ev))
+                  .join("")
+          }
         </div>
       </section>`;
   }

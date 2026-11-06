@@ -1462,6 +1462,641 @@ export function createCampusCloudApp(options = {}) {
     }
   );
 
+  // --- 67..88 Standardized BFF, Sync, Live Library & Cloud-Controlled Campus Content Operations ---
+  register("GET", "/api/v1/auth/web/start", "startWebOidcRedirect", "public", async ({ query, nowMs }) => {
+    const webTxn = identity.startWebTransaction({ returnTo: query.get("return_to") || "/" }, nowMs);
+    return {
+      status: 302,
+      headers: { Location: webTxn.redirect_url },
+      code: "WEB_OIDC_REDIRECT",
+      data: webTxn
+    };
+  });
+
+  register("GET", "/api/v1/auth/web/logout", "logoutWebSession", "public", async ({ headers, nowMs }) => {
+    const cookieAuth = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs);
+    if (cookieAuth?.cloudUserId) {
+      identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+    }
+    return {
+      status: 302,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "set-cookie": "dis_web_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        Location: "/"
+      },
+      rawBody: "",
+      code: "WEB_LOGGED_OUT",
+      data: { logged_out: true }
+    };
+  });
+
+  register(
+    "POST",
+    "/api/v1/auth/web/exchange",
+    "exchangeWebAuthTicket",
+    "single_use_ticket",
+    async ({ body, nowMs }) => {
+      const sessionRes = identity.exchangeWebTicket(
+        {
+          loginTxn: body?.login_txn,
+          webTicket: body?.web_ticket
+        },
+        nowMs
+      );
+      await syncUserToSso(sessionRes.cloud_user_id);
+      const cookieVal = identity.signWebSessionCookie({
+        cloudUserId: sessionRes.cloud_user_id,
+        accessToken: sessionRes.access_token,
+        refreshToken: sessionRes.refresh_token
+      });
+      return {
+        status: 200,
+        headers: {
+          "set-cookie": `dis_web_session=${encodeURIComponent(
+            cookieVal
+          )}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
+        },
+        code: "WEB_SESSION_ISSUED",
+        data: sessionRes
+      };
+    }
+  );
+
+  register("GET", "/api/v1/auth/mobile/status", "getMobileAuthTransactionStatus", "login_txn", async ({ query, nowMs }) => {
+    const statusRes = identity.getMobileTransactionStatus(query.get("txn"), nowMs);
+    return {
+      status: 200,
+      code: "AUTH_TXN_STATUS",
+      data: statusRes
+    };
+  });
+
+  register(
+    "POST",
+    "/api/v1/auth/oidc/native-login",
+    "loginNativeWithSso",
+    "anonymous_rate_limited",
+    async ({ body, nowMs }) => {
+      const nativeRes = await identity.loginNativeWithSso(
+        {
+          identifier: body?.identifier ?? body?.username ?? body?.email,
+          password: body?.password,
+          totpCode: body?.totp_code ?? body?.totpCode ?? body?.code,
+          installEphemeralId: body?.install_ephemeral_id,
+          deviceLabel: body?.device_label
+        },
+        nowMs
+      );
+      if (nativeRes.totp_required && !nativeRes.ok) {
+        return {
+          status: 200,
+          code: "TOTP_REQUIRED",
+          data: nativeRes
+        };
+      }
+      await syncUserToSso(nativeRes.session.cloud_user_id);
+      return {
+        status: 200,
+        code: "SESSION_ISSUED",
+        data: nativeRes.session
+      };
+    }
+  );
+
+  register("GET", "/api/v1/sync/snapshot", "getUserSyncSnapshot", "bearer", async ({ auth }) => {
+    const snapshot = await buildUserSyncSnapshot(auth.cloudUserId);
+    return {
+      status: 200,
+      code: "SYNC_SNAPSHOT_OK",
+      data: snapshot
+    };
+  });
+
+  register("POST", "/api/v1/sync/snapshot", "pushUserSyncSnapshot", "bearer", async ({ auth, body, nowMs }) => {
+    if (body && typeof body === "object") {
+      if (Array.isArray(body.school_binding_upserts)) {
+        for (const bItem of body.school_binding_upserts) {
+          const studentNo = String(bItem?.student_no || "").trim();
+          if (!studentNo) continue;
+          const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
+          let existingBinding = Array.from(store.schoolBindings.values()).find(
+            (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
+          );
+          if (!existingBinding) {
+            const bindingId = crypto.randomUUID();
+            existingBinding = {
+              id: bindingId,
+              cloud_user_id: auth.cloudUserId,
+              school_id: schoolId,
+              student_no: studentNo,
+              student_no_masked: studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
+              status: "DELEGATED_ACTIVE",
+              credential_ref: null,
+              credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+              created_at: new Date(nowMs).toISOString(),
+              revoked_at: null
+            };
+            store.schoolBindings.set(bindingId, existingBinding);
+          } else {
+            existingBinding.student_no = studentNo;
+            existingBinding.student_no_masked = studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
+            existingBinding.status = "DELEGATED_ACTIVE";
+          }
+          if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
+            const encrypted = kmsVault.encryptSecret({
+              bindingId: existingBinding.id,
+              schoolId,
+              credentialKind: "DELEGATED_SESSION_BUNDLE",
+              plaintext: String(bItem.delegated_secret).trim(),
+              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+            });
+            store.encryptedCredentials.set(encrypted.id, encrypted);
+            existingBinding.credential_ref = encrypted.id;
+            existingBinding.credential_expires_at = encrypted.expires_at;
+          }
+          const hasActiveConsent = Array.from(store.consents.values()).some(
+            (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+          );
+          if (!hasActiveConsent) {
+            const cid = crypto.randomUUID();
+            store.consents.set(cid, {
+              id: cid,
+              cloud_user_id: auth.cloudUserId,
+              school_id: schoolId,
+              scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+              policy_version: "policy-2026-11-v4",
+              granted_at: new Date(nowMs).toISOString(),
+              withdrawn_at: null
+            });
+          }
+        }
+      }
+
+      if (Array.isArray(body.parcel_upserts)) {
+        for (const pItem of body.parcel_upserts) {
+          if (!pItem || !pItem.tracking_number) continue;
+          parcelHub.upsertParcel({
+            cloudUserId: auth.cloudUserId,
+            trackingNumber: pItem.tracking_number,
+            carrierCode: pItem.carrier_code || "cainiao",
+            carrierName: pItem.carrier_name || "校园快递",
+            providerId: pItem.provider_id || "parcel.manual",
+            channel: pItem.channel || "CLIENT_IMPORT",
+            status: pItem.status || (pItem.pickup_code ? "READY_FOR_PICKUP" : "IN_TRANSIT"),
+            pickupCode: pItem.pickup_code || "",
+            stationName: pItem.station_name || "",
+            itemTitle: pItem.item_title || "",
+            rawNotificationText: pItem.raw_notification_text || "",
+            checkpoints: Array.isArray(pItem.checkpoints) ? pItem.checkpoints : [],
+            sandboxOverride: false
+          });
+        }
+      }
+
+      if (Array.isArray(body.parcel_status_updates)) {
+        const userParcels = parcelHub.listUserParcels(auth.cloudUserId);
+        for (const uItem of body.parcel_status_updates) {
+          const target = userParcels.find(
+            (p) =>
+              (uItem.parcel_id && p.id === uItem.parcel_id) ||
+              (uItem.tracking_number && p.tracking_number === uItem.tracking_number)
+          );
+          if (target && uItem.status) {
+            target.status = uItem.status;
+          }
+        }
+      }
+
+      if (Array.isArray(body.reservation_cancellations)) {
+        for (const cancelId of body.reservation_cancellations) {
+          const job = store.reservationJobs.get(cancelId);
+          if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
+            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
+              job.state = "CANCELLED";
+              job.state_version += 1;
+            });
+          }
+          const plan = store.reservationPlans.get(cancelId);
+          if (plan && plan.cloud_user_id === auth.cloudUserId) {
+            plan.enabled = false;
+            for (const j of store.reservationJobs.values()) {
+              if (j.plan_id === plan.id && j.state !== "CANCELLED") {
+                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
+                  j.state = "CANCELLED";
+                  j.state_version += 1;
+                });
+              }
+            }
+          }
+        }
+      }
+
+      await syncUserToSso(auth.cloudUserId);
+    }
+
+    const snapshot = await buildUserSyncSnapshot(auth.cloudUserId);
+    return {
+      status: 200,
+      code: "SYNC_SNAPSHOT_OK",
+      data: snapshot
+    };
+  });
+
+  register(
+    "POST",
+    "/api/v1/admin/orders/{orderId}/quick-refund",
+    "quickRefundAdminOrder",
+    "bearer",
+    async ({ auth, params, body, nowMs }) => {
+      const isAdminUser =
+        auth.roles.includes("ADMIN") ||
+        auth.roles.includes("PLATFORM_OWNER") ||
+        auth.roles.includes("FINANCE") ||
+        auth.roles.includes("FINANCE_OPERATOR") ||
+        store.users.get(auth.cloudUserId)?.role === "admin";
+      if (!isAdminUser) {
+        throw new ContractError("FORBIDDEN", "Admin privileges required for quick refund");
+      }
+      const orderId = params.orderId;
+      const targetOrder = store.reservationOrders.get(orderId);
+      if (!targetOrder) {
+        throw new ContractError("NOT_FOUND", "Order not found");
+      }
+      const order = await financeService.issueRefundForOrder(
+        orderId,
+        {
+          amountMicropeach:
+            targetOrder.price_micropeach ||
+            store.pricingMicropeach ||
+            DEFAULT_RESERVATION_PRICE_MICROPEACH,
+          reason: body?.reason || "站点管理员在后台发起 🍑 退还",
+          actorRef: auth.cloudUserId,
+          secondApproverRef: `console_approver_${auth.cloudUserId}`
+        },
+        nowMs
+      );
+      await syncUserToSso(order.cloud_user_id);
+      return {
+        status: 200,
+        code: "ADMIN_ORDER_REFUNDED",
+        data: order
+      };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/reservation-jobs/{jobId}/execute-now",
+    "executeReservationJobNow",
+    "bearer",
+    async ({ auth, params, nowMs }) => {
+      const jobId = params.jobId;
+      const job = store.reservationJobs.get(jobId);
+      if (!job || job.cloud_user_id !== auth.cloudUserId) {
+        throw new ContractError("NOT_FOUND", "Reservation job not found");
+      }
+      const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
+      await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
+      await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", effectiveFireMs);
+      const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs, {
+        allowDateFallbackToToday: true
+      });
+      await syncUserToSso(auth.cloudUserId);
+      return {
+        status: 200,
+        code: "RESERVATION_JOB_EXECUTED",
+        data: fireRes
+      };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/reservation-jobs/{jobId}/cancel-seat",
+    "cancelConfirmedReservationSeat",
+    "bearer",
+    async ({ auth, params, nowMs }) => {
+      const jobId = params.jobId;
+      const job = store.reservationJobs.get(jobId);
+      if (!job || job.cloud_user_id !== auth.cloudUserId) {
+        throw new ContractError("NOT_FOUND", "Reservation job not found");
+      }
+      const cancelRes = await reservationEngine.cancelConfirmedOrActiveJob(jobId, nowMs);
+      await syncUserToSso(auth.cloudUserId);
+      return {
+        status: 200,
+        code: "RESERVATION_SEAT_CANCELLED",
+        data: cancelRes
+      };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/school-bindings/bind-live",
+    "bindLiveSchoolAccount",
+    "bearer",
+    async ({ auth, body, nowMs }) => {
+      const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
+      const studentNoInput = String(body?.student_no || "").trim();
+      const passwordInput = String(body?.password || "").trim();
+      const rawTokenInput = String(body?.raw_token || "").trim();
+      const casTgcInput = String(body?.cas_tgc || "").trim();
+
+      const authRes = await schoolProvider.authenticateHautSession({
+        raw_token: rawTokenInput,
+        cas_tgc: casTgcInput,
+        cas_jsessionid: "",
+        student_no: studentNoInput,
+        password: passwordInput,
+        isLiveCredential: true
+      });
+
+      const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
+      let binding = Array.from(store.schoolBindings.values()).find(
+        (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
+      );
+      if (!binding) {
+        const bindingId = crypto.randomUUID();
+        binding = {
+          id: bindingId,
+          cloud_user_id: auth.cloudUserId,
+          school_id: schoolId,
+          student_no: resolvedStudentNo,
+          student_no_masked: resolvedStudentNo.length >= 4 ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}` : "***",
+          user_name: authRes.userInfo?.userName || "",
+          department: authRes.userInfo?.department || "",
+          status: "DELEGATED_ACTIVE",
+          credential_ref: null,
+          credential_expires_at: null,
+          created_at: new Date(nowMs).toISOString(),
+          revoked_at: null
+        };
+        store.schoolBindings.set(bindingId, binding);
+      } else {
+        binding.student_no = resolvedStudentNo;
+        binding.student_no_masked = resolvedStudentNo.length >= 4 ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}` : "***";
+        binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
+        binding.department = authRes.userInfo?.department || binding.department || "";
+        binding.status = "DELEGATED_ACTIVE";
+      }
+
+      const credBundleJson = JSON.stringify({
+        student_no: resolvedStudentNo,
+        password: passwordInput,
+        raw_token: authRes.rawToken,
+        cas_tgc: authRes.casTgc || "",
+        cas_jsessionid: authRes.casJsessionId || "",
+        user_name: authRes.userInfo?.userName || "",
+        department: authRes.userInfo?.department || ""
+      });
+      const encrypted = kmsVault.encryptSecret({
+        bindingId: binding.id,
+        schoolId,
+        credentialKind: "DELEGATED_SESSION_BUNDLE",
+        plaintext: credBundleJson,
+        expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
+      });
+      store.encryptedCredentials.set(encrypted.id, encrypted);
+      binding.credential_ref = encrypted.id;
+      binding.credential_expires_at = encrypted.expires_at;
+
+      let consent = Array.from(store.consents.values()).find(
+        (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+      );
+      if (!consent) {
+        const cid = crypto.randomUUID();
+        consent = {
+          id: cid,
+          cloud_user_id: auth.cloudUserId,
+          school_id: schoolId,
+          scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+          policy_version: "policy-2026-11-v4",
+          granted_at: new Date(nowMs).toISOString(),
+          withdrawn_at: null
+        };
+        store.consents.set(cid, consent);
+      }
+
+      await syncUserToSso(auth.cloudUserId);
+      return {
+        status: 201,
+        code: "SCHOOL_BINDING_LIVE_VERIFIED",
+        data: {
+          id: binding.id,
+          consent_id: consent.id,
+          student_no: binding.student_no,
+          user_name: authRes.userInfo?.userName || "",
+          binding,
+          consent,
+          user_info: authRes.userInfo
+        }
+      };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/schools/haut/library/live-regions",
+    "getHautLibraryLiveRegions",
+    "bearer",
+    async ({ auth, query, nowMs }) => {
+      const dateParam =
+        query.get("booking_date") ||
+        query.get("date") ||
+        new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      const binding = Array.from(store.schoolBindings.values()).find(
+        (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+      );
+      if (!binding) {
+        throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
+      }
+      const credRecord = store.encryptedCredentials.get(binding.credential_ref);
+      const permit = kmsVault.issueAccessPermit({
+        taskId: `live_regions_${Date.now()}`,
+        schoolId: binding.school_id,
+        bindingId: binding.id,
+        credentialRef: binding.credential_ref,
+        ttlSeconds: 15,
+        nowMs
+      });
+      const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+      const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+      const snap = await schoolProvider.fetchLiveStudyRegions(authRes.rawToken, dateParam);
+      const currentBooking = await schoolProvider.fetchCurrentActiveBooking(authRes.rawToken);
+      return {
+        status: 200,
+        code: "LIVE_REGIONS_OK",
+        data: {
+          ...snap,
+          current_booking: currentBooking,
+          user_info: authRes.userInfo
+        }
+      };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/schools/haut/library/live-seats",
+    "getHautLibraryLiveSeats",
+    "bearer",
+    async ({ auth, query, nowMs }) => {
+      const regionId = Number(query.get("region_id") || 7);
+      const dateParam =
+        query.get("booking_date") ||
+        query.get("date") ||
+        new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      const binding = Array.from(store.schoolBindings.values()).find(
+        (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+      );
+      if (!binding) {
+        throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
+      }
+      const credRecord = store.encryptedCredentials.get(binding.credential_ref);
+      const permit = kmsVault.issueAccessPermit({
+        taskId: `live_seats_${Date.now()}`,
+        schoolId: binding.school_id,
+        bindingId: binding.id,
+        credentialRef: binding.credential_ref,
+        ttlSeconds: 15,
+        nowMs
+      });
+      const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+      const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+      const snap = await schoolProvider.fetchLiveRegionSeats(authRes.rawToken, regionId, dateParam);
+      return {
+        status: 200,
+        code: "LIVE_SEATS_OK",
+        data: snap
+      };
+    }
+  );
+
+  register("GET", "/api/v1/campus-content", "getCampusContent", "public", async ({ query }) => {
+    const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
+    const content = store.getCampusContent(schoolId, { includeDisabled: false });
+    return {
+      status: 200,
+      headers: {
+        "cache-control": "no-store, no-cache, must-revalidate"
+      },
+      code: "CAMPUS_CONTENT_OK",
+      data: content
+    };
+  });
+
+  register("GET", "/api/v1/admin/campus-content", "getAdminCampusContent", "bearer_admin", async ({ query }) => {
+    const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
+    return {
+      status: 200,
+      code: "ADMIN_CAMPUS_CONTENT_OK",
+      data: store.getCampusContent(schoolId, { includeDisabled: true })
+    };
+  });
+
+  register("PUT", "/api/v1/admin/campus-content", "updateAdminCampusContent", "bearer_admin", async ({ auth, query, body }) => {
+    const schoolId = query.get("school_id") || body?.school_id || DEFAULT_SCHOOL_ID;
+    const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+    const updated = store.updateCampusContent(schoolId, body || {}, actorName);
+    return {
+      status: 200,
+      code: "CAMPUS_CONTENT_UPDATED",
+      data: updated
+    };
+  });
+
+  register("POST", "/api/v1/admin/campus-content/channels", "upsertAdminCampusChannel", "bearer_admin", async ({ auth, body }) => {
+    const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
+    const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+    const updated = store.upsertCampusChannel(schoolId, body || {}, actorName);
+    return {
+      status: 200,
+      code: "CAMPUS_CHANNEL_UPSERTED",
+      data: updated
+    };
+  });
+
+  register(
+    "DELETE",
+    "/api/v1/admin/campus-content/channels/{channelId}",
+    "deleteAdminCampusChannel",
+    "bearer_admin",
+    async ({ auth, params, query }) => {
+      const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
+      const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+      const updated = store.deleteCampusChannel(schoolId, params.channelId, actorName);
+      return {
+        status: 200,
+        code: "CAMPUS_CHANNEL_DELETED",
+        data: updated
+      };
+    }
+  );
+
+  register("POST", "/api/v1/admin/campus-content/clubs", "upsertAdminCampusClub", "bearer_admin", async ({ auth, body }) => {
+    const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
+    const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+    const updated = store.upsertCampusClub(schoolId, body || {}, actorName);
+    return {
+      status: 200,
+      code: "CAMPUS_CLUB_UPSERTED",
+      data: updated
+    };
+  });
+
+  register(
+    "DELETE",
+    "/api/v1/admin/campus-content/clubs/{clubId}",
+    "deleteAdminCampusClub",
+    "bearer_admin",
+    async ({ auth, params, query }) => {
+      const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
+      const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+      const updated = store.deleteCampusClub(schoolId, params.clubId, actorName);
+      return {
+        status: 200,
+        code: "CAMPUS_CLUB_DELETED",
+        data: updated
+      };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/campus-content/competitions",
+    "upsertAdminCampusCompetition",
+    "bearer_admin",
+    async ({ auth, body }) => {
+      const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
+      const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+      const updated = store.upsertCampusCompetition(schoolId, body || {}, actorName);
+      return {
+        status: 200,
+        code: "CAMPUS_COMPETITION_UPSERTED",
+        data: updated
+      };
+    }
+  );
+
+  register(
+    "DELETE",
+    "/api/v1/admin/campus-content/competitions/{competitionId}",
+    "deleteAdminCampusCompetition",
+    "bearer_admin",
+    async ({ auth, params, query }) => {
+      const schoolId = query.get("school_id") || DEFAULT_SCHOOL_ID;
+      const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
+      const updated = store.deleteCampusCompetition(schoolId, params.competitionId, actorName);
+      return {
+        status: 200,
+        code: "CAMPUS_COMPETITION_DELETED",
+        data: updated
+      };
+    }
+  );
+
   async function inject({
     method = "GET",
     url = "/healthz",
@@ -1651,714 +2286,6 @@ export function createCampusCloudApp(options = {}) {
         };
       }
 
-      if (upperMethod === "GET" && pathname === "/api/v1/auth/web/start") {
-        const webTxn = identity.startWebTransaction(
-          { returnTo: parsedUrl.searchParams.get("return_to") || "/" },
-          nowMs
-        );
-        return {
-          status: 302,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId,
-            Location: webTxn.redirect_url
-          },
-          body: okEnvelope("WEB_OIDC_REDIRECT", webTxn, requestId)
-        };
-      }
-
-      if (upperMethod === "GET" && pathname === "/api/v1/auth/web/logout") {
-        const cookieAuth = identity.verifyWebSessionCookie(
-          headers?.cookie || headers?.Cookie || "",
-          nowMs
-        );
-        if (cookieAuth?.cloudUserId) {
-          identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
-        }
-        return {
-          status: 302,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "text/html; charset=utf-8",
-            "x-request-id": requestId,
-            "set-cookie": "dis_web_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-            Location: "/"
-          },
-          rawBody: "",
-          body: okEnvelope("WEB_LOGGED_OUT", { logged_out: true }, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/auth/web/exchange") {
-        const sessionRes = identity.exchangeWebTicket(
-          {
-            loginTxn: body?.login_txn,
-            webTicket: body?.web_ticket
-          },
-          nowMs
-        );
-        await syncUserToSso(sessionRes.cloud_user_id);
-        const cookieVal = identity.signWebSessionCookie({
-          cloudUserId: sessionRes.cloud_user_id,
-          accessToken: sessionRes.access_token,
-          refreshToken: sessionRes.refresh_token
-        });
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId,
-            "set-cookie": `dis_web_session=${encodeURIComponent(
-              cookieVal
-            )}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
-          },
-          body: okEnvelope("WEB_SESSION_ISSUED", sessionRes, requestId)
-        };
-      }
-
-      if (upperMethod === "GET" && pathname === "/api/v1/auth/mobile/status") {
-        const statusRes = identity.getMobileTransactionStatus(
-          parsedUrl.searchParams.get("txn"),
-          nowMs
-        );
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("AUTH_TXN_STATUS", statusRes, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/auth/oidc/native-login") {
-        const nativeRes = await identity.loginNativeWithSso(
-          {
-            identifier: body?.identifier ?? body?.username ?? body?.email,
-            password: body?.password,
-            totpCode: body?.totp_code ?? body?.totpCode ?? body?.code,
-            installEphemeralId: body?.install_ephemeral_id,
-            deviceLabel: body?.device_label
-          },
-          nowMs
-        );
-        if (nativeRes.totp_required && !nativeRes.ok) {
-          return {
-            status: 200,
-            headers: {
-              "content-type": "application/json; charset=utf-8",
-              "x-request-id": requestId
-            },
-            body: okEnvelope("TOTP_REQUIRED", nativeRes, requestId)
-          };
-        }
-        await syncUserToSso(nativeRes.session.cloud_user_id);
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("SESSION_ISSUED", nativeRes.session, requestId)
-        };
-      }
-
-      if (pathname === "/api/v1/sync/snapshot" && (upperMethod === "GET" || upperMethod === "POST")) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (upperMethod === "POST" && body && typeof body === "object") {
-          // 1) School binding upserts from Android App
-          if (Array.isArray(body.school_binding_upserts)) {
-            for (const bItem of body.school_binding_upserts) {
-              const studentNo = String(bItem?.student_no || "").trim();
-              if (!studentNo) continue;
-              const schoolId = bItem?.school_id || "haut";
-              let existingBinding = Array.from(store.schoolBindings.values()).find(
-                (b) =>
-                  b.cloud_user_id === auth.cloudUserId &&
-                  b.school_id === schoolId &&
-                  !b.revoked_at
-              );
-              if (!existingBinding) {
-                const bindingId = crypto.randomUUID();
-                existingBinding = {
-                  id: bindingId,
-                  cloud_user_id: auth.cloudUserId,
-                  school_id: schoolId,
-                  student_no: studentNo,
-                  student_no_masked:
-                    studentNo.length >= 4
-                      ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}`
-                      : "***",
-                  status: "DELEGATED_ACTIVE",
-                  credential_ref: null,
-                  credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
-                  created_at: new Date(nowMs).toISOString(),
-                  revoked_at: null
-                };
-                store.schoolBindings.set(bindingId, existingBinding);
-              } else {
-                existingBinding.student_no = studentNo;
-                existingBinding.student_no_masked =
-                  studentNo.length >= 4
-                    ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}`
-                    : "***";
-                existingBinding.status = "DELEGATED_ACTIVE";
-              }
-              if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-                const encrypted = kmsVault.encryptSecret({
-                  bindingId: existingBinding.id,
-                  schoolId,
-                  credentialKind: "DELEGATED_SESSION_BUNDLE",
-                  plaintext: String(bItem.delegated_secret).trim(),
-                  expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-                });
-                store.encryptedCredentials.set(encrypted.id, encrypted);
-                existingBinding.credential_ref = encrypted.id;
-                existingBinding.credential_expires_at = encrypted.expires_at;
-              }
-              const hasActiveConsent = Array.from(store.consents.values()).some(
-                (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
-              );
-              if (!hasActiveConsent) {
-                const cid = crypto.randomUUID();
-                store.consents.set(cid, {
-                  id: cid,
-                  cloud_user_id: auth.cloudUserId,
-                  school_id: schoolId,
-                  scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-                  policy_version: "policy-2026-11-v4",
-                  granted_at: new Date(nowMs).toISOString(),
-                  withdrawn_at: null
-                });
-              }
-            }
-          }
-
-          // 2) Parcel upserts from Android App (e.g. Xiaomi Express / SMS import)
-          if (Array.isArray(body.parcel_upserts)) {
-            for (const pItem of body.parcel_upserts) {
-              if (!pItem || !pItem.tracking_number) continue;
-              parcelHub.upsertParcel({
-                cloudUserId: auth.cloudUserId,
-                trackingNumber: pItem.tracking_number,
-                carrierCode: pItem.carrier_code || "cainiao",
-                carrierName: pItem.carrier_name || "校园快递",
-                providerId: pItem.provider_id || "parcel.manual",
-                channel: pItem.channel || "CLIENT_IMPORT",
-                status: pItem.status || (pItem.pickup_code ? "READY_FOR_PICKUP" : "IN_TRANSIT"),
-                pickupCode: pItem.pickup_code || "",
-                stationName: pItem.station_name || "",
-                itemTitle: pItem.item_title || "",
-                rawNotificationText: pItem.raw_notification_text || "",
-                checkpoints: Array.isArray(pItem.checkpoints) ? pItem.checkpoints : [],
-                sandboxOverride: false
-              });
-            }
-          }
-
-          // 3) Parcel status updates (e.g. PICKED_UP)
-          if (Array.isArray(body.parcel_status_updates)) {
-            const userParcels = parcelHub.listUserParcels(auth.cloudUserId);
-            for (const uItem of body.parcel_status_updates) {
-              const target = userParcels.find(
-                (p) =>
-                  (uItem.parcel_id && p.id === uItem.parcel_id) ||
-                  (uItem.tracking_number && p.tracking_number === uItem.tracking_number)
-              );
-              if (target && uItem.status) {
-                target.status = uItem.status;
-              }
-            }
-          }
-
-          // 4) Reservation cancellations from Android App
-          if (Array.isArray(body.reservation_cancellations)) {
-            for (const cancelId of body.reservation_cancellations) {
-              const job = store.reservationJobs.get(cancelId);
-              if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
-                await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
-                  job.state = "CANCELLED";
-                  job.state_version += 1;
-                });
-              }
-              const plan = store.reservationPlans.get(cancelId);
-              if (plan && plan.cloud_user_id === auth.cloudUserId) {
-                plan.enabled = false;
-                for (const j of store.reservationJobs.values()) {
-                  if (j.plan_id === plan.id && j.state !== "CANCELLED") {
-                    await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
-                      j.state = "CANCELLED";
-                      j.state_version += 1;
-                    });
-                  }
-                }
-              }
-            }
-          }
-
-          await syncUserToSso(auth.cloudUserId);
-        }
-
-        const snapshot = await buildUserSyncSnapshot(auth.cloudUserId);
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("SYNC_SNAPSHOT_OK", snapshot, requestId)
-        };
-      }
-
-      const quickRefundMatch = pathname.match(/^\/api\/v1\/admin\/orders\/([^/]+)\/quick-refund$/);
-      if (upperMethod === "POST" && quickRefundMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        const isAdminUser =
-          auth.roles.includes("ADMIN") ||
-          auth.roles.includes("PLATFORM_OWNER") ||
-          auth.roles.includes("FINANCE") ||
-          auth.roles.includes("FINANCE_OPERATOR") ||
-          store.users.get(auth.cloudUserId)?.role === "admin";
-        if (!isAdminUser) {
-          throw new ContractError("FORBIDDEN", "Admin privileges required for quick refund");
-        }
-        const orderId = decodeURIComponent(quickRefundMatch[1]);
-        const targetOrder = store.reservationOrders.get(orderId);
-        if (!targetOrder) {
-          throw new ContractError("NOT_FOUND", "Order not found");
-        }
-        const order = await financeService.issueRefundForOrder(
-          orderId,
-          {
-            amountMicropeach:
-              targetOrder.price_micropeach ||
-              store.pricingMicropeach ||
-              DEFAULT_RESERVATION_PRICE_MICROPEACH,
-            reason: body?.reason || "站点管理员在后台发起 🍑 退还",
-            actorRef: auth.cloudUserId,
-            secondApproverRef: `console_approver_${auth.cloudUserId}`
-          },
-          nowMs
-        );
-        await syncUserToSso(order.cloud_user_id);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("ADMIN_ORDER_REFUNDED", order, requestId)
-        };
-      }
-
-      const execNowMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/execute-now$/);
-      if (upperMethod === "POST" && execNowMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        const jobId = decodeURIComponent(execNowMatch[1]);
-        const job = store.reservationJobs.get(jobId);
-        if (!job || job.cloud_user_id !== auth.cloudUserId) {
-          throw new ContractError("NOT_FOUND", "Reservation job not found");
-        }
-        const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
-        await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
-        await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", effectiveFireMs);
-        const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs, {
-          allowDateFallbackToToday: true
-        });
-        await syncUserToSso(auth.cloudUserId);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("RESERVATION_JOB_EXECUTED", fireRes, requestId)
-        };
-      }
-
-      const cancelSeatMatch = pathname.match(/^\/api\/v1\/reservation-jobs\/([^/]+)\/cancel-seat$/);
-      if (upperMethod === "POST" && cancelSeatMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        const jobId = decodeURIComponent(cancelSeatMatch[1]);
-        const job = store.reservationJobs.get(jobId);
-        if (!job || job.cloud_user_id !== auth.cloudUserId) {
-          throw new ContractError("NOT_FOUND", "Reservation job not found");
-        }
-        const cancelRes = await reservationEngine.cancelConfirmedOrActiveJob(jobId, nowMs);
-        await syncUserToSso(auth.cloudUserId);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("RESERVATION_SEAT_CANCELLED", cancelRes, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/school-bindings/bind-live") {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        const schoolId = body?.school_id || "haut";
-        const studentNoInput = String(body?.student_no || "").trim();
-        const passwordInput = String(body?.password || "").trim();
-        const rawTokenInput = String(body?.raw_token || "").trim();
-        const casTgcInput = String(body?.cas_tgc || "").trim();
-
-        const authRes = await schoolProvider.authenticateHautSession({
-          raw_token: rawTokenInput,
-          cas_tgc: casTgcInput,
-          cas_jsessionid: "",
-          student_no: studentNoInput,
-          password: passwordInput,
-          isLiveCredential: true
-        });
-
-        const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
-        let binding = Array.from(store.schoolBindings.values()).find(
-          (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
-        );
-        if (!binding) {
-          const bindingId = crypto.randomUUID();
-          binding = {
-            id: bindingId,
-            cloud_user_id: auth.cloudUserId,
-            school_id: schoolId,
-            student_no: resolvedStudentNo,
-            student_no_masked:
-              resolvedStudentNo.length >= 4
-                ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}`
-                : "***",
-            user_name: authRes.userInfo?.userName || "",
-            department: authRes.userInfo?.department || "",
-            status: "DELEGATED_ACTIVE",
-            credential_ref: null,
-            credential_expires_at: null,
-            created_at: new Date(nowMs).toISOString(),
-            revoked_at: null
-          };
-          store.schoolBindings.set(bindingId, binding);
-        } else {
-          binding.student_no = resolvedStudentNo;
-          binding.student_no_masked =
-            resolvedStudentNo.length >= 4
-              ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}`
-              : "***";
-          binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
-          binding.department = authRes.userInfo?.department || binding.department || "";
-          binding.status = "DELEGATED_ACTIVE";
-        }
-
-        const credBundleJson = JSON.stringify({
-          student_no: resolvedStudentNo,
-          password: passwordInput,
-          raw_token: authRes.rawToken,
-          cas_tgc: authRes.casTgc || "",
-          cas_jsessionid: authRes.casJsessionId || "",
-          user_name: authRes.userInfo?.userName || "",
-          department: authRes.userInfo?.department || ""
-        });
-        const encrypted = kmsVault.encryptSecret({
-          bindingId: binding.id,
-          schoolId,
-          credentialKind: "DELEGATED_SESSION_BUNDLE",
-          plaintext: credBundleJson,
-          expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
-        });
-        store.encryptedCredentials.set(encrypted.id, encrypted);
-        binding.credential_ref = encrypted.id;
-        binding.credential_expires_at = encrypted.expires_at;
-
-        let consent = Array.from(store.consents.values()).find(
-          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
-        );
-        if (!consent) {
-          const cid = crypto.randomUUID();
-          consent = {
-            id: cid,
-            cloud_user_id: auth.cloudUserId,
-            school_id: schoolId,
-            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-            policy_version: "policy-2026-11-v4",
-            granted_at: new Date(nowMs).toISOString(),
-            withdrawn_at: null
-          };
-          store.consents.set(cid, consent);
-        }
-
-        await syncUserToSso(auth.cloudUserId);
-        return {
-          status: 201,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope(
-            "SCHOOL_BINDING_LIVE_VERIFIED",
-            {
-              id: binding.id,
-              consent_id: consent.id,
-              student_no: binding.student_no,
-              user_name: authRes.userInfo?.userName || "",
-              binding,
-              consent,
-              user_info: authRes.userInfo
-            },
-            requestId
-          )
-        };
-      }
-
-      if (upperMethod === "GET" && pathname === "/api/v1/schools/haut/library/live-regions") {
-        const auth = extractBearer(headers, nowMs);
-        const dateParam =
-          parsedUrl.searchParams.get("booking_date") ||
-          parsedUrl.searchParams.get("date") ||
-          new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-        const binding = Array.from(store.schoolBindings.values()).find(
-          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
-        );
-        if (!binding) {
-          throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
-        }
-        const credRecord = store.encryptedCredentials.get(binding.credential_ref);
-        const permit = kmsVault.issueAccessPermit({
-          taskId: `live_regions_${Date.now()}`,
-          schoolId: binding.school_id,
-          bindingId: binding.id,
-          credentialRef: binding.credential_ref,
-          ttlSeconds: 15,
-          nowMs
-        });
-        const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
-        const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
-        const snap = await schoolProvider.fetchLiveStudyRegions(authRes.rawToken, dateParam);
-        const currentBooking = await schoolProvider.fetchCurrentActiveBooking(authRes.rawToken);
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope(
-            "LIVE_REGIONS_OK",
-            {
-              ...snap,
-              current_booking: currentBooking,
-              user_info: authRes.userInfo
-            },
-            requestId
-          )
-        };
-      }
-
-      if (upperMethod === "GET" && pathname === "/api/v1/schools/haut/library/live-seats") {
-        const auth = extractBearer(headers, nowMs);
-        const regionId = Number(parsedUrl.searchParams.get("region_id") || 7);
-        const dateParam =
-          parsedUrl.searchParams.get("booking_date") ||
-          parsedUrl.searchParams.get("date") ||
-          new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-        const binding = Array.from(store.schoolBindings.values()).find(
-          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
-        );
-        if (!binding) {
-          throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
-        }
-        const credRecord = store.encryptedCredentials.get(binding.credential_ref);
-        const permit = kmsVault.issueAccessPermit({
-          taskId: `live_seats_${Date.now()}`,
-          schoolId: binding.school_id,
-          bindingId: binding.id,
-          credentialRef: binding.credential_ref,
-          ttlSeconds: 15,
-          nowMs
-        });
-        const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
-        const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
-        const snap = await schoolProvider.fetchLiveRegionSeats(authRes.rawToken, regionId, dateParam);
-        return {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("LIVE_SEATS_OK", snap, requestId)
-        };
-      }
-
-      // --- Cloud-Controlled Campus Channels & Student Clubs Control Plane ---
-      if (upperMethod === "GET" && pathname === "/api/v1/campus-content") {
-        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
-        const content = store.getCampusContent(schoolId, { includeDisabled: false });
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "cache-control": "no-store, no-cache, must-revalidate",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CONTENT_OK", content, requestId)
-        };
-      }
-
-      if (pathname === "/api/v1/admin/campus-content" && (upperMethod === "GET" || upperMethod === "PUT")) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道与社团云控内容");
-        }
-        const schoolId = parsedUrl.searchParams.get("school_id") || body?.school_id || DEFAULT_SCHOOL_ID;
-        if (upperMethod === "GET") {
-          return {
-            status: 200,
-            headers: {
-              ...SECURITY_HEADERS,
-              "content-type": "application/json; charset=utf-8",
-              "x-request-id": requestId
-            },
-            body: okEnvelope(
-              "ADMIN_CAMPUS_CONTENT_OK",
-              store.getCampusContent(schoolId, { includeDisabled: true }),
-              requestId
-            )
-          };
-        }
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.updateCampusContent(schoolId, body || {}, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CONTENT_UPDATED", updated, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/channels") {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限管理校园频道");
-        }
-        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.upsertCampusChannel(schoolId, body || {}, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CHANNEL_UPSERTED", updated, requestId)
-        };
-      }
-
-      const deleteChannelMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/channels\/([^/]+)$/);
-      if (upperMethod === "DELETE" && deleteChannelMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限删除校园频道");
-        }
-        const channelId = decodeURIComponent(deleteChannelMatch[1]);
-        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.deleteCampusChannel(schoolId, channelId, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CHANNEL_DELETED", updated, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/clubs") {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限管理学生社团");
-        }
-        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.upsertCampusClub(schoolId, body || {}, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CLUB_UPSERTED", updated, requestId)
-        };
-      }
-
-      const deleteClubMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/clubs\/([^/]+)$/);
-      if (upperMethod === "DELETE" && deleteClubMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限删除学生社团");
-        }
-        const clubId = decodeURIComponent(deleteClubMatch[1]);
-        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.deleteCampusClub(schoolId, clubId, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_CLUB_DELETED", updated, requestId)
-        };
-      }
-
-      if (upperMethod === "POST" && pathname === "/api/v1/admin/campus-content/competitions") {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限管理学科竞赛指南");
-        }
-        const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.upsertCampusCompetition(schoolId, body || {}, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_COMPETITION_UPSERTED", updated, requestId)
-        };
-      }
-
-      const deleteCompMatch = pathname.match(/^\/api\/v1\/admin\/campus-content\/competitions\/([^/]+)$/);
-      if (upperMethod === "DELETE" && deleteCompMatch) {
-        const auth = extractBearer(headers, nowMs, upperMethod);
-        if (!isAdminOrOperatorAuth(auth)) {
-          throw new ContractError("FORBIDDEN", "需要管理员权限删除学科竞赛词条");
-        }
-        const compId = decodeURIComponent(deleteCompMatch[1]);
-        const schoolId = parsedUrl.searchParams.get("school_id") || DEFAULT_SCHOOL_ID;
-        const actorName = store.users.get(auth.cloudUserId)?.username || auth.cloudUserId;
-        const updated = store.deleteCampusCompetition(schoolId, compId, actorName);
-        return {
-          status: 200,
-          headers: {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8",
-            "x-request-id": requestId
-          },
-          body: okEnvelope("CAMPUS_COMPETITION_DELETED", updated, requestId)
-        };
-      }
-
       let matchedRoute = null;
       let params = {};
       const allRoutes = [...routes, ...extensionRoutes];
@@ -2379,8 +2306,15 @@ export function createCampusCloudApp(options = {}) {
       }
 
       let auth = null;
-      if (matchedRoute.auth === "bearer" || matchedRoute.auth === "bearer_rbac") {
+      if (
+        matchedRoute.auth === "bearer" ||
+        matchedRoute.auth === "bearer_rbac" ||
+        matchedRoute.auth === "bearer_admin"
+      ) {
         auth = extractBearer(headers, nowMs, upperMethod);
+        if (matchedRoute.auth === "bearer_admin" && !isAdminOrOperatorAuth(auth)) {
+          throw new ContractError("FORBIDDEN", "需要管理员或运营权限");
+        }
       }
 
       const result = await matchedRoute.handler({
@@ -2405,6 +2339,7 @@ export function createCampusCloudApp(options = {}) {
           "x-request-id": requestId,
           ...(result.headers || {})
         },
+        ...(result.rawBody !== undefined ? { rawBody: result.rawBody } : {}),
         body: envelope
       };
     } catch (err) {

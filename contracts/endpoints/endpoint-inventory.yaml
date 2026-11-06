@@ -331,3 +331,113 @@ endpoints:
     operationId: listAdminAuditEvents
     auth: bearer_rbac
     owner: admin
+  - method: GET
+    path: /api/v1/auth/web/start
+    operationId: startWebOidcRedirect
+    auth: public
+    owner: identity
+  - method: GET
+    path: /api/v1/auth/web/logout
+    operationId: logoutWebSession
+    auth: public
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/web/exchange
+    operationId: exchangeWebAuthTicket
+    auth: single_use_ticket
+    owner: identity
+  - method: GET
+    path: /api/v1/auth/mobile/status
+    operationId: getMobileAuthTransactionStatus
+    auth: login_txn
+    owner: identity
+  - method: POST
+    path: /api/v1/auth/oidc/native-login
+    operationId: loginNativeWithSso
+    auth: anonymous_rate_limited
+    owner: identity
+  - method: GET
+    path: /api/v1/sync/snapshot
+    operationId: getUserSyncSnapshot
+    auth: bearer
+    owner: identity
+  - method: POST
+    path: /api/v1/sync/snapshot
+    operationId: pushUserSyncSnapshot
+    auth: bearer
+    owner: identity
+  - method: POST
+    path: /api/v1/admin/orders/{orderId}/quick-refund
+    operationId: quickRefundAdminOrder
+    auth: bearer_admin
+    owner: admin
+  - method: POST
+    path: /api/v1/reservation-jobs/{jobId}/execute-now
+    operationId: executeReservationJobNow
+    auth: bearer
+    owner: reservations
+  - method: POST
+    path: /api/v1/reservation-jobs/{jobId}/cancel-seat
+    operationId: cancelConfirmedReservationSeat
+    auth: bearer
+    owner: reservations
+  - method: POST
+    path: /api/v1/school-bindings/bind-live
+    operationId: bindLiveSchoolAccount
+    auth: bearer
+    owner: school-spi
+  - method: GET
+    path: /api/v1/schools/haut/library/live-regions
+    operationId: getHautLibraryLiveRegions
+    auth: bearer
+    owner: school-spi
+  - method: GET
+    path: /api/v1/schools/haut/library/live-seats
+    operationId: getHautLibraryLiveSeats
+    auth: bearer
+    owner: school-spi
+  - method: GET
+    path: /api/v1/campus-content
+    operationId: getCampusContent
+    auth: public
+    owner: schools
+  - method: GET
+    path: /api/v1/admin/campus-content
+    operationId: getAdminCampusContent
+    auth: bearer_admin
+    owner: admin
+  - method: PUT
+    path: /api/v1/admin/campus-content
+    operationId: updateAdminCampusContent
+    auth: bearer_admin
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/campus-content/channels
+    operationId: upsertAdminCampusChannel
+    auth: bearer_admin
+    owner: admin
+  - method: DELETE
+    path: /api/v1/admin/campus-content/channels/{channelId}
+    operationId: deleteAdminCampusChannel
+    auth: bearer_admin
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/campus-content/clubs
+    operationId: upsertAdminCampusClub
+    auth: bearer_admin
+    owner: admin
+  - method: DELETE
+    path: /api/v1/admin/campus-content/clubs/{clubId}
+    operationId: deleteAdminCampusClub
+    auth: bearer_admin
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/campus-content/competitions
+    operationId: upsertAdminCampusCompetition
+    auth: bearer_admin
+    owner: admin
+  - method: DELETE
+    path: /api/v1/admin/campus-content/competitions/{competitionId}
+    operationId: deleteAdminCampusCompetition
+    auth: bearer_admin
+    owner: admin
