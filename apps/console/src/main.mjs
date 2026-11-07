@@ -155,45 +155,45 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
           <img src="/static/xpeach-logo.png" alt="XPeach" class="brand-logo brand-logo--lg" width="44" height="44" />
           <div class="brand-text">
             <span class="brand-name">XPeach</span>
-            <span class="brand-sub">🍑 云端通行证 · 日在校园</span>
+            <span class="brand-sub">日在校园</span>
           </div>
         </a>
       </header>
       <main class="card auth-window xp-card">
         <div class="auth-header">
-          <div class="auth-eyebrow">🍑 XPeach 统一账户与云控中心</div>
+          <div class="auth-eyebrow">XPeach 账号登录</div>
           <h1 class="auth-title">日在校园</h1>
-          <p class="auth-subtitle" id="landing-subtitle">使用您的 XPeach 账号一键登录，同步通用 🍑 余额，管理图书馆准点抢座、校园快递取件码与合作社团目录。</p>
+          <p class="auth-subtitle" id="landing-subtitle">使用 XPeach 账号登录，管理图书馆座位预约、快递取件码与校园社团。</p>
         </div>
 
         <div class="stack gap-3">
           <a class="btn btn-primary btn-block btn-lg" id="sso-login-btn" href="/api/v1/auth/web/start">
-            使用 XPeach 账号一键登录
+            使用 XPeach 账号登录
           </a>
           <a class="btn btn-secondary btn-block btn-lg" href="https://sso.xpeach.codes/portal">
             返回 XPeach 账户中心
           </a>
         </div>
 
-        <div class="auth-divider"><span>全端统一能力</span></div>
+        <div class="auth-divider"><span>功能概览</span></div>
 
         <div class="xp-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px;">
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">📚 图书馆自动预约</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">可视化点选自习区域与座位号，到点自动占座，预约成功仅消耗 ${escapeHtml(pricePeachText)} 🍑，未成功不扣费。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">图书馆座位预约</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">按区域与座位号定时预约，成功扣 ${escapeHtml(pricePeachText)} 🍑，失败不扣费。</p>
           </div>
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">📦 快递取件码汇总</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">支持手机号绑定小米智能助理或粘贴取件短信，按校园驿站分组展示大字号取件码。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">快递取件码</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">粘贴取件短信或从客户端同步，按驿站汇总取件码。</p>
           </div>
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">🤝 官方合作社团</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">炽夜空动漫社、硬件技术联盟、计算机服务社官方入驻，云端实时同步纳新交流群。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">社团与竞赛</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">查看炽夜空动漫社、硬件技术联盟、计算机服务社及学科竞赛信息。</p>
           </div>
         </div>
       </main>
       <footer class="auth-footer">
-        <span>🍑 XPeach Account Center · 日在校园</span>
+        <span>XPeach · 日在校园</span>
         <span>·</span>
         <a href="https://sso.xpeach.codes/portal">XPeach 主站</a>
         <span>·</span>
@@ -208,7 +208,7 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
         function syncStyleLabel() {
           if (!styleLabel) return;
           var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-          styleLabel.textContent = cur === "liquid-glass" ? "✨ 液态毛玻璃" : "🎨 经典 M3";
+          styleLabel.textContent = cur === "liquid-glass" ? "毛玻璃" : "经典 M3";
         }
         syncStyleLabel();
         if (styleBtn) {
@@ -226,7 +226,7 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
         var txn = params.get("txn");
         if (webTicket && txn) {
           var sub = document.getElementById("landing-subtitle");
-          if (sub) sub.textContent = "正在同步您的 XPeach 账号与 🍑 余额，请稍候…";
+          if (sub) sub.textContent = "正在登录，请稍候…";
           fetch("/api/v1/auth/web/exchange", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -321,9 +321,9 @@ export function renderConsoleHtml(ctx = {}) {
     updated_at: "",
     bulletin: {
       enabled: true,
-      title: "河工大合作社团与交流群云端直通车",
-      content: "合作学生社团招新与技术交流 QQ 群已接入云端实时下发，点击即可一键呼起手机 QQ 加群；校园频道暂时置空。",
-      tag: "云端实时同步"
+      title: "河工大社团与竞赛目录",
+      content: "汇总校内合作社团招新群与常见学科竞赛信息。",
+      tag: "社团与竞赛"
     },
     channels: [],
     clubs: []
@@ -337,32 +337,32 @@ export function renderConsoleHtml(ctx = {}) {
 
   const pageHeaderConfig = {
     portal: {
-      title: "日在校园 · 个人通行证",
-      subtitle: "与 XPeach 账户中心实时同步通用 🍑 余额，一站式查看待取快递、今日图书馆占座与官方合作社团。"
+      title: "概览",
+      subtitle: "查看账户余额、待取快递与图书馆预约状态。"
     },
     reservations: {
-      title: "图书馆座位自动预约",
-      subtitle: `点选楼层自习区与心仪座位号（支持首选 + 2 个备选），到点自动占座；成功仅扣 ${pricePeachText} 🍑，未成功不扣费。`
+      title: "图书馆座位预约",
+      subtitle: `选择自习区域与备选座位，到点自动提交预约；成功扣 ${pricePeachText} 🍑，失败不扣费。`
     },
     parcels: {
-      title: "我的快递与取件码",
-      subtitle: "按校园驿站分组展示大字号取件码，支持粘贴取件短信智能提取，并与日在校园 App 双向同步。"
+      title: "快递与取件码",
+      subtitle: "按驿站分组展示取件码，支持短信识别与客户端同步。"
     },
     community: {
-      title: "合作社团 · 学科竞赛指南 · 校园频道",
-      subtitle: "河南工业大学 · 官方合作社团、教育部白名单赛事专业匹配与官网直通（云端实时同步）。"
+      title: "社团与竞赛",
+      subtitle: "河南工业大学合作社团、学科竞赛与校园频道。"
     },
     orders: {
-      title: "🍑 消费与退还明细",
-      subtitle: "所有消费直接以 XPeach 通用 🍑 结算，账单实时同步至 XPeach 主站。"
+      title: "消费与退还明细",
+      subtitle: "查看座位预约扣费与退还记录。"
     },
     console: {
-      title: "站点服务与云控管理中心",
-      subtitle: "动态管理合作社团与校园频道热更新、学校图书馆服务开关及跨站 🍑 消费账单对账。"
+      title: "站点管理",
+      subtitle: "管理社团与竞赛内容、图书馆服务状态及消费账单。"
     }
   }[activeNav] || {
-    title: "日在校园 · 个人通行证",
-    subtitle: "与 XPeach 账户中心实时同步通用 🍑 余额。"
+    title: "概览",
+    subtitle: "查看账户余额、待取快递与图书馆预约状态。"
   };
 
   function renderIdentityPassSection() {
@@ -377,8 +377,8 @@ export function renderConsoleHtml(ctx = {}) {
               <h2 class="xp-entity-title" style="font-size: 18px;">${escapeHtml(username)}</h2>
               <div class="xp-badge-flow">
                 ${xpeachBadge(userGroup, "primary")}
-                ${xpeachBadge("已同步 XPeach 主站", "success")}
-                ${activeStudentNo ? xpeachBadge(`已绑学号 ${activeStudentNo}`, "peach") : ""}
+                ${xpeachBadge("XPeach 已连接", "success")}
+                ${activeStudentNo ? xpeachBadge(`学号 ${activeStudentNo}`, "peach") : ""}
               </div>
               <div class="text-xs text-muted">
                 通行证 ID: <code>${escapeHtml(user.subject)}</code>
@@ -388,10 +388,10 @@ export function renderConsoleHtml(ctx = {}) {
             </div>
           </div>
           <div class="identity-wallet-box">
-            <div class="identity-wallet-label">通用 🍑 余额 (XPeach 实时同步)</div>
+            <div class="identity-wallet-label">账户余额</div>
             <div class="identity-wallet-value" id="wallet-balance-text">🍑 ${escapeHtml(peachBalanceFormatted)}</div>
             <div class="identity-wallet-sub" id="wallet-used-text">
-              累计已用 🍑 ${escapeHtml(peachUsedFormatted)} · 占座成功每次扣除 ${escapeHtml(pricePeachText)} 🍑（未成功不扣费）
+              已用 🍑 ${escapeHtml(peachUsedFormatted)} · 预约成功扣 ${escapeHtml(pricePeachText)} 🍑
             </div>
           </div>
         </div>
@@ -399,30 +399,30 @@ export function renderConsoleHtml(ctx = {}) {
 
       <section class="xp-bento-grid" aria-label="通行证核心指标">
         ${xpeachBentoTile({
-          label: "通用 🍑 余额",
+          label: "账户余额",
           value: `🍑 ${peachBalanceFormatted}`,
-          hint: `累计已用 🍑 ${peachUsedFormatted}`,
-          badge: xpeachBadge("实时互通", "primary"),
+          hint: `已用 🍑 ${peachUsedFormatted}`,
+          badge: xpeachBadge("XPeach", "primary"),
           valueId: "stat-peach-balance"
         })}
         ${xpeachBentoTile({
-          label: "已绑定校园学号",
+          label: "校园学号",
           value: bindings.length > 0 ? "已绑定" : "未绑定",
-          hint: activeStudentNo ? `学号：${activeStudentNo}` : "前往抢座页面即可绑定",
+          hint: activeStudentNo ? `学号：${activeStudentNo}` : "前往预约页面绑定",
           badge: xpeachBadge(bindings.length > 0 ? "已就绪" : "待绑定", bindings.length > 0 ? "success" : "warning"),
           valueId: "stat-bindings-count"
         })}
         ${xpeachBentoTile({
-          label: "进行中占座预约",
+          label: "有效预约",
           value: String(activePlans.length),
-          hint: `成功占座每次消耗 ${pricePeachText} 🍑`,
+          hint: `成功每次扣 ${pricePeachText} 🍑`,
           badge: xpeachBadge(`${pricePeachText} 🍑/次`, "peach"),
           valueId: "stat-plans-count"
         })}
         ${xpeachBentoTile({
-          label: "待取快递包裹",
+          label: "待取快递",
           value: String(readyParcels.length),
-          hint: `共记录 ${parcels.length} 件快递`,
+          hint: `共 ${parcels.length} 件记录`,
           badge: xpeachBadge(readyParcels.length > 0 ? "待取件" : "已清空", readyParcels.length > 0 ? "peach" : "neutral"),
           valueId: "stat-parcels-count"
         })}
@@ -441,13 +441,13 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">📦</div>
             <div class="xp-entity-title-col">
               <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">待取快递提醒</h2>
+                <h2 class="xp-entity-title">待取快递</h2>
                 <a class="xp-pill xp-pill--compact" href="/parcels">管理快递 →</a>
               </div>
               <p class="xp-entity-summary" style="margin-top: 2px;">${
                 readyParcels.length > 0
-                  ? `您有 ${readyParcels.length} 件包裹已到达校园驿站，请凭取件码领取`
-                  : "当前没有待取快递，粘贴取件短信或在 App 绑定手机号即可自动同步"
+                  ? `${readyParcels.length} 件包裹待取`
+                  : "当前无待取快递"
               }</p>
             </div>
           </div>
@@ -456,7 +456,7 @@ export function renderConsoleHtml(ctx = {}) {
               ? xpeachEmptyState({
                   icon: "📦",
                   title: "暂无待取包裹",
-                  subtitle: "收到菜鸟驿站或丰巢短信后，可在「我的快递与取件码」页面一键识别，或在 Android 客户端绑定小米智能助理自动拉取。",
+                  subtitle: "可粘贴取件短信识别，或在客户端同步包裹记录。",
                   actionLabel: "录入取件码",
                   actionHref: "/parcels"
                 })
@@ -466,7 +466,7 @@ export function renderConsoleHtml(ctx = {}) {
                       ([station, list]) => `
                     <div class="pickup-station-group">
                       <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 10px;">
-                        <span class="text-sm font-semibold">📍 ${escapeHtml(station)}</span>
+                        <span class="text-sm font-semibold">${escapeHtml(station)}</span>
                         ${xpeachBadge(`${list.length} 件待取`, "primary")}
                       </div>
                       <div class="stack gap-2">
@@ -479,7 +479,7 @@ export function renderConsoleHtml(ctx = {}) {
                               <div class="pickup-code-number">${escapeHtml(p.pickup_code || "待出码")}</div>
                               <div class="text-xs text-muted">${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")} · ${escapeHtml(p.item_title || p.tracking_number)}</div>
                             </div>
-                            <button type="button" class="xp-pill xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">✓ 已取件</button>
+                            <button type="button" class="xp-pill xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">已取件</button>
                           </div>`
                           )
                           .join("")}
@@ -497,13 +497,13 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="xp-icon-box" aria-hidden="true">💺</div>
             <div class="xp-entity-title-col">
               <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">图书馆占座动态</h2>
-                <a class="xp-pill xp-pill--active xp-pill--compact" href="/reservations">去选座预约 →</a>
+                <h2 class="xp-entity-title">图书馆预约</h2>
+                <a class="xp-pill xp-pill--active xp-pill--compact" href="/reservations">新建预约 →</a>
               </div>
               <p class="xp-entity-summary" style="margin-top: 2px;">${
                 activeJobs.length > 0
-                  ? `当前共有 ${activeJobs.length} 项有效预约或进行中抢座任务`
-                  : "提前选好自习室与座位号，明早 07:00 自动为您准点抢座"
+                  ? `${activeJobs.length} 项进行中预约`
+                  : "当前无进行中的座位预约"
               }</p>
             </div>
           </div>
@@ -511,9 +511,9 @@ export function renderConsoleHtml(ctx = {}) {
             activeJobs.length === 0
               ? xpeachEmptyState({
                   icon: "📚",
-                  title: "暂未设置今日/明日抢座计划",
-                  subtitle: "支持河南工业大学莲花街校区图书馆全部楼层区域列表点选，首选座位被占时毫秒级自动切换备选座位。",
-                  actionLabel: "立即配置自动抢座",
+                  title: "暂无预约计划",
+                  subtitle: "选择楼层区域与备选座位，到点自动提交预约。",
+                  actionLabel: "新建预约",
                   actionHref: "/reservations"
                 })
               : `<div class="stack gap-2">
@@ -531,7 +531,7 @@ export function renderConsoleHtml(ctx = {}) {
                         </div>
                         <div class="xp-badge-flow">
                           ${repDays > 1 ? xpeachBadge(`连续 ${repDays} 天 (剩 ${remDays} 天)`, "primary") : ""}
-                          ${j.state === "CONFIRMED" ? xpeachBadge("已占座成功", "success") : xpeachBadge("等待到点开抢", "primary")}
+                          ${j.state === "CONFIRMED" ? xpeachBadge("已成功", "success") : xpeachBadge("待执行", "primary")}
                           ${
                             j.state !== "CONFIRMED"
                               ? `<button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}">取消</button>`
@@ -546,16 +546,16 @@ export function renderConsoleHtml(ctx = {}) {
         </section>
       </div>
 
-      <!-- 官方合作社团直通预览 -->
+      <!-- 合作社团预览 -->
       <section class="xp-card" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
           <div class="xp-icon-box" aria-hidden="true">🤝</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">官方合作社团与技术交流群</h2>
-              <a class="xp-pill xp-pill--compact" href="/community">进入社团与竞赛中心 (${ccClubs.length}社团 · ${ccCompetitions.length}竞赛) →</a>
+              <h2 class="xp-entity-title">合作社团</h2>
+              <a class="xp-pill xp-pill--compact" href="/community">查看全部 (${ccClubs.length}) →</a>
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">云端实时下发最新合作社团招新与技术交流 QQ 群，与 Android 客户端保持实时一致。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">校内合作社团与招新交流群。</p>
           </div>
         </div>
         <div class="xp-card-grid">
@@ -563,16 +563,16 @@ export function renderConsoleHtml(ctx = {}) {
         </div>
       </section>
 
-      <!-- 核心学科竞赛指南预览 -->
+      <!-- 学科竞赛目录预览 -->
       <section class="xp-card">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
           <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">教育部白名单学科竞赛与专业发展指南</h2>
-              <a class="xp-pill xp-pill--active xp-pill--compact" href="/community#section-community-competitions">按专业匹配全部 ${ccCompetitions.length} 项赛事 →</a>
+              <h2 class="xp-entity-title">学科竞赛目录</h2>
+              <a class="xp-pill xp-pill--active xp-pill--compact" href="/community#section-community-competitions">查看全部 (${ccCompetitions.length}) →</a>
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">不知自己专业适合参加什么比赛？一键按学院/专业方向匹配高含金量白名单赛事、直达官网并关联合作社团组队。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">按专业方向筛选常见高校学科竞赛与报名信息。</p>
           </div>
         </div>
         <div class="xp-card-grid">
@@ -589,7 +589,7 @@ export function renderConsoleHtml(ctx = {}) {
             ? xpeachBulletinHeroCard({
                 title: ccBulletin.title,
                 content: ccBulletin.content,
-                tag: ccBulletin.tag || "云端实时同步",
+                tag: ccBulletin.tag || "公告",
                 version: campusContent.version || 3,
                 clubsCount: ccClubs.length,
                 competitionsCount: ccCompetitions.length
@@ -602,13 +602,13 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="xp-icon-box" aria-hidden="true">🤝</div>
             <div class="xp-entity-title-col">
               <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">官方合作学生社团 (${ccClubs.length})</h2>
-                ${xpeachStatusDot("一键复制群号或唤醒手机 QQ 加群", "success")}
+                <h2 class="xp-entity-title">合作社团 (${ccClubs.length})</h2>
+                ${xpeachStatusDot("支持复制群号或唤起 QQ", "success")}
               </div>
             </div>
           </div>
           <div class="xp-search-bar" style="margin-bottom: 12px;">
-            <input class="input xp-search-input" id="community-club-search" type="search" placeholder="搜索社团名称、活动方向、场地或 QQ 群号…" />
+            <input class="input xp-search-input" id="community-club-search" type="search" placeholder="搜索社团、场地或 QQ 群号…" />
             <div class="xp-pill-bar" id="community-category-pills">
               <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-club-filter="ALL">全部 (${ccClubs.length})</button>
               <button type="button" class="xp-pill xp-pill--compact" data-club-filter="TECH_INNOVATION">科技创新</button>
@@ -622,7 +622,7 @@ export function renderConsoleHtml(ctx = {}) {
                 ? xpeachEmptyState({
                     icon: "🤝",
                     title: "暂无合作社团",
-                    subtitle: "管理员可在站点后台动态发布合作社团与招新群号。"
+                    subtitle: "管理员可在后台添加合作社团信息。"
                   })
                 : ccClubs.map((club) => xpeachClubCard(club, { isAdmin: false })).join("")
             }
@@ -634,17 +634,17 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
             <div class="xp-entity-title-col">
               <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">大学生学科竞赛清单与专业/兴趣发展指南 (${ccCompetitions.length})</h2>
-                ${xpeachBadge("教育部白名单赛事 · 官网直达", "peach")}
+                <h2 class="xp-entity-title">学科竞赛目录 (${ccCompetitions.length})</h2>
+                ${xpeachBadge("高校常见赛事", "peach")}
               </div>
-              <p class="xp-entity-summary" style="margin-top: 2px;">选择您的专业赛道或兴趣方向，快速了解本专业必打的高含金量比赛、报名窗口、能力成长路线与校内组队社团。</p>
+              <p class="xp-entity-summary" style="margin-top: 2px;">按专业方向或类别筛选赛事，查看报名时间、备赛要点与官网链接。</p>
             </div>
           </div>
 
           <div class="xp-well" style="margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px;">
-            <input class="input" id="community-comp-search" type="search" placeholder="搜索竞赛名称、主办单位、适合专业、技能标签或合作社团…" />
+            <input class="input" id="community-comp-search" type="search" placeholder="搜索竞赛、主办单位、专业或社团…" />
             <div>
-              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">🎓 按专业赛道匹配适合你的比赛：</div>
+              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">适用专业</div>
               <div class="xp-pill-bar" id="community-comp-major-pills">
                 <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-major="ALL">全部专业 (${ccCompetitions.length})</button>
                 <button type="button" class="xp-pill xp-pill--compact" data-comp-major="CS_AI_SOFTWARE">计算机/软件/AI</button>
@@ -657,10 +657,10 @@ export function renderConsoleHtml(ctx = {}) {
               </div>
             </div>
             <div>
-              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">🧭 按兴趣发展方向与入门难度筛选：</div>
+              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">赛事类别</div>
               <div class="xp-pill-bar" id="community-comp-cat-pills">
-                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-cat="ALL">全部方向</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-beginner-toggle="true">✨ 大一/零基础友好</button>
+                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-cat="ALL">全部类别</button>
+                <button type="button" class="xp-pill xp-pill--compact" data-comp-beginner-toggle="true">入门友好</button>
                 <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ALGO_PROGRAMMING">算法编程</button>
                 <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ELECTRONICS_ROBO">硬件机器人</button>
                 <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="MATH_MODELING">数学建模</button>
@@ -699,8 +699,8 @@ export function renderConsoleHtml(ctx = {}) {
             ccChannels.length === 0
               ? xpeachEmptyState({
                   icon: "💬",
-                  title: "校园频道暂时置空",
-                  subtitle: "当前仅开放官方合作学生社团与技术交流群，校园频道后续将通过云端实时下发开放。"
+                  title: "暂无校园频道",
+                  subtitle: "当前仅展示合作社团与交流群，频道列表暂未开放。"
                 })
               : `<div class="xp-card-grid">${ccChannels.map((ch) => xpeachChannelCard(ch, { isAdmin: false })).join("")}</div>`
           }
@@ -715,10 +715,10 @@ export function renderConsoleHtml(ctx = {}) {
           <div class="xp-icon-box" aria-hidden="true">📚</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">图书馆座位自动预约</h2>
-              ${xpeachBadge(`${pricePeachText} 🍑 / 次 · 仅占座成功扣费 · 余额 🍑 ${peachBalanceFormatted}`, "peach")}
+              <h2 class="xp-entity-title">图书馆座位预约</h2>
+              ${xpeachBadge(`${pricePeachText} 🍑 / 次 · 成功扣费 · 余额 🍑 ${peachBalanceFormatted}`, "peach")}
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">第一步绑定您的学号，第二步点选楼层区域与座位号即可，三段式准点调度引擎将为您毫秒级锁定心仪座位。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">绑定学号后选择自习区域与备选座位，到点自动提交预约。</p>
           </div>
         </div>
 
@@ -733,7 +733,7 @@ export function renderConsoleHtml(ctx = {}) {
                   : xpeachBadge("待绑定", "warning")
               }
             </div>
-            <p class="text-xs text-muted" style="margin: 0 0 14px;">绑定您的学校与学号，用于自动登录图书馆预约系统并同步至日在校园 App。</p>
+            <p class="text-xs text-muted" style="margin: 0 0 14px;">用于登录图书馆预约系统，绑定状态与客户端同步。</p>
             <div class="stack gap-3">
               <div class="field">
                 <label class="label" for="bind-school">所属学校</label>
@@ -747,7 +747,7 @@ export function renderConsoleHtml(ctx = {}) {
               </div>
               <div class="field">
                 <label class="label" for="bind-secret">图书馆 / 统一认证密码</label>
-                <input class="input" id="bind-secret" type="password" placeholder="请输入登录密码（KMS 信封加密托管，仅用于自动抢座）" />
+                <input class="input" id="bind-secret" type="password" placeholder="请输入登录密码（加密保存，仅用于座位预约）" />
               </div>
               <button type="button" class="btn btn-primary btn-block" id="btn-save-binding">
                 ${activeStudentNo ? "更新绑定学号与密码" : "保存并绑定学号"}
@@ -756,19 +756,19 @@ export function renderConsoleHtml(ctx = {}) {
             <div id="binding-list-box" style="margin-top: 12px;" class="text-xs text-muted">
               ${
                 activeStudentNo
-                  ? `当前生效学号：<strong>${escapeHtml(activeStudentNo)}</strong>（河南工业大学 · 与 App 实时互通）`
-                  : "暂未绑定学号，请先填写上方学号完成绑定。"
+                  ? `当前绑定学号：<strong>${escapeHtml(activeStudentNo)}</strong>（河南工业大学）`
+                  : "尚未绑定学号。"
               }
             </div>
           </div>
 
-          <!-- Step 2: 选择自习区域与下属座位号 -->
+          <!-- Step 2: 选择区域与座位 -->
           <div class="xp-well" style="padding: 18px;">
             <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 8px;">
-              <h3 class="xp-entity-title" style="font-size: 15px;">第二步：点选自习区域与座位号</h3>
-              <span class="xp-badge xp-badge--success" id="live-region-badge" style="display:none;">已连接河工大图书馆实时座位</span>
+              <h3 class="xp-entity-title" style="font-size: 15px;">第二步：选择区域与座位</h3>
+              <span class="xp-badge xp-badge--success" id="live-region-badge" style="display:none;">实时座位数据</span>
             </div>
-            <p class="text-xs text-muted" style="margin: 0 0 10px;">点击下方楼层标签或在列表中切换区域，直接点击座位卡片即可设为首选/备选座位。</p>
+            <p class="text-xs text-muted" style="margin: 0 0 10px;">切换楼层区域并点击座位卡片设置首选与备选座位。</p>
 
             <div class="xp-pill-bar" id="area-pills-bar" style="margin-bottom: 12px;">
               <button type="button" class="area-pill active" data-area-pill="4F_NORTH">4楼北自习区</button>
@@ -792,7 +792,7 @@ export function renderConsoleHtml(ctx = {}) {
 
               <div class="field">
                 <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 4px;">
-                  <label class="label" style="margin: 0;">2. 点击座位卡片快速选座（蓝色=首选，绿色=备选）</label>
+                  <label class="label" style="margin: 0;">2. 选择座位（蓝色首选，绿色备选）</label>
                   <span class="text-xs text-muted" id="seat-selection-summary">已选：4N-001 / 4N-002 / 4N-003</span>
                 </div>
                 <div class="seat-visual-grid" id="seat-visual-grid"></div>
@@ -819,9 +819,9 @@ export function renderConsoleHtml(ctx = {}) {
                   <input class="input" id="plan-date" type="date" />
                 </div>
                 <div class="field">
-                  <label class="label" for="plan-time">自动开抢时间</label>
+                  <label class="label" for="plan-time">自动执行时间</label>
                   <select class="input" id="plan-time">
-                    <option value="07:00:00">07:00（早间准点开抢）</option>
+                    <option value="07:00:00">07:00（早间场次）</option>
                     <option value="07:30:00">07:30（早间场次）</option>
                     <option value="08:00:00">08:00（上午场次）</option>
                     <option value="12:30:00">12:30（午间场次）</option>
@@ -831,28 +831,28 @@ export function renderConsoleHtml(ctx = {}) {
                   </select>
                 </div>
                 <div class="field">
-                  <label class="label" for="plan-repeat-days">连续自动抢座周期</label>
+                  <label class="label" for="plan-repeat-days">重复周期</label>
                   <select class="input" id="plan-repeat-days">
-                    <option value="1">仅抢 1 天（单次）</option>
-                    <option value="3">连续 3 天自动抢座</option>
-                    <option value="7">连续 7 天（一整周每天早间自动抢）</option>
-                    <option value="14">连续 14 天（两周自动续期）</option>
-                    <option value="30">连续 30 天（整月自动续期）</option>
+                    <option value="1">单次（1 天）</option>
+                    <option value="3">连续 3 天</option>
+                    <option value="7">连续 7 天</option>
+                    <option value="14">连续 14 天</option>
+                    <option value="30">连续 30 天</option>
                   </select>
                 </div>
               </div>
               <div class="field">
                 <label class="label" for="plan-slot">自习用座时段</label>
                 <select class="input" id="plan-slot">
-                  <option value="08:00-22:00">08:00 - 22:00（全天沉浸自习）</option>
+                  <option value="08:00-22:00">08:00 - 22:00（全天时段）</option>
                   <option value="08:00-12:00">08:00 - 12:00（上午时段）</option>
                   <option value="14:00-18:00">14:00 - 18:00（下午时段）</option>
                   <option value="18:30-22:00">18:30 - 22:00（晚间时段）</option>
                 </select>
               </div>
               <div class="xp-action-group">
-                <button type="button" class="btn btn-primary" style="flex:1;" id="btn-create-plan">保存自动抢座计划</button>
-                <button type="button" class="btn btn-secondary" id="btn-fire-now">立即预约所选座位</button>
+                <button type="button" class="btn btn-primary" style="flex:1;" id="btn-create-plan">保存预约计划</button>
+                <button type="button" class="btn btn-secondary" id="btn-fire-now">立即预约</button>
               </div>
             </div>
           </div>
@@ -860,14 +860,14 @@ export function renderConsoleHtml(ctx = {}) {
 
         <div class="divider"></div>
 
-        <h3 class="xp-section-subtitle">我的预约与抢座记录</h3>
+        <h3 class="xp-section-subtitle">预约记录</h3>
         <div class="xp-row-list" id="jobs-tbody">
           ${
             jobs.length === 0
               ? xpeachEmptyState({
                   icon: "💺",
                   title: "暂无预约记录",
-                  subtitle: "在上方选择自习区域与座位号即可创建自动抢座计划。"
+                  subtitle: "选择自习区域与座位后即可创建预约计划。"
                 })
               : jobs
                   .map((j) => {
@@ -887,30 +887,30 @@ export function renderConsoleHtml(ctx = {}) {
           <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">📦</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">我的快递与取件码</h2>
+              <h2 class="xp-entity-title">快递与取件码</h2>
               ${xpeachBadge(`${readyParcels.length} 件待取件`, "peach")}
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">粘贴菜鸟驿站/丰巢取件短信自动识别取件码与驿站位置，所有包裹与日在校园 Android 客户端实时同步。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">粘贴取件短信提取取件码与驿站位置，数据与客户端同步。</p>
           </div>
         </div>
 
-        <!-- 短信智能粘贴识别框 -->
+        <!-- 短信粘贴识别框 -->
         <div class="xp-well" style="padding: 16px; margin-bottom: 18px;">
           <div class="xp-form-grid-3" style="align-items: end;">
             <div class="field" style="grid-column: span 2;">
-              <label class="label" for="parcel-sms">粘贴取件短信（实时识别取件码与校园驿站）</label>
+              <label class="label" for="parcel-sms">取件短信</label>
               <input class="input" id="parcel-sms" type="text" placeholder="例如：【菜鸟驿站】您的包裹已到莲花街北苑菜鸟驿站，请凭取件码 3-2-1048 领取" />
             </div>
             <div class="field">
-              <label class="label" for="parcel-tracking">运单号（选填，不填自动生成）</label>
+              <label class="label" for="parcel-tracking">运单号（选填）</label>
               <input class="input" id="parcel-tracking" type="text" placeholder="例如 SF15283910293" />
             </div>
           </div>
           <div class="xp-action-bar" style="margin-top: 10px;">
             <div id="sms-preview-chip" class="text-xs text-muted">
-              💡 提示：在「日在校园」App 中可通过手机号一键绑定小米智能助理，全自动同步您的所有校园快递与取件码。
+              可在「日在校园」App 中绑定手机号自动同步快递信息。
             </div>
-            <button type="button" class="xp-pill xp-pill--active" id="btn-add-parcel">识别并保存取件码</button>
+            <button type="button" class="xp-pill xp-pill--active" id="btn-add-parcel">保存取件码</button>
           </div>
         </div>
 
@@ -923,7 +923,7 @@ export function renderConsoleHtml(ctx = {}) {
                     ([station, list]) => `
                   <div class="pickup-station-group">
                     <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 10px;">
-                      <span class="text-sm font-semibold">📍 ${escapeHtml(station)}</span>
+                      <span class="text-sm font-semibold">${escapeHtml(station)}</span>
                       ${xpeachBadge(`${list.length} 件待取`, "primary")}
                     </div>
                     <div class="stack gap-2">
@@ -935,7 +935,7 @@ export function renderConsoleHtml(ctx = {}) {
                             <div class="pickup-code-number">${escapeHtml(p.pickup_code || "待出码")}</div>
                             <div class="text-xs text-muted">${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")} · <code>${escapeHtml(p.tracking_number)}</code></div>
                           </div>
-                          <button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">✓ 我已取件</button>
+                          <button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">标记已取</button>
                         </div>`
                         )
                         .join("")}
@@ -954,7 +954,7 @@ export function renderConsoleHtml(ctx = {}) {
               ? xpeachEmptyState({
                   icon: "📦",
                   title: "暂无快递记录",
-                  subtitle: "可在上方粘贴取件短信或在日在校园 App 中绑定手机号自动同步。"
+                  subtitle: "粘贴取件短信或在客户端中同步包裹记录。"
                 })
               : parcels.map((p) => xpeachParcelRowCard(p)).join("")
           }
@@ -970,10 +970,10 @@ export function renderConsoleHtml(ctx = {}) {
           <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">🍑 消费与退还明细</h2>
-              <a class="xp-pill xp-pill--compact" href="https://sso.xpeach.codes/portal">前往 XPeach 主站查看总账单 →</a>
+              <h2 class="xp-entity-title">消费与退还明细</h2>
+              <a class="xp-pill xp-pill--compact" href="https://sso.xpeach.codes/portal">XPeach 账户账单 →</a>
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">所有消费直接以 XPeach 通用 🍑 结算并实时同步至 XPeach 主站，预约未成功或取消不扣取任何 🍑。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">预约成功扣取 🍑，未成功或已取消不扣费。</p>
           </div>
         </div>
         <div class="xp-row-list" id="orders-tbody">
@@ -981,8 +981,8 @@ export function renderConsoleHtml(ctx = {}) {
             orders.length === 0
               ? xpeachEmptyState({
                   icon: "🍑",
-                  title: "暂无 🍑 消费记录",
-                  subtitle: `仅在图书馆自动占座核验成功后扣除 ${pricePeachText} 🍑。`
+                  title: "暂无消费记录",
+                  subtitle: `座位预约成功后扣除 ${pricePeachText} 🍑。`
                 })
               : orders
                   .map((o) =>
