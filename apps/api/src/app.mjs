@@ -1730,20 +1730,14 @@ export function createCampusCloudApp(options = {}) {
         for (const cancelId of body.reservation_cancellations) {
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
-            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
-              job.state = "CANCELLED";
-              job.state_version += 1;
-            });
+            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs);
           }
           const plan = store.reservationPlans.get(cancelId);
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
             for (const j of store.reservationJobs.values()) {
               if (j.plan_id === plan.id && j.state !== "CANCELLED") {
-                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
-                  j.state = "CANCELLED";
-                  j.state_version += 1;
-                });
+                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs);
               }
             }
           }
@@ -2543,6 +2537,17 @@ export function createCampusCloudApp(options = {}) {
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
       const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+
+      // Fail closed for EVERY method before auth, route dispatch, or public HTML rendering.
+      // Existing Moments records lack verified owner/tenant attribution, and the current
+      // shared public claim codes are not safe disclosure/report capabilities. Do not add
+      // an environment switch: reopening requires an audited data/auth migration.
+      if (pathname === "/api/v1/moments" || pathname.startsWith("/api/v1/moments/")) {
+        throw new ContractError("FORBIDDEN", "校园社区云功能暂未开放；内容仅保存在本地，未发布或送达云端");
+      }
+      if (pathname === "/claim" || pathname.startsWith("/claim/")) {
+        throw new ContractError("NOT_FOUND", "Public claim pages are unavailable");
+      }
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
       if (upperMethod === "GET" && (pathname.startsWith("/static/") || pathname === "/favicon.ico")) {

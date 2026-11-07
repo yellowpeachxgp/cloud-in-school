@@ -806,6 +806,7 @@ export class HautLibraryProvider {
   }
 
   async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
+    throw new ContractError("SCHOOL_PERMISSION_REQUIRED", "Live school writes are disabled; cancel through the official school service");
     const auth = await this.authenticateHautSession(decryptedSecret, binding);
     const rawToken = auth.rawToken;
     let targetBookingId =
@@ -971,6 +972,9 @@ export class HautLibraryProvider {
     }
 
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
+    if (credBundle.isLiveCredential) {
+      throw new ContractError("SCHOOL_PERMISSION_REQUIRED", "Live school automation is disabled pending verified school authorization");
+    }
     if (credBundle.isLiveCredential) {
       // Use cached raw_token immediately at 07:00:00 if present so Wave 0 has zero auth RTT;
       // otherwise authenticate now.

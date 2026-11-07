@@ -594,6 +594,17 @@ export class TripleScheduleEngine {
           return { job, event };
         }
 
+        // Existing armed/ambiguous jobs must not bypass containment through scheduler
+        // execution or adopt an unrelated live readback and settle it as a new booking.
+        if (!this.schoolProvider.mockBackend && this.schoolProvider.parseCredentialBundle(decryptedSecret, binding).isLiveCredential) {
+          event.status = "FIRE_NEEDS_USER";
+          event.diagnostic_code = "SCHOOL_PERMISSION_REQUIRED";
+          event.actual_at = new Date(nowMs).toISOString();
+          if (job.state !== "RESULT_UNKNOWN") this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {last_error_code: "SCHOOL_PERMISSION_REQUIRED"});
+          this.store.saveSnapshot?.();
+          return {job, event};
+        }
+
         // Never blind-retry if already submitted or RESULT_UNKNOWN
         if (job.state === "RESULT_UNKNOWN" || job.attempt_count >= 1) {
           try {
