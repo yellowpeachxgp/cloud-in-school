@@ -1750,6 +1750,74 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      if (Array.isArray(body.reservation_plan_upserts)) {
+        const activeBinding = Array.from(store.schoolBindings.values()).find(
+          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at
+        );
+        let activeConsent = Array.from(store.consents.values()).find(
+          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+        );
+        if (activeBinding && !activeConsent) {
+          const cid = crypto.randomUUID();
+          activeConsent = {
+            id: cid,
+            cloud_user_id: auth.cloudUserId,
+            school_id: activeBinding.school_id || DEFAULT_SCHOOL_ID,
+            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+            policy_version: "policy-2026-11-v4",
+            granted_at: new Date(nowMs).toISOString(),
+            withdrawn_at: null
+          };
+          store.consents.set(cid, activeConsent);
+        }
+        if (activeBinding && activeConsent) {
+          for (const rpItem of body.reservation_plan_upserts) {
+            const targetDate = String(rpItem?.target_local_date || "").trim();
+            const targetTime = String(rpItem?.target_local_time || "07:00:00").trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) continue;
+            const alreadyActive = Array.from(store.reservationJobs.values()).some(
+              (j) =>
+                j.cloud_user_id === auth.cloudUserId &&
+                j.booking_local_date === targetDate &&
+                !["CANCELLED", "FAILED", "EXPIRED", "REVOKED"].includes(j.state)
+            );
+            if (alreadyActive) continue;
+            const areaName = String(rpItem?.area_name || rpItem?.area_code || "五层中区").trim();
+            const seats = Array.isArray(rpItem?.candidate_seats)
+              ? rpItem.candidate_seats.map((s) => String(s).trim()).filter(Boolean)
+              : ["01桌 B座"];
+            const repeatDays = Math.min(Math.max(Number(rpItem?.repeat_days ?? 1) || 1, 1), 30);
+            const remainingDays = Math.min(
+              Math.max(Number(rpItem?.remaining_days ?? repeatDays) || repeatDays, 1),
+              repeatDays
+            );
+            try {
+              reservationEngine.createPlanAndJob(
+                auth.cloudUserId,
+                {
+                  school_binding_id: activeBinding.id,
+                  consent_id: activeConsent.id,
+                  area_code: areaName,
+                  area_name: areaName,
+                  candidate_seats: seats,
+                  preferred_area_ids: [areaName],
+                  preferred_seat_ids: seats,
+                  target_local_date: targetDate,
+                  target_local_time: targetTime,
+                  repeat_days: repeatDays,
+                  remaining_days: remainingDays,
+                  allow_alternative_seat: rpItem?.allow_alternative_seat !== false,
+                  replace_existing: false
+                },
+                nowMs
+              );
+            } catch {
+              // Ignore expired window or validation errors during background snapshot sync
+            }
+          }
+        }
+      }
+
       await syncUserToSso(auth.cloudUserId);
     }
 

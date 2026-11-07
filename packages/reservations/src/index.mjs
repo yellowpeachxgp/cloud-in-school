@@ -323,6 +323,9 @@ export class TripleScheduleEngine {
     for (const ev of events) {
       this.store.scheduleEvents.set(ev.id, ev);
     }
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
 
     // Asynchronously prewarm target region & candidate seat IDs on job creation when live credentials exist
     if (
@@ -382,6 +385,9 @@ export class TripleScheduleEngine {
     job.state = nextState;
     job.state_version += 1;
     Object.assign(job, patch);
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
     return true;
   }
 
@@ -752,6 +758,9 @@ export class TripleScheduleEngine {
     const plan = this.store.reservationPlans.get(job.plan_id);
     if (plan) {
       plan.enabled = false;
+    }
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
     }
     return {
       job,

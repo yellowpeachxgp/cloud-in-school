@@ -28,6 +28,28 @@ export const HAUT_CAS_LOGIN_URL =
 export const HAUT_WSLIB_API_BASE = "https://wslib.haut.edu.cn/spacelink/api";
 const HAUT_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
+const HAUT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8";
+
+export function translateWslibDiagnosticMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  if (!text) return "";
+  if (/seat\.10056/i.test(text)) return "预约开始时间须大于当前时间";
+  if (/seat\.10057/i.test(text)) return "只能预约1天之内的时间(含当天)";
+  if (/seat\.10058/i.test(text)) return "预约时间不在自习室开放时段内";
+  if (/seat\.10062/i.test(text)) return "本座位已锁定 请稍后再试!";
+  if (/seat\.10079/i.test(text)) return "未到07:00开放时间或该时段内已有生效预约";
+  return text;
+}
+
+export function isWslibNotYetOpenMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  return /未到|未开放|不在.*时间|只能预约|尚未开放|seat\.10057|seat\.10058|seat\.10079/i.test(text);
+}
+
+export function isWslibAlreadyBookedMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  return /已有.*预约|不能重复|已预约|只能预约一个座位|seat\.10060|seat\.10061|seat\.10079/i.test(text);
+}
 
 export function validateAllowedSchoolUrl(urlString, allowedHosts) {
   let parsed;
@@ -284,6 +306,7 @@ export class HautLibraryProvider {
         redirect: "error",
         headers: {
           "User-Agent": HAUT_USER_AGENT,
+          "Accept-Language": HAUT_ACCEPT_LANGUAGE,
           Authorization: `Bearer ${cleanToken}`,
           Accept: "application/json, text/plain, */*"
         },
@@ -563,6 +586,7 @@ export class HautLibraryProvider {
       redirect: "error",
       headers: {
         "User-Agent": HAUT_USER_AGENT,
+        "Accept-Language": HAUT_ACCEPT_LANGUAGE,
         Authorization: `Bearer ${cleanToken}`,
         Accept: "application/json, text/plain, */*"
       },
@@ -574,6 +598,10 @@ export class HautLibraryProvider {
     const json = await res.json();
     if (json?.code === 401) {
       throw new ContractError("SCHOOL_AUTH_EXPIRED", "图书馆登录 Token 已过期");
+    }
+    if (json && typeof json.msg === "string" && json.msg.includes("No message found under code")) {
+      json.raw_msg = json.msg;
+      json.msg = translateWslibDiagnosticMessage(json.msg);
     }
     return json;
   }
@@ -983,9 +1011,10 @@ export class HautLibraryProvider {
         prewarmed.end_full &&
         (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
       ) {
-        for (let fastAttempt = 0; fastAttempt < 2; fastAttempt++) {
-          if (fastAttempt > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 180));
+        const fastWaveDelaysMs = [0, 180, 220, 250, 280, 320, 380, 450, 520, 600, 700, 800];
+        for (let fastAttempt = 0; fastAttempt < fastWaveDelaysMs.length; fastAttempt++) {
+          if (fastWaveDelaysMs[fastAttempt] > 0) {
+            await new Promise((resolve) => setTimeout(resolve, fastWaveDelaysMs[fastAttempt]));
           }
           try {
             let needWaitOpening = false;
@@ -998,7 +1027,8 @@ export class HautLibraryProvider {
                 )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
                 rawToken
               );
-              lastMsg = String(addRes?.msg || "").trim();
+              const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
+              lastMsg = translateWslibDiagnosticMessage(rawErrText);
               if (addRes?.code === 200) {
                 const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
                 const confirmed = await this.fetchCurrentActiveBooking(rawToken);
@@ -1010,7 +1040,7 @@ export class HautLibraryProvider {
                   rawToken
                 };
               }
-              if (/已有.*预约|不能重复|已预约/.test(lastMsg)) {
+              if (isWslibAlreadyBookedMessage(rawErrText) || isWslibAlreadyBookedMessage(lastMsg)) {
                 const existing = await this.fetchCurrentActiveBooking(rawToken);
                 if (existing) {
                   return {
@@ -1022,7 +1052,7 @@ export class HautLibraryProvider {
                   };
                 }
               }
-              if (/未到|未开放|不在.*时间/.test(lastMsg)) {
+              if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(lastMsg)) {
                 needWaitOpening = true;
                 break;
               }
@@ -1098,7 +1128,7 @@ export class HautLibraryProvider {
         }
       }
 
-      const waveDelaysMs = [0, 300, 650, 1100, 1800];
+      const waveDelaysMs = [0, 300, 600, 900, 1300, 1800, 2400];
       for (let wave = 0; wave < waveDelaysMs.length; wave++) {
         if (waveDelaysMs[wave] > 0) {
           await new Promise((resolve) => setTimeout(resolve, waveDelaysMs[wave]));
@@ -1196,7 +1226,9 @@ export class HautLibraryProvider {
                     rawToken
                   };
                 }
-                if (/已有.*预约|不能重复|已预约/.test(lastMsg)) {
+                const rawSeatErr = String(addRes?.raw_msg || addRes?.msg || "").trim();
+                lastMsg = translateWslibDiagnosticMessage(rawSeatErr);
+                if (isWslibAlreadyBookedMessage(rawSeatErr) || isWslibAlreadyBookedMessage(lastMsg)) {
                   const confirmed = await this.fetchCurrentActiveBooking(rawToken);
                   if (confirmed) {
                     return {
@@ -1207,6 +1239,9 @@ export class HautLibraryProvider {
                       rawToken
                     };
                   }
+                }
+                if (isWslibNotYetOpenMessage(rawSeatErr) || isWslibNotYetOpenMessage(lastMsg)) {
+                  break;
                 }
               }
             }
@@ -1228,10 +1263,25 @@ export class HautLibraryProvider {
         }
       }
 
+      try {
+        const finalConfirmed = await this.fetchCurrentActiveBooking(rawToken);
+        if (finalConfirmed && finalConfirmed.bookingId) {
+          return {
+            outcome: "SUBMITTED",
+            externalBookingId: finalConfirmed.bookingId,
+            seatAlias: finalConfirmed.seatName,
+            regionAlias: finalConfirmed.regionName,
+            rawToken
+          };
+        }
+      } catch {
+        // Ignore readback error on final fallback
+      }
+
       return {
         outcome: "FAILED",
         errorCode: "SCHOOL_REJECTED",
-        diagnosticMessage: lastMsg || "目标自习室暂无可用空座或不在开放预约时段"
+        diagnosticMessage: translateWslibDiagnosticMessage(lastMsg) || "目标自习室暂无可用空座或不在开放预约时段"
       };
     }
 
@@ -1257,12 +1307,9 @@ export class HautLibraryProvider {
     if (this.mockBackend) {
       return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
     }
-    if (!expectedExternalBookingId) {
-      return { verified: false, officialStatus: "NOT_CREATED" };
-    }
 
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
-    if (credBundle.isLiveCredential && !String(expectedExternalBookingId).startsWith("haut_mock_")) {
+    if (credBundle.isLiveCredential && !String(expectedExternalBookingId || "").startsWith("haut_mock_")) {
       let tokenToUse = rawToken;
       if (!tokenToUse) {
         const auth = await this.authenticateHautSession(credBundle, binding);
@@ -1291,6 +1338,9 @@ export class HautLibraryProvider {
         }
       }
       return { verified: false, officialStatus: "NOT_FOUND_ON_WSLIB" };
+    }
+    if (!expectedExternalBookingId) {
+      return { verified: false, officialStatus: "NOT_CREATED" };
     }
 
     const evidenceSha256 = crypto
