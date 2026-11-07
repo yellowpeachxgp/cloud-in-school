@@ -355,3 +355,21 @@ test("Concurrent execute-now and terminal replays return the saved payment resul
   }
   assert.equal(app.financeBridge.getSandboxBalance(f.customer.user.id), 40_000);
 });
+
+
+test("Mobile quote contract rejects a price changed after confirmation without creating a job", async () => {
+  const app = appWithSandbox();
+  const f = await createPlanFixture(app);
+  assert.equal(f.quote.charge_policy, "POST_CONFIRMATION_ONLY");
+  assert.equal(f.quote.local_device_mode_micropeach, 0);
+  assert.ok(Number.isSafeInteger(f.quote.cloud_hosted_mode_micropeach));
+  app.store.pricingMicropeach = 20_000;
+  const rejected = await f.inject("/api/v1/reservation-plans", f.payload);
+  assert.equal(rejected.status, 409);
+  assert.equal(app.store.reservationJobs.size, 0);
+  const refreshed = (await app.inject({ method: "GET", url: "/api/v1/pricing/library-booking" })).body.data;
+  assert.equal(refreshed.cloud_hosted_mode_micropeach, 20_000);
+  assert.notEqual(refreshed.price_version, f.quote.price_version);
+  // Fetching a new quote is not acceptance and must not create any plan.
+  assert.equal(app.store.reservationPlans.size, 0);
+});

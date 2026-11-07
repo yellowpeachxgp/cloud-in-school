@@ -2461,6 +2461,24 @@ components:
           type: string
         data:
           type: object
+          required: [price_version, currency_symbol, local_device_mode_micropeach, cloud_hosted_mode_micropeach, charge_policy]
+          properties:
+            price_version:
+              type: string
+              minLength: 1
+              description: Opaque quote identifier to submit unchanged after explicit user confirmation.
+            currency_symbol:
+              type: string
+            local_device_mode_micropeach:
+              type: integer
+              const: 0
+            cloud_hosted_mode_micropeach:
+              type: integer
+              minimum: 0
+              description: Amount per confirmed reservation, in micropeach (10000 = 1 peach).
+            charge_policy:
+              type: string
+              const: POST_CONFIRMATION_ONLY
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     NotificationListEnvelope:
