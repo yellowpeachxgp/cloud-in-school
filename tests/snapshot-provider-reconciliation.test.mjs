@@ -90,3 +90,21 @@ test('stale binding and plan snapshots cannot restore withdrawn consent or revok
  app.store.schoolBindings.clear();app.store.consents.clear();await push();
  assert.equal(app.store.schoolBindings.size,0);assert.equal(app.store.consents.size,0);assert.equal(app.store.reservationPlans.size,0);
 });
+
+test('snapshot keeps completed job zero and preserves repeat total after rollover',async()=>{
+const app=createCampusCloudApp();const now=Date.parse('2026-11-08T05:00:00+08:00');
+const user=app.store.findOrCreateCloudUser({issuer:'https://synthetic.invalid',subject:'snapshot-incremental'});
+const session=app.identity.issueDeviceSession(user,'audit',null,1,now);
+const plan={id:'plan',cloud_user_id:user.id,school_id:'haut',school_binding_id:'binding',repeat_days:7,remaining_days:7,enabled:true,generation:1,target_local_date:'2026-11-08',target_local_time:'07:00:00'};
+const old={id:'old',plan_id:plan.id,cloud_user_id:user.id,school_id:'haut',booking_local_date:'2026-11-08',repeat_days:7,remaining_days:7,state:'CONFIRMED'};
+app.store.reservationPlans.set(plan.id,plan);app.store.reservationJobs.set(old.id,old);
+const next=app.reservationEngine.rolloverMultiDayPlanIfEligible(plan,old,'synthetic',now);
+const snapshot=async()=>{const r=await app.inject({method:'GET',url:'/api/v1/sync/snapshot',headers:{authorization:`Bearer ${session.access_token}`},nowMs:now});assert.equal(r.status,200);return r.body.data;};
+let s=await snapshot();const jobs=s.reservation_jobs;
+assert.equal(jobs.find(j=>j.id==='old').remaining_days,0);
+assert.equal(jobs.find(j=>j.id===next.id).remaining_days,6);
+assert.equal(jobs.find(j=>j.id===next.id).repeat_days,7);
+plan.repeat_days=1;next.repeat_days=7;s=await snapshot();assert.equal(s.reservation_jobs.find(j=>j.id===next.id).repeat_days,7);
+delete next.remaining_days;s=await snapshot();assert.equal(s.reservation_jobs.find(j=>j.id===next.id).remaining_days,6);
+
+});
