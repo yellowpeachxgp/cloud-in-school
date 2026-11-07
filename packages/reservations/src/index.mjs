@@ -237,7 +237,7 @@ export class TripleScheduleEngine {
       preferences_json: {
         preferred_area_ids: payload.preferred_area_ids || (payload.area_code ? [payload.area_code] : ["area-haut-north-4f"]),
         preferred_seat_ids: payload.preferred_seat_ids || payload.candidate_seats || ["N4-088"],
-        allow_alternative_seat: payload.allow_alternative_seat !== false
+        allow_alternative_seat: payload.allow_alternative_seat === true
       },
       generation,
       enabled: true,

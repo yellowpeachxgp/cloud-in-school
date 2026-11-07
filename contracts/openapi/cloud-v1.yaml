@@ -2265,7 +2265,8 @@ components:
             type: string
         allow_alternative_seat:
           type: boolean
-          default: true
+          default: false
+          description: Alternative seats require explicit opt-in.
         precheck_lead_seconds:
           type: integer
           const: 1800

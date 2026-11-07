@@ -373,3 +373,16 @@ test("Mobile quote contract rejects a price changed after confirmation without c
   // Fetching a new quote is not acceptance and must not create any plan.
   assert.equal(app.store.reservationPlans.size, 0);
 });
+
+test("Alternative seats require explicit opt-in, including when clients omit the field", async () => {
+  for (const choice of [undefined, false, true]) {
+    const app = appWithSandbox();
+    const f = await createPlanFixture(app);
+    const payload = { ...f.payload };
+    if (choice !== undefined) payload.allow_alternative_seat = choice;
+    const created = await f.inject("/api/v1/reservation-plans", payload);
+    assert.equal(created.status, 201);
+    const plan = [...app.store.reservationPlans.values()][0];
+    assert.equal(plan.preferences_json.allow_alternative_seat, choice === true);
+  }
+});
