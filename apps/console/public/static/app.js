@@ -10,6 +10,28 @@
     return String(val).replace(/["\\]/g, "\\$&");
   }
 
+  const menuButton = document.getElementById("mobile-nav-open");
+  const menuBackdrop = document.getElementById("sidebar-backdrop");
+  const mobileSidebar = document.getElementById("console-sidebar");
+  function setMobileMenu(open) {
+    root.toggleAttribute("data-mobile-menu-open", open);
+    menuButton?.setAttribute("aria-expanded", String(open));
+    if (open) mobileSidebar?.querySelector("a,button")?.focus();
+    else menuButton?.focus();
+  }
+  menuButton?.addEventListener("click", () => setMobileMenu(!root.hasAttribute("data-mobile-menu-open")));
+  menuBackdrop?.addEventListener("click", () => setMobileMenu(false));
+  document.addEventListener("keydown", (event) => {
+    if (!root.hasAttribute("data-mobile-menu-open")) return;
+    if (event.key === "Escape") setMobileMenu(false);
+    if (event.key === "Tab" && mobileSidebar) {
+      const items = [...mobileSidebar.querySelectorAll("a[href],button:not([disabled])")];
+      const first = items[0], last = items.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+  });
+
   // 1. System-Following Theme Engine (Auto-Follow OS Light/Dark + Instant Toggle)
   function applyEffectiveTheme() {
     let saved = null;

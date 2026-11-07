@@ -12,20 +12,14 @@ import { ContractError } from "../../contracts/src/index.mjs";
 export class KmsEnvelopeVault {
   constructor(options = {}) {
     this.activeKekId = options.activeKekId || process.env.KMS_KEY_ID || "cn-kms-campus-cloud-kek-v1";
-    const configuredKekMaterial =
-      options.initialKekMaterial || process.env.KMS_MASTER_SEED || "";
-    if (configuredKekMaterial.startsWith("secret://")) {
-      throw new Error(
-        "Unresolved secret reference for KMS_MASTER_SEED; provide raw secret material"
-      );
+    const suppliedMaterial = options.initialKekMaterial || process.env.KMS_MASTER_SEED;
+    if (String(suppliedMaterial || "").startsWith("secret://")) throw new Error("Unresolved KMS secret reference");
+    if ((options.environment || process.env.NODE_ENV) === "production" &&
+        (!suppliedMaterial || Buffer.byteLength(suppliedMaterial) < 32 || String(suppliedMaterial).startsWith("secret://") || suppliedMaterial === "cn-campus-cloud-kms-seed-2026-argongate")) {
+      throw new Error("Production requires KMS_MASTER_SEED with at least 32 bytes of resolved secret material");
     }
-    if (!configuredKekMaterial && process.env.NODE_ENV === "production") {
-      throw new Error(
-        "KMS_MASTER_SEED is required in production; refusing insecure built-in default"
-      );
-    }
-    const initialKekMaterial =
-      configuredKekMaterial || "cn-campus-cloud-kms-seed-2026-argongate";
+    // Development-only in-memory vaults use a fresh key, never a public default.
+    const initialKekMaterial = suppliedMaterial || crypto.randomBytes(32);
     this.kekRing = new Map();
     this.kekRing.set(this.activeKekId, crypto.createHash("sha256").update(initialKekMaterial).digest());
     this.permitSecret = crypto

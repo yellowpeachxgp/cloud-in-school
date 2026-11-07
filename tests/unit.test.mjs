@@ -1,3 +1,4 @@
+import './test-secrets.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";

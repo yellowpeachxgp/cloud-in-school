@@ -55,3 +55,21 @@ server.listen(port, host, () => {
     })
   );
 });
+
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  clearInterval(scannerTimer);
+  // Stop accepting requests and let current mutations finish before the final sync.
+  await new Promise(resolve => server.close(resolve));
+  while (isScanning) await new Promise(resolve => setTimeout(resolve, 10));
+  const { pending } = await app.closeProfileSync();
+  if (pending) console.error(JSON.stringify({ service: "profile-sync", pending,
+    message: "SSO unavailable at shutdown; latest profiles will be retried on restart" }));
+  app.store.saveSnapshot({ required: true });
+  await app.redisBuffer.client.close();
+}
+for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => {
+  shutdown().catch(() => { process.exitCode = 1; });
+});

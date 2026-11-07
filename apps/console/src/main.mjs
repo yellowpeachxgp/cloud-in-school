@@ -2,7 +2,8 @@ import http from "node:http";
 import {
   DEFAULT_RESERVATION_PRICE_MICROPEACH,
   MICROPEACH_PER_PEACH,
-  formatPeachFromMicropeach
+  formatPeachFromMicropeach,
+  getReservationPriceVersion
 } from "../../../packages/contracts/src/index.mjs";
 import {
   cleanDisplayText,
@@ -63,7 +64,7 @@ function renderHead(title = "日在校园 · XPeach 云端通行证") {
           var theme = savedTheme === "dark" || savedTheme === "light" ? savedTheme : (prefersDark ? "dark" : "light");
           document.documentElement.setAttribute("data-theme", theme);
           var savedStyle = localStorage.getItem("xpeach-ui-style");
-          var uiStyle = savedStyle === "flutter-m3" || savedStyle === "liquid-glass" ? savedStyle : "liquid-glass";
+          var uiStyle = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"].includes(savedStyle) ? savedStyle : "liquid-glass";
           document.documentElement.setAttribute("data-ui-style", uiStyle);
         } catch (e) {}
       })();
@@ -208,13 +209,14 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
         function syncStyleLabel() {
           if (!styleLabel) return;
           var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-          styleLabel.textContent = cur === "liquid-glass" ? "毛玻璃" : "经典 M3";
+          styleLabel.textContent = ({ "liquid-glass": "毛玻璃", "flutter-m3": "经典 M3", "fresh-breeze": "清新森系", "cream-pastel": "奶油手账" })[cur] || "毛玻璃";
         }
         syncStyleLabel();
         if (styleBtn) {
           styleBtn.addEventListener("click", function () {
             var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-            var next = cur === "liquid-glass" ? "flutter-m3" : "liquid-glass";
+            var styles = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"];
+            var next = styles[(styles.indexOf(cur) + 1) % styles.length];
             document.documentElement.setAttribute("data-ui-style", next);
             try { localStorage.setItem("xpeach-ui-style", next); } catch (e) {}
             syncStyleLabel();
@@ -234,9 +236,8 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
           })
             .then(function (r) { return r.json(); })
             .then(function (res) {
-              if (res && res.ok && res.data && res.data.access_token) {
-                localStorage.setItem("dis_web_session", JSON.stringify(res.data));
-              }
+              // The exchange sets an HttpOnly cookie. Never persist bearer credentials in JS storage.
+              try { localStorage.removeItem("dis_web_session"); } catch (e) {}
               window.location.replace(window.location.pathname || "/");
             })
             .catch(function () {
@@ -286,6 +287,8 @@ export function renderConsoleHtml(ctx = {}) {
     roles.includes("ADMIN") ||
     roles.includes("OPERATOR") ||
     roles.includes("FINANCE") ||
+    roles.includes("FINANCE_OPERATOR") ||
+    roles.includes("PLATFORM_OWNER") ||
     user.role === "admin";
   const activeNav = ctx.activeNav || "portal";
 
@@ -333,7 +336,7 @@ export function renderConsoleHtml(ctx = {}) {
   const ccClubs = Array.isArray(campusContent.clubs) ? campusContent.clubs : [];
   const ccCompetitions = Array.isArray(campusContent.competitions) ? campusContent.competitions : [];
 
-  const accessToken = ctx.accessToken || "";
+
 
   const pageHeaderConfig = {
     portal: {
@@ -1507,23 +1510,23 @@ export function renderConsoleHtml(ctx = {}) {
     </div>
 
     <nav class="mobile-glass-dock" aria-label="快捷导航">
-      <a class="dock-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
+      <a class="mobile-dock-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         <span>通行证</span>
       </a>
-      <a class="dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+      <a class="mobile-dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
         <span>抢座预约</span>
       </a>
-      <a class="dock-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
+      <a class="mobile-dock-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
         <span>取件码</span>
       </a>
-      <a class="dock-item ${activeNav === "community" ? "active" : ""}" href="/community">
+      <a class="mobile-dock-item ${activeNav === "community" ? "active" : ""}" href="/community">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
         <span>合作社团</span>
       </a>
-      <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
+      <a class="mobile-dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
         <span>🍑 账单</span>
       </a>
@@ -1532,8 +1535,9 @@ export function renderConsoleHtml(ctx = {}) {
     <script src="/static/app.js" defer></script>
     <script>
       (function () {
-        var SERVER_TOKEN = ${JSON.stringify(accessToken).replace(/</g, "\\u003c")};
         var PRICE_PEACH_TEXT = ${JSON.stringify(pricePeachText)};
+        var ACCEPTED_PRICE_MICROPEACH = ${JSON.stringify(pricingMicropeach)};
+        var ACCEPTED_PRICE_VERSION = ${JSON.stringify(getReservationPriceVersion(pricingMicropeach))};
         function escHtml(v) {
           return String(v == null ? "" : v)
             .replace(/&/g, "&amp;")
@@ -1543,18 +1547,19 @@ export function renderConsoleHtml(ctx = {}) {
             .replace(/'/g, "&#39;");
         }
 
-        // Liquid Glass / Flutter M3 UI style switcher
+        // Cycle all supported UI styles without changing the light/dark preference.
         function syncAllStyleLabels() {
           var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
           document.querySelectorAll("[data-ui-style-label]").forEach(function (el) {
-            el.textContent = cur === "liquid-glass" ? "✨ 液态毛玻璃" : "🎨 经典 M3";
+            el.textContent = ({ "liquid-glass": "毛玻璃", "flutter-m3": "经典 M3", "fresh-breeze": "清新森系", "cream-pastel": "奶油手账" })[cur] || "毛玻璃";
           });
         }
         syncAllStyleLabels();
         document.querySelectorAll("[data-ui-style-toggle]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-            var next = cur === "liquid-glass" ? "flutter-m3" : "liquid-glass";
+            var styles = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"];
+            var next = styles[(styles.indexOf(cur) + 1) % styles.length];
             document.documentElement.setAttribute("data-ui-style", next);
             try { localStorage.setItem("xpeach-ui-style", next); } catch (e) {}
             syncAllStyleLabels();
@@ -1581,9 +1586,8 @@ export function renderConsoleHtml(ctx = {}) {
         function apiFetch(url, options) {
           options = options || {};
           options.headers = options.headers || {};
-          if (SERVER_TOKEN) {
-            options.headers["Authorization"] = "Bearer " + SERVER_TOKEN;
-          }
+          // Same-origin HttpOnly session cookie; no bearer token embedded in HTML.
+          options.credentials = "same-origin";
           options.headers["Content-Type"] = "application/json";
           return fetch(url, options).then(function (r) {
             return r.json().then(function (d) {
@@ -2055,6 +2059,8 @@ export function renderConsoleHtml(ctx = {}) {
               body: JSON.stringify({
                 school_binding_id: ids.bindingId,
                 consent_id: ids.consentId,
+                accepted_price_version: ACCEPTED_PRICE_VERSION,
+                accepted_price_micropeach: ACCEPTED_PRICE_MICROPEACH,
                 area_code: areaKey,
                 area_name: areaCfg.name,
                 candidate_seats: seats,
@@ -2099,7 +2105,16 @@ export function renderConsoleHtml(ctx = {}) {
           var sr = data.schoolReservation || data.school_reservation || {};
           if (job.state === "CONFIRMED") {
             var alias = sr.seat_alias ? "（" + sr.seat_alias + "）" : "";
-            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 " + PRICE_PEACH_TEXT + " 🍑。");
+            var order = data.order || {};
+            if (order.payment_state === "PAID") {
+              showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 " + (order.price_micropeach / 10000) + " 🍑。");
+            } else if (order.payment_state === "PAYMENT_DUE") {
+              showToast("占座成功！" + alias + " 余额不足，订单待支付；已确认的座位仍保留。", true);
+            } else if (order.payment_state === "NOT_REQUIRED") {
+              showToast("占座成功！" + alias + " 本次无需支付。");
+            } else {
+              showToast("占座成功！" + alias + " 扣费结果待核实，请查看账单。", true);
+            }
           } else {
             showToast("未能锁定所选座位（座位已被占用或未绑定正确图书馆密码），本次未扣费", true);
           }
@@ -2195,7 +2210,7 @@ export function renderConsoleHtml(ctx = {}) {
           var codeMatch = sms.match(/([0-9A-Za-z]{1,4}-[0-9A-Za-z]{1,4}-[0-9A-Za-z]{2,6})/) ||
                           sms.match(/取件码[为是：:\\s]*([0-9A-Za-z-]{4,12})/);
           var pickupCode = codeMatch ? codeMatch[1] : "";
-          var stationName = "莲花街南苑菜鸟驿站";
+          var stationName = null;
           if (sms.indexOf("北苑") !== -1) stationName = "莲花街北苑菜鸟驿站";
           else if (sms.indexOf("东苑") !== -1) stationName = "莲花街东苑快递中心";
           else if (sms.indexOf("丰巢") !== -1) stationName = "学生公寓丰巢智能柜";
@@ -2237,7 +2252,7 @@ export function renderConsoleHtml(ctx = {}) {
               return;
             }
             var parsed = parseSmsText(sms);
-            var pickupCode = parsed.pickupCode || "1-2-1088";
+            var pickupCode = parsed.pickupCode || null;
             var stationName = parsed.stationName;
             var carrierName = parsed.carrierName;
             if (!tracking) {
@@ -2250,14 +2265,14 @@ export function renderConsoleHtml(ctx = {}) {
                 tracking_number: tracking,
                 carrier_code: "cainiao",
                 carrier_name: carrierName,
-                status: "READY_FOR_PICKUP",
+                status: pickupCode ? "READY_FOR_PICKUP" : "IN_TRANSIT",
                 pickup_code: pickupCode,
                 station_name: stationName,
                 raw_notification_text: sms || "网页端录入取件码"
               })
             })
               .then(function () {
-                showToast("取件码 " + pickupCode + " 已保存并同步至 App！");
+                showToast(pickupCode ? "取件码 " + pickupCode + " 已保存并同步至 App！" : "运单已保存，等待有效取件码。");
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {
@@ -2306,23 +2321,33 @@ export function renderConsoleHtml(ctx = {}) {
           });
         });
 
-        // Admin: 1-click order refund
+        // Admin: one operator requests, another authenticates and approves the saved refund.
         document.querySelectorAll("[data-refund-order]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var orderId = btn.getAttribute("data-refund-order");
+            var refundRequestId = btn.getAttribute("data-refund-request") || null;
+            var refundPayload = refundRequestId
+              ? { refund_request_id: refundRequestId }
+              : { reason: "管理员在站点后台申请退还 🍑" };
+            var priorLabel = btn.textContent;
             btn.disabled = true;
-            btn.textContent = "退还中…";
+            btn.textContent = "处理中…";
             apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/quick-refund", {
               method: "POST",
-              body: JSON.stringify({ reason: "管理员在站点后台执行一键退还 🍑" })
+              body: JSON.stringify(refundPayload)
             })
-              .then(function () {
-                showToast("已将 " + PRICE_PEACH_TEXT + " 🍑 原路退还至用户 XPeach 账户！");
+              .then(function (res) {
+                var order = (res && res.data) || {};
+                if (order.payment_state === "REFUNDED") {
+                  showToast("已将 " + (order.refunded_micropeach / 10000) + " 🍑 原路退还至用户 XPeach 账户！");
+                } else {
+                  showToast("退款申请已保存，需另一位有权限的财务人员登录审批；尚未退款。");
+                }
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {
                 btn.disabled = false;
-                btn.textContent = "退还 🍑";
+                btn.textContent = priorLabel;
                 showToast(err.message, true);
               });
           });

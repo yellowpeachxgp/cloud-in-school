@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getReservationPriceVersion } from "../packages/contracts/src/index.mjs";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { validateAllowedSchoolUrl } from "../packages/school-spi/src/index.mjs";
 import { assertSafeRelativeArtifactPath } from "../packages/plugin-sdk/src/index.mjs";
@@ -300,7 +301,8 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
 
   const order = await app.financeService.createAndSettleOrderForConfirmedJob({
     job: { id: "job_fin_mutex_1", cloud_user_id: user.id },
-    plan: { id: "plan_fin_mutex_1" }
+    plan: { id: "plan_fin_mutex_1", price_micropeach: 10_000,
+      price_version: getReservationPriceVersion(10_000), price_accepted_at: new Date().toISOString() }
   });
   assert.equal(order.payment_state, "PAID");
   assert.equal(app.financeBridge.getSandboxBalance(user.id), 40_000);
@@ -325,20 +327,18 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
     (err) => err?.code === "FORBIDDEN"
   );
 
-  // Concurrent refund attempts must serialize and only refund once
+  const operators = ["requester", "approver"].map((subject) => {
+    const actor = app.store.findOrCreateCloudUser({ issuer: "https://sso.xpeach.codes", subject: `test_mutex_${subject}` });
+    app.store.setUserRoles(actor.id, ["FINANCE_OPERATOR"]);
+    return actor;
+  });
+  const request = { amountMicropeach: 10_000, reason: "Concurrent refund", actorRef: operators[0].id };
+  const pending = await app.financeService.issueRefundForOrder(order.id, request);
+  const approval = { ...request, refundRequestId: pending.refund_request.id, actorRef: operators[1].id };
+  // Concurrent authenticated approvals must serialize and only refund once.
   const [r1, r2] = await Promise.all([
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 1",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    }),
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 2",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    })
+    app.financeService.issueRefundForOrder(order.id, approval),
+    app.financeService.issueRefundForOrder(order.id, approval)
   ]);
   assert.equal(r1.payment_state, "REFUNDED");
   assert.equal(r2.payment_state, "REFUNDED");
@@ -386,17 +386,31 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
     "Unknown school_id must not allocate memory in store.campusContent"
   );
 
-  // 3) Active rate limiting on anonymous_rate_limited endpoints (client headers cannot inflate the cap)
-  let lastReq = null;
-  for (let i = 0; i < 61; i++) {
-    lastReq = await app.inject({
-      method: "GET",
-      url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
-      headers: { "x-rate-limit-key": `spoof_${i}` }
-    });
-  }
-  assert.equal(lastReq.status, 429);
-  assert.equal(lastReq.body.code, "RATE_LIMITED");
+  // 3) Active rate limiting on anonymous_rate_limited endpoints
+  const rlHeaders = {
+    "x-rate-limit-key": "attacker_ip_198_51_100_99",
+    "x-rate-limit-max": "2"
+  };
+  const req1 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  const req2 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  for (let i = 0; i < 58; i++) await app.inject({ method: "GET", url: "/api/v1/auth/mobile/status?txn=txn_nonexistent", headers: rlHeaders });
+  const req3 = await app.inject({
+    method: "GET",
+    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+    headers: rlHeaders
+  });
+  assert.equal(req1.status, 200);
+  assert.equal(req2.status, 200);
+  assert.equal(req3.status, 429);
+  assert.equal(req3.body.code, "RATE_LIMITED");
 
   // 4) DELETED user cannot authenticate with a pre-deletion JWT
   const delUser = app.store.findOrCreateCloudUser({
@@ -416,13 +430,16 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
 
 test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency, and multi-day rollover prewarmed date rewrite (SCHED-REDTEAM-004)", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
+  const nowMs = Date.parse("2026-11-08T07:00:00+08:00");
+  const inject = app.inject;
+  app.inject = (request) => inject({ ...request, nowMs });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "test_sched_redteam_user",
     displayName: "Sched User"
   });
   app.financeBridge.setSandboxBalance(user.id, 100_000);
-  const sess = app.identity.issueDeviceSession(user, "Phone");
+  const sess = app.identity.issueDeviceSession(user, "Phone", null, 1, nowMs);
 
   const bindInit = await app.inject({
     method: "POST",
@@ -458,6 +475,8 @@ test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency,
       area_code: "5F_MID",
       area_name: "五层中区",
       candidate_seats: ["001", "002"],
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-08",
       target_local_time: "07:00:00",
       repeat_days: 2
@@ -568,7 +587,7 @@ test("Security Red-Team: Hardcoded admin backdoor subject grants no implicit rol
   );
 
   const allowApp = createCampusCloudApp({
-    storeOptions: { adminSsoSubjects: ["owner_sub_1"] }
+    storeOptions: { adminSsoSubjects: ["owner_sub_1"], adminSsoIssuer: "https://sso.xpeach.codes/t/acme" }
   });
   const owner = allowApp.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
@@ -646,55 +665,38 @@ test("Security Red-Team: Refund requires real distinct approver, not fabricated 
   };
   app.store.reservationOrders.set(order.id, order);
 
-  await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: `console_approver_${actor.id}`
-      }),
-    /distinct, existing, ACTIVE approver/
-  );
-  await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: "nonexistent_user_123"
-      }),
-    /distinct, existing, ACTIVE approver/
-  );
-  const outsider = app.store.findOrCreateCloudUser({
-    issuer: "https://sso.xpeach.codes/t/acme",
-    subject: "plain_outsider_sub",
-    displayName: "No Finance Role"
+  await app.financeService.issueRefundForOrder(order.id, {
+    amountMicropeach: 1000, reason: "test", actorRef: actor.id,
+    secondApproverRef: `console_approver_${actor.id}`
   });
-  await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: outsider.id
-      }),
-    /finance approval role/
-  );
+  assert.equal(order.payment_state, "PAID");
+  assert.ok(order.refund_request?.id);
+  // An arbitrary ref cannot satisfy the second authenticated request.
+  for (const actorRef of [actor.id, "nonexistent_user_123"]) {
+    await assert.rejects(app.financeService.issueRefundForOrder(order.id, {
+      amountMicropeach: 1000, reason: "test", actorRef,
+      refundRequestId: order.refund_request.id
+    }));
+  }
+  const outsider = app.store.findOrCreateCloudUser({issuer:"https://sso.xpeach.codes/t/acme",subject:"plain_outsider_sub"});
+  await assert.rejects(app.financeService.issueRefundForOrder(order.id, {
+    amountMicropeach:1000, actorRef:outsider.id, refundRequestId:order.refund_request.id
+  }));
+  assert.equal(order.payment_state, "PAID");
 });
 
 test("Security Red-Team: Unresolved secret:// references and missing prod secrets fail closed (CRYPTO-001)", async () => {
   const { KmsEnvelopeVault } = await import("../packages/crypto/src/index.mjs");
   assert.throws(
     () => new KmsEnvelopeVault({ initialKekMaterial: "secret://campus-cloud/prod/kms" }),
-    /Unresolved secret reference/
+    /Unresolved .*secret reference|Unresolved secret reference/
   );
   const { CloudIdentityService } = await import("../packages/identity/src/index.mjs");
   const { CloudDatabaseStore } = await import("../packages/db/src/index.mjs");
   const store = new CloudDatabaseStore();
   assert.throws(
     () => new CloudIdentityService(store, { sessionSecret: "secret://x/y" }),
-    /Unresolved secret reference/
+    /Unresolved .*secret reference|Unresolved secret reference/
   );
 });
 

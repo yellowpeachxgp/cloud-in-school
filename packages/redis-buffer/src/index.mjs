@@ -171,6 +171,7 @@ export class RedisRespClient {
     if (this.ready && this.socket && !this.socket.destroyed) return true;
     if (this.connectingPromise) return this.connectingPromise;
 
+    this.parser.buffer = Buffer.alloc(0);
     this.connectingPromise = new Promise((resolve) => {
       const sock = this.socketPath
         ? net.createConnection({ path: this.socketPath })
@@ -178,6 +179,7 @@ export class RedisRespClient {
             host: this.host,
             port: this.port
           });
+      this.socket = sock;
       if (!this.socketPath) {
         sock.setNoDelay(true);
         sock.setKeepAlive(true, 30_000);
@@ -194,6 +196,7 @@ export class RedisRespClient {
       }, this.connectTimeoutMs);
 
       sock.on("data", (chunk) => {
+        if (this.socket !== sock) return;
         try {
           this.parser.feed(chunk);
         } catch {
@@ -202,6 +205,7 @@ export class RedisRespClient {
       });
 
       sock.on("error", () => {
+        if (this.socket !== sock) return;
         this._failQueue(new Error("Redis socket error"));
         this.connected = false;
         this.ready = false;
@@ -214,6 +218,7 @@ export class RedisRespClient {
       });
 
       sock.on("close", () => {
+        if (this.socket !== sock) return;
         this._failQueue(new Error("Redis socket closed"));
         this.connected = false;
         this.ready = false;
@@ -276,9 +281,13 @@ export class RedisRespClient {
         return;
       }
       const timer = setTimeout(() => {
-        const idx = this.queue.findIndex((q) => q.timer === timer);
-        if (idx !== -1) this.queue.splice(idx, 1);
-        reject(new Error(`Redis command timeout: ${args[0]}`));
+        // RESP has no request IDs. A timed-out response must never shift onto
+        // another command: discard this connection and every pending waiter.
+        this.ready = false;
+        this.connected = false;
+        this._failQueue(new Error(`Redis command timeout: ${args[0]}`));
+        this.parser.buffer = Buffer.alloc(0);
+        this.socket?.destroy();
       }, this.commandTimeoutMs);
 
       this.queue.push({ resolve, reject, timer });
@@ -395,6 +404,7 @@ export class RedisGatewayBuffer {
         return { value: coalescedRes.value, cacheStatus: "COALESCED" };
       }
 
+      const flightState = { invalidated: false };
       const flightPromise = (async () => {
         // 3) Check L2 Redis distributed buffer
         if (this.client.enabled) {
@@ -409,7 +419,7 @@ export class RedisGatewayBuffer {
                 negErr.fromNegativeCache = true;
                 throw negErr;
               }
-              this._setL1(fullKey, parsed, l1TtlMs);
+              if (!flightState.invalidated) this._setL1(fullKey, parsed, l1TtlMs);
               this.metrics.l2_redis_hits += 1;
               return { value: parsed, fromRedis: true };
             }
@@ -423,8 +433,8 @@ export class RedisGatewayBuffer {
         this.metrics.misses += 1;
         try {
           const freshValue = await computeFn();
-          this._setL1(fullKey, freshValue, l1TtlMs);
-          if (this.client.enabled && freshValue !== undefined) {
+          if (!flightState.invalidated) this._setL1(fullKey, freshValue, l1TtlMs);
+          if (!flightState.invalidated && this.client.enabled && freshValue !== undefined) {
             const jitteredMs = this._computeJitteredTtlMs(ttlSeconds);
             this.client
               .sendCommand(["SET", fullKey, JSON.stringify(freshValue), "PX", String(jitteredMs)])
@@ -438,7 +448,7 @@ export class RedisGatewayBuffer {
           return { value: freshValue, fromRedis: false };
         } catch (computeErr) {
           // Negative-cache NOT_FOUND errors for 15s to prevent cache penetration attacks
-          if (computeErr?.code === "NOT_FOUND" && this.client.enabled) {
+          if (!flightState.invalidated && computeErr?.code === "NOT_FOUND" && this.client.enabled) {
             const negPayload = JSON.stringify({
               __negative_cache: true,
               code: "NOT_FOUND",
@@ -452,6 +462,7 @@ export class RedisGatewayBuffer {
         }
       })();
 
+      flightPromise.invalidationState = flightState;
       this.inFlight.set(fullKey, flightPromise);
 
       try {
@@ -461,7 +472,7 @@ export class RedisGatewayBuffer {
           cacheStatus: res.fromRedis ? "HIT-REDIS" : "MISS"
         };
       } finally {
-        this.inFlight.delete(fullKey);
+        if (this.inFlight.get(fullKey) === flightPromise) this.inFlight.delete(fullKey);
       }
     } finally {
       const elapsedUsec = Number(process.hrtime.bigint() - startHr) / 1000;
@@ -475,6 +486,8 @@ export class RedisGatewayBuffer {
    */
   async setAndWarm(namespace, key, value, ttlSeconds = 120) {
     const fullKey = this._fullKey(namespace, key);
+    const pending = this.inFlight.get(fullKey);
+    if (pending) { pending.invalidationState.invalidated = true; this.inFlight.delete(fullKey); }
     this._setL1(fullKey, value, Math.min(this.l1DefaultTtlMs, ttlSeconds * 1000));
     if (!this.client.enabled) return;
     try {
@@ -488,6 +501,12 @@ export class RedisGatewayBuffer {
 
   async invalidate(namespace, key = null) {
     const prefix = key ? this._fullKey(namespace, key) : `${this.keyPrefix}cache:${namespace}:`;
+    for (const [k, pending] of this.inFlight) {
+      if (key ? k === prefix : k.startsWith(prefix)) {
+        pending.invalidationState.invalidated = true;
+        this.inFlight.delete(k);
+      }
+    }
     for (const k of this.l1Cache.keys()) {
       if (k === prefix || k.startsWith(prefix)) {
         this.l1Cache.delete(k);

@@ -721,10 +721,12 @@ export class CloudDatabaseStore {
   constructor({
     snapshotPath = null,
     pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
-    adminSsoSubjects = null
+    adminSsoSubjects = null,
+    adminSsoIssuer = null
   } = {}) {
     this.snapshotPath = snapshotPath;
     this.pricingMicropeach = pricingMicropeach;
+    this.adminSsoIssuer = adminSsoIssuer || process.env.OIDC_EXPECTED_ISSUER || null;
     this.adminSsoSubjects = new Set(
       (
         adminSsoSubjects ??
@@ -780,12 +782,13 @@ export class CloudDatabaseStore {
     this.runMigrations();
     this._loadSnapshot();
     this._rebuildIndexes();
+    this._trackIndexedMaps();
   }
 
   _rebuildIndexes() {
     this._idxUserByIssuerSubject = new Map();
     for (const [id, u] of this.users) {
-      if (u.issuer && u.subject) this._idxUserByIssuerSubject.set(`${u.issuer}|${u.subject}`, id);
+      if (u.issuer && u.subject) this._idxUserByIssuerSubject.set(JSON.stringify([u.issuer, u.subject]), id);
     }
     this._idxSessionByRefreshHash = new Map();
     this._idxSessionIdsByFamily = new Map();
@@ -812,6 +815,29 @@ export class CloudDatabaseStore {
         byUser.get(uid).add(id);
       }
       this._idxIdsByUser.set(name, byUser);
+    }
+  }
+
+  _trackIndexedMaps() {
+    // Map mutation is part of the existing public store API. Keep derived indexes
+    // correct even when callers do not remember a separate index helper.
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "scheduleEvents"]) {
+      const map = this[name];
+      const remove = (id, rec) => {
+        if (name === "scheduleEvents") this._idxEventIdsByJob.get(rec?.job_id)?.delete(id);
+        else this._idxIdsByUser.get(name)?.get(rec?.cloud_user_id)?.delete(id);
+        if (name === "reservationOrders" && this._idxOrderByJob.get(rec?.job_id) === id) this._idxOrderByJob.delete(rec.job_id);
+      };
+      map.set = (id, rec) => {
+        remove(id, map.get(id));
+        Map.prototype.set.call(map, id, rec);
+        if (name === "scheduleEvents") this.indexScheduleEvent(id, rec);
+        else this.indexUserScoped(name, id, rec?.cloud_user_id);
+        if (name === "reservationOrders") this.indexReservationOrder(id, rec);
+        return map;
+      };
+      map.delete = id => { remove(id, map.get(id)); return Map.prototype.delete.call(map, id); };
+      map.clear = () => { for (const [id, rec] of map) remove(id, rec); Map.prototype.clear.call(map); };
     }
   }
 
@@ -867,7 +893,7 @@ export class CloudDatabaseStore {
     const out = [];
     for (const id of ids) {
       const ev = this.scheduleEvents.get(id);
-      if (ev) out.push(ev);
+      if (ev?.job_id === jobId) out.push(ev);
     }
     return out;
   }
@@ -883,7 +909,7 @@ export class CloudDatabaseStore {
     const out = [];
     for (const id of ids) {
       const r = coll.get(id);
-      if (r) out.push(r);
+      if (r?.cloud_user_id === cloudUserId) out.push(r);
     }
     return out;
   }
@@ -915,6 +941,7 @@ export class CloudDatabaseStore {
       loadMap(this.authTransactions, raw.authTransactions);
       loadMap(this.exchangeTickets, raw.exchangeTickets);
       loadMap(this.deviceSessions, raw.deviceSessions);
+      loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.schoolBindings, raw.schoolBindings);
       loadMap(this.encryptedCredentials, raw.encryptedCredentials);
       loadMap(this.consents, raw.consents);
@@ -948,47 +975,13 @@ export class CloudDatabaseStore {
     }
   }
 
-  saveSnapshot() {
-    if (!this.snapshotPath) return;
-    if (this._snapshotFlushTimer) return;
-    this._snapshotFlushTimer = setTimeout(() => {
-      this._snapshotFlushTimer = null;
-      this._flushSnapshotSync();
-    }, 200);
-    this._snapshotFlushTimer.unref?.();
-  }
+  flushSnapshotSync(options = {}) { return this.saveSnapshot(options); }
 
-  flushSnapshotSync() {
-    if (this._snapshotFlushTimer) {
-      clearTimeout(this._snapshotFlushTimer);
-      this._snapshotFlushTimer = null;
+  saveSnapshot({ required = false } = {}) {
+    if (!this.snapshotPath) {
+      if (required) throw new ContractError("CONFLICT", "Durable snapshot storage is required before live school operations");
+      return false;
     }
-    this._flushSnapshotSync();
-  }
-
-  pruneAuthEphemera(nowMs = Date.now()) {
-    for (const [k, t] of this.authTransactions) {
-      if (t.status === "COMPLETED" || nowMs > t.expiresAtMs + 3600_000) {
-        this.unindexAuthTransaction?.(k, t);
-        this.authTransactions.delete(k);
-      }
-    }
-    for (const [k, t] of this.exchangeTickets) {
-      if (t.consumedAtMs !== null || nowMs > t.expiresAtMs) {
-        this.exchangeTickets.delete(k);
-      }
-    }
-    for (const [k, s] of this.deviceSessions) {
-      if (new Date(s.expires_at).getTime() + 7 * 86400_000 < nowMs) {
-        this.unindexDeviceSession?.(k, s);
-        this.deviceSessions.delete(k);
-      }
-    }
-  }
-
-  _flushSnapshotSync() {
-    if (!this.snapshotPath) return;
-    this.pruneAuthEphemera();
     try {
       const dir = path.dirname(this.snapshotPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -999,6 +992,7 @@ export class CloudDatabaseStore {
         authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
         exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(this.deviceSessions.entries()),
+        schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
         schoolBindings: Array.from(this.schoolBindings.entries()),
         encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
         consents: Array.from(this.consents.entries()),
@@ -1019,10 +1013,20 @@ export class CloudDatabaseStore {
         auditEvents: this.auditEvents.slice(-500)
       };
       const tmp = `${this.snapshotPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+      const fd = fs.openSync(tmp, "w", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(data), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmp, this.snapshotPath);
-    } catch {
-      // Ignore write error
+      const dirFd = fs.openSync(dir, "r");
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+      return true;
+    } catch (err) {
+      if (required) throw err;
+      return false;
     }
   }
 
@@ -1032,7 +1036,7 @@ export class CloudDatabaseStore {
       display_name: "河南工业大学 (HAUT)",
       provider_id: "school.haut.library",
       enabled: true,
-      kill_switch: false,
+      kill_switch: true,
       authorization_evidence_ref: null, // Default MOCK_ONLY until dual-person approval + evidence
       approver_primary_ref: null,
       approver_secondary_ref: null,
@@ -1451,7 +1455,7 @@ export class CloudDatabaseStore {
     ssoRefreshToken = null,
     peachWallet = null
   }) {
-    const existingId = this._idxUserByIssuerSubject?.get(`${issuer}|${subject}`);
+    const existingId = this._idxUserByIssuerSubject?.get(JSON.stringify([issuer, subject]));
     const existing = existingId ? this.users.get(existingId) : null;
     if (existing) {
       if (displayName) existing.display_name = displayName;
@@ -1493,7 +1497,7 @@ export class CloudDatabaseStore {
       created_at: new Date().toISOString()
     };
     this.users.set(id, user);
-    this._idxUserByIssuerSubject?.set(`${issuer}|${subject}`, id);
+    this._idxUserByIssuerSubject?.set(JSON.stringify([issuer, subject]), id);
     if (!this.userRoles.has(id)) {
       this.userRoles.set(id, new Set(["USER"]));
     }
@@ -1504,34 +1508,35 @@ export class CloudDatabaseStore {
 
   _syncAdminRoleIfEligible(user) {
     if (!user) return;
-    // SSO-derived roles are recomputed on every login from the fresh role claim so
-    // tenant-side demotion takes effect on next sign-in (owner > admin > member).
+    // Only explicitly labelled local roles survive demotion; old mixed-role snapshots fail closed.
+    this.userRoles.set(user.id, new Set(["USER", ...(user.local_roles || [])]));
     const role = String(user.role || "").toLowerCase();
-    const mapped = role === "owner" ? SSO_OWNER_ROLES : role === "admin" ? SSO_ADMIN_ROLES : EMPTY_ROLE_SET;
-    this.userSsoRoles.set(user.id, new Set(mapped));
-    // Env subject allowlist is a manual break-glass grant, intentionally outside
-    // the SSO recompute so it survives claim changes until the config is removed.
-    if (this.adminSsoSubjects.has(user.subject)) {
-      const roles = this.userRoles.get(user.id) || new Set(["USER"]);
-      for (const r of SSO_OWNER_ROLES) roles.add(r);
-      this.userRoles.set(user.id, roles);
-    }
+    this.userSsoRoles.set(user.id, new Set(role === "owner" ? SSO_OWNER_ROLES : role === "admin" ? SSO_ADMIN_ROLES : EMPTY_ROLE_SET));
   }
 
   getUserRoles(cloudUserId) {
+    const user = this.users.get(cloudUserId);
+    if (user) this._syncAdminRoleIfEligible(user);
     const merged = new Set(this.userRoles.get(cloudUserId) || []);
     for (const r of this.userSsoRoles.get(cloudUserId) || []) merged.add(r);
+    // Break-glass subjects are meaningful only inside an explicitly pinned issuer.
+    // Recompute dynamically, so removing the allowlist never leaves a persistent grant.
+    if (user && this.adminSsoIssuer && user.issuer === this.adminSsoIssuer && this.adminSsoSubjects.has(user.subject)) {
+      for (const r of SSO_OWNER_ROLES) merged.add(r);
+    }
     return merged.size ? Array.from(merged) : ["USER"];
   }
 
   hasAdminAccess(cloudUserId) {
-    const merged = new Set(this.userRoles.get(cloudUserId) || []);
-    for (const r of this.userSsoRoles.get(cloudUserId) || []) merged.add(r);
-    return merged.has("ADMIN") || merged.has("PLATFORM_OWNER");
+    const roles = this.getUserRoles(cloudUserId);
+    return roles.includes("ADMIN") || roles.includes("PLATFORM_OWNER");
   }
 
   setUserRoles(cloudUserId, roles) {
-    this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])]));
+    const user = this.users.get(cloudUserId);
+    if (!user) { this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])])); this.saveSnapshot(); return; }
+    user.local_roles = Array.from(new Set(roles || []));
+    this._syncAdminRoleIfEligible(user);
     this.saveSnapshot();
   }
 
@@ -1625,10 +1630,10 @@ export class CloudDatabaseStore {
         j.cloud_user_id === cloudUserId &&
         !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
+        j.state = j.attempt_count ? "RESULT_UNKNOWN" : "CANCELLED";
         j.state_version += 1;
         j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
+        if (j.state === "CANCELLED") cancelledJobIds.push(j.id);
       }
     }
 
@@ -1642,6 +1647,8 @@ export class CloudDatabaseStore {
       detail: { cancelled_job_ids: cancelledJobIds }
     });
 
+    const needsDurability = Array.from(this.reservationJobs.values()).some(j => j.cloud_user_id === cloudUserId && j.capability === "AUTHORIZED_AUTOMATION");
+    this.saveSnapshot({ required: needsDurability });
     return { cancelledJobIds };
   }
 
@@ -1668,10 +1675,10 @@ export class CloudDatabaseStore {
         j.school_binding_id === bindingId &&
         !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
+        j.state = j.attempt_count ? "RESULT_UNKNOWN" : "CANCELLED";
         j.state_version += 1;
         j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
+        if (j.state === "CANCELLED") cancelledJobIds.push(j.id);
       }
     }
 
@@ -1685,6 +1692,8 @@ export class CloudDatabaseStore {
       detail: { cancelled_job_ids: cancelledJobIds }
     });
 
+    const needsDurability = Array.from(this.reservationJobs.values()).some(j => j.school_binding_id === bindingId && j.capability === "AUTHORIZED_AUTOMATION");
+    this.saveSnapshot({ required: needsDurability });
     return { binding, cancelledJobIds };
   }
 }

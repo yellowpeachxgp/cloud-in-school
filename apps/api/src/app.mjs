@@ -1,3 +1,4 @@
+import { createProfileSyncQueue } from "./profile-sync.mjs";
 import http from "node:http";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -9,6 +10,7 @@ import {
   DEFAULT_SCHOOL_ID,
   MICROPEACH_PER_PEACH,
   generateRequestId,
+  getReservationPriceVersion,
   okEnvelope,
   errorEnvelope,
   loadOpenApiText,
@@ -62,23 +64,13 @@ export function createCampusCloudApp(options = {}) {
   const kmsVault =
     options.kmsVault ||
     new KmsEnvelopeVault({
+      environment: options.environment,
       onAudit: (ev) => store.recordAudit(ev),
       ...options.kmsOptions
     });
-  const identity =
-    options.identity ||
-    new CloudIdentityService(store, {
-      requireAdminAccess: options.requireAdminAccess,
-      ...options.identityOptions
-    });
-  const trustProxyHeaders =
-    options.trustProxyHeaders !== undefined
-      ? Boolean(options.trustProxyHeaders)
-      : process.env.TRUST_PROXY_HEADERS === "true";
-  const allowSandboxProviders =
-    options.allowSandboxProviders !== undefined
-      ? Boolean(options.allowSandboxProviders)
-      : process.env.PARCEL_ALLOW_SANDBOX_PROVIDERS === "true";
+  const identity = options.identity || new CloudIdentityService(store, { environment: options.environment, requireAdminAccess: options.requireAdminAccess, ...options.identityOptions });
+  const trustProxyHeaders = options.trustProxyHeaders === true || (options.trustProxyHeaders === undefined && process.env.TRUST_PROXY_HEADERS === "true");
+  const allowSandboxProviders = options.allowSandboxProviders === true || (options.allowSandboxProviders === undefined && process.env.PARCEL_ALLOW_SANDBOX_PROVIDERS === "true");
   const cookieVault = options.cookieVault || new ScopedSchoolCookieVault();
   const schoolProvider =
     options.schoolProvider || new HautLibraryProvider(options.schoolProviderOptions);
@@ -241,8 +233,8 @@ export function createCampusCloudApp(options = {}) {
       }
       return {
         cloudUserId: cookieAuth.cloudUserId,
-        familyId: "web_cookie_family",
-        sessionId: "web_cookie_session",
+        familyId: cookieAuth.familyId,
+        sessionId: cookieAuth.sessionId,
         ssoIssuer: cookieAuth.user.issuer,
         ssoSubject: cookieAuth.user.subject,
         roles: cookieAuth.roles
@@ -252,18 +244,12 @@ export function createCampusCloudApp(options = {}) {
     throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing Bearer Authorization header");
   }
 
-  const ssoSyncState = new Map(); // cloudUserId -> { lastMs, inFlight }
-  async function syncUserToSso(cloudUserId) {
-    const st = ssoSyncState.get(cloudUserId);
-    if (st?.inFlight) return st.inFlight;
-    if (st?.lastMs && Date.now() - st.lastMs < 30_000) return;
-    const inFlight = doSyncUserToSso(cloudUserId);
-    ssoSyncState.set(cloudUserId, { lastMs: Date.now(), inFlight });
-    try {
-      await inFlight;
-    } finally {
-      ssoSyncState.set(cloudUserId, { lastMs: Date.now() });
-    }
+  const profileSync = createProfileSyncQueue(doSyncUserToSso, options.profileSyncOptions);
+  const syncUserToSso = profileSync.request;
+  // Recover dirty/latest profiles after restart from the authoritative snapshot.
+  // Only credentialed active accounts are eligible; never cache a profile payload.
+  for (const user of store.users.values()) {
+    if (user.status === "ACTIVE" && user.sso_access_token) void syncUserToSso(user.id);
   }
 
   async function doSyncUserToSso(cloudUserId) {
@@ -271,7 +257,7 @@ export function createCampusCloudApp(options = {}) {
       store.saveSnapshot();
     }
     const user = store.users.get(cloudUserId);
-    if (!user || !user.sso_access_token) return;
+    if (!user || user.status !== "ACTIVE" || !user.sso_access_token) return { ok: true };
     const bindings = store.recordsForUser("schoolBindings", cloudUserId).filter((b) => !b.revoked_at);
     const plans = store.recordsForUser("reservationPlans", cloudUserId).filter((p) => p.enabled !== false);
     const jobs = store.recordsForUser("reservationJobs", cloudUserId);
@@ -280,7 +266,7 @@ export function createCampusCloudApp(options = {}) {
       (p) => p.status !== "PICKED_UP" && (p.status === "READY_FOR_PICKUP" || p.pickup_code)
     );
     const orders = store.recordsForUser("reservationOrders", cloudUserId);
-    await identity.syncUserSiteProfileToSso(user, {
+    return await identity.syncUserSiteProfileToSso(user, {
       school_bindings_count: bindings.length,
       active_student_no: bindings[0]?.student_no || bindings[0]?.student_no_masked || null,
       active_plans_count: plans.length,
@@ -344,7 +330,7 @@ export function createCampusCloudApp(options = {}) {
       .map((o) => ({
         ...o,
         price_peach: Number(
-          o.price_peach ?? (o.price_micropeach || store.pricingMicropeach || DEFAULT_RESERVATION_PRICE_MICROPEACH) / MICROPEACH_PER_PEACH
+          o.price_peach ?? o.price_micropeach / MICROPEACH_PER_PEACH
         )
       }));
     const parcels = parcelHub.listUserParcels(cloudUserId);
@@ -935,13 +921,10 @@ export function createCampusCloudApp(options = {}) {
           }
           return { status: 200, code: "REQUEST_DUPLICATE", data: existing.data };
         }
-        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
-        if (store.idempotencyRecords.size > 2000) {
-          for (const [k, r] of store.idempotencyRecords) {
-            if (!r.createdAtMs || nowMs - r.createdAtMs > 86400_000) store.idempotencyRecords.delete(k);
-          }
-          if (store.idempotencyRecords.size > 2000) store.idempotencyRecords.clear();
+        if (store.idempotencyRecords.size >= 2000) {
+          throw new ContractError("CONFLICT", "Idempotency receipt capacity reached; retry only after operator reconciliation");
         }
+        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
         store.idempotencyRecords.set(cacheKey, { bodyHash, data: created, createdAtMs: nowMs });
         await syncUserToSso(auth.cloudUserId);
         return { status: 201, code: "RESERVATION_PLAN_CREATED", data: created };
@@ -962,11 +945,18 @@ export function createCampusCloudApp(options = {}) {
       if (!plan || plan.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
+      const planJobs = Array.from(store.reservationJobs.values()).filter(j => j.plan_id === plan.id);
+      if (planJobs.some(j => reservationEngine.inFlightJobs.has(j.id) || j.attempt_count || ["EXECUTING", "RESULT_UNKNOWN", "CONFIRMED"].includes(j.state))) {
+        throw new ContractError("CONFLICT", "Cannot edit a plan during or after a booking attempt");
+      }
       if (body?.preferred_seat_ids) {
         plan.preferences_json.preferred_seat_ids = body.preferred_seat_ids;
+        plan.candidate_seats = body.preferred_seat_ids;
       }
       if (body?.preferred_area_ids) {
         plan.preferences_json.preferred_area_ids = body.preferred_area_ids;
+        plan.area_name = body.preferred_area_ids[0];
+        plan.area_code = body.preferred_area_ids[0];
       }
       if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
         const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
@@ -985,6 +975,20 @@ export function createCampusCloudApp(options = {}) {
         }
       }
       plan.generation += 1;
+      for (const job of planJobs) {
+        if (["CANCELLED", "FAILED", "EXPIRED"].includes(job.state)) continue;
+        job.generation = plan.generation;
+        job.prewarmed_targets = null;
+        job.state = "ARMED";
+        job.state_version += 1;
+        for (const event of store.scheduleEvents.values()) {
+          if (event.job_id !== job.id) continue;
+          event.generation = plan.generation;
+          event.status = "ARMED";
+          event.actual_at = null;
+          event.diagnostic_code = null;
+        }
+      }
       await syncUserToSso(auth.cloudUserId);
       return { status: 200, code: "RESERVATION_PLAN_UPDATED", data: plan };
     }
@@ -1003,8 +1007,7 @@ export function createCampusCloudApp(options = {}) {
       plan.enabled = false;
       for (const j of store.reservationJobs.values()) {
         if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)) {
-          j.state = "CANCELLED";
-          j.state_version += 1;
+          await reservationEngine.cancelConfirmedOrActiveJob(j.id);
         }
       }
       await syncUserToSso(auth.cloudUserId);
@@ -1047,10 +1050,9 @@ export function createCampusCloudApp(options = {}) {
       if (["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(job.state)) {
         throw new ContractError("JOB_ALREADY_TERMINAL", `Job is already in terminal state ${job.state}`);
       }
-      job.state = "CANCELLED";
-      job.state_version += 1;
+      const result = await reservationEngine.cancelConfirmedOrActiveJob(job.id);
       await syncUserToSso(auth.cloudUserId);
-      return { status: 200, code: "RESERVATION_JOB_CANCELLED", data: job };
+      return { status: result.job.state === "CANCELLED" ? 200 : 409, code: result.job.state === "CANCELLED" ? "RESERVATION_JOB_CANCELLED" : "BOOKING_RESULT_UNKNOWN", data: result };
     }
   );
 
@@ -1082,7 +1084,7 @@ export function createCampusCloudApp(options = {}) {
     status: 200,
     code: "PRICING_OK",
     data: {
-      price_version: "price-library-cloud-2026-11-v1",
+      price_version: getReservationPriceVersion(store.pricingMicropeach),
       currency_symbol: "🍑",
       local_device_mode_micropeach: 0,
       cloud_hosted_mode_micropeach: store.pricingMicropeach,
@@ -1412,17 +1414,24 @@ export function createCampusCloudApp(options = {}) {
       store.requireRole(auth, ["PLATFORM_OWNER", "OPERATIONS_ADMIN", "SCHOOL_OPERATOR"]);
       const school = store.schoolIntegrations.get(params.schoolId);
       if (!school) throw new ContractError("NOT_FOUND", "School not found");
-      school.kill_switch = Boolean(body?.kill_switch);
+      if (typeof body?.kill_switch !== "boolean") throw new ContractError("BAD_REQUEST", "kill_switch must be an explicit boolean");
+      store.requireRole({ cloudUserId: auth.cloudUserId, roles: store.getUserRoles(auth.cloudUserId) }, ["PLATFORM_OWNER", "OPERATIONS_ADMIN", "SCHOOL_OPERATOR"]);
+      if (!body.kill_switch) {
+        schoolProvider.assertOperationAllowed("CREATE_BOOKING", { ...school, kill_switch: false }, { requireLiveAutomation: true });
+      }
+      school.kill_switch = body.kill_switch;
       school.updated_at = new Date().toISOString();
-      await redisBuffer.invalidate("schools");
+      try { store.saveSnapshot({ required: true }); } catch (err) {
+        // Never leave an unpersisted permission expansion active in this process.
+        school.kill_switch = true;
+        throw err;
+      }
       store.recordAudit({
-        actor_kind: "ADMIN",
-        actor_ref: auth.cloudUserId,
-        action: "TOGGLE_SCHOOL_KILL_SWITCH",
-        resource_kind: "school_integration",
-        resource_ref: params.schoolId,
+        actor_kind: "ADMIN", actor_ref: auth.cloudUserId, action: "TOGGLE_SCHOOL_KILL_SWITCH",
+        resource_kind: "school_integration", resource_ref: params.schoolId,
         outcome: school.kill_switch ? "KILL_SWITCH_ON" : "KILL_SWITCH_OFF"
       });
+      await redisBuffer.invalidate("schools");
       return { status: 200, code: "KILL_SWITCH_UPDATED", data: school };
     }
   );
@@ -1436,17 +1445,43 @@ export function createCampusCloudApp(options = {}) {
       store.requireRole(auth, ["PLATFORM_OWNER", "SCHOOL_OPERATOR"]);
       const school = store.schoolIntegrations.get(params.schoolId);
       if (!school) throw new ContractError("NOT_FOUND", "School not found");
-      if (!body?.secondary_approver_ref || body.secondary_approver_ref === auth.cloudUserId) {
-        throw new ContractError(
-          "FORBIDDEN",
-          "Dual-person approval requires a distinct secondary_approver_ref"
-        );
+      const roles = ["PLATFORM_OWNER", "SCHOOL_OPERATOR"];
+      store.requireRole({ cloudUserId: auth.cloudUserId, roles: store.getUserRoles(auth.cloudUserId) }, roles);
+      if (body?.secondary_approver_ref) throw new ContractError("BAD_REQUEST", "The second operator must authenticate and approve the request themselves");
+      const pending = school.authorization_request;
+      if (body?.authorization_request_id) {
+        if (!pending || pending.id !== body.authorization_request_id || pending.status !== "PENDING") throw new ContractError("CONFLICT", "Authorization request is not pending");
+        if (pending.primary_actor_ref === auth.cloudUserId) throw new ContractError("FORBIDDEN", "A different authenticated operator must approve");
+        store.requireRole({ cloudUserId: pending.primary_actor_ref, roles: store.getUserRoles(pending.primary_actor_ref) }, roles);
+        if (Date.parse(pending.expires_at) <= Date.now()) throw new ContractError("CONFLICT", "Authorization evidence has expired");
+        if ((body.evidence_ref && body.evidence_ref !== pending.evidence_ref) || (body.expires_at && body.expires_at !== pending.expires_at)) throw new ContractError("CONFLICT", "Approval must match the original evidence and expiry");
+        school.authorization_approval = { ...pending, status: "APPROVED", secondary_actor_ref: auth.cloudUserId, approved_at: new Date().toISOString() };
+        school.authorization_evidence_ref = pending.evidence_ref;
+        school.approver_primary_ref = pending.primary_actor_ref;
+        school.approver_secondary_ref = auth.cloudUserId;
+        pending.status = "APPROVED";
+      } else {
+        const evidenceRef = String(body?.evidence_ref || body?.authorization_evidence_ref || "").trim();
+        if (!evidenceRef || !Number.isFinite(Date.parse(body?.expires_at)) || Date.parse(body.expires_at) <= Date.now()) throw new ContractError("BAD_REQUEST", "Non-empty evidence_ref and future expires_at are required");
+        school.authorization_request = { id: crypto.randomUUID(), status: "PENDING", evidence_ref: evidenceRef, expires_at: body.expires_at, primary_actor_ref: auth.cloudUserId, requested_at: new Date().toISOString() };
+        school.authorization_approval = null;
+        school.authorization_evidence_ref = null;
+        school.approver_primary_ref = null;
+        school.approver_secondary_ref = null;
       }
-      school.authorization_evidence_ref = body?.authorization_evidence_ref || null;
-      school.approver_primary_ref = auth.cloudUserId;
-      school.approver_secondary_ref = body.secondary_approver_ref;
+      // Approval never disables the kill switch implicitly.
+      school.kill_switch = true;
       school.updated_at = new Date().toISOString();
-      return { status: 200, code: "SCHOOL_AUTHORIZATION_APPROVED", data: school };
+      try { store.saveSnapshot({ required: true }); } catch (err) {
+        school.authorization_approval = null;
+        school.authorization_evidence_ref = null;
+        school.approver_primary_ref = null;
+        school.approver_secondary_ref = null;
+        throw err;
+      }
+      store.recordAudit({ actor_kind: "ADMIN", actor_ref: auth.cloudUserId, action: "APPROVE_SCHOOL_AUTHORIZATION", resource_kind: "school_integration", resource_ref: params.schoolId, outcome: school.authorization_approval ? "APPROVED" : "PENDING_SECOND_APPROVAL" });
+      await redisBuffer.invalidate("schools");
+      return { status: 200, code: school.authorization_approval ? "SCHOOL_AUTHORIZATION_APPROVED" : "SCHOOL_AUTHORIZATION_PENDING", data: school };
     }
   );
 
@@ -1499,11 +1534,13 @@ export function createCampusCloudApp(options = {}) {
           amountMicropeach: body?.amount_micropeach,
           reason: body?.reason || "Admin approved refund",
           actorRef: auth.cloudUserId,
-          secondApproverRef: body?.second_approver_ref
+          refundRequestId: body?.refund_request_id
         },
         nowMs
       );
-      return { status: 200, code: "ADMIN_ORDER_REFUNDED", data: order };
+      const refunded = order.payment_state === "REFUNDED";
+      return { status: refunded ? 200 : 202,
+        code: refunded ? "ADMIN_ORDER_REFUNDED" : "REFUND_APPROVAL_REQUIRED", data: order };
     }
   );
 
@@ -1540,7 +1577,7 @@ export function createCampusCloudApp(options = {}) {
   register("GET", "/api/v1/auth/web/logout", "logoutWebSession", "public", async ({ headers, nowMs }) => {
     const cookieAuth = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs);
     if (cookieAuth?.cloudUserId) {
-      identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+      identity.revokeSessionFamily(cookieAuth.familyId, "WEB_USER_LOGOUT", nowMs);
     }
     return {
       status: 302,
@@ -1639,65 +1676,9 @@ export function createCampusCloudApp(options = {}) {
 
   register("POST", "/api/v1/sync/snapshot", "pushUserSyncSnapshot", "bearer", async ({ auth, body, nowMs }) => {
     if (body && typeof body === "object") {
-      if (Array.isArray(body.school_binding_upserts)) {
-        for (const bItem of body.school_binding_upserts) {
-          const studentNo = String(bItem?.student_no || "").trim();
-          if (!studentNo) continue;
-          const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
-          let existingBinding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-            (b) => b.school_id === schoolId && !b.revoked_at
-          );
-          if (!existingBinding) {
-            const bindingId = crypto.randomUUID();
-            existingBinding = {
-              id: bindingId,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              student_no: studentNo,
-              student_no_masked: studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
-              status: "DELEGATED_ACTIVE",
-              credential_ref: null,
-              credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
-              created_at: new Date(nowMs).toISOString(),
-              revoked_at: null
-            };
-            store.schoolBindings.set(bindingId, existingBinding);
-            store.indexUserScoped?.("schoolBindings", bindingId, existingBinding.cloud_user_id);
-          } else {
-            existingBinding.student_no = studentNo;
-            existingBinding.student_no_masked = studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
-            existingBinding.status = "DELEGATED_ACTIVE";
-          }
-          if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-            const encrypted = kmsVault.encryptSecret({
-              bindingId: existingBinding.id,
-              schoolId,
-              credentialKind: "DELEGATED_SESSION_BUNDLE",
-              plaintext: String(bItem.delegated_secret).trim(),
-              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-            });
-            store.encryptedCredentials.set(encrypted.id, encrypted);
-            existingBinding.credential_ref = encrypted.id;
-            existingBinding.credential_expires_at = encrypted.expires_at;
-          }
-          const hasActiveConsent = store.recordsForUser("consents", auth.cloudUserId).some(
-            (c) => !c.withdrawn_at
-          );
-          if (!hasActiveConsent) {
-            const cid = crypto.randomUUID();
-            store.indexUserScoped?.("consents", cid, auth.cloudUserId);
-            store.consents.set(cid, {
-              id: cid,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-              policy_version: "policy-2026-11-v4",
-              granted_at: new Date(nowMs).toISOString(),
-              withdrawn_at: null
-            });
-          }
-        }
-      }
+      // Bindings, delegated credentials and consent are security state, not snapshot data.
+      // Only the explicit enrolment/completion and consent endpoints may change them.
+      // In particular, stale devices must not recreate revoked bindings or withdrawn consent.
 
       if (Array.isArray(body.parcel_upserts)) {
         for (const pItem of body.parcel_upserts) {
@@ -1734,24 +1715,32 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
-      if (Array.isArray(body.reservation_cancellations)) {
-        for (const cancelId of body.reservation_cancellations) {
+      const syncUser = store.users.get(auth.cloudUserId);
+      const cancelledSyncIds = new Set(syncUser?.reservation_sync_tombstones || []);
+      const snapshotCancellations = [
+        ...(Array.isArray(body.reservation_cancellations) ? body.reservation_cancellations : []),
+        ...(Array.isArray(body.reservation_plan_upserts) ? body.reservation_plan_upserts : [])
+          .filter(p => p && (p.enabled === false || p.deleted_at || p.cancelled_at || p.tombstone === true))
+          .map(p => p.plan_id)
+      ];
+      if (snapshotCancellations.length) {
+        for (const rawCancelId of snapshotCancellations) {
+          const cancelId = typeof rawCancelId === "string" ? rawCancelId.trim() : "";
+          if (!cancelId || cancelId.length > 200) continue;
+          cancelledSyncIds.add(cancelId);
+          if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
-            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
-              job.state = "CANCELLED";
-              job.state_version += 1;
-            });
+            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs);
           }
-          const plan = store.reservationPlans.get(cancelId);
+          const plan = store.reservationPlans.get(cancelId) || Array.from(store.reservationPlans.values()).find(
+            p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === cancelId
+          );
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
             for (const j of store.reservationJobs.values()) {
               if (j.plan_id === plan.id && j.state !== "CANCELLED") {
-                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
-                  j.state = "CANCELLED";
-                  j.state_version += 1;
-                });
+                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs);
               }
             }
           }
@@ -1762,24 +1751,23 @@ export function createCampusCloudApp(options = {}) {
         const activeBinding = Array.from(store.schoolBindings.values()).find(
           (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at
         );
-        let activeConsent = Array.from(store.consents.values()).find(
-          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+        const activeConsent = Array.from(store.consents.values()).find(
+          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at &&
+            c.school_id === activeBinding?.school_id && c.scope_list?.includes("LIBRARY_SEAT_RESERVATION")
         );
-        if (activeBinding && !activeConsent) {
-          const cid = crypto.randomUUID();
-          activeConsent = {
-            id: cid,
-            cloud_user_id: auth.cloudUserId,
-            school_id: activeBinding.school_id || DEFAULT_SCHOOL_ID,
-            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-            policy_version: "policy-2026-11-v4",
-            granted_at: new Date(nowMs).toISOString(),
-            withdrawn_at: null
-          };
-          store.consents.set(cid, activeConsent);
-        }
         if (activeBinding && activeConsent) {
           for (const rpItem of body.reservation_plan_upserts) {
+            // Snapshot replay cannot re-enable server plans or resurrect cancelled client IDs.
+            const sourceId = typeof rpItem?.plan_id === "string" ? rpItem.plan_id.trim() : "";
+            if (!sourceId || sourceId.length > 200 || cancelledSyncIds.has(sourceId)) continue;
+            if (rpItem.enabled === false || rpItem.deleted_at || rpItem.cancelled_at || rpItem.tombstone === true) {
+              cancelledSyncIds.add(sourceId);
+              if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
+              continue;
+            }
+            if (store.reservationPlans.has(sourceId) || Array.from(store.reservationPlans.values()).some(
+              p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === sourceId
+            )) continue;
             const targetDate = String(rpItem?.target_local_date || "").trim();
             const targetTime = String(rpItem?.target_local_time || "07:00:00").trim();
             if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) continue;
@@ -1803,6 +1791,9 @@ export function createCampusCloudApp(options = {}) {
               reservationEngine.createPlanAndJob(
                 auth.cloudUserId,
                 {
+                  sync_source_id: sourceId,
+                  accepted_price_version: rpItem.accepted_price_version,
+                  accepted_price_micropeach: rpItem.accepted_price_micropeach,
                   school_binding_id: activeBinding.id,
                   consent_id: activeConsent.id,
                   area_code: areaName,
@@ -1814,7 +1805,7 @@ export function createCampusCloudApp(options = {}) {
                   target_local_time: targetTime,
                   repeat_days: repeatDays,
                   remaining_days: remainingDays,
-                  allow_alternative_seat: rpItem?.allow_alternative_seat !== false,
+                  allow_alternative_seat: rpItem?.allow_alternative_seat === true,
                   replace_existing: false
                 },
                 nowMs
@@ -1826,6 +1817,7 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      store.saveSnapshot?.();
       await syncUserToSso(auth.cloudUserId);
     }
 
@@ -1843,45 +1835,28 @@ export function createCampusCloudApp(options = {}) {
     "quickRefundAdminOrder",
     "bearer_admin",
     async ({ auth, params, body, nowMs }) => {
-      const isAdminUser =
-        auth.roles.includes("ADMIN") ||
-        auth.roles.includes("PLATFORM_OWNER") ||
-        auth.roles.includes("FINANCE") ||
-        auth.roles.includes("FINANCE_OPERATOR") ||
-        store.users.get(auth.cloudUserId)?.role === "admin";
-      if (!isAdminUser) {
-        throw new ContractError("FORBIDDEN", "Admin privileges required for quick refund");
-      }
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
       const orderId = params.orderId;
       const targetOrder = store.reservationOrders.get(orderId);
       if (!targetOrder) {
         throw new ContractError("NOT_FOUND", "Order not found");
       }
-      const secondApproverRef =
-        typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
-      if (!secondApproverRef) {
-        throw new ContractError(
-          "BAD_REQUEST",
-          "second_approver_ref is required; dual-person approval cannot be synthesized"
-        );
-      }
+      const refundRequest = targetOrder.refund_request;
       const order = await financeService.issueRefundForOrder(
         orderId,
         {
-          amountMicropeach:
-            targetOrder.price_micropeach ||
-            store.pricingMicropeach ||
-            DEFAULT_RESERVATION_PRICE_MICROPEACH,
-          reason: body?.reason || "站点管理员在后台发起 🍑 退还",
+          amountMicropeach: refundRequest?.amount_micropeach ?? targetOrder.price_micropeach,
+          reason: body?.reason || refundRequest?.reason || "站点管理员在后台发起 🍑 退还",
           actorRef: auth.cloudUserId,
-          secondApproverRef
+          refundRequestId: body?.refund_request_id
         },
         nowMs
       );
-      await syncUserToSso(order.cloud_user_id);
+      const refunded = order.payment_state === "REFUNDED";
+      if (refunded) await syncUserToSso(order.cloud_user_id);
       return {
-        status: 200,
-        code: "ADMIN_ORDER_REFUNDED",
+        status: refunded ? 200 : 202,
+        code: refunded ? "ADMIN_ORDER_REFUNDED" : "REFUND_APPROVAL_REQUIRED",
         data: order
       };
     }
@@ -1903,15 +1878,17 @@ export function createCampusCloudApp(options = {}) {
         return {
           status: 200,
           code: "RESERVATION_JOB_EXECUTED",
-          data: { job, schoolReservation }
+          data: {
+            job,
+            schoolReservation,
+            order: Array.from(store.reservationOrders.values()).find((order) => order.job_id === job.id) || null
+          }
         };
       }
-      const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
-      await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
-      await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", effectiveFireMs);
-      const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs, {
-        allowDateFallbackToToday: true
-      });
+      if (nowMs < Date.parse(job.fire_at)) throw new ContractError("BOOKING_WINDOW_CLOSED", "Cannot execute before the accepted target time");
+      await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
+      await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", nowMs);
+      const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", nowMs);
       await syncUserToSso(auth.cloudUserId);
       return {
         status: 200,
@@ -1935,8 +1912,8 @@ export function createCampusCloudApp(options = {}) {
       const cancelRes = await reservationEngine.cancelConfirmedOrActiveJob(jobId, nowMs);
       await syncUserToSso(auth.cloudUserId);
       return {
-        status: 200,
-        code: "RESERVATION_SEAT_CANCELLED",
+        status: cancelRes.job.state === "CANCELLED" ? 200 : 409,
+        code: cancelRes.job.state === "CANCELLED" ? "RESERVATION_SEAT_CANCELLED" : "SCHOOL_CANCELLATION_UNCONFIRMED",
         data: cancelRes
       };
     }
@@ -2013,8 +1990,8 @@ export function createCampusCloudApp(options = {}) {
       binding.credential_ref = encrypted.id;
       binding.credential_expires_at = encrypted.expires_at;
 
-      let consent = store.recordsForUser("consents", auth.cloudUserId).find(
-        (c) => !c.withdrawn_at
+      let consent = Array.from(store.consents.values()).find(
+        (c) => c.cloud_user_id === auth.cloudUserId && c.school_id === schoolId && !c.withdrawn_at && ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"].every((scope) => c.scope_list?.includes(scope))
       );
       if (!consent) {
         const cid = crypto.randomUUID();
@@ -2547,6 +2524,7 @@ export function createCampusCloudApp(options = {}) {
   async function inject({
     method = "GET",
     url = "/healthz",
+    remoteAddress = "anon_default",
     headers = {},
     body = undefined,
     nowMs = Date.now(),
@@ -2557,6 +2535,17 @@ export function createCampusCloudApp(options = {}) {
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
       const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+
+      // Fail closed for EVERY method before auth, route dispatch, or public HTML rendering.
+      // Existing Moments records lack verified owner/tenant attribution, and the current
+      // shared public claim codes are not safe disclosure/report capabilities. Do not add
+      // an environment switch: reopening requires an audited data/auth migration.
+      if (pathname === "/api/v1/moments" || pathname.startsWith("/api/v1/moments/")) {
+        throw new ContractError("FORBIDDEN", "校园社区云功能暂未开放；内容仅保存在本地，未发布或送达云端");
+      }
+      if (pathname === "/claim" || pathname.startsWith("/claim/")) {
+        throw new ContractError("NOT_FOUND", "Public claim pages are unavailable");
+      }
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
       if (upperMethod === "GET" && (pathname.startsWith("/static/") || pathname === "/favicon.ico")) {
@@ -2653,6 +2642,8 @@ export function createCampusCloudApp(options = {}) {
             cookieAuth.roles.includes("ADMIN") ||
             cookieAuth.roles.includes("OPERATOR") ||
             cookieAuth.roles.includes("FINANCE") ||
+            cookieAuth.roles.includes("FINANCE_OPERATOR") ||
+            cookieAuth.roles.includes("PLATFORM_OWNER") ||
             cookieAuth.user.role === "admin";
           let adminCtx = {};
           if (isAdminUser && activeNav === "console") {
@@ -2814,12 +2805,9 @@ export function createCampusCloudApp(options = {}) {
         matchedRoute.auth === "single_use_ticket" ||
         matchedRoute.auth === "oidc_state_nonce"
       ) {
-        const clientIp =
-          (trustProxyHeaders
-            ? String(headers?.["x-forwarded-for"] || "").split(",")[0].trim()
-            : "") ||
-          remoteAddr ||
-          "anon_default";
+        // Only the transport, never an arbitrary HTTP header, chooses the bucket.
+        const clientIp = (trustProxyHeaders ? String(headers?.["x-forwarded-for"] || "").split(",")[0].trim() : "") || String(remoteAddr || remoteAddress || "anon_default");
+        const maxReqs = 60;
         const rl = await redisBuffer.checkRateLimit(
           `${matchedRoute.operationId}:${clientIp}`,
           60,
@@ -2947,6 +2935,7 @@ export function createCampusCloudApp(options = {}) {
       const response = await inject({
         method: req.method,
         url: req.url,
+        remoteAddress: req.socket.remoteAddress,
         headers: req.headers,
         body: parsedBody,
         remoteAddr: req.socket?.remoteAddress || null
@@ -2986,6 +2975,7 @@ export function createCampusCloudApp(options = {}) {
     redisBuffer,
     inject,
     createHttpServer,
-    getRegisteredRoutes
+    getRegisteredRoutes,
+    closeProfileSync: profileSync.close
   };
 }

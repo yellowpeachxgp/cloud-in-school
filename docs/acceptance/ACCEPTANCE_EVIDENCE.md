@@ -17,7 +17,7 @@
 |---|---|---|---|
 | **OpenAPI 3.1.2 契约一致性** | 66 个接口 100% 双向对齐 `openapi.yaml` 与 `endpoint-inventory.yaml` | `npm run contract:check` & `tests/contract-parity.test.mjs` | **PASS** |
 | **ADR-005 校园预约双引擎** | 支持 `[07:00, 21:30)` 内任意自定义时刻 `T`，`T-30m PRECHECK / T-5m FINAL_CHECK / T FIRE`，本机免费 (`LOCAL_DEVICE`) 与云端托管 (`CLOUD_HOSTED`) 双引擎 | `tests/triple-schedule.test.mjs` & `CampusServicesUnitTest.dualEngineReservationPlanner_computesArbitraryTargetTAndThreeAlarms` | **PASS** |
-| **Zero-SSO-Change 账务 Saga** | 不改 SSO 源码，仅在学校记录回读核实 (`CONFIRMED`) 后扣减 `0.10 🍑`，100 并发仅扣 1 次，余额不足转 `PAYMENT_DUE` 不退座 | `tests/finance-saga-concurrency.test.mjs` | **PASS** |
+| **Zero-SSO-Change 账务 Saga** | 不改 SSO 源码，仅在学校记录回读核实 (`CONFIRMED`) 后按用户接受的价格快照扣费（默认 `1 🍑 = 10,000 micropeach`），100 并发仅扣 1 次，余额不足转 `PAYMENT_DUE` 不退座 | `tests/finance-saga-concurrency.test.mjs` | **PASS** |
 | **Parcel Hub 快递聚合与安全门禁** | 净室重构 `ExpressAssistant`，严密拦截银行/登录 OTP 验证码短信，强制执行 `PROVIDER_AUTHORITY_MATRIX` Fail-Closed 门禁 | `tests/unit.test.mjs` & `CampusServicesUnitTest.parcelHubEngine_blocksOtpSmsAndEnforcesProviderAuthorityMatrix` | **PASS** |
 | **零宿主修改插件生态** | CLI `init -> validate -> sign -> verify -> install -> invoke -> upgrade -> rollback -> uninstall`，兼容 `dis-extension/v2` 与 `dis-campus-plugin/v1` | `tests/plugin-zero-host-change.test.mjs` & `PackageManifestCodecTest` | **PASS** |
 | **Room v5 -> v6 无损迁移** | 保留全部既有课表、成绩、考试、水电、专注与提醒数据 | `UniversalDatabaseMigrationTest` (`v1 -> v6`) | **PASS** |

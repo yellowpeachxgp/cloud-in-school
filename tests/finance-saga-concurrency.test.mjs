@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { getReservationPriceVersion } from "../packages/contracts/src/index.mjs";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { buildDebitEventKey } from "../packages/finance/src/index.mjs";
 
@@ -90,6 +91,8 @@ test("Finance Saga: Post-confirmation insufficient balance sets PAYMENT_DUE with
     body: {
       school_binding_id: bindRes.body.data.id,
       consent_id: consentRes.body.data.id,
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-03",
       target_local_time: "07:00:00"
     },
@@ -104,8 +107,15 @@ test("Finance Saga: Post-confirmation insufficient balance sets PAYMENT_DUE with
     Date.parse("2026-11-03T06:30:00+08:00")
   );
 
-  // User spends all 🍑 on another XPEACH site at 06:58!
-  app.financeBridge.setSandboxBalance(user.id, 0);
+  await app.reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", Date.parse("2026-11-03T06:55:00+08:00"));
+
+  // Another site spends the balance after the final FIRE check, during school submission.
+  const executeCreate = app.schoolProvider.executeMockOrAuthorizedCreate.bind(app.schoolProvider);
+  app.schoolProvider.executeMockOrAuthorizedCreate = async (...args) => {
+    const result = await executeCreate(...args);
+    app.financeBridge.setSandboxBalance(user.id, 0);
+    return result;
+  };
 
   // At T=07:00, booking succeeds and is verified, debit fails with WALLET_INSUFFICIENT -> order is PAYMENT_DUE, seat stays CONFIRMED!
   const fireRes = await app.reservationEngine.runScheduleEvent(
@@ -150,32 +160,21 @@ test("Finance Saga: Refund requires dual-person approval and cannot exceed paid 
     displayName: "Refund Approver"
   });
 
-  // Self-approval must fail
-  await assert.rejects(async () => {
-    await app.financeService.issueRefundForOrder(orderId, {
-      amountMicropeach: 1_000,
-      reason: "Test",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_1"
-    });
+  const operators = ["requester", "approver"].map((subject) => {
+    const actor = app.store.findOrCreateCloudUser({ issuer: "https://sso.xpeach.codes", subject: `test_${subject}` });
+    app.store.setUserRoles(actor.id, ["FINANCE_OPERATOR"]);
+    return actor;
   });
-
-  // Over-refund (> paid amount) must fail
-  await assert.rejects(async () => {
-    await app.financeService.issueRefundForOrder(orderId, {
-      amountMicropeach: 2_000,
-      reason: "Test",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    });
-  });
-
-  // Valid dual-person refund succeeds and credits wallet idempotently
+  const request = { amountMicropeach: 1_000, reason: "Service goodwill refund", actorRef: operators[0].id };
+  await assert.rejects(() => app.financeService.issueRefundForOrder(orderId, { ...request, amountMicropeach: 2_000 }));
+  const pending = await app.financeService.issueRefundForOrder(orderId, request);
+  assert.equal(pending.payment_state, "PAID");
+  assert.equal(pending.refund_request.status, "PENDING_APPROVAL");
+  const refundRequestId = pending.refund_request.id;
+  await assert.rejects(() => app.financeService.issueRefundForOrder(orderId, { ...request, refundRequestId }),
+    (err) => err.code === "FORBIDDEN");
   const refunded = await app.financeService.issueRefundForOrder(orderId, {
-    amountMicropeach: 1_000,
-    reason: "Service goodwill refund",
-    actorRef: "admin_1",
-    secondApproverRef: "admin_2"
+    ...request, refundRequestId, actorRef: operators[1].id
   });
   assert.equal(refunded.payment_state, "REFUNDED");
 });

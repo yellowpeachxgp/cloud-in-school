@@ -9,8 +9,9 @@ export interface CloudEnvelope<T = unknown> {
     details?: Record<string, unknown>;
   };
   meta: {
-    trace_id: string;
-    timestamp: string;
+    request_id: string;
+    api_version: string;
+    next_cursor: string | null;
   };
 }
 
@@ -30,7 +31,10 @@ export declare class CampusCloudClient {
   startOidcLogin(payload: Record<string, unknown>): Promise<CloudEnvelope>;
   exchangeAppTicket(payload: Record<string, unknown>): Promise<CloudEnvelope>;
   getWalletSummary(): Promise<CloudEnvelope>;
-  createReservationOrder(payload: Record<string, unknown>, idempotencyKey: string): Promise<CloudEnvelope>;
+  createReservationPlan(payload: Record<string, unknown>, idempotencyKey: string): Promise<CloudEnvelope>;
+  /** Unsupported: orders are created only by execution; throws. */
+  createReservationOrder(...args: unknown[]): never;
+  listReservationOrders(): Promise<CloudEnvelope<{ orders: Array<{ id: string; [key: string]: unknown }> }>>;
   getReservationOrder(orderId: string): Promise<CloudEnvelope>;
   listParcels(): Promise<CloudEnvelope>;
   upsertParcel(payload: Record<string, unknown>): Promise<CloudEnvelope>;
