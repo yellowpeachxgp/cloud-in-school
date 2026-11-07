@@ -2601,7 +2601,10 @@ export function createCampusCloudApp(options = {}) {
       ]);
       const retiredConsoleRoutes = new Set(["/portal", "/reservations", "/parcels", "/community", "/orders"]);
 
-      if (upperMethod === "GET" && retiredConsoleRoutes.has(pathname)) {
+      const consolePathname =
+        pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+
+      if (upperMethod === "GET" && retiredConsoleRoutes.has(consolePathname)) {
         return {
           status: 302,
           headers: { Location: "/console", "cache-control": "no-store", "x-request-id": requestId },
@@ -2610,8 +2613,8 @@ export function createCampusCloudApp(options = {}) {
         };
       }
 
-      if (upperMethod === "GET" && webConsoleRoutes.has(pathname)) {
-        const activeNav = webConsoleRoutes.get(pathname);
+      if (upperMethod === "GET" && webConsoleRoutes.has(consolePathname)) {
+        const activeNav = webConsoleRoutes.get(consolePathname);
         let cookieAuth = identity.verifyWebSessionCookie(
           headers?.cookie || headers?.Cookie || "",
           nowMs

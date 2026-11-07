@@ -103,7 +103,7 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
         </div>
         <div class="stack gap-3">
           <a class="btn btn-primary btn-block btn-lg" id="open-app-btn" href="${customSchemeUrl}">立即返回日在校园 App</a>
-          <a class="btn btn-secondary btn-block" href="/">进入网页端个人中心</a>
+          <a class="btn btn-secondary btn-block" href="/">进入运维管理控制台</a>
         </div>
         <input type="hidden" id="cb-ticket" value="${safeTicket}" />
         <input type="hidden" id="cb-txn" value="${safeTxn}" />
@@ -592,7 +592,7 @@ export function renderConsoleHtml(ctx = {}) {
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
               <h2 class="xp-entity-title">最近安全与操作审计记录</h2>
-              <a class="xp-pill xp-pill--compact" href="/audit">查看全部 →</a>
+              <a class="xp-pill xp-pill--compact" href="/console/audit">查看全部 →</a>
             </div>
             <p class="xp-entity-summary" style="margin-top: 2px;">自动记录凭据加密托管、预约执行、社团云控变更与账单退还操作。</p>
           </div>
@@ -1101,23 +1101,23 @@ export function renderConsoleHtml(ctx = {}) {
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
               <span>运维总览</span>
             </a>
-            <a class="nav-item ${activeNav === "jobs" ? "active" : ""}" href="/jobs">
+            <a class="nav-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
               <span>预约任务</span>
             </a>
-            <a class="nav-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
+            <a class="nav-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
               <span>账单退还</span>
             </a>
-            <a class="nav-item ${activeNav === "audit" ? "active" : ""}" href="/audit">
+            <a class="nav-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               <span>审计日志</span>
             </a>
-            <a class="nav-item ${activeNav === "schools" ? "active" : ""}" href="/schools">
+            <a class="nav-item ${activeNav === "schools" ? "active" : ""}" href="/console/schools">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
               <span>学校服务</span>
             </a>
-            <a class="nav-item ${activeNav === "content" ? "active" : ""}" href="/content">
+            <a class="nav-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
               <span>内容云控</span>
             </a>
@@ -1191,19 +1191,19 @@ export function renderConsoleHtml(ctx = {}) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         <span>总览</span>
       </a>
-      <a class="dock-item ${activeNav === "jobs" ? "active" : ""}" href="/jobs">
+      <a class="dock-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
         <span>任务</span>
       </a>
-      <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
+      <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
         <span>账单</span>
       </a>
-      <a class="dock-item ${activeNav === "audit" ? "active" : ""}" href="/audit">
+      <a class="dock-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span>审计</span>
       </a>
-      <a class="dock-item ${activeNav === "content" ? "active" : ""}" href="/content">
+      <a class="dock-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
         <span>云控</span>
       </a>
