@@ -1726,8 +1726,20 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
-      if (Array.isArray(body.reservation_cancellations)) {
-        for (const cancelId of body.reservation_cancellations) {
+      const syncUser = store.users.get(auth.cloudUserId);
+      const cancelledSyncIds = new Set(syncUser?.reservation_sync_tombstones || []);
+      const snapshotCancellations = [
+        ...(Array.isArray(body.reservation_cancellations) ? body.reservation_cancellations : []),
+        ...(Array.isArray(body.reservation_plan_upserts) ? body.reservation_plan_upserts : [])
+          .filter(p => p && (p.enabled === false || p.deleted_at || p.cancelled_at || p.tombstone === true))
+          .map(p => p.plan_id)
+      ];
+      if (snapshotCancellations.length) {
+        for (const rawCancelId of snapshotCancellations) {
+          const cancelId = typeof rawCancelId === "string" ? rawCancelId.trim() : "";
+          if (!cancelId || cancelId.length > 200) continue;
+          cancelledSyncIds.add(cancelId);
+          if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
             await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
@@ -1735,7 +1747,9 @@ export function createCampusCloudApp(options = {}) {
               job.state_version += 1;
             });
           }
-          const plan = store.reservationPlans.get(cancelId);
+          const plan = store.reservationPlans.get(cancelId) || Array.from(store.reservationPlans.values()).find(
+            p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === cancelId
+          );
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
             for (const j of store.reservationJobs.values()) {
@@ -1754,24 +1768,23 @@ export function createCampusCloudApp(options = {}) {
         const activeBinding = Array.from(store.schoolBindings.values()).find(
           (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at
         );
-        let activeConsent = Array.from(store.consents.values()).find(
-          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+        const activeConsent = Array.from(store.consents.values()).find(
+          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at &&
+            c.school_id === activeBinding?.school_id && c.scope_list?.includes("LIBRARY_SEAT_RESERVATION")
         );
-        if (activeBinding && !activeConsent) {
-          const cid = crypto.randomUUID();
-          activeConsent = {
-            id: cid,
-            cloud_user_id: auth.cloudUserId,
-            school_id: activeBinding.school_id || DEFAULT_SCHOOL_ID,
-            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-            policy_version: "policy-2026-11-v4",
-            granted_at: new Date(nowMs).toISOString(),
-            withdrawn_at: null
-          };
-          store.consents.set(cid, activeConsent);
-        }
         if (activeBinding && activeConsent) {
           for (const rpItem of body.reservation_plan_upserts) {
+            // Snapshot replay cannot re-enable server plans or resurrect cancelled client IDs.
+            const sourceId = typeof rpItem?.plan_id === "string" ? rpItem.plan_id.trim() : "";
+            if (!sourceId || sourceId.length > 200 || cancelledSyncIds.has(sourceId)) continue;
+            if (rpItem.enabled === false || rpItem.deleted_at || rpItem.cancelled_at || rpItem.tombstone === true) {
+              cancelledSyncIds.add(sourceId);
+              if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
+              continue;
+            }
+            if (store.reservationPlans.has(sourceId) || Array.from(store.reservationPlans.values()).some(
+              p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === sourceId
+            )) continue;
             const targetDate = String(rpItem?.target_local_date || "").trim();
             const targetTime = String(rpItem?.target_local_time || "07:00:00").trim();
             if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) continue;
@@ -1795,6 +1808,7 @@ export function createCampusCloudApp(options = {}) {
               reservationEngine.createPlanAndJob(
                 auth.cloudUserId,
                 {
+                  sync_source_id: sourceId,
                   school_binding_id: activeBinding.id,
                   consent_id: activeConsent.id,
                   area_code: areaName,
@@ -1818,6 +1832,7 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      store.saveSnapshot?.();
       await syncUserToSso(auth.cloudUserId);
     }
 

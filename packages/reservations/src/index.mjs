@@ -246,6 +246,7 @@ export class TripleScheduleEngine {
         allow_alternative_seat: payload.allow_alternative_seat !== false
       },
       generation,
+      ...(payload.sync_source_id ? { sync_source_id: payload.sync_source_id } : {}),
       enabled: true,
       created_at: new Date(nowMs).toISOString()
     };
@@ -647,7 +648,8 @@ export class TripleScheduleEngine {
             schoolIntegration,
             decryptedSecret,
             nowInstant: new Date(nowMs),
-            allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
+            allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday),
+            persistSubmission: () => this.store.saveSnapshot?.()
           });
         } catch (err) {
           submitRes = {

@@ -940,6 +940,21 @@ export class HautLibraryProvider {
     return { auth, prewarmed };
   }
 
+  matchesSubmittedBooking(active, job, binding, expectedId) {
+    const target = job.submission_target;
+    return Boolean(expectedId && active?.bookingId && target &&
+      job.school_id === this.schoolId && binding.school_id === this.schoolId &&
+      target.binding_id === binding.id && target.school_id === job.school_id &&
+      target.booking_local_date === job.booking_local_date &&
+      String(active.bookingId) === String(expectedId) &&
+      [1, 2, 3, 4].includes(Number(active.bookingStatus)) &&
+      String(active.seatId) === target.seat_id &&
+      String(active.startDate).replace("T", " ") === target.start_full &&
+      String(active.endDate).replace("T", " ") === target.end_full &&
+      target.start_full.startsWith(`${job.booking_local_date} `) &&
+      target.end_full.startsWith(`${job.booking_local_date} `));
+  }
+
   async executeMockOrAuthorizedCreate({
     job,
     plan,
@@ -947,7 +962,8 @@ export class HautLibraryProvider {
     schoolIntegration,
     decryptedSecret = null,
     nowInstant,
-    allowDateFallbackToToday = false
+    allowDateFallbackToToday = false,
+    persistSubmission = () => {}
   }) {
     if (job.school_id !== this.schoolId) {
       throw new ContractError("FORBIDDEN", "Cross-school provider mismatch");
@@ -979,6 +995,35 @@ export class HautLibraryProvider {
         const auth = await this.authenticateHautSession(credBundle, binding);
         rawToken = auth.rawToken;
       }
+
+      // Bind every successful submission to an explicit server booking ID and exact target.
+      // Uncertain writes stop the retry wave rather than adopting an unrelated active booking.
+      const submitExact = async (path, token) => {
+        const query = new URL(path, "https://school.invalid").searchParams;
+        job.submission_target = {
+          school_id: job.school_id, binding_id: binding.id,
+          booking_local_date: job.booking_local_date, seat_id: query.get("seatid"),
+          start_full: query.get("starttime"), end_full: query.get("endtime")
+        };
+        job.pending_external_booking_id = null;
+        await persistSubmission();
+        let response;
+        try { response = await this.wslibGetJson(path, token); }
+        catch { throw new ContractError("BOOKING_VERIFICATION_PENDING", "Submission outcome is uncertain"); }
+        if (response?.code === 200) {
+          const id = response.bookingid ? String(response.bookingid) : null;
+          job.pending_external_booking_id = id;
+          try { await persistSubmission(); }
+          catch { throw new ContractError("BOOKING_VERIFICATION_PENDING", "Booking result persistence is uncertain"); }
+          let active;
+          try { active = await this.fetchCurrentActiveBooking(token); } catch { /* Fail closed. */ }
+          if (!this.matchesSubmittedBooking(active, job, binding, id)) {
+            throw new ContractError("BOOKING_VERIFICATION_PENDING", "Exact booking readback is required");
+          }
+          return { ...response, verified_booking: active };
+        }
+        return response;
+      };
 
       const shanghaiToday = formatLocalDateInShanghai(nowInstant);
       const datesToTry =
@@ -1019,7 +1064,7 @@ export class HautLibraryProvider {
           try {
             let needWaitOpening = false;
             for (const cand of prewarmed.candidate_seats) {
-              const addRes = await this.wslibGetJson(
+              const addRes = await submitExact(
                 `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
                   cand.id
                 )}&starttime=${encodeURIComponent(
@@ -1031,27 +1076,18 @@ export class HautLibraryProvider {
               lastMsg = translateWslibDiagnosticMessage(rawErrText);
               if (addRes?.code === 200) {
                 const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+                const confirmed = addRes.verified_booking;
                 return {
                   outcome: "SUBMITTED",
-                  externalBookingId: confirmed?.bookingId || bookedId || String(cand.id),
+                  externalBookingId: bookedId,
                   seatAlias: confirmed?.seatName || cand.seat_name,
                   regionAlias: confirmed?.regionName || prewarmed.region_name,
                   rawToken
                 };
               }
               if (isWslibAlreadyBookedMessage(rawErrText) || isWslibAlreadyBookedMessage(lastMsg)) {
-                const existing = await this.fetchCurrentActiveBooking(rawToken);
-                if (existing) {
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: existing.bookingId,
-                    seatAlias: existing.seatName,
-                    regionAlias: existing.regionName,
-                    rawToken
-                  };
+                  return { outcome: "FAILED", errorCode: "EXISTING_BOOKING_NOT_OWNED" };
                 }
-              }
               if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(lastMsg)) {
                 needWaitOpening = true;
                 break;
@@ -1069,7 +1105,7 @@ export class HautLibraryProvider {
               const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
               const freeSeats = rawSeats.filter((s) => s?.id && Number(s.seatStatus ?? 1) === 2);
               for (const freeSeat of freeSeats.slice(0, 4)) {
-                const addRes = await this.wslibGetJson(
+                const addRes = await submitExact(
                   `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
                     freeSeat.id
                   )}&starttime=${encodeURIComponent(
@@ -1080,10 +1116,10 @@ export class HautLibraryProvider {
                 lastMsg = String(addRes?.msg || "").trim();
                 if (addRes?.code === 200) {
                   const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+                  const confirmed = addRes.verified_booking;
                   return {
                     outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(freeSeat.id),
+                    externalBookingId: bookedId,
                     seatAlias:
                       confirmed?.seatName || cleanSpiText(freeSeat.seatName, String(freeSeat.id)),
                     regionAlias: confirmed?.regionName || prewarmed.region_name,
@@ -1094,6 +1130,9 @@ export class HautLibraryProvider {
             }
             if (!needWaitOpening) break;
           } catch (err) {
+            if (err?.code === "BOOKING_VERIFICATION_PENDING") {
+              return { outcome: "TIMEOUT_AMBIGUOUS", externalBookingId: job.pending_external_booking_id, rawToken };
+            }
             if (err?.code === "SCHOOL_AUTH_EXPIRED") {
               const freshAuth = await this.authenticateHautSession(
                 { ...credBundle, raw_token: "" },
@@ -1110,16 +1149,13 @@ export class HautLibraryProvider {
       try {
         const existingActive = await this.fetchCurrentActiveBooking(rawToken);
         if (existingActive) {
-          return {
-            outcome: "SUBMITTED",
-            externalBookingId: existingActive.bookingId,
-            seatAlias: existingActive.seatName,
-            regionAlias: existingActive.regionName,
-            rawToken
-          };
+          return { outcome: "FAILED", errorCode: "EXISTING_BOOKING_NOT_OWNED" };
         }
       } catch (err) {
-        if (err?.code === "SCHOOL_AUTH_EXPIRED") {
+        if (err?.code === "BOOKING_VERIFICATION_PENDING") {
+              return { outcome: "TIMEOUT_AMBIGUOUS", externalBookingId: job.pending_external_booking_id, rawToken };
+            }
+            if (err?.code === "SCHOOL_AUTH_EXPIRED") {
           const freshAuth = await this.authenticateHautSession(
             { ...credBundle, raw_token: "" },
             binding
@@ -1206,7 +1242,7 @@ export class HautLibraryProvider {
               }
 
               for (const seat of orderedCandidates.slice(0, 5)) {
-                const addRes = await this.wslibGetJson(
+                const addRes = await submitExact(
                   `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
                     seat.id
                   )}&starttime=${encodeURIComponent(
@@ -1217,10 +1253,10 @@ export class HautLibraryProvider {
                 lastMsg = String(addRes?.msg || "").trim();
                 if (addRes?.code === 200) {
                   const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
+                  const confirmed = addRes.verified_booking;
                   return {
                     outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
+                    externalBookingId: bookedId,
                     seatAlias: confirmed?.seatName || seat.seat_name,
                     regionAlias: confirmed?.regionName || region.region_name,
                     rawToken
@@ -1229,16 +1265,7 @@ export class HautLibraryProvider {
                 const rawSeatErr = String(addRes?.raw_msg || addRes?.msg || "").trim();
                 lastMsg = translateWslibDiagnosticMessage(rawSeatErr);
                 if (isWslibAlreadyBookedMessage(rawSeatErr) || isWslibAlreadyBookedMessage(lastMsg)) {
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  if (confirmed) {
-                    return {
-                      outcome: "SUBMITTED",
-                      externalBookingId: confirmed.bookingId,
-                      seatAlias: confirmed.seatName,
-                      regionAlias: confirmed.regionName,
-                      rawToken
-                    };
-                  }
+                  return { outcome: "FAILED", errorCode: "EXISTING_BOOKING_NOT_OWNED" };
                 }
                 if (isWslibNotYetOpenMessage(rawSeatErr) || isWslibNotYetOpenMessage(lastMsg)) {
                   break;
@@ -1247,7 +1274,10 @@ export class HautLibraryProvider {
             }
           }
         } catch (err) {
-          if (err?.code === "SCHOOL_AUTH_EXPIRED") {
+          if (err?.code === "BOOKING_VERIFICATION_PENDING") {
+              return { outcome: "TIMEOUT_AMBIGUOUS", externalBookingId: job.pending_external_booking_id, rawToken };
+            }
+            if (err?.code === "SCHOOL_AUTH_EXPIRED") {
             try {
               const freshAuth = await this.authenticateHautSession(
                 { ...credBundle, raw_token: "" },
@@ -1261,21 +1291,6 @@ export class HautLibraryProvider {
             lastMsg = err?.message || lastMsg;
           }
         }
-      }
-
-      try {
-        const finalConfirmed = await this.fetchCurrentActiveBooking(rawToken);
-        if (finalConfirmed && finalConfirmed.bookingId) {
-          return {
-            outcome: "SUBMITTED",
-            externalBookingId: finalConfirmed.bookingId,
-            seatAlias: finalConfirmed.seatName,
-            regionAlias: finalConfirmed.regionName,
-            rawToken
-          };
-        }
-      } catch {
-        // Ignore readback error on final fallback
       }
 
       return {
@@ -1308,6 +1323,10 @@ export class HautLibraryProvider {
       return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
     }
 
+    if (expectedExternalBookingId && job.pending_external_booking_id &&
+        String(expectedExternalBookingId) !== String(job.pending_external_booking_id)) {
+      return { verified: false, officialStatus: "TARGET_MISMATCH" };
+    }
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
     if (credBundle.isLiveCredential && !String(expectedExternalBookingId || "").startsWith("haut_mock_")) {
       let tokenToUse = rawToken;
@@ -1320,7 +1339,7 @@ export class HautLibraryProvider {
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
         const active = await this.fetchCurrentActiveBooking(tokenToUse);
-        if (active && active.bookingId) {
+        if (this.matchesSubmittedBooking(active, job, binding, expectedExternalBookingId || job.pending_external_booking_id)) {
           const evidenceSha256 = crypto
             .createHash("sha256")
             .update(`haut_live|${binding.id}|${active.bookingId}|${active.seatName}|CONFIRMED`)
