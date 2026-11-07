@@ -552,6 +552,7 @@ export class CloudDatabaseStore {
       loadMap(this.authTransactions, raw.authTransactions);
       loadMap(this.exchangeTickets, raw.exchangeTickets);
       loadMap(this.deviceSessions, raw.deviceSessions);
+      loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.schoolBindings, raw.schoolBindings);
       loadMap(this.encryptedCredentials, raw.encryptedCredentials);
       loadMap(this.consents, raw.consents);
@@ -579,8 +580,11 @@ export class CloudDatabaseStore {
     }
   }
 
-  saveSnapshot() {
-    if (!this.snapshotPath) return;
+  saveSnapshot({ required = false } = {}) {
+    if (!this.snapshotPath) {
+      if (required) throw new ContractError("CONFLICT", "Durable snapshot storage is required before live school operations");
+      return false;
+    }
     try {
       const dir = path.dirname(this.snapshotPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -590,6 +594,7 @@ export class CloudDatabaseStore {
         authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
         exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(this.deviceSessions.entries()),
+        schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
         schoolBindings: Array.from(this.schoolBindings.entries()),
         encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
         consents: Array.from(this.consents.entries()),
@@ -609,10 +614,20 @@ export class CloudDatabaseStore {
         auditEvents: this.auditEvents.slice(-500)
       };
       const tmp = `${this.snapshotPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+      const fd = fs.openSync(tmp, "w", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(data), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmp, this.snapshotPath);
-    } catch {
-      // Ignore write error
+      const dirFd = fs.openSync(dir, "r");
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+      return true;
+    } catch (err) {
+      if (required) throw err;
+      return false;
     }
   }
 
@@ -622,7 +637,7 @@ export class CloudDatabaseStore {
       display_name: "河南工业大学 (HAUT)",
       provider_id: "school.haut.library",
       enabled: true,
-      kill_switch: false,
+      kill_switch: true,
       authorization_evidence_ref: null, // Default MOCK_ONLY until dual-person approval + evidence
       approver_primary_ref: null,
       approver_secondary_ref: null,
@@ -1207,10 +1222,10 @@ export class CloudDatabaseStore {
         j.cloud_user_id === cloudUserId &&
         !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
+        j.state = j.attempt_count ? "RESULT_UNKNOWN" : "CANCELLED";
         j.state_version += 1;
         j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
+        if (j.state === "CANCELLED") cancelledJobIds.push(j.id);
       }
     }
 
@@ -1224,6 +1239,8 @@ export class CloudDatabaseStore {
       detail: { cancelled_job_ids: cancelledJobIds }
     });
 
+    const needsDurability = Array.from(this.reservationJobs.values()).some(j => j.cloud_user_id === cloudUserId && j.capability === "AUTHORIZED_AUTOMATION");
+    this.saveSnapshot({ required: needsDurability });
     return { cancelledJobIds };
   }
 
@@ -1250,10 +1267,10 @@ export class CloudDatabaseStore {
         j.school_binding_id === bindingId &&
         !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
+        j.state = j.attempt_count ? "RESULT_UNKNOWN" : "CANCELLED";
         j.state_version += 1;
         j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
+        if (j.state === "CANCELLED") cancelledJobIds.push(j.id);
       }
     }
 
@@ -1267,6 +1284,8 @@ export class CloudDatabaseStore {
       detail: { cancelled_job_ids: cancelledJobIds }
     });
 
+    const needsDurability = Array.from(this.reservationJobs.values()).some(j => j.school_binding_id === bindingId && j.capability === "AUTHORIZED_AUTOMATION");
+    this.saveSnapshot({ required: needsDurability });
     return { binding, cancelledJobIds };
   }
 }

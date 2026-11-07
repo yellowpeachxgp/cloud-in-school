@@ -11,6 +11,15 @@ export const DEFAULT_SCHOOL_ID = "haut";
 export const MICROPEACH_PER_PEACH = 10_000;
 export const DEFAULT_RESERVATION_PRICE_MICROPEACH = 10_000; // 1 🍑 per confirmed reservation
 
+// The amount is part of the quote identity so a price change invalidates stale consent.
+export function getReservationPriceVersion(micropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH) {
+  if (!Number.isSafeInteger(micropeach) || micropeach < 0) {
+    throw new ContractError("BAD_REQUEST", "Reservation price must be a non-negative integer");
+  }
+  const base = "price-library-cloud-2026-11-v1";
+  return micropeach === DEFAULT_RESERVATION_PRICE_MICROPEACH ? base : `${base}:${micropeach}`;
+}
+
 export function formatPeachFromMicropeach(micropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH, fractionDigits = null) {
   const num = Number(micropeach ?? DEFAULT_RESERVATION_PRICE_MICROPEACH) / MICROPEACH_PER_PEACH;
   if (!Number.isFinite(num)) return "1";

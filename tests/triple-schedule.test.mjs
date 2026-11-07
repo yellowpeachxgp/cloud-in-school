@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getReservationPriceVersion } from "../packages/contracts/src/index.mjs";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { DeterministicMockSchoolBackend } from "../apps/mock-school/src/main.mjs";
 
@@ -62,6 +63,8 @@ test("Triple-Schedule (ADR-005): Arbitrary user-selected Target T (07:00, 08:45,
       body: {
         school_binding_id: bindingId,
         consent_id: consentId,
+        accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+        accepted_price_micropeach: app.store.pricingMicropeach,
         target_local_date: targetDate,
         target_local_time: targetTime,
         preferred_seat_ids: [`N4-0${i + 1}`]
@@ -146,6 +149,8 @@ test("Triple-Schedule: Rejects out-of-window target T (e.g. 06:59:59 or 21:30:00
     body: {
       school_binding_id: bindingId,
       consent_id: consentId,
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-04",
       target_local_time: "06:59:59"
     },
@@ -162,13 +167,15 @@ test("Triple-Schedule: Rejects out-of-window target T (e.g. 06:59:59 or 21:30:00
     body: {
       school_binding_id: bindingId,
       consent_id: consentId,
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-03",
       target_local_time: "09:00:00"
     },
     nowMs
   });
   assert.equal(lateRes.status, 201);
-  assert.equal(lateRes.body.data.status, "PRECHECK_OK");
+  assert.equal(lateRes.body.data.status, "ARMED");
 });
 
 test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via readback without blind retry or premature debit", async () => {
@@ -211,6 +218,8 @@ test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via 
     body: {
       school_binding_id: bindingId,
       consent_id: consentRes.body.data.id,
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-03",
       target_local_time: "07:00:00"
     },
@@ -218,6 +227,9 @@ test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via 
   });
   const jobId = createRes.body.data.job_id;
   const fireAtMs = Date.parse("2026-11-03T07:00:00+08:00");
+
+  await app.reservationEngine.runScheduleEvent(jobId, "PRECHECK", fireAtMs - 1800000);
+  await app.reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", fireAtMs - 300000);
 
   // 1st FIRE: school submission times out ambiguously -> RESULT_UNKNOWN, zero debit
   const firstFire = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireAtMs);
@@ -272,6 +284,8 @@ test("Triple-Schedule: Multi-day continuous reservation (repeat_days=7) automati
     body: {
       school_binding_id: bindingId,
       consent_id: consentRes.body.data.id,
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-04",
       target_local_time: "07:00:00",
       repeat_days: 7
@@ -285,6 +299,8 @@ test("Triple-Schedule: Multi-day continuous reservation (repeat_days=7) automati
 
   const day1JobId = createRes.body.data.job_id;
   const day1FireMs = Date.parse("2026-11-04T07:00:00+08:00");
+  await app.reservationEngine.runScheduleEvent(day1JobId, "PRECHECK", day1FireMs - 1800000);
+  await app.reservationEngine.runScheduleEvent(day1JobId, "FINAL_CHECK", day1FireMs - 300000);
   const fireRes = await app.reservationEngine.runScheduleEvent(day1JobId, "FIRE", day1FireMs + 200);
   assert.equal(fireRes.job.state, "CONFIRMED");
   assert.ok(fireRes.next_job_id, "Must spawn next day's job automatically when remaining_days > 1");

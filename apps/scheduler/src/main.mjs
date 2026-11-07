@@ -26,14 +26,10 @@ export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
 
   // Also include RESULT_UNKNOWN jobs that need authoritative readback reconciliation (throttled to 15s)
   for (const job of app.store.reservationJobs.values()) {
-    if (job.state === "RESULT_UNKNOWN" && !eventsByJob.has(job.id)) {
+    if (["RESULT_UNKNOWN", "EXECUTING"].includes(job.state) && job.attempt_count >= 1 && !eventsByJob.has(job.id)) {
       const fireAtMs = new Date(job.fire_at).getTime();
-      const effectiveExpiresAtMs = Math.max(
-        new Date(job.expires_at).getTime(),
-        fireAtMs + 1800 * 1000
-      );
       const lastReconcileMs = Number(job.last_reconcile_at_ms || 0);
-      if (nowMs >= fireAtMs && nowMs <= effectiveExpiresAtMs && nowMs - lastReconcileMs >= 15_000) {
+      if (nowMs >= fireAtMs && nowMs - lastReconcileMs >= 15_000) {
         const fireEv = Array.from(app.store.scheduleEvents.values()).find(
           (e) => e.job_id === job.id && e.kind === "FIRE" && e.generation === job.generation
         );
@@ -78,6 +74,7 @@ export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
       executed.push(...item.value);
     }
   }
+  app.store.saveSnapshot?.();
   return executed;
 }
 
