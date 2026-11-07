@@ -134,7 +134,7 @@ function renderUnauthenticatedLandingHtml() {
         <button type="button" class="xp-pill xp-pill--compact" data-ui-style-toggle title="切换 Flutter M3 / 液态毛玻璃设计风格">
           <span data-ui-style-label>✨ 液态毛玻璃</span>
         </button>
-        <button type="button" class="theme-toggle" data-theme-toggle aria-label="切换明暗主题" title="切换明暗主题">
+        <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label="切换明暗主题" title="切换明暗主题">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
@@ -256,6 +256,22 @@ export function renderConsoleHtml(ctx = {}) {
 
   const username = user.username || user.display_name || "站点管理员";
   const userInitial = String(username).trim().slice(0, 1).toUpperCase() || "A";
+  const userRoleLabel =
+    user.role === "owner"
+      ? "平台所有者"
+      : user.role === "admin"
+        ? "站点管理员"
+        : roles.includes("PLATFORM_OWNER")
+          ? "平台所有者"
+          : roles.includes("ADMIN") || roles.includes("OPERATIONS_ADMIN")
+            ? "站点管理员"
+            : roles.includes("FINANCE_OPERATOR")
+              ? "财务运营"
+              : roles.includes("SECURITY_AUDITOR")
+                ? "安全审计"
+                : roles.length > 0
+                  ? "运维成员"
+                  : "运维成员";
   const roles = Array.isArray(ctx.roles) ? ctx.roles : [];
   const isAdmin =
     roles.includes("ADMIN") ||
@@ -1063,13 +1079,13 @@ export function renderConsoleHtml(ctx = {}) {
     <div class="mobile-topbar">
       <a class="brand" href="/">
         <img src="/static/xpeach-logo.png" alt="XPeach" class="brand-logo brand-logo--sm" width="28" height="28" />
-        <span class="brand-name">XPeach · 日在校园</span>
+        <span class="brand-title">XPeach · 日在校园</span>
       </a>
       <div class="mobile-topbar-actions">
         <button type="button" class="xp-pill xp-pill--compact" data-ui-style-toggle title="切换液态毛玻璃 / 经典 M3">
           <span data-ui-style-label>✨ 毛玻璃</span>
         </button>
-        <button type="button" class="theme-toggle" data-theme-toggle aria-label="切换明暗主题">
+        <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label="切换明暗主题">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
@@ -1083,12 +1099,12 @@ export function renderConsoleHtml(ctx = {}) {
 
     <div class="console-shell">
       <aside class="sidebar" id="console-sidebar" aria-label="主导航">
-        <div class="sidebar-head">
+        <div class="sidebar-top">
           <a class="brand" href="/">
             <img src="/static/xpeach-logo.png" alt="XPeach" class="brand-logo brand-logo--md" width="34" height="34" />
-            <div class="brand-text">
-              <span class="brand-name">XPeach</span>
-              <span class="brand-sub">日在校园</span>
+            <div class="brand-copy">
+              <span class="brand-title">XPeach</span>
+              <span class="brand-caption">日在校园</span>
             </div>
           </a>
           ${xpeachBadge(isAdmin ? "运维管理" : "只读访客", "primary")}
@@ -1139,29 +1155,28 @@ export function renderConsoleHtml(ctx = {}) {
         <div class="sidebar-foot">
           <div class="user-card">
             <div class="user-avatar">${escapeHtml(userInitial)}</div>
-            <div class="user-info">
+            <div class="user-meta">
               <div class="user-name">${escapeHtml(username)}</div>
-              <div class="xp-badge-flow" style="margin-top: 4px;">
-                ${
-                  roles.length > 0
-                    ? roles.slice(0, 3).map((r) => xpeachBadge(r, "primary")).join("")
-                    : xpeachBadge(user.role || "ADMIN", "primary")
-                }
-              </div>
+              <div class="user-role">${escapeHtml(userRoleLabel)}</div>
             </div>
-          </div>
-          <div class="sidebar-foot-actions">
-            <button type="button" class="theme-toggle" data-theme-toggle aria-label="切换明暗主题" title="切换明暗主题">
-              <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="4"></circle>
-                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
-              </svg>
-              <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-              </svg>
-              <span class="theme-toggle-label" data-theme-label>主题</span>
-            </button>
-            <a class="btn btn-ghost btn-sm" href="/api/v1/auth/web/logout" style="flex:1;justify-content:center;">退出</a>
+            <div class="sidebar-foot-actions">
+              <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label="切换明暗主题" title="切换明暗主题">
+                <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4"></circle>
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+                </svg>
+                <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+              </button>
+              <a class="icon-btn user-logout-btn" href="/api/v1/auth/web/logout" title="退出登录" aria-label="退出登录">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                  <path d="M16 17l5-5-5-5"></path>
+                  <path d="M21 12H9"></path>
+                </svg>
+              </a>
+            </div>
           </div>
         </div>
       </aside>
@@ -1187,23 +1202,23 @@ export function renderConsoleHtml(ctx = {}) {
     </div>
 
     <nav class="mobile-glass-dock" aria-label="快捷导航">
-      <a class="dock-item ${activeNav === "console" ? "active" : ""}" href="/console">
+      <a class="mobile-dock-item ${activeNav === "console" ? "active" : ""}" href="/console">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         <span>总览</span>
       </a>
-      <a class="dock-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
+      <a class="mobile-dock-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
         <span>任务</span>
       </a>
-      <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
+      <a class="mobile-dock-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
         <span>账单</span>
       </a>
-      <a class="dock-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
+      <a class="mobile-dock-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span>审计</span>
       </a>
-      <a class="dock-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
+      <a class="mobile-dock-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
         <span>云控</span>
       </a>
