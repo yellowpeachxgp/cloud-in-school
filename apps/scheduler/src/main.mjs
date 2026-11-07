@@ -6,14 +6,22 @@ const KIND_PRIORITY = {
 
 export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
   const executed = [];
-  const dueEvents = Array.from(app.store.scheduleEvents.values())
-    .filter((ev) => ev.status === "ARMED" && new Date(ev.due_at).getTime() <= nowMs)
-    .sort((a, b) => {
-      const pa = KIND_PRIORITY[a.kind] ?? 9;
-      const pb = KIND_PRIORITY[b.kind] ?? 9;
-      if (pa !== pb) return pa - pb;
-      return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
-    });
+  // Single pass: collect due events and a job_id -> events index (avoids nested find per unknown job)
+  const eventsByJobAll = new Map();
+  const dueEvents = [];
+  for (const ev of app.store.scheduleEvents.values()) {
+    if (!eventsByJobAll.has(ev.job_id)) eventsByJobAll.set(ev.job_id, []);
+    eventsByJobAll.get(ev.job_id).push(ev);
+    if (ev.status === "ARMED" && new Date(ev.due_at).getTime() <= nowMs) {
+      dueEvents.push(ev);
+    }
+  }
+  dueEvents.sort((a, b) => {
+    const pa = KIND_PRIORITY[a.kind] ?? 9;
+    const pb = KIND_PRIORITY[b.kind] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+  });
 
   // Group due events by job_id so distinct jobs run concurrently without 07:00:00 head-of-line blocking
   const eventsByJob = new Map();
@@ -34,8 +42,8 @@ export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
       );
       const lastReconcileMs = Number(job.last_reconcile_at_ms || 0);
       if (nowMs >= fireAtMs && nowMs <= effectiveExpiresAtMs && nowMs - lastReconcileMs >= 15_000) {
-        const fireEv = Array.from(app.store.scheduleEvents.values()).find(
-          (e) => e.job_id === job.id && e.kind === "FIRE" && e.generation === job.generation
+        const fireEv = (eventsByJobAll.get(job.id) || []).find(
+          (e) => e.kind === "FIRE" && e.generation === job.generation
         );
         if (fireEv) {
           job.last_reconcile_at_ms = nowMs;

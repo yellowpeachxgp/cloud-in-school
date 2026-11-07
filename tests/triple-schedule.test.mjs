@@ -17,6 +17,7 @@ function setupBoundUser(app, nowMs) {
 test("Triple-Schedule (ADR-005): Arbitrary user-selected Target T (07:00, 08:45, 12:10, 20:59) & T-30m / T-5m / T execution", async () => {
   const mockSchool = new DeterministicMockSchoolBackend();
   const app = createCampusCloudApp({
+    requireAdminAccess: false,
     schoolProviderOptions: { mockBackend: mockSchool }
   });
 
@@ -110,7 +111,7 @@ test("Triple-Schedule (ADR-005): Arbitrary user-selected Target T (07:00, 08:45,
 });
 
 test("Triple-Schedule: Rejects out-of-window target T (e.g. 06:59:59 or 21:30:00) and supports late-creation catch-up", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const nowMs = Date.parse("2026-11-03T08:40:00+08:00");
   const { authHeaders } = setupBoundUser(app, nowMs);
 
@@ -175,6 +176,7 @@ test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via 
   const mockSchool = new DeterministicMockSchoolBackend();
   mockSchool.setMode("TIMEOUT_AMBIGUOUS");
   const app = createCampusCloudApp({
+    requireAdminAccess: false,
     schoolProviderOptions: { mockBackend: mockSchool }
   });
 
@@ -236,6 +238,7 @@ test("Triple-Schedule: Ambiguous timeout enters RESULT_UNKNOWN and resolves via 
 test("Triple-Schedule: Multi-day continuous reservation (repeat_days=7) automatically rolls over and arms next day's job after FIRE", async () => {
   const mockSchool = new DeterministicMockSchoolBackend();
   const app = createCampusCloudApp({
+    requireAdminAccess: false,
     schoolProviderOptions: { mockBackend: mockSchool }
   });
 
@@ -299,7 +302,7 @@ test("Triple-Schedule: Multi-day continuous reservation (repeat_days=7) automati
 });
 
 test("Cloud-Native Campus Content: Public /api/v1/campus-content and Admin control plane dynamically publish channels & clubs", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const nowMs = Date.now();
   const adminUser = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes",

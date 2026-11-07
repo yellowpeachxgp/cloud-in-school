@@ -262,6 +262,10 @@ export class IsolatedFinanceBridge {
         const cached = this.processedIdempotencyKeys.get(eventKey);
         return { ...cached, deduplicated: true };
       }
+      if (this.processedIdempotencyKeys.size > 5000) {
+        const oldest = this.processedIdempotencyKeys.keys().next().value;
+        this.processedIdempotencyKeys.delete(oldest);
+      }
 
       const hasExplicitSandbox = this.sandboxBalancesMicropeach.has(cloudUserId);
       const isRealUser = !hasExplicitSandbox && !this._isSyntheticTestSubject(ssoSubject);
@@ -433,14 +437,12 @@ export class FinanceSagaService {
   async getWalletSnapshot(cloudUserId) {
     const user = this.store.users.get(cloudUserId);
     const snapshot = await this.financeBridge.readWallet(cloudUserId, user?.subject, user);
-    if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
-    }
     return snapshot;
   }
 
   async createAndSettleOrderForConfirmedJob({ job, plan, nowMs = Date.now() }) {
-    let order = Array.from(this.store.reservationOrders.values()).find((o) => o.job_id === job.id);
+    const existingOrderId = this.store._idxOrderByJob?.get(job.id);
+    let order = existingOrderId ? this.store.reservationOrders.get(existingOrderId) : null;
     if (!order) {
       const orderId = crypto.randomUUID();
       const pricePeach = this.store.pricingMicropeach / MICROPEACH_PER_PEACH;
@@ -458,6 +460,8 @@ export class FinanceSagaService {
         created_at: new Date(nowMs).toISOString()
       };
       this.store.reservationOrders.set(order.id, order);
+      this.store.indexReservationOrder?.(order.id, order);
+      this.store.indexUserScoped?.("reservationOrders", order.id, order.cloud_user_id);
       this.store.outboxEvents.push({
         id: crypto.randomUUID(),
         aggregate_type: "reservation_order",
@@ -568,6 +572,26 @@ export class FinanceSagaService {
       const cleanSecond = typeof secondApproverRef === "string" ? secondApproverRef.trim() : "";
       if (!cleanActor || !cleanSecond || cleanSecond === cleanActor) {
         throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
+      }
+      const approverUser = Array.from(this.store.users.values()).find(
+        (u) => u.id === cleanSecond || u.subject === cleanSecond || u.username === cleanSecond
+      );
+      if (!approverUser || approverUser.id === cleanActor || approverUser.status !== "ACTIVE") {
+        throw new ContractError(
+          "FORBIDDEN",
+          "second_approver_ref must reference a distinct, existing, ACTIVE approver account"
+        );
+      }
+      const approverRoles = new Set(this.store.getUserRoles?.(approverUser.id) || []);
+      if (
+        !["PLATFORM_OWNER", "FINANCE", "FINANCE_OPERATOR", "ADMIN"].some((r) =>
+          approverRoles.has(r)
+        )
+      ) {
+        throw new ContractError(
+          "FORBIDDEN",
+          "second_approver_ref does not hold a finance approval role"
+        );
       }
       const resolvedMicro =
         typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)

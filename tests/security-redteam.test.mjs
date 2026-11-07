@@ -6,7 +6,7 @@ import { assertSafeRelativeArtifactPath } from "../packages/plugin-sdk/src/index
 import { redactSensitiveFields } from "../packages/contracts/src/index.mjs";
 
 test("Security Red-Team: Refresh token replay immediately revokes entire device session family (AUTH-014)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "redteam_replay_sub",
@@ -42,7 +42,7 @@ test("Security Red-Team: Refresh token replay immediately revokes entire device 
 });
 
 test("Security Red-Team: Cross-tenant IDOR on bindings, jobs, parcels, and admin endpoints is blocked", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const userA = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "user_a",
@@ -116,7 +116,7 @@ test("Security Red-Team: Plugin zip-slip path traversal, tampered artifact diges
   }
 
   // Tampered signature rejection
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "sec_plugin_user",
@@ -178,7 +178,7 @@ test("Security Red-Team: DLP redaction strips cookies, passwords, tokens, and in
 });
 
 test("Security Red-Team: Synthetic OIDC code bypass, cross-flow ticket confusion, open redirects, CSRF, and javascript: URLs are blocked", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
 
   // 1) Open redirect in return_to is neutralized to '/'
   const webTxn = app.identity.startWebTransaction({ returnTo: "//evil.example.com/phish" });
@@ -253,6 +253,7 @@ test("Security Red-Team: Synthetic OIDC code bypass, cross-flow ticket confusion
 
 test("Security Red-Team: Production Finance Bridge never grants fake 5.0 🍑 sandbox balance or allows unbacked debits (FIN-REDTEAM-001)", async () => {
   const app = createCampusCloudApp({
+    requireAdminAccess: false,
     financeBridgeOptions: {
       realDebitsEnabled: true,
       allowSandboxFallback: false,
@@ -289,7 +290,7 @@ test("Security Red-Team: Production Finance Bridge never grants fake 5.0 🍑 sa
 });
 
 test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whitespace approver rejection (FIN-REDTEAM-002)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "test_fin_mutex_user",
@@ -303,6 +304,14 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
   });
   assert.equal(order.payment_state, "PAID");
   assert.equal(app.financeBridge.getSandboxBalance(user.id), 40_000);
+
+  const approver = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "fin_mutex_approver_sub",
+    username: "admin_2",
+    role: "admin",
+    displayName: "Fin Approver"
+  });
 
   // Whitespace-only secondApproverRef must be rejected
   await assert.rejects(
@@ -343,7 +352,7 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
 });
 
 test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS guard, and active rate limiting (GATEWAY-REDTEAM-003)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
 
   // 1) Missing nonce in OIDC claims must be rejected
   const webTxn = app.identity.startWebTransaction({ returnTo: "/" });
@@ -377,30 +386,17 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
     "Unknown school_id must not allocate memory in store.campusContent"
   );
 
-  // 3) Active rate limiting on anonymous_rate_limited endpoints
-  const rlHeaders = {
-    "x-rate-limit-key": "attacker_ip_198_51_100_99",
-    "x-rate-limit-max": "2"
-  };
-  const req1 = await app.inject({
-    method: "GET",
-    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
-    headers: rlHeaders
-  });
-  const req2 = await app.inject({
-    method: "GET",
-    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
-    headers: rlHeaders
-  });
-  const req3 = await app.inject({
-    method: "GET",
-    url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
-    headers: rlHeaders
-  });
-  assert.equal(req1.status, 200);
-  assert.equal(req2.status, 200);
-  assert.equal(req3.status, 429);
-  assert.equal(req3.body.code, "RATE_LIMITED");
+  // 3) Active rate limiting on anonymous_rate_limited endpoints (client headers cannot inflate the cap)
+  let lastReq = null;
+  for (let i = 0; i < 61; i++) {
+    lastReq = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
+      headers: { "x-rate-limit-key": `spoof_${i}` }
+    });
+  }
+  assert.equal(lastReq.status, 429);
+  assert.equal(lastReq.body.code, "RATE_LIMITED");
 
   // 4) DELETED user cannot authenticate with a pre-deletion JWT
   const delUser = app.store.findOrCreateCloudUser({
@@ -419,7 +415,7 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
 });
 
 test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency, and multi-day rollover prewarmed date rewrite (SCHED-REDTEAM-004)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "test_sched_redteam_user",
@@ -506,4 +502,286 @@ test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency,
   assert.equal(nextJob.booking_local_date, "2026-11-09");
   assert.equal(nextJob.prewarmed_targets.start_full, "2026-11-09 08:00:00");
   assert.equal(nextJob.prewarmed_targets.end_full, "2026-11-09 22:00:00");
+});
+
+test("Security Red-Team: Admin-only login gate blocks non-admin console flow; app flow stays open with RBAC gating (AUTH-GATE-001)", async () => {
+  const app = createCampusCloudApp();
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "plain_student_sub",
+    displayName: "Plain Student"
+  });
+  assert.equal(app.store.hasAdminAccess(user.id), false);
+
+  // Console (backend) flow is blocked at issuance for non-admins
+  assert.throws(
+    () => app.identity.issueDeviceSession(user, "Campus Cloud Web Console", null, 1, Date.now(), "WEB_CONSOLE"),
+    /仅管理员账号可登录云平台后台/
+  );
+
+  // Mobile app flow issues normally for any active SSO user
+  const sess = app.identity.issueDeviceSession(user, "Phone", null, 1, Date.now(), "MOBILE_APP");
+  assert.ok(sess.access_token);
+  const ctx = app.identity.verifyAccessToken(sess.access_token);
+  assert.equal(ctx.cloudUserId, user.id);
+
+  // Admin endpoints remain RBAC-gated against the member's app token
+  const res = await app.inject({
+    method: "GET",
+    url: "/api/v1/admin/overview",
+    headers: { authorization: `Bearer ${sess.access_token}` }
+  });
+  assert.equal(res.status, 403);
+
+  // A console-flow session whose user lost admin access is rejected at verification
+  app.identity.requireAdminAccess = false;
+  const webSess = app.identity.issueDeviceSession(user, "Web", null, 1, Date.now(), "WEB_CONSOLE");
+  app.identity.requireAdminAccess = true;
+  await assert.rejects(
+    async () => app.identity.verifyAccessToken(webSess.access_token),
+    /FORBIDDEN|仅管理员/
+  );
+
+  // Cookie path fails closed the same way
+  const cookieVal = app.identity.signWebSessionCookie({
+    cloudUserId: user.id,
+    accessToken: webSess.access_token,
+    refreshToken: webSess.refresh_token
+  });
+  assert.equal(
+    app.identity.verifyWebSessionCookie(`dis_web_session=${encodeURIComponent(cookieVal)}`),
+    null
+  );
+});
+
+test("Security Red-Team: Hardcoded admin backdoor subject grants no implicit roles; env allowlist does (AUTH-GATE-002)", async () => {
+  const app = createCampusCloudApp();
+  const former = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "856f-cf51-b064-5d84",
+    displayName: "Former Backdoor Subject"
+  });
+  assert.equal(app.store.hasAdminAccess(former.id), false);
+  assert.throws(
+    () => app.identity.issueDeviceSession(former, "Web"),
+    /仅管理员账号可登录/
+  );
+
+  const allowApp = createCampusCloudApp({
+    storeOptions: { adminSsoSubjects: ["owner_sub_1"] }
+  });
+  const owner = allowApp.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "owner_sub_1",
+    displayName: "Owner"
+  });
+  assert.equal(allowApp.store.hasAdminAccess(owner.id), true);
+  const sess = allowApp.identity.issueDeviceSession(owner, "Web");
+  assert.ok(sess.access_token);
+  const ctx = allowApp.identity.verifyAccessToken(sess.access_token);
+  assert.ok(ctx.roles.includes("PLATFORM_OWNER"));
+});
+
+test("Security Red-Team: Rate limiter ignores client-supplied x-rate-limit-* / forwarded headers (AUTH-RL-001)", async () => {
+  const app = createCampusCloudApp();
+  let lastStatus = 200;
+  for (let i = 0; i < 61; i++) {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/mobile/start",
+      headers: {
+        "x-rate-limit-key": `spoofed_${i}_${Math.random()}`,
+        "x-rate-limit-max": "99999",
+        "x-forwarded-for": `10.0.0.${i}`,
+        "x-real-ip": `10.0.0.${i}`
+      },
+      body: {
+        install_ephemeral_id: "eph_attacker123456",
+        code_challenge: "A".repeat(43),
+        code_challenge_method: "S256"
+      }
+    });
+    lastStatus = res.status;
+  }
+  assert.equal(lastStatus, 429);
+});
+
+test("Security Red-Team: sandbox_override request field cannot unlock research-sandbox-only providers (PARCEL-SANDBOX-001)", async () => {
+  const app = createCampusCloudApp();
+  const admin = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "ops_admin_sub",
+    role: "admin",
+    displayName: "Ops Admin"
+  });
+  const sess = app.identity.issueDeviceSession(admin, "Console");
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/v1/parcel-sync/jobs",
+    headers: { authorization: `Bearer ${sess.access_token}` },
+    body: {
+      provider_id: "parcel.taobao.cainiao",
+      sandbox_override: true,
+      channel: "MANUAL_API_CALL"
+    }
+  });
+  assert.equal(res.status, 403);
+});
+
+test("Security Red-Team: Refund requires real distinct approver, not fabricated refs (FIN-DUAL-001)", async () => {
+  const app = createCampusCloudApp();
+  const actor = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "finance_actor_sub",
+    role: "admin",
+    displayName: "Finance Actor"
+  });
+  const order = {
+    id: "ord_refund_gate_1",
+    cloud_user_id: actor.id,
+    price_micropeach: 100000,
+    payment_state: "PAID",
+    paid_at: new Date().toISOString(),
+    created_at: new Date().toISOString()
+  };
+  app.store.reservationOrders.set(order.id, order);
+
+  await assert.rejects(
+    async () =>
+      app.financeService.issueRefundForOrder(order.id, {
+        amountMicropeach: 1000,
+        reason: "test",
+        actorRef: actor.id,
+        secondApproverRef: `console_approver_${actor.id}`
+      }),
+    /distinct, existing, ACTIVE approver/
+  );
+  await assert.rejects(
+    async () =>
+      app.financeService.issueRefundForOrder(order.id, {
+        amountMicropeach: 1000,
+        reason: "test",
+        actorRef: actor.id,
+        secondApproverRef: "nonexistent_user_123"
+      }),
+    /distinct, existing, ACTIVE approver/
+  );
+  const outsider = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "plain_outsider_sub",
+    displayName: "No Finance Role"
+  });
+  await assert.rejects(
+    async () =>
+      app.financeService.issueRefundForOrder(order.id, {
+        amountMicropeach: 1000,
+        reason: "test",
+        actorRef: actor.id,
+        secondApproverRef: outsider.id
+      }),
+    /finance approval role/
+  );
+});
+
+test("Security Red-Team: Unresolved secret:// references and missing prod secrets fail closed (CRYPTO-001)", async () => {
+  const { KmsEnvelopeVault } = await import("../packages/crypto/src/index.mjs");
+  assert.throws(
+    () => new KmsEnvelopeVault({ initialKekMaterial: "secret://campus-cloud/prod/kms" }),
+    /Unresolved secret reference/
+  );
+  const { CloudIdentityService } = await import("../packages/identity/src/index.mjs");
+  const { CloudDatabaseStore } = await import("../packages/db/src/index.mjs");
+  const store = new CloudDatabaseStore();
+  assert.throws(
+    () => new CloudIdentityService(store, { sessionSecret: "secret://x/y" }),
+    /Unresolved secret reference/
+  );
+});
+
+test("Security Red-Team: Orphan refresh token (valid signature, no session record) is rejected (AUTH-RT-001)", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "orphan_rt_sub",
+    displayName: "Orphan"
+  });
+  const sess = app.identity.issueDeviceSession(user, "Phone");
+  app.store.deviceSessions.clear();
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/refresh",
+    body: { refresh_token: sess.refresh_token }
+  });
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.code, "CLOUD_AUTH_REQUIRED");
+});
+
+test("Security Red-Team: Tampered v2 web session cookie fails closed (AUTH-COOKIE-001)", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "cookie_user_sub",
+    role: "admin",
+    displayName: "Cookie User"
+  });
+  const sess = app.identity.issueDeviceSession(user, "Web");
+  const cookieVal = app.identity.signWebSessionCookie({
+    cloudUserId: user.id,
+    accessToken: sess.access_token,
+    refreshToken: sess.refresh_token
+  });
+  const parts = cookieVal.split(".");
+  assert.equal(parts.length, 4);
+  parts[3] = Buffer.from("forged").toString("base64url");
+  assert.equal(
+    app.identity.verifyWebSessionCookie(`dis_web_session=${parts.join(".")}`),
+    null
+  );
+});
+
+test("Security Red-Team: SSO membership role claim drives admin gate; demotion recomputes (AUTH-RBAC-001)", async () => {
+  const app = createCampusCloudApp();
+  const mk = (sub, role) =>
+    app.store.findOrCreateCloudUser({
+      issuer: "https://sso.xpeach.codes/t/acme",
+      subject: sub,
+      displayName: sub,
+      role
+    });
+
+  const owner = mk("sso_owner_1", "owner");
+  assert.equal(app.store.hasAdminAccess(owner.id), true);
+  assert.ok(app.store.getUserRoles(owner.id).includes("PLATFORM_OWNER"));
+
+  const admin = mk("sso_admin_1", "admin");
+  assert.equal(app.store.hasAdminAccess(admin.id), true);
+  assert.ok(app.store.getUserRoles(admin.id).includes("ADMIN"));
+  assert.equal(app.store.getUserRoles(admin.id).includes("PLATFORM_OWNER"), false);
+
+  const member = mk("sso_member_1", "member");
+  assert.equal(app.store.hasAdminAccess(member.id), false);
+  assert.throws(
+    () => app.identity.issueDeviceSession(member, "Web"),
+    /管理员|administrator/i
+  );
+
+  // Demotion at SSO (owner -> member) must strip SSO-derived roles on next login sync
+  app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_owner_1",
+    displayName: "sso_owner_1",
+    role: "member"
+  });
+  assert.equal(app.store.hasAdminAccess(owner.id), false);
+
+  // Manual setUserRoles grants survive SSO recompute
+  app.store.setUserRoles(member.id, ["SECURITY_AUDITOR"]);
+  app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_member_1",
+    displayName: "sso_member_1",
+    role: "member"
+  });
+  assert.ok(app.store.getUserRoles(member.id).includes("SECURITY_AUDITOR"));
 });

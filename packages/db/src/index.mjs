@@ -12,6 +12,15 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.resolve(__dirname, "../migrations");
 
+// SSO tenant membership role -> cloud backend role mapping (owner > admin > member).
+// owner carries PLATFORM_OWNER (highest privilege); admin gets the operational set only.
+const SSO_OWNER_ROLES = Object.freeze([
+  "ADMIN", "OPERATOR", "FINANCE", "PLATFORM_OWNER",
+  "OPERATIONS_ADMIN", "SCHOOL_OPERATOR", "FINANCE_OPERATOR", "SECURITY_AUDITOR"
+]);
+const SSO_ADMIN_ROLES = Object.freeze(SSO_OWNER_ROLES.filter((r) => r !== "PLATFORM_OWNER"));
+const EMPTY_ROLE_SET = Object.freeze([]);
+
 const CLUB_CATEGORY_LABELS = {
   TECH_INNOVATION: "科技创新",
   ACADEMIC_CULTURE: "学术文化",
@@ -709,14 +718,25 @@ export function listMigrations() {
 }
 
 export class CloudDatabaseStore {
-  constructor({ snapshotPath = null, pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH } = {}) {
+  constructor({
+    snapshotPath = null,
+    pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
+    adminSsoSubjects = null
+  } = {}) {
     this.snapshotPath = snapshotPath;
     this.pricingMicropeach = pricingMicropeach;
+    this.adminSsoSubjects = new Set(
+      (
+        adminSsoSubjects ??
+        (process.env.CLOUD_ADMIN_SSO_SUBJECTS || "").split(",")
+      ).map((s) => String(s).trim()).filter(Boolean)
+    );
     this.appliedMigrations = new Set();
 
     // Identity & Sessions
     this.users = new Map(); // id -> user
-    this.userRoles = new Map(); // userId -> Set<string>
+    this.userRoles = new Map(); // userId -> Set<string> — manual grants only (setUserRoles / env allowlist)
+    this.userSsoRoles = new Map(); // userId -> Set<string> — recomputed from latest SSO role claim each login
     this.authTransactions = new Map(); // loginTxn -> txn
     this.exchangeTickets = new Map(); // appTicket -> ticket
     this.deviceSessions = new Map(); // sessionId -> session
@@ -759,6 +779,117 @@ export class CloudDatabaseStore {
     this._seedDefaults();
     this.runMigrations();
     this._loadSnapshot();
+    this._rebuildIndexes();
+  }
+
+  _rebuildIndexes() {
+    this._idxUserByIssuerSubject = new Map();
+    for (const [id, u] of this.users) {
+      if (u.issuer && u.subject) this._idxUserByIssuerSubject.set(`${u.issuer}|${u.subject}`, id);
+    }
+    this._idxSessionByRefreshHash = new Map();
+    this._idxSessionIdsByFamily = new Map();
+    for (const [id, s] of this.deviceSessions) this._indexDeviceSessionRecord(id, s);
+    this._idxTxnByServerState = new Map();
+    for (const [id, t] of this.authTransactions) {
+      if (t.serverState) this._idxTxnByServerState.set(t.serverState, id);
+    }
+    this._idxOrderByJob = new Map();
+    for (const [id, o] of this.reservationOrders) {
+      if (o.job_id) this._idxOrderByJob.set(o.job_id, id);
+    }
+    this._idxEventIdsByJob = new Map();
+    for (const [id, ev] of this.scheduleEvents) {
+      this.indexScheduleEvent(id, ev);
+    }
+    this._idxIdsByUser = new Map();
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications"]) {
+      const byUser = new Map();
+      for (const [id, rec] of this[name]) {
+        const uid = rec.cloud_user_id;
+        if (!uid) continue;
+        if (!byUser.has(uid)) byUser.set(uid, new Set());
+        byUser.get(uid).add(id);
+      }
+      this._idxIdsByUser.set(name, byUser);
+    }
+  }
+
+  _indexDeviceSessionRecord(id, s) {
+    if (s.refresh_token_hash) this._idxSessionByRefreshHash.set(s.refresh_token_hash, id);
+    if (s.family_id) {
+      if (!this._idxSessionIdsByFamily.has(s.family_id)) this._idxSessionIdsByFamily.set(s.family_id, new Set());
+      this._idxSessionIdsByFamily.get(s.family_id).add(id);
+    }
+  }
+
+  indexDeviceSession(id, s) {
+    this._indexDeviceSessionRecord(id, s);
+  }
+
+  unindexDeviceSession(id, s) {
+    if (s?.refresh_token_hash) this._idxSessionByRefreshHash.delete(s.refresh_token_hash);
+    if (s?.family_id) this._idxSessionIdsByFamily.get(s.family_id)?.delete(id);
+  }
+
+  indexAuthTransaction(id, t) {
+    if (t?.serverState) this._idxTxnByServerState.set(t.serverState, id);
+  }
+
+  unindexAuthTransaction(id, t) {
+    if (t?.serverState) this._idxTxnByServerState.delete(t.serverState);
+  }
+
+  indexReservationOrder(id, o) {
+    if (o?.job_id) this._idxOrderByJob.set(o.job_id, id);
+  }
+
+  indexUserScoped(collectionName, id, cloudUserId) {
+    const byUser = this._idxIdsByUser.get(collectionName);
+    if (!byUser || !cloudUserId) return;
+    if (!byUser.has(cloudUserId)) byUser.set(cloudUserId, new Set());
+    byUser.get(cloudUserId).add(id);
+  }
+
+  indexScheduleEvent(id, ev) {
+    if (!this._idxEventIdsByJob) this._idxEventIdsByJob = new Map();
+    if (!ev?.job_id) return;
+    if (!this._idxEventIdsByJob.has(ev.job_id)) this._idxEventIdsByJob.set(ev.job_id, new Set());
+    this._idxEventIdsByJob.get(ev.job_id).add(id);
+  }
+
+  eventsForJob(jobId) {
+    if (!this._idxEventIdsByJob) {
+      return Array.from(this.scheduleEvents.values()).filter((e) => e.job_id === jobId);
+    }
+    const ids = this._idxEventIdsByJob.get(jobId);
+    if (!ids) return [];
+    const out = [];
+    for (const id of ids) {
+      const ev = this.scheduleEvents.get(id);
+      if (ev) out.push(ev);
+    }
+    return out;
+  }
+
+  recordsForUser(collectionName, cloudUserId) {
+    const byUser = this._idxIdsByUser?.get(collectionName);
+    if (!byUser) {
+      return Array.from(this[collectionName].values()).filter((r) => r.cloud_user_id === cloudUserId);
+    }
+    const ids = byUser.get(cloudUserId);
+    if (!ids) return [];
+    const coll = this[collectionName];
+    const out = [];
+    for (const id of ids) {
+      const r = coll.get(id);
+      if (r) out.push(r);
+    }
+    return out;
+  }
+
+  idsForUser(collectionName, cloudUserId) {
+    return this._idxIdsByUser.get(collectionName)?.get(cloudUserId) || null;
   }
 
   _loadSnapshot() {
@@ -774,6 +905,11 @@ export class CloudDatabaseStore {
       if (Array.isArray(raw.userRoles)) {
         for (const [k, arr] of raw.userRoles) {
           this.userRoles.set(k, new Set(Array.isArray(arr) ? arr : ["USER"]));
+        }
+      }
+      if (Array.isArray(raw.userSsoRoles)) {
+        for (const [k, arr] of raw.userSsoRoles) {
+          this.userSsoRoles.set(k, new Set(Array.isArray(arr) ? arr : []));
         }
       }
       loadMap(this.authTransactions, raw.authTransactions);
@@ -814,12 +950,52 @@ export class CloudDatabaseStore {
 
   saveSnapshot() {
     if (!this.snapshotPath) return;
+    if (this._snapshotFlushTimer) return;
+    this._snapshotFlushTimer = setTimeout(() => {
+      this._snapshotFlushTimer = null;
+      this._flushSnapshotSync();
+    }, 200);
+    this._snapshotFlushTimer.unref?.();
+  }
+
+  flushSnapshotSync() {
+    if (this._snapshotFlushTimer) {
+      clearTimeout(this._snapshotFlushTimer);
+      this._snapshotFlushTimer = null;
+    }
+    this._flushSnapshotSync();
+  }
+
+  pruneAuthEphemera(nowMs = Date.now()) {
+    for (const [k, t] of this.authTransactions) {
+      if (t.status === "COMPLETED" || nowMs > t.expiresAtMs + 3600_000) {
+        this.unindexAuthTransaction?.(k, t);
+        this.authTransactions.delete(k);
+      }
+    }
+    for (const [k, t] of this.exchangeTickets) {
+      if (t.consumedAtMs !== null || nowMs > t.expiresAtMs) {
+        this.exchangeTickets.delete(k);
+      }
+    }
+    for (const [k, s] of this.deviceSessions) {
+      if (new Date(s.expires_at).getTime() + 7 * 86400_000 < nowMs) {
+        this.unindexDeviceSession?.(k, s);
+        this.deviceSessions.delete(k);
+      }
+    }
+  }
+
+  _flushSnapshotSync() {
+    if (!this.snapshotPath) return;
+    this.pruneAuthEphemera();
     try {
       const dir = path.dirname(this.snapshotPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const data = {
         users: Array.from(this.users.entries()),
         userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        userSsoRoles: Array.from(this.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
         authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
         exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(this.deviceSessions.entries()),
@@ -1275,9 +1451,8 @@ export class CloudDatabaseStore {
     ssoRefreshToken = null,
     peachWallet = null
   }) {
-    const existing = Array.from(this.users.values()).find(
-      (u) => u.issuer === issuer && u.subject === subject
-    );
+    const existingId = this._idxUserByIssuerSubject?.get(`${issuer}|${subject}`);
+    const existing = existingId ? this.users.get(existingId) : null;
     if (existing) {
       if (displayName) existing.display_name = displayName;
       if (username) existing.username = username;
@@ -1318,6 +1493,7 @@ export class CloudDatabaseStore {
       created_at: new Date().toISOString()
     };
     this.users.set(id, user);
+    this._idxUserByIssuerSubject?.set(`${issuer}|${subject}`, id);
     if (!this.userRoles.has(id)) {
       this.userRoles.set(id, new Set(["USER"]));
     }
@@ -1328,26 +1504,30 @@ export class CloudDatabaseStore {
 
   _syncAdminRoleIfEligible(user) {
     if (!user) return;
-    if (
-      user.role === "admin" ||
-      user.subject === "856f-cf51-b064-5d84"
-    ) {
+    // SSO-derived roles are recomputed on every login from the fresh role claim so
+    // tenant-side demotion takes effect on next sign-in (owner > admin > member).
+    const role = String(user.role || "").toLowerCase();
+    const mapped = role === "owner" ? SSO_OWNER_ROLES : role === "admin" ? SSO_ADMIN_ROLES : EMPTY_ROLE_SET;
+    this.userSsoRoles.set(user.id, new Set(mapped));
+    // Env subject allowlist is a manual break-glass grant, intentionally outside
+    // the SSO recompute so it survives claim changes until the config is removed.
+    if (this.adminSsoSubjects.has(user.subject)) {
       const roles = this.userRoles.get(user.id) || new Set(["USER"]);
-      roles.add("ADMIN");
-      roles.add("OPERATOR");
-      roles.add("FINANCE");
-      roles.add("PLATFORM_OWNER");
-      roles.add("OPERATIONS_ADMIN");
-      roles.add("SCHOOL_OPERATOR");
-      roles.add("FINANCE_OPERATOR");
-      roles.add("SECURITY_AUDITOR");
+      for (const r of SSO_OWNER_ROLES) roles.add(r);
       this.userRoles.set(user.id, roles);
     }
   }
 
   getUserRoles(cloudUserId) {
-    const set = this.userRoles.get(cloudUserId);
-    return set ? Array.from(set) : ["USER"];
+    const merged = new Set(this.userRoles.get(cloudUserId) || []);
+    for (const r of this.userSsoRoles.get(cloudUserId) || []) merged.add(r);
+    return merged.size ? Array.from(merged) : ["USER"];
+  }
+
+  hasAdminAccess(cloudUserId) {
+    const merged = new Set(this.userRoles.get(cloudUserId) || []);
+    for (const r of this.userSsoRoles.get(cloudUserId) || []) merged.add(r);
+    return merged.has("ADMIN") || merged.has("PLATFORM_OWNER");
   }
 
   setUserRoles(cloudUserId, roles) {
@@ -1390,6 +1570,9 @@ export class CloudDatabaseStore {
       created_at: new Date().toISOString()
     };
     this.auditEvents.push(entry);
+    if (this.auditEvents.length > 2000) {
+      this.auditEvents.splice(0, this.auditEvents.length - 2000);
+    }
     this.saveSnapshot();
     return entry;
   }
@@ -1406,6 +1589,7 @@ export class CloudDatabaseStore {
       created_at: new Date().toISOString()
     };
     this.notifications.set(id, n);
+    this.indexUserScoped?.("notifications", id, n.cloud_user_id);
     this.saveSnapshot();
     return n;
   }

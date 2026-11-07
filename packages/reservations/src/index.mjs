@@ -162,9 +162,8 @@ export class TripleScheduleEngine {
     }
 
     // Conflict check: same user + binding + date active job
-    const duplicateActive = Array.from(this.store.reservationJobs.values()).find(
+    const duplicateActive = this.store.recordsForUser("reservationJobs", cloudUserId).find(
       (j) =>
-        j.cloud_user_id === cloudUserId &&
         j.school_binding_id === binding.id &&
         j.booking_local_date === payload.target_local_date &&
         !["CANCELLED", "FAILED", "EXPIRED"].includes(j.state)
@@ -319,9 +318,12 @@ export class TripleScheduleEngine {
     };
 
     this.store.reservationPlans.set(planId, plan);
+    this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
     this.store.reservationJobs.set(jobId, job);
+    this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
     for (const ev of events) {
       this.store.scheduleEvents.set(ev.id, ev);
+      this.store.indexScheduleEvent?.(ev.id, ev);
     }
     if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
@@ -441,8 +443,8 @@ export class TripleScheduleEngine {
       const binding = this.store.schoolBindings.get(job.school_binding_id);
       const consent = plan ? this.store.consents.get(plan.consent_id) : null;
 
-      const event = Array.from(this.store.scheduleEvents.values()).find(
-        (e) => e.job_id === jobId && e.kind === kind && e.generation === job.generation
+      const event = this.store.eventsForJob(jobId).find(
+        (e) => e.kind === kind && e.generation === job.generation
       );
       if (!event) {
         throw new ContractError("NOT_FOUND", `Schedule event ${kind} not found for job ${jobId}`);
@@ -907,8 +909,10 @@ export class TripleScheduleEngine {
     }
 
     this.store.reservationJobs.set(nextJobId, nextJob);
+    this.store.indexUserScoped?.("reservationJobs", nextJobId, nextJob.cloud_user_id);
     for (const ev of nextEvents) {
       this.store.scheduleEvents.set(ev.id, ev);
+      this.store.indexScheduleEvent?.(ev.id, ev);
     }
     if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();

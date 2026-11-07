@@ -65,7 +65,20 @@ export function createCampusCloudApp(options = {}) {
       onAudit: (ev) => store.recordAudit(ev),
       ...options.kmsOptions
     });
-  const identity = options.identity || new CloudIdentityService(store, options.identityOptions);
+  const identity =
+    options.identity ||
+    new CloudIdentityService(store, {
+      requireAdminAccess: options.requireAdminAccess,
+      ...options.identityOptions
+    });
+  const trustProxyHeaders =
+    options.trustProxyHeaders !== undefined
+      ? Boolean(options.trustProxyHeaders)
+      : process.env.TRUST_PROXY_HEADERS === "true";
+  const allowSandboxProviders =
+    options.allowSandboxProviders !== undefined
+      ? Boolean(options.allowSandboxProviders)
+      : process.env.PARCEL_ALLOW_SANDBOX_PROVIDERS === "true";
   const cookieVault = options.cookieVault || new ScopedSchoolCookieVault();
   const schoolProvider =
     options.schoolProvider || new HautLibraryProvider(options.schoolProviderOptions);
@@ -239,28 +252,34 @@ export function createCampusCloudApp(options = {}) {
     throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing Bearer Authorization header");
   }
 
+  const ssoSyncState = new Map(); // cloudUserId -> { lastMs, inFlight }
   async function syncUserToSso(cloudUserId) {
+    const st = ssoSyncState.get(cloudUserId);
+    if (st?.inFlight) return st.inFlight;
+    if (st?.lastMs && Date.now() - st.lastMs < 30_000) return;
+    const inFlight = doSyncUserToSso(cloudUserId);
+    ssoSyncState.set(cloudUserId, { lastMs: Date.now(), inFlight });
+    try {
+      await inFlight;
+    } finally {
+      ssoSyncState.set(cloudUserId, { lastMs: Date.now() });
+    }
+  }
+
+  async function doSyncUserToSso(cloudUserId) {
     if (typeof store.saveSnapshot === "function") {
       store.saveSnapshot();
     }
     const user = store.users.get(cloudUserId);
     if (!user || !user.sso_access_token) return;
-    const bindings = Array.from(store.schoolBindings.values()).filter(
-      (b) => b.cloud_user_id === cloudUserId && !b.revoked_at
-    );
-    const plans = Array.from(store.reservationPlans.values()).filter(
-      (p) => p.cloud_user_id === cloudUserId && p.enabled !== false
-    );
-    const jobs = Array.from(store.reservationJobs.values()).filter(
-      (j) => j.cloud_user_id === cloudUserId
-    );
+    const bindings = store.recordsForUser("schoolBindings", cloudUserId).filter((b) => !b.revoked_at);
+    const plans = store.recordsForUser("reservationPlans", cloudUserId).filter((p) => p.enabled !== false);
+    const jobs = store.recordsForUser("reservationJobs", cloudUserId);
     const parcels = parcelHub.listUserParcels(cloudUserId);
     const readyParcels = parcels.filter(
       (p) => p.status !== "PICKED_UP" && (p.status === "READY_FOR_PICKUP" || p.pickup_code)
     );
-    const orders = Array.from(store.reservationOrders.values()).filter(
-      (o) => o.cloud_user_id === cloudUserId
-    );
+    const orders = store.recordsForUser("reservationOrders", cloudUserId);
     await identity.syncUserSiteProfileToSso(user, {
       school_bindings_count: bindings.length,
       active_student_no: bindings[0]?.student_no || bindings[0]?.student_no_masked || null,
@@ -293,8 +312,8 @@ export function createCampusCloudApp(options = {}) {
   async function buildUserSyncSnapshot(cloudUserId) {
     const user = store.users.get(cloudUserId);
     const wallet = await financeService.getWalletSnapshot(cloudUserId);
-    const bindings = Array.from(store.schoolBindings.values())
-      .filter((b) => b.cloud_user_id === cloudUserId && !b.revoked_at)
+    const bindings = store.recordsForUser("schoolBindings", cloudUserId)
+      .filter((b) => !b.revoked_at)
       .map((b) => ({
         id: b.id,
         school_id: b.school_id,
@@ -303,14 +322,9 @@ export function createCampusCloudApp(options = {}) {
         status: b.status,
         created_at: b.created_at
       }));
-    const consents = Array.from(store.consents.values()).filter(
-      (c) => c.cloud_user_id === cloudUserId && !c.withdrawn_at
-    );
-    const plans = Array.from(store.reservationPlans.values()).filter(
-      (p) => p.cloud_user_id === cloudUserId
-    );
-    const jobs = Array.from(store.reservationJobs.values())
-      .filter((j) => j.cloud_user_id === cloudUserId)
+    const consents = store.recordsForUser("consents", cloudUserId).filter((c) => !c.withdrawn_at);
+    const plans = store.recordsForUser("reservationPlans", cloudUserId);
+    const jobs = store.recordsForUser("reservationJobs", cloudUserId)
       .map((j) => {
         const p = store.reservationPlans.get(j.plan_id) || {};
         const sr = store.schoolReservations.get(j.id) || null;
@@ -326,8 +340,7 @@ export function createCampusCloudApp(options = {}) {
           school_reservation: sr
         };
       });
-    const orders = Array.from(store.reservationOrders.values())
-      .filter((o) => o.cloud_user_id === cloudUserId)
+    const orders = store.recordsForUser("reservationOrders", cloudUserId)
       .map((o) => ({
         ...o,
         price_peach: Number(
@@ -399,7 +412,7 @@ export function createCampusCloudApp(options = {}) {
         ready: kmsVault.kmsOnline,
         migrations_applied: Array.from(store.appliedMigrations),
         school_providers: ["school.haut.library"],
-        redis_buffer: redisTelemetry
+        redis_buffer: { connected: Boolean(redisTelemetry?.connected) }
       }
     };
   });
@@ -587,16 +600,12 @@ export function createCampusCloudApp(options = {}) {
   });
 
   register("GET", "/api/v1/me/orders", "listMyOrders", "bearer", async ({ auth }) => {
-    const orders = Array.from(store.reservationOrders.values()).filter(
-      (o) => o.cloud_user_id === auth.cloudUserId
-    );
+    const orders = store.recordsForUser("reservationOrders", auth.cloudUserId);
     return { status: 200, code: "ORDERS_LISTED", data: { orders } };
   });
 
   register("GET", "/api/v1/me/consents", "listMyConsents", "bearer", async ({ auth }) => {
-    const consents = Array.from(store.consents.values()).filter(
-      (c) => c.cloud_user_id === auth.cloudUserId
-    );
+    const consents = store.recordsForUser("consents", auth.cloudUserId);
     return { status: 200, code: "CONSENTS_LISTED", data: { consents } };
   });
 
@@ -612,6 +621,7 @@ export function createCampusCloudApp(options = {}) {
       withdrawn_at: null
     };
     store.consents.set(id, record);
+    store.indexUserScoped?.("consents", id, record.cloud_user_id);
     return { status: 201, code: "CONSENT_GRANTED", data: record };
   });
 
@@ -645,12 +655,8 @@ export function createCampusCloudApp(options = {}) {
 
   register("POST", "/api/v1/me/data-export", "requestMyDataExport", "bearer", async ({ auth }) => {
     const user = store.users.get(auth.cloudUserId);
-    const bindings = Array.from(store.schoolBindings.values()).filter(
-      (b) => b.cloud_user_id === auth.cloudUserId
-    );
-    const plans = Array.from(store.reservationPlans.values()).filter(
-      (p) => p.cloud_user_id === auth.cloudUserId
-    );
+    const bindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
+    const plans = store.recordsForUser("reservationPlans", auth.cloudUserId);
     const parcels = parcelHub.listUserParcels(auth.cloudUserId);
     return {
       status: 200,
@@ -755,8 +761,7 @@ export function createCampusCloudApp(options = {}) {
   );
 
   register("GET", "/api/v1/school-bindings", "listMySchoolBindings", "bearer", async ({ auth }) => {
-    const bindings = Array.from(store.schoolBindings.values())
-      .filter((b) => b.cloud_user_id === auth.cloudUserId)
+    const bindings = store.recordsForUser("schoolBindings", auth.cloudUserId)
       .map((b) => ({
         id: b.id,
         school_id: b.school_id,
@@ -797,6 +802,7 @@ export function createCampusCloudApp(options = {}) {
         revoked_at: null
       };
       store.schoolBindings.set(bindingId, binding);
+      store.indexUserScoped?.("schoolBindings", bindingId, binding.cloud_user_id);
       store.saveSnapshot();
       return { status: 201, code: "SCHOOL_BINDING_INITIATED", data: binding };
     }
@@ -905,9 +911,7 @@ export function createCampusCloudApp(options = {}) {
 
   // --- 30..38 Reservation Plans, Jobs & Pricing ---
   register("GET", "/api/v1/reservation-plans", "listReservationPlans", "bearer", async ({ auth }) => {
-    const plans = Array.from(store.reservationPlans.values()).filter(
-      (p) => p.cloud_user_id === auth.cloudUserId
-    );
+    const plans = store.recordsForUser("reservationPlans", auth.cloudUserId);
     return { status: 200, code: "RESERVATION_PLANS_LISTED", data: { plans } };
   });
 
@@ -932,7 +936,13 @@ export function createCampusCloudApp(options = {}) {
           return { status: 200, code: "REQUEST_DUPLICATE", data: existing.data };
         }
         const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
-        store.idempotencyRecords.set(cacheKey, { bodyHash, data: created });
+        if (store.idempotencyRecords.size > 2000) {
+          for (const [k, r] of store.idempotencyRecords) {
+            if (!r.createdAtMs || nowMs - r.createdAtMs > 86400_000) store.idempotencyRecords.delete(k);
+          }
+          if (store.idempotencyRecords.size > 2000) store.idempotencyRecords.clear();
+        }
+        store.idempotencyRecords.set(cacheKey, { bodyHash, data: created, createdAtMs: nowMs });
         await syncUserToSso(auth.cloudUserId);
         return { status: 201, code: "RESERVATION_PLAN_CREATED", data: created };
       }
@@ -1003,9 +1013,7 @@ export function createCampusCloudApp(options = {}) {
   );
 
   register("GET", "/api/v1/reservation-jobs", "listReservationJobs", "bearer", async ({ auth }) => {
-    const jobs = Array.from(store.reservationJobs.values()).filter(
-      (j) => j.cloud_user_id === auth.cloudUserId
-    );
+    const jobs = store.recordsForUser("reservationJobs", auth.cloudUserId);
     return { status: 200, code: "RESERVATION_JOBS_LISTED", data: { jobs } };
   });
 
@@ -1020,7 +1028,7 @@ export function createCampusCloudApp(options = {}) {
       if (job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("FORBIDDEN", "Cross-user reservation job access denied");
       }
-      const events = Array.from(store.scheduleEvents.values()).filter((e) => e.job_id === job.id);
+      const events = store.eventsForJob(job.id);
       return { status: 200, code: "RESERVATION_JOB_OK", data: { ...job, schedule_events: events } };
     }
   );
@@ -1084,9 +1092,7 @@ export function createCampusCloudApp(options = {}) {
 
   // --- 39..40 Notifications ---
   register("GET", "/api/v1/notifications", "listMyNotifications", "bearer", async ({ auth }) => {
-    const notifications = Array.from(store.notifications.values()).filter(
-      (n) => n.cloud_user_id === auth.cloudUserId
-    );
+    const notifications = store.recordsForUser("notifications", auth.cloudUserId);
     return { status: 200, code: "NOTIFICATIONS_LISTED", data: { notifications } };
   });
 
@@ -1176,7 +1182,7 @@ export function createCampusCloudApp(options = {}) {
         itemTitle: item?.item_title,
         rawNotificationText: item?.raw_notification_text,
         checkpoints: item?.checkpoints || [],
-        sandboxOverride: Boolean(item?.sandbox_override)
+        sandboxOverride: allowSandboxProviders
       })
     );
     await syncUserToSso(auth.cloudUserId);
@@ -1194,7 +1200,7 @@ export function createCampusCloudApp(options = {}) {
         providerId: params.providerId,
         accountAlias: body?.account_alias,
         secretPayload: body?.secret_payload,
-        sandboxOverride: Boolean(body?.sandbox_override)
+        sandboxOverride: allowSandboxProviders
       });
       return { status: 201, code: "PARCEL_SOURCE_AUTHORIZED", data: conn };
     }
@@ -1233,7 +1239,7 @@ export function createCampusCloudApp(options = {}) {
     const providerId = body?.provider_id || "parcel.campus-station";
     parcelHub.enforceProviderAuthority(providerId, {
       channel: body?.channel || "CLOUD_BACKGROUND_POLL",
-      sandboxOverride: Boolean(body?.sandbox_override)
+      sandboxOverride: allowSandboxProviders
     });
     const jobId = crypto.randomUUID();
     const job = {
@@ -1638,8 +1644,8 @@ export function createCampusCloudApp(options = {}) {
           const studentNo = String(bItem?.student_no || "").trim();
           if (!studentNo) continue;
           const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
-          let existingBinding = Array.from(store.schoolBindings.values()).find(
-            (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
+          let existingBinding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
+            (b) => b.school_id === schoolId && !b.revoked_at
           );
           if (!existingBinding) {
             const bindingId = crypto.randomUUID();
@@ -1656,6 +1662,7 @@ export function createCampusCloudApp(options = {}) {
               revoked_at: null
             };
             store.schoolBindings.set(bindingId, existingBinding);
+            store.indexUserScoped?.("schoolBindings", bindingId, existingBinding.cloud_user_id);
           } else {
             existingBinding.student_no = studentNo;
             existingBinding.student_no_masked = studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
@@ -1673,11 +1680,12 @@ export function createCampusCloudApp(options = {}) {
             existingBinding.credential_ref = encrypted.id;
             existingBinding.credential_expires_at = encrypted.expires_at;
           }
-          const hasActiveConsent = Array.from(store.consents.values()).some(
-            (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+          const hasActiveConsent = store.recordsForUser("consents", auth.cloudUserId).some(
+            (c) => !c.withdrawn_at
           );
           if (!hasActiveConsent) {
             const cid = crypto.randomUUID();
+            store.indexUserScoped?.("consents", cid, auth.cloudUserId);
             store.consents.set(cid, {
               id: cid,
               cloud_user_id: auth.cloudUserId,
@@ -1849,11 +1857,14 @@ export function createCampusCloudApp(options = {}) {
       if (!targetOrder) {
         throw new ContractError("NOT_FOUND", "Order not found");
       }
-      const rawApprover = typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
       const secondApproverRef =
-        rawApprover && rawApprover !== auth.cloudUserId
-          ? rawApprover
-          : `console_approver_${auth.cloudUserId}`;
+        typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
+      if (!secondApproverRef) {
+        throw new ContractError(
+          "BAD_REQUEST",
+          "second_approver_ref is required; dual-person approval cannot be synthesized"
+        );
+      }
       const order = await financeService.issueRefundForOrder(
         orderId,
         {
@@ -1953,8 +1964,8 @@ export function createCampusCloudApp(options = {}) {
       });
 
       const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
-      let binding = Array.from(store.schoolBindings.values()).find(
-        (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
+      let binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
+        (b) => b.school_id === schoolId && !b.revoked_at
       );
       if (!binding) {
         const bindingId = crypto.randomUUID();
@@ -1973,6 +1984,7 @@ export function createCampusCloudApp(options = {}) {
           revoked_at: null
         };
         store.schoolBindings.set(bindingId, binding);
+        store.indexUserScoped?.("schoolBindings", bindingId, binding.cloud_user_id);
       } else {
         binding.student_no = resolvedStudentNo;
         binding.student_no_masked = resolvedStudentNo.length >= 4 ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}` : "***";
@@ -2001,8 +2013,8 @@ export function createCampusCloudApp(options = {}) {
       binding.credential_ref = encrypted.id;
       binding.credential_expires_at = encrypted.expires_at;
 
-      let consent = Array.from(store.consents.values()).find(
-        (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
+      let consent = store.recordsForUser("consents", auth.cloudUserId).find(
+        (c) => !c.withdrawn_at
       );
       if (!consent) {
         const cid = crypto.randomUUID();
@@ -2016,6 +2028,7 @@ export function createCampusCloudApp(options = {}) {
           withdrawn_at: null
         };
         store.consents.set(cid, consent);
+        store.indexUserScoped?.("consents", cid, consent.cloud_user_id);
       }
 
       await syncUserToSso(auth.cloudUserId);
@@ -2045,8 +2058,8 @@ export function createCampusCloudApp(options = {}) {
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      const binding = Array.from(store.schoolBindings.values()).find(
-        (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+      const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
+        (b) => !b.revoked_at && b.credential_ref
       );
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
@@ -2087,8 +2100,8 @@ export function createCampusCloudApp(options = {}) {
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      const binding = Array.from(store.schoolBindings.values()).find(
-        (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at && b.credential_ref
+      const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
+        (b) => !b.revoked_at && b.credential_ref
       );
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
@@ -2536,7 +2549,8 @@ export function createCampusCloudApp(options = {}) {
     url = "/healthz",
     headers = {},
     body = undefined,
-    nowMs = Date.now()
+    nowMs = Date.now(),
+    remoteAddr = null
   }) {
     const requestId = generateRequestId(headers["x-request-id"] || headers["X-Request-Id"]);
     try {
@@ -2630,19 +2644,11 @@ export function createCampusCloudApp(options = {}) {
         };
         if (cookieAuth) {
           const wallet = await financeService.getWalletSnapshot(cookieAuth.cloudUserId);
-          const bindings = Array.from(store.schoolBindings.values()).filter(
-            (b) => b.cloud_user_id === cookieAuth.cloudUserId
-          );
-          const plans = Array.from(store.reservationPlans.values()).filter(
-            (p) => p.cloud_user_id === cookieAuth.cloudUserId
-          );
-          const jobs = Array.from(store.reservationJobs.values()).filter(
-            (j) => j.cloud_user_id === cookieAuth.cloudUserId
-          );
+          const bindings = store.recordsForUser("schoolBindings", cookieAuth.cloudUserId);
+          const plans = store.recordsForUser("reservationPlans", cookieAuth.cloudUserId);
+          const jobs = store.recordsForUser("reservationJobs", cookieAuth.cloudUserId);
           const parcels = parcelHub.listUserParcels(cookieAuth.cloudUserId);
-          const orders = Array.from(store.reservationOrders.values()).filter(
-            (o) => o.cloud_user_id === cookieAuth.cloudUserId
-          );
+          const orders = store.recordsForUser("reservationOrders", cookieAuth.cloudUserId);
           const isAdminUser =
             cookieAuth.roles.includes("ADMIN") ||
             cookieAuth.roles.includes("OPERATOR") ||
@@ -2787,7 +2793,11 @@ export function createCampusCloudApp(options = {}) {
         if (m) {
           matchedRoute = route;
           route.paramNames.forEach((name, idx) => {
-            params[name] = decodeURIComponent(m[idx + 1]);
+            try {
+              params[name] = decodeURIComponent(m[idx + 1]);
+            } catch {
+              throw new ContractError("BAD_REQUEST", "Malformed path parameter encoding");
+            }
           });
           break;
         }
@@ -2805,18 +2815,14 @@ export function createCampusCloudApp(options = {}) {
         matchedRoute.auth === "oidc_state_nonce"
       ) {
         const clientIp =
-          String(
-            headers?.["x-rate-limit-key"] ||
-              headers?.["x-real-ip"] ||
-              headers?.["x-forwarded-for"] ||
-              "anon_default"
-          )
-            .split(",")[0]
-            .trim() || "anon_default";
-        const maxReqs = Math.max(1, Number(headers?.["x-rate-limit-max"]) || 60);
+          (trustProxyHeaders
+            ? String(headers?.["x-forwarded-for"] || "").split(",")[0].trim()
+            : "") ||
+          remoteAddr ||
+          "anon_default";
         const rl = await redisBuffer.checkRateLimit(
           `${matchedRoute.operationId}:${clientIp}`,
-          maxReqs,
+          60,
           60,
           nowMs
         );
@@ -2942,7 +2948,8 @@ export function createCampusCloudApp(options = {}) {
         method: req.method,
         url: req.url,
         headers: req.headers,
-        body: parsedBody
+        body: parsedBody,
+        remoteAddr: req.socket?.remoteAddress || null
       });
       res.writeHead(response.status, {
         ...SECURITY_HEADERS,

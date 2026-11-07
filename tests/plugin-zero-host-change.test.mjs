@@ -38,7 +38,7 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
   assert.equal(verOut.ok, true);
 
   // 3. Install v1.0.0 into running CampusCloudApp without modifying any host files
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "plugin_tester",

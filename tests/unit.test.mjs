@@ -6,7 +6,7 @@ import { resolvePickupCode, PROVIDER_AUTHORITY_MATRIX } from "../packages/parcel
 import { listMigrations } from "../packages/db/src/index.mjs";
 
 test("Unit: OIDC BFF + PKCE S256 + Single-Use App Ticket + Refresh Family Rotation (AUTH-001..020)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_valid_verifier_12345";
   const challenge = computeS256Challenge(verifier);
 
@@ -84,7 +84,7 @@ test("Unit: OIDC BFF + PKCE S256 + Single-Use App Ticket + Refresh Family Rotati
 });
 
 test("Unit: KMS Envelope Encryption + CredentialAccessPermit + Key Rotation (SCH-001..015)", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const enc = app.kmsVault.encryptSecret({
     bindingId: "bind_01",
     schoolId: "haut",

@@ -5,7 +5,7 @@ import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { buildDebitEventKey } from "../packages/finance/src/index.mjs";
 
 test("Finance Saga (PAY-001..020): 100 concurrent debit calls for the same confirmed order deduct wallet exactly once", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "sso_concurrent_user_01",
@@ -49,7 +49,7 @@ test("Finance Saga (PAY-001..020): 100 concurrent debit calls for the same confi
 });
 
 test("Finance Saga: Post-confirmation insufficient balance sets PAYMENT_DUE without cancelling confirmed library seat", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const nowMs = Date.parse("2026-11-03T06:00:00+08:00");
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
@@ -123,7 +123,7 @@ test("Finance Saga: Post-confirmation insufficient balance sets PAYMENT_DUE with
 });
 
 test("Finance Saga: Refund requires dual-person approval and cannot exceed paid amount", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "sso_refund_user",
@@ -141,6 +141,13 @@ test("Finance Saga: Refund requires dual-person approval and cannot exceed paid 
     payment_state: "PAID",
     paid_at: new Date().toISOString(),
     created_at: new Date().toISOString()
+  });
+  const approver = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_refund_approver",
+    username: "admin_2",
+    role: "admin",
+    displayName: "Refund Approver"
   });
 
   // Self-approval must fail

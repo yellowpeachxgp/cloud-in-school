@@ -12,10 +12,20 @@ import { ContractError } from "../../contracts/src/index.mjs";
 export class KmsEnvelopeVault {
   constructor(options = {}) {
     this.activeKekId = options.activeKekId || process.env.KMS_KEY_ID || "cn-kms-campus-cloud-kek-v1";
+    const configuredKekMaterial =
+      options.initialKekMaterial || process.env.KMS_MASTER_SEED || "";
+    if (configuredKekMaterial.startsWith("secret://")) {
+      throw new Error(
+        "Unresolved secret reference for KMS_MASTER_SEED; provide raw secret material"
+      );
+    }
+    if (!configuredKekMaterial && process.env.NODE_ENV === "production") {
+      throw new Error(
+        "KMS_MASTER_SEED is required in production; refusing insecure built-in default"
+      );
+    }
     const initialKekMaterial =
-      options.initialKekMaterial ||
-      process.env.KMS_MASTER_SEED ||
-      "cn-campus-cloud-kms-seed-2026-argongate";
+      configuredKekMaterial || "cn-campus-cloud-kms-seed-2026-argongate";
     this.kekRing = new Map();
     this.kekRing.set(this.activeKekId, crypto.createHash("sha256").update(initialKekMaterial).digest());
     this.permitSecret = crypto

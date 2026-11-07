@@ -8,7 +8,7 @@ import {
 import { CONSOLE_VIEWS, renderConsoleHtml } from "../apps/console/src/main.mjs";
 
 test("Contract Parity: 100% bidirectional parity between registered HTTP routes, endpoint-inventory.yaml, and OpenAPI 3.1.2 spec", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   const registered = app.getRegisteredRoutes();
   const inventory = loadEndpointInventory();
   const openApiText = loadOpenApiText();
@@ -44,7 +44,7 @@ test("Contract Parity: Operations Console exposes all 12 mandatory views", () =>
 });
 
 test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /community route, and 1 🍑 pricing", async () => {
-  const app = createCampusCloudApp();
+  const app = createCampusCloudApp({ requireAdminAccess: false });
   assert.equal(app.store.pricingMicropeach, 10_000, "Default reservation price must be 10,000 micropeach (1 🍑)");
 
   const cssRes = await app.inject({ method: "GET", url: "/static/xpeach-sdk.css" });

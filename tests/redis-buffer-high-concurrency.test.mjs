@@ -283,7 +283,7 @@ test("Redis Gateway Buffer: Native RESP2 pipelining, config tuning audit, 500-wa
     const readyRes = await app.inject({ method: "GET", url: "/readyz" });
     assert.equal(readyRes.status, 200);
     assert.equal(readyRes.body.data.redis_buffer.connected, true);
-    assert.equal(readyRes.body.data.redis_buffer.server.maxmemory_policy, "allkeys-lru");
+    assert.equal(readyRes.body.data.redis_buffer.server, undefined);
 
     await redisBuffer.client.close();
   } finally {

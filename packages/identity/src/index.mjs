@@ -80,10 +80,26 @@ export class CloudIdentityService {
       options.publicBaseUrl ||
       process.env.PUBLIC_BASE_URL ||
       "https://campus.yellowpeachxgp.com";
+    const sessionKeyMaterial =
+      options.sessionSecret || process.env.CLOUD_SESSION_SIGNING_KEY_REF || "";
+    if (sessionKeyMaterial.startsWith("secret://")) {
+      throw new Error(
+        "Unresolved secret reference for CLOUD_SESSION_SIGNING_KEY_REF; provide raw secret material"
+      );
+    }
+    if (!sessionKeyMaterial && process.env.NODE_ENV === "production") {
+      throw new Error(
+        "CLOUD_SESSION_SIGNING_KEY_REF is required in production; refusing insecure built-in default"
+      );
+    }
     this.sessionSecret = crypto
       .createHash("sha256")
-      .update(options.sessionSecret || process.env.CLOUD_SESSION_SIGNING_KEY_REF || "cloud-session-key-v1")
+      .update(sessionKeyMaterial || "cloud-session-key-v1")
       .digest();
+    this.requireAdminAccess =
+      options.requireAdminAccess !== undefined
+        ? Boolean(options.requireAdminAccess)
+        : process.env.CLOUD_REQUIRE_ADMIN_ACCESS !== "false";
     this.ssoCodeExchanger = options.ssoCodeExchanger || null;
     this.httpTimeoutMs = Number(options.httpTimeoutMs) || 8_000;
     this.allowSyntheticTestCodes =
@@ -100,6 +116,7 @@ export class CloudIdentityService {
     const serverChallenge = computeS256Challenge(serverVerifier);
     const expiresAtMs = nowMs + 15 * 60 * 1000;
 
+    this.store.pruneAuthEphemera?.(nowMs);
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
       flowKind: "WEB_CONSOLE",
@@ -115,6 +132,7 @@ export class CloudIdentityService {
       expiresAtMs,
       status: "INITIATED"
     });
+    this.store.indexAuthTransaction?.(loginTxn, this.store.authTransactions.get(loginTxn));
     this.store.saveSnapshot?.();
 
     return {
@@ -140,6 +158,7 @@ export class CloudIdentityService {
     const serverChallenge = computeS256Challenge(serverVerifier);
     const expiresAtMs = nowMs + 15 * 60 * 1000;
 
+    this.store.pruneAuthEphemera?.(nowMs);
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
       installEphemeralId,
@@ -153,6 +172,7 @@ export class CloudIdentityService {
       expiresAtMs,
       status: "INITIATED"
     });
+    this.store.indexAuthTransaction?.(loginTxn, this.store.authTransactions.get(loginTxn));
     this.store.saveSnapshot?.();
 
     return {
@@ -178,7 +198,7 @@ export class CloudIdentityService {
       client_id: this.clientId,
       redirect_uri: this.redirectUri,
       response_type: "code",
-      scope: "openid profile email offline_access",
+      scope: "openid profile email offline_access tenant",
       state: txn.serverState,
       nonce: txn.serverNonce,
       code_challenge: txn.serverChallenge,
@@ -329,7 +349,8 @@ export class CloudIdentityService {
       deviceLabel || "Android Native OIDC Client",
       null,
       1,
-      nowMs
+      nowMs,
+      "MOBILE_APP"
     );
 
     return {
@@ -343,7 +364,8 @@ export class CloudIdentityService {
     if (!code || !state) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing OIDC code or state");
     }
-    const txn = Array.from(this.store.authTransactions.values()).find((t) => t.serverState === state);
+    const txnId = this.store._idxTxnByServerState?.get(state);
+    const txn = txnId ? this.store.authTransactions.get(txnId) : null;
     if (!txn) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid OIDC state parameter");
     }
@@ -387,6 +409,7 @@ export class CloudIdentityService {
         aud: this.clientId,
         sub: code.startsWith("sub:") ? code.slice(4) : `xpeach_user_${crypto.createHash("sha256").update(code).digest("hex").slice(0, 12)}`,
         nonce: txn.serverNonce,
+        exp: Math.floor((nowMs + 5 * 60 * 1000) / 1000),
         preferred_username: "campus_student"
       };
     } else {
@@ -407,6 +430,21 @@ export class CloudIdentityService {
     }
     if (!verifiedClaims.sub || typeof verifiedClaims.sub !== "string") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token missing subject");
+    }
+    if (verifiedClaims.tenant_slug) {
+      const expectedSlug = (() => {
+        try {
+          return new URL(this.expectedIssuer).pathname.split("/").filter(Boolean).pop();
+        } catch {
+          return null;
+        }
+      })();
+      if (expectedSlug && String(verifiedClaims.tenant_slug) !== expectedSlug) {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token tenant_slug mismatch");
+      }
+    }
+    if (!verifiedClaims.exp || verifiedClaims.exp * 1000 <= nowMs) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token expired");
     }
 
     const displayName =
@@ -455,14 +493,14 @@ export class CloudIdentityService {
       ssoRefreshToken: verifiedClaims.sso_refresh_token || null,
       peachWallet: verifiedClaims.peach_wallet || null,
       issuedAtMs: nowMs,
-      expiresAtMs: nowMs + 10 * 60 * 1000,
+      expiresAtMs: nowMs + 60 * 1000,
       consumedAtMs: null
     });
     this.store.saveSnapshot?.();
 
     let webSessionCookie = null;
     if (txn.flowKind === "WEB_CONSOLE") {
-      const webSess = this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs);
+      const webSess = this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs, "WEB_CONSOLE");
       webSessionCookie = this.signWebSessionCookie({
         cloudUserId: user.id,
         accessToken: webSess.access_token,
@@ -518,6 +556,12 @@ export class CloudIdentityService {
     if (idTokenParts.length !== 3) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Malformed ID Token from XPEACH SSO");
     }
+    const idTokenHeader = JSON.parse(Buffer.from(idTokenParts[0], "base64url").toString("utf8"));
+    await this.verifyIdTokenSignature(
+      `${idTokenParts[0]}.${idTokenParts[1]}`,
+      idTokenParts[2],
+      idTokenHeader
+    );
     const claims = JSON.parse(Buffer.from(idTokenParts[1], "base64url").toString("utf8"));
     if (expectedNonce && (!claims.nonce || claims.nonce !== expectedNonce)) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token nonce mismatch");
@@ -686,7 +730,7 @@ export class CloudIdentityService {
     if (user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
     }
-    return this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs);
+    return this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs, "WEB_CONSOLE");
   }
 
   exchangeMobileTicket({ loginTxn, appTicket, codeVerifier }, nowMs = Date.now()) {
@@ -737,10 +781,16 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
     }
 
-    return this.issueDeviceSession(user, txn.deviceLabel, null, 1, nowMs);
+    return this.issueDeviceSession(user, txn.deviceLabel, null, 1, nowMs, "MOBILE_APP");
   }
 
-  issueDeviceSession(user, deviceLabel, existingFamilyId = null, generation = 1, nowMs = Date.now()) {
+  issueDeviceSession(user, deviceLabel, existingFamilyId = null, generation = 1, nowMs = Date.now(), flow = "WEB_CONSOLE") {
+    // Admin gate applies only to the web-console (backend admin) flow. Mobile app /
+    // native client sessions are issued to any authenticated SSO user; admin
+    // endpoints are still protected by bearer_rbac role checks downstream.
+    if (this.requireAdminAccess && flow === "WEB_CONSOLE" && !this.store.hasAdminAccess?.(user?.id)) {
+      throw new ContractError("FORBIDDEN", "仅管理员账号可登录云平台后台");
+    }
     const familyId = existingFamilyId || crypto.randomUUID();
     const sessionId = crypto.randomUUID();
     const rtPayloadB64 = Buffer.from(
@@ -752,7 +802,7 @@ export class CloudIdentityService {
         fid: familyId,
         gen: generation,
         dl: deviceLabel || "Android Client",
-        exp: Math.floor((nowMs + 90 * 24 * 3600 * 1000) / 1000)
+        exp: Math.floor((nowMs + 30 * 24 * 3600 * 1000) / 1000)
       })
     ).toString("base64url");
     const rtSigB64 = crypto
@@ -769,12 +819,14 @@ export class CloudIdentityService {
       refresh_token_hash: refreshTokenHash,
       family_id: familyId,
       generation,
-      expires_at: new Date(nowMs + 90 * 24 * 3600 * 1000).toISOString(),
+      flow,
+      expires_at: new Date(nowMs + 30 * 24 * 3600 * 1000).toISOString(),
       revoked_at: null,
       consumed_at: null,
       created_at: new Date(nowMs).toISOString()
     };
     this.store.deviceSessions.set(sessionId, sessionRecord);
+    this.store.indexDeviceSession?.(sessionId, sessionRecord);
     if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
@@ -797,7 +849,7 @@ export class CloudIdentityService {
       cloud_user_id: user.id,
       access_token: accessToken,
       refresh_token: rawRefreshToken,
-      expires_in: 30 * 86400,
+      expires_in: 4 * 3600,
       family_id: familyId,
       sso_issuer: user.issuer,
       sso_subject: user.subject,
@@ -860,6 +912,79 @@ export class CloudIdentityService {
     }
   }
 
+  async fetchJwksKeys(forceRefresh = false) {
+    if (
+      !forceRefresh &&
+      this._jwksCache &&
+      Date.now() < this._jwksCache.expiresAtMs
+    ) {
+      return this._jwksCache.keys;
+    }
+    const issuerBase = this.expectedIssuer.replace(/\/+$/, "");
+    const discoResp = await fetch(`${issuerBase}/.well-known/openid-configuration`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(this.httpTimeoutMs)
+    });
+    if (!discoResp.ok) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "OIDC discovery document unavailable");
+    }
+    const disco = await discoResp.json();
+    const jwksUri = typeof disco.jwks_uri === "string" ? disco.jwks_uri : "";
+    if (!jwksUri.startsWith("https://")) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "OIDC discovery missing HTTPS jwks_uri");
+    }
+    const jwksResp = await fetch(jwksUri, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(this.httpTimeoutMs)
+    });
+    if (!jwksResp.ok) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "OIDC JWKS endpoint unavailable");
+    }
+    const jwks = await jwksResp.json();
+    const keys = Array.isArray(jwks.keys) ? jwks.keys : [];
+    this._jwksCache = { keys, expiresAtMs: Date.now() + 10 * 60 * 1000 };
+    return keys;
+  }
+
+  async verifyIdTokenSignature(signingInput, sigB64, header) {
+    if (!header || typeof header.kid !== "string" || !header.kid) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token missing key id (kid)");
+    }
+    if (header.alg !== "RS256" && header.alg !== "ES256") {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        `Unsupported ID Token signing algorithm: ${header.alg}`
+      );
+    }
+    let keys = await this.fetchJwksKeys();
+    let jwk = keys.find((k) => k.kid === header.kid);
+    if (!jwk) {
+      keys = await this.fetchJwksKeys(true);
+      jwk = keys.find((k) => k.kid === header.kid);
+    }
+    if (!jwk) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "No JWKS key matching ID Token kid");
+    }
+    const keyObj = crypto.createPublicKey({ key: jwk, format: "jwk" });
+    const ok =
+      header.alg === "RS256"
+        ? crypto.verify(
+            "RSA-SHA256",
+            Buffer.from(signingInput),
+            keyObj,
+            Buffer.from(sigB64, "base64url")
+          )
+        : crypto.verify(
+            "SHA256",
+            Buffer.from(signingInput),
+            { key: keyObj, dsaEncoding: "ieee-p1363" },
+            Buffer.from(sigB64, "base64url")
+          );
+    if (!ok) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "ID Token signature verification failed");
+    }
+  }
+
   signWebSessionCookie({ cloudUserId, accessToken, refreshToken }) {
     const payload = Buffer.from(
       JSON.stringify({
@@ -867,13 +992,15 @@ export class CloudIdentityService {
         at: accessToken,
         rt: refreshToken,
         exp: Math.floor(Date.now() / 1000) + 7 * 86400
-      })
-    ).toString("base64url");
-    const sig = crypto
-      .createHmac("sha256", this.sessionSecret)
-      .update(payload)
-      .digest("base64url");
-    return `${payload}.${sig}`;
+      }),
+      "utf8"
+    );
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", this.sessionSecret, iv);
+    cipher.setAAD(Buffer.from("dis-web-session|v2", "utf8"));
+    const ct = Buffer.concat([cipher.update(payload), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `v2.${iv.toString("base64url")}.${tag.toString("base64url")}.${ct.toString("base64url")}`;
   }
 
   verifyWebSessionCookie(cookieHeader, nowMs = Date.now()) {
@@ -881,22 +1008,16 @@ export class CloudIdentityService {
     const m = cookieHeader.match(/(?:^|;\s*)dis_web_session=([^;]+)/);
     if (!m) return null;
     const raw = decodeURIComponent(m[1].trim());
-    const dot = raw.indexOf(".");
-    if (dot <= 0) return null;
-    const payloadB64 = raw.slice(0, dot);
-    const sigB64 = raw.slice(dot + 1);
-    const expectedSig = crypto
-      .createHmac("sha256", this.sessionSecret)
-      .update(payloadB64)
-      .digest("base64url");
-    if (
-      sigB64.length !== expectedSig.length ||
-      !crypto.timingSafeEqual(Buffer.from(sigB64), Buffer.from(expectedSig))
-    ) {
-      return null;
-    }
     try {
-      const parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+      const segs = raw.split(".");
+      if (segs.length !== 4 || segs[0] !== "v2") return null;
+      const iv = Buffer.from(segs[1], "base64url");
+      const tag = Buffer.from(segs[2], "base64url");
+      const ct = Buffer.from(segs[3], "base64url");
+      const decipher = crypto.createDecipheriv("aes-256-gcm", this.sessionSecret, iv);
+      decipher.setAAD(Buffer.from("dis-web-session|v2", "utf8"));
+      decipher.setAuthTag(tag);
+      const parsed = JSON.parse(Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8"));
       if (parsed.exp && parsed.exp * 1000 <= nowMs) return null;
       let user = this.store.users.get(parsed.uid);
       let jwtPayload = null;
@@ -917,35 +1038,11 @@ export class CloudIdentityService {
           jwtPayload = null;
         }
       }
-      if (!user && jwtPayload && jwtPayload.sso_sub) {
-        user = {
-          id: parsed.uid,
-          issuer: jwtPayload.sso_iss || this.expectedIssuer,
-          subject: jwtPayload.sso_sub,
-          username: jwtPayload.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User",
-          display_name: jwtPayload.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User",
-          email: null,
-          email_verified: true,
-          group: jwtPayload.sso_sub === "856f-cf51-b064-5d84" ? "管理员分组" : "默认分组",
-          aff_code: null,
-          role: jwtPayload.sso_sub === "856f-cf51-b064-5d84" ? "admin" : "user",
-          sso_created_at: new Date(nowMs).toISOString(),
-          sso_last_login_at: new Date(nowMs).toISOString(),
-          sso_access_token: null,
-          sso_refresh_token: null,
-          peach_wallet: null,
-          status: "ACTIVE",
-          created_at: new Date(nowMs).toISOString()
-        };
-        this.store.users.set(user.id, user);
-        this.store._syncAdminRoleIfEligible?.(user);
-        this.store.saveSnapshot?.();
-      }
       if (!user || user.status !== "ACTIVE") return null;
+      if (this.requireAdminAccess && !this.store.hasAdminAccess?.(user.id)) return null;
       if (jwtPayload?.family_id) {
-        const famSessions = Array.from(this.store.deviceSessions.values()).filter(
-          (s) => s.family_id === jwtPayload.family_id
-        );
+        const famIds = this.store._idxSessionIdsByFamily?.get(jwtPayload.family_id);
+        const famSessions = famIds ? [...famIds].map((id) => this.store.deviceSessions.get(id)).filter(Boolean) : [];
         if (famSessions.length > 0 && famSessions.every((s) => s.revoked_at !== null)) {
           return null;
         }
@@ -980,66 +1077,9 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing refresh_token");
     }
     const hash = crypto.createHash("sha256").update(rawRefreshToken).digest("hex");
-    const session = Array.from(this.store.deviceSessions.values()).find(
-      (s) => s.refresh_token_hash === hash
-    );
+    const sessionIdForHash = this.store._idxSessionByRefreshHash?.get(hash);
+    const session = sessionIdForHash ? this.store.deviceSessions.get(sessionIdForHash) : null;
     if (!session) {
-      if (rawRefreshToken.startsWith("crs_") && rawRefreshToken.includes(".")) {
-        const body = rawRefreshToken.slice(4);
-        const dotIdx = body.indexOf(".");
-        const payloadB64 = body.slice(0, dotIdx);
-        const sigB64 = body.slice(dotIdx + 1);
-        const expectedSig = crypto
-          .createHmac("sha256", this.sessionSecret)
-          .update(payloadB64)
-          .digest("base64url");
-        if (
-          sigB64.length === expectedSig.length &&
-          crypto.timingSafeEqual(Buffer.from(sigB64), Buffer.from(expectedSig))
-        ) {
-          try {
-            const parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
-            if (!parsed.exp || parsed.exp * 1000 > nowMs) {
-              if (parsed.fid) {
-                const famSessions = Array.from(this.store.deviceSessions.values()).filter(
-                  (s) => s.family_id === parsed.fid
-                );
-                if (
-                  famSessions.some(
-                    (s) => s.revoked_at !== null || s.generation >= Number(parsed.gen || 1)
-                  )
-                ) {
-                  this.revokeSessionFamily(parsed.fid, "REFRESH_TOKEN_REPLAY", nowMs);
-                  throw new ContractError(
-                    "SESSION_REPLAY_DETECTED",
-                    "Refresh token replay detected; entire device session family has been revoked"
-                  );
-                }
-              }
-              let user = this.store.users.get(parsed.uid);
-              if (!user && parsed.sso_sub) {
-                user = this.store.findOrCreateCloudUser({
-                  issuer: parsed.sso_iss || this.expectedIssuer,
-                  subject: parsed.sso_sub,
-                  displayName: parsed.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User"
-                });
-              }
-              if (user && user.status === "ACTIVE") {
-                return this.issueDeviceSession(
-                  user,
-                  parsed.dl || "Android Client",
-                  parsed.fid || null,
-                  (Number(parsed.gen) || 1) + 1,
-                  nowMs
-                );
-              }
-            }
-          } catch (err) {
-            if (err instanceof ContractError) throw err;
-            // Fall through to Unknown refresh_token
-          }
-        }
-      }
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Unknown refresh_token");
     }
 
@@ -1066,13 +1106,16 @@ export class CloudIdentityService {
       session.device_label,
       session.family_id,
       session.generation + 1,
-      nowMs
+      nowMs,
+      session.flow || "MOBILE_APP"
     );
   }
 
   revokeSessionFamily(familyId, reason = "USER_LOGOUT", nowMs = Date.now()) {
     const ts = new Date(nowMs).toISOString();
-    for (const s of this.store.deviceSessions.values()) {
+    const ids = this.store._idxSessionIdsByFamily?.get(familyId);
+    const targets = ids ? [...ids].map((id) => this.store.deviceSessions.get(id)).filter(Boolean) : [...this.store.deviceSessions.values()];
+    for (const s of targets) {
       if (s.family_id === familyId && !s.revoked_at) {
         s.revoked_at = ts;
       }
@@ -1110,7 +1153,7 @@ export class CloudIdentityService {
         sso_sub: ssoSub,
         roles: roles || [],
         iat: Math.floor(nowMs / 1000),
-        exp: Math.floor(nowMs / 1000) + 30 * 86400
+        exp: Math.floor(nowMs / 1000) + 4 * 3600
       })
     ).toString("base64url");
     const sig = crypto
@@ -1152,43 +1195,29 @@ export class CloudIdentityService {
     if (payload.exp * 1000 <= nowMs) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Access token expired");
     }
-    let user = this.store.users.get(payload.sub);
-    if (!user && payload.sso_sub) {
-      user = {
-        id: payload.sub,
-        issuer: payload.sso_iss || this.expectedIssuer,
-        subject: payload.sso_sub,
-        username: payload.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User",
-        display_name: payload.sso_sub === "856f-cf51-b064-5d84" ? "yellowpeach" : "XPEACH User",
-        email: null,
-        email_verified: true,
-        group: payload.sso_sub === "856f-cf51-b064-5d84" ? "管理员分组" : "默认分组",
-        aff_code: null,
-        role: payload.sso_sub === "856f-cf51-b064-5d84" ? "admin" : "user",
-        sso_created_at: new Date(nowMs).toISOString(),
-        sso_last_login_at: new Date(nowMs).toISOString(),
-        sso_access_token: null,
-        sso_refresh_token: null,
-        peach_wallet: null,
-        status: "ACTIVE",
-        created_at: new Date(nowMs).toISOString()
-      };
-      this.store.users.set(user.id, user);
-      this.store._syncAdminRoleIfEligible?.(user);
-      this.store.saveSnapshot?.();
-    }
+    const user = this.store.users.get(payload.sub);
     if (!user || user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user is inactive or deleted");
     }
+    let specificSess = null;
     if (payload.sid) {
-      const specificSess = this.store.deviceSessions.get(payload.sid);
+      specificSess = this.store.deviceSessions.get(payload.sid);
       if (specificSess && specificSess.revoked_at !== null) {
         throw new ContractError("CLOUD_AUTH_REQUIRED", "Device session has been revoked");
       }
     }
-    const familySessions = Array.from(this.store.deviceSessions.values()).filter(
-      (s) => s.family_id === payload.family_id
-    );
+    // Console-flow sessions require current admin access; app-flow sessions
+    // (MOBILE_APP and any non-console) are allowed for any active user — admin
+    // endpoints remain gated by requireRole. Missing/unknown flow fails closed.
+    if (
+      this.requireAdminAccess &&
+      specificSess?.flow !== "MOBILE_APP" &&
+      !this.store.hasAdminAccess?.(user.id)
+    ) {
+      throw new ContractError("FORBIDDEN", "仅管理员账号可访问云平台后台");
+    }
+    const famIds = this.store._idxSessionIdsByFamily?.get(payload.family_id);
+    const familySessions = famIds ? [...famIds].map((id) => this.store.deviceSessions.get(id)).filter(Boolean) : [];
     if (familySessions.length > 0 && familySessions.every((s) => s.revoked_at !== null)) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Device session family has been revoked");
     }
