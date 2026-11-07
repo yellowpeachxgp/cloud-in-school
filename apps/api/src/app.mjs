@@ -2767,6 +2767,7 @@ export function createCampusCloudApp(options = {}) {
                 roles: store.getUserRoles(u.id)
               }));
               viewData.auditEvents = store.auditEvents.slice(-10).reverse();
+              viewData.schools = Array.from(store.schoolIntegrations.values());
               viewData.financeMatrix = getFinanceMatrixCached(nowMs);
             } else if (activeNav === "jobs") {
               viewData.allJobs = Array.from(store.reservationJobs.values()).map((j) => {
