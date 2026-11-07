@@ -320,8 +320,8 @@ export function createCampusCloudApp(options = {}) {
           area_name: p.area_name || "4楼北自习区",
           candidate_seats: p.candidate_seats || [],
           slot_window: p.slot_window || "08:00-22:00",
-          repeat_days: Number(p.repeat_days ?? j.repeat_days ?? 1),
-          remaining_days: Number(p.remaining_days ?? j.remaining_days ?? 1),
+          repeat_days: Math.max(Number(p.repeat_days || 1), Number(j.repeat_days || 1)),
+          remaining_days: Number(j.remaining_days ?? p.remaining_days ?? 1),
           end_local_date: p.end_local_date || j.end_local_date || j.booking_local_date,
           school_reservation: sr
         };
