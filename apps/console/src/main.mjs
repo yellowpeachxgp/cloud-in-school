@@ -11,30 +11,27 @@ import {
   xpeachStatusDot,
   xpeachBentoTile,
   xpeachEmptyState,
-  xpeachBulletinHeroCard,
   xpeachClubCard,
   xpeachChannelCard,
   xpeachCompetitionCard,
-  xpeachJobRowCard,
-  xpeachParcelRowCard,
   xpeachOrderRowCard,
   xpeachSchoolControlCard,
   xpeachAuditRowCard
 } from "./ui-sdk.mjs";
 
 export const CONSOLE_VIEWS = [
-  { id: "overview", title: "通行证总览", role: "USER" },
-  { id: "school-providers", title: "学校服务状态", role: "OPERATOR" },
-  { id: "reservation-plans", title: "图书馆座位预约", role: "USER" },
-  { id: "reservation-jobs", title: "预约执行记录", role: "USER" },
-  { id: "worker-leases", title: "节点状态", role: "OPERATOR" },
-  { id: "finance-reconcile", title: "🍑 消费账单", role: "FINANCE" },
-  { id: "refund-approvals", title: "账单退还处理", role: "FINANCE" },
-  { id: "parcel-hub", title: "我的快递与取件码", role: "USER" },
+  { id: "overview", title: "运维总览", role: "ADMIN" },
+  { id: "jobs", title: "预约任务管理", role: "OPERATOR" },
+  { id: "orders", title: "账单与退还", role: "FINANCE" },
+  { id: "audit", title: "审计事件检索", role: "ADMIN" },
+  { id: "schools", title: "学校服务管理", role: "OPERATOR" },
+  { id: "content", title: "校园内容云控", role: "OPERATOR" },
+  { id: "users", title: "接入用户管理", role: "SUPPORT" },
+  { id: "finance-reconcile", title: "🍑 财务对账", role: "FINANCE" },
+  { id: "refund-approvals", title: "账单退还审批", role: "FINANCE" },
   { id: "plugin-registry", title: "功能扩展中心", role: "OPERATOR" },
-  { id: "audit-log", title: "操作记录", role: "ADMIN" },
-  { id: "user-support", title: "账号与设备管理", role: "SUPPORT" },
-  { id: "privacy-erasure", title: "数据导出与注销", role: "USER" }
+  { id: "audit-log", title: "操作审计日志", role: "ADMIN" },
+  { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
 function renderHiddenContractViews() {
@@ -43,7 +40,7 @@ function renderHiddenContractViews() {
   ).join("")}</template>`;
 }
 
-function renderHead(title = "日在校园 · XPeach 云端通行证") {
+function renderHead(title = "日在校园 · 运维管理控制台") {
   return `<!doctype html>
 <html lang="zh-CN" data-ui-style="liquid-glass">
   <head>
@@ -128,8 +125,8 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
 </html>`;
 }
 
-function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
-  return `${renderHead("日在校园 · XPeach 云端通行证")}
+function renderUnauthenticatedLandingHtml() {
+  return `${renderHead("日在校园 · 运维管理控制台")}
   <body class="auth-body">
     ${renderHiddenContractViews()}
     <header class="auth-toolbar" aria-label="偏好设置">
@@ -161,34 +158,34 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
       </header>
       <main class="card auth-window xp-card">
         <div class="auth-header">
-          <div class="auth-eyebrow">XPeach 账号登录</div>
-          <h1 class="auth-title">日在校园</h1>
-          <p class="auth-subtitle" id="landing-subtitle">使用 XPeach 账号登录，管理图书馆座位预约、快递取件码与校园社团。</p>
+          <div class="auth-eyebrow">🍑 XPeach 管理员认证</div>
+          <h1 class="auth-title">日在校园 · 运维管理控制台</h1>
+          <p class="auth-subtitle" id="landing-subtitle">仅限 owner/admin 管理员登录。登录后可执行预约任务监控、账单对账退还、学校服务熔断与校园内容云控。</p>
         </div>
 
         <div class="stack gap-3">
           <a class="btn btn-primary btn-block btn-lg" id="sso-login-btn" href="/api/v1/auth/web/start">
-            使用 XPeach 账号登录
+            使用 XPeach 管理员账号登录
           </a>
           <a class="btn btn-secondary btn-block btn-lg" href="https://sso.xpeach.codes/portal">
             返回 XPeach 账户中心
           </a>
         </div>
 
-        <div class="auth-divider"><span>功能概览</span></div>
+        <div class="auth-divider"><span>运维能力概览</span></div>
 
         <div class="xp-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px;">
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">图书馆座位预约</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">按区域与座位号定时预约，成功扣 ${escapeHtml(pricePeachText)} 🍑，失败不扣费。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">预约任务调度监控</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">查看全站占座任务、三段式调度事件与失败诊断状态。</p>
           </div>
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">快递取件码</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">粘贴取件短信或从客户端同步，按驿站汇总取件码。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">账单对账与一键退还</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">全站 🍑 消费账单对账，支持幂等一键退还至用户钱包。</p>
           </div>
           <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">社团与竞赛</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">查看炽夜空动漫社、硬件技术联盟、计算机服务社及学科竞赛信息。</p>
+            <div class="xp-entity-title" style="font-size: 14px;">内容云控与安全审计</div>
+            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">社团、竞赛、频道与横幅公告实时下发，全程审计留痕。</p>
           </div>
         </div>
       </main>
@@ -249,72 +246,35 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
 </html>`;
 }
 
-function groupParcelsByStation(parcels) {
-  const map = new Map();
-  for (const p of parcels) {
-    const station = cleanDisplayText(p.station_name, "校内菜鸟驿站");
-    if (!map.has(station)) map.set(station, []);
-    map.get(station).push(p);
-  }
-  return Array.from(map.entries());
-}
-
 export function renderConsoleHtml(ctx = {}) {
   const pricingMicropeach = Number(ctx.pricingMicropeach ?? DEFAULT_RESERVATION_PRICE_MICROPEACH);
   const pricePeachText = formatPeachFromMicropeach(pricingMicropeach);
   const user = ctx.user || null;
   if (!user) {
-    return renderUnauthenticatedLandingHtml(pricePeachText);
+    return renderUnauthenticatedLandingHtml();
   }
 
-  const wallet = ctx.wallet || {};
-  const peachBalanceFormatted =
-    wallet.peach_balance_formatted ||
-    user.peach_wallet?.peachBalanceFormatted ||
-    Number(wallet.peach_balance ?? user.peach_wallet?.peachBalance ?? 0).toFixed(2);
-  const peachUsedFormatted =
-    wallet.peach_used_formatted ||
-    user.peach_wallet?.peachUsedFormatted ||
-    Number(wallet.peach_used ?? user.peach_wallet?.peachUsed ?? 0).toFixed(2);
-  const userGroup = wallet.group || user.group || user.peach_wallet?.group || "默认分组";
-  const userAffCode = wallet.aff_code || user.aff_code || user.peach_wallet?.affCode || "-";
-  const username = user.username || user.display_name || "XPeach 用户";
-  const userEmail = user.email || `${username}@users.xpeach.codes`;
-  const userInitial = String(username).trim().slice(0, 1).toUpperCase() || "U";
-  const roles = Array.isArray(ctx.roles) ? ctx.roles : ["USER"];
+  const username = user.username || user.display_name || "站点管理员";
+  const userInitial = String(username).trim().slice(0, 1).toUpperCase() || "A";
+  const roles = Array.isArray(ctx.roles) ? ctx.roles : [];
   const isAdmin =
     roles.includes("ADMIN") ||
     roles.includes("OPERATOR") ||
     roles.includes("FINANCE") ||
-    user.role === "admin";
-  const activeNav = ctx.activeNav || "portal";
+    roles.includes("SUPPORT") ||
+    roles.includes("PLATFORM_OWNER") ||
+    user.role === "admin" ||
+    user.role === "owner";
+  const activeNav = ctx.activeNav || "console";
 
-  const bindings = Array.isArray(ctx.bindings) ? ctx.bindings.filter((b) => !b.revoked_at) : [];
-  const activeStudentNo = bindings[0]?.student_no || bindings[0]?.student_no_masked || "";
-  const plans = Array.isArray(ctx.plans) ? ctx.plans : [];
-  const jobs = Array.isArray(ctx.jobs) ? ctx.jobs : [];
-  const parcels = (Array.isArray(ctx.parcels) ? ctx.parcels : []).map((p) => {
-    const cleanCode = cleanDisplayText(p?.pickup_code, "");
-    const cleanStation = cleanDisplayText(p?.station_name, "");
-    const cleanTitle = cleanDisplayText(p?.item_title, "");
-    const cleanCarrier =
-      cleanDisplayText(p?.carrier_name, "") ||
-      cleanDisplayText(p?.carrier_code, "") ||
-      "校园快递";
-    return {
-      ...p,
-      pickup_code: cleanCode || null,
-      station_name: cleanStation || null,
-      item_title: cleanTitle || null,
-      carrier_name: cleanCarrier
-    };
-  });
-  const orders = Array.isArray(ctx.orders) ? ctx.orders : [];
-  const activePlans = plans.filter((p) => p.enabled !== false);
-  const readyParcels = parcels.filter(
-    (p) => p.status !== "PICKED_UP" && (p.status === "READY_FOR_PICKUP" || Boolean(p.pickup_code))
-  );
-  const stationGroups = groupParcelsByStation(readyParcels);
+  const adminStats = ctx.adminStats && typeof ctx.adminStats === "object" ? ctx.adminStats : {};
+  const allJobs = Array.isArray(ctx.allJobs) ? ctx.allJobs : [];
+  const allEvents = Array.isArray(ctx.allEvents) ? ctx.allEvents : null;
+  const allOrders = Array.isArray(ctx.allOrders) ? ctx.allOrders : [];
+  const allUsers = Array.isArray(ctx.allUsers) ? ctx.allUsers : [];
+  const schools = Array.isArray(ctx.schools) ? ctx.schools : [];
+  const auditEvents = Array.isArray(ctx.auditEvents) ? ctx.auditEvents : [];
+  const financeMatrix = ctx.financeMatrix && typeof ctx.financeMatrix === "object" ? ctx.financeMatrix : null;
 
   const campusContent = ctx.campusContent || {
     version: 2,
@@ -336,709 +296,218 @@ export function renderConsoleHtml(ctx = {}) {
   const accessToken = ctx.accessToken || "";
 
   const pageHeaderConfig = {
-    portal: {
-      title: "概览",
-      subtitle: "查看账户余额、待取快递与图书馆预约状态。"
+    console: {
+      title: "运维总览",
+      subtitle: "站点运行指标、学校服务状态、接入用户与最近审计事件。"
     },
-    reservations: {
-      title: "图书馆座位预约",
-      subtitle: `选择自习区域与备选座位，到点自动提交预约；成功扣 ${pricePeachText} 🍑，失败不扣费。`
-    },
-    parcels: {
-      title: "快递与取件码",
-      subtitle: "按驿站分组展示取件码，支持短信识别与客户端同步。"
-    },
-    community: {
-      title: "社团与竞赛",
-      subtitle: "河南工业大学合作社团、学科竞赛与校园频道。"
+    jobs: {
+      title: "预约任务管理",
+      subtitle: "全站图书馆占座任务与三段式调度事件监控。"
     },
     orders: {
-      title: "消费与退还明细",
-      subtitle: "查看座位预约扣费与退还记录。"
+      title: "账单与退还",
+      subtitle: "全站 🍑 消费账单对账与一键退还。"
     },
-    console: {
-      title: "站点管理",
-      subtitle: "管理社团与竞赛内容、图书馆服务状态及消费账单。"
+    audit: {
+      title: "审计日志",
+      subtitle: "安全与操作审计事件检索，敏感字段已在服务端脱敏。"
+    },
+    schools: {
+      title: "学校服务管理",
+      subtitle: "图书馆服务熔断开关与运维授权审批。"
+    },
+    content: {
+      title: "校园内容云控",
+      subtitle: "社团、竞赛、频道与社区横幅公告的云端下发管理。"
     }
   }[activeNav] || {
-    title: "概览",
-    subtitle: "查看账户余额、待取快递与图书馆预约状态。"
+    title: "运维总览",
+    subtitle: "站点运行指标、学校服务状态、接入用户与最近审计事件。"
   };
 
-  function renderIdentityPassSection() {
+  function jobStateBadge(state) {
+    if (state === "CONFIRMED") return xpeachBadge("已成功", "success");
+    if (state === "FAILED") return xpeachBadge("执行失败", "danger");
+    if (state === "CANCELLED") return xpeachBadge("已取消", "neutral");
+    if (state === "EXPIRED") return xpeachBadge("已过期", "warning");
+    if (state === "FINAL_CHECK_OK") return xpeachBadge("终检通过", "primary");
+    if (state === "PRECHECK_OK") return xpeachBadge("预检通过", "primary");
+    return xpeachBadge(state || "ARMED", "primary");
+  }
+
+  function renderAdminJobRow(job) {
+    const j = job || {};
+    const state = cleanDisplayText(j.state, "ARMED");
+    const ownerLabel = cleanDisplayText(j.username || j.cloud_user_id, "-");
+    const planLabel = cleanDisplayText(j.plan_label || j.plan_id, "-");
+    const repDays = Number(j.repeat_days || 1);
+    const createdText = cleanDisplayText((j.created_at || "").replace("T", " ").slice(0, 19), "-");
+    const searchText =
+      `${j.id || ""} ${ownerLabel} ${j.cloud_user_id || ""} ${planLabel} ${j.school_id || ""} ${state} ${j.booking_local_date || ""}`.toLowerCase();
     return `
-      <section class="xp-card identity-pass-card" style="margin-bottom: 16px;">
-        <div class="identity-pass-grid">
-          <div class="identity-pass-main">
-            <div class="user-avatar" style="width: 56px; height: 56px; font-size: 22px;">
-              ${escapeHtml(userInitial)}
+      <article class="xp-row-card" data-job-row data-job-state="${escapeHtml(state)}" data-job-search="${escapeHtml(searchText)}">
+        <div class="xp-row-card-main">
+          <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">💺</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow">
+              <span class="xp-row-card-title">${escapeHtml(ownerLabel)}</span>
+              <code class="xp-code-pill">${escapeHtml(planLabel)}</code>
+              ${repDays > 1 ? xpeachBadge(`连续 ${repDays} 天`, "primary") : ""}
+              ${jobStateBadge(state)}
             </div>
-            <div class="xp-entity-title-col">
-              <h2 class="xp-entity-title" style="font-size: 18px;">${escapeHtml(username)}</h2>
-              <div class="xp-badge-flow">
-                ${xpeachBadge(userGroup, "primary")}
-                ${xpeachBadge("XPeach 已连接", "success")}
-                ${activeStudentNo ? xpeachBadge(`学号 ${activeStudentNo}`, "peach") : ""}
-              </div>
-              <div class="text-xs text-muted">
-                通行证 ID: <code>${escapeHtml(user.subject)}</code>
-                · 邮箱: <span>${escapeHtml(userEmail)}</span>
-                · 邀请码: <code>${escapeHtml(userAffCode)}</code>
-              </div>
-            </div>
-          </div>
-          <div class="identity-wallet-box">
-            <div class="identity-wallet-label">账户余额</div>
-            <div class="identity-wallet-value" id="wallet-balance-text">🍑 ${escapeHtml(peachBalanceFormatted)}</div>
-            <div class="identity-wallet-sub" id="wallet-used-text">
-              已用 🍑 ${escapeHtml(peachUsedFormatted)} · 预约成功扣 ${escapeHtml(pricePeachText)} 🍑
+            <div class="xp-row-card-meta">
+              <span>预约日期：<strong>${escapeHtml(j.booking_local_date || "-")}</strong></span>
+              <span>执行时间：<code>${escapeHtml(j.target_local_time || "-")}</code></span>
+              <span>代次：${escapeHtml(String(j.generation ?? 1))}</span>
+              <span>任务：<code>${escapeHtml(String(j.id || "-").slice(0, 12))}</code></span>
+              <span>创建：${escapeHtml(createdText)}</span>
+              ${j.last_error_code ? `<span>错误：<code>${escapeHtml(j.last_error_code)}</code></span>` : ""}
             </div>
           </div>
         </div>
-      </section>
-
-      <section class="xp-bento-grid" aria-label="通行证核心指标">
-        ${xpeachBentoTile({
-          label: "账户余额",
-          value: `🍑 ${peachBalanceFormatted}`,
-          hint: `已用 🍑 ${peachUsedFormatted}`,
-          badge: xpeachBadge("XPeach", "primary"),
-          valueId: "stat-peach-balance"
-        })}
-        ${xpeachBentoTile({
-          label: "校园学号",
-          value: bindings.length > 0 ? "已绑定" : "未绑定",
-          hint: activeStudentNo ? `学号：${activeStudentNo}` : "前往预约页面绑定",
-          badge: xpeachBadge(bindings.length > 0 ? "已就绪" : "待绑定", bindings.length > 0 ? "success" : "warning"),
-          valueId: "stat-bindings-count"
-        })}
-        ${xpeachBentoTile({
-          label: "有效预约",
-          value: String(activePlans.length),
-          hint: `成功每次扣 ${pricePeachText} 🍑`,
-          badge: xpeachBadge(`${pricePeachText} 🍑/次`, "peach"),
-          valueId: "stat-plans-count"
-        })}
-        ${xpeachBentoTile({
-          label: "待取快递",
-          value: String(readyParcels.length),
-          hint: `共 ${parcels.length} 件记录`,
-          badge: xpeachBadge(readyParcels.length > 0 ? "待取件" : "已清空", readyParcels.length > 0 ? "peach" : "neutral"),
-          valueId: "stat-parcels-count"
-        })}
-      </section>`;
+      </article>`;
   }
 
-  function renderPortalView() {
-    const activeJobs = jobs.filter((j) => !["CANCELLED", "FAILED", "EXPIRED"].includes(j.state));
+  function renderScheduleEventRow(ev) {
+    const e = ev || {};
+    const kindLabel =
+      { PRECHECK: "预检 (T-30m)", FINAL_CHECK: "终检 (T-5m)", FIRE: "点火执行 (T)" }[e.kind] ||
+      cleanDisplayText(e.kind, "EVENT");
+    const status = cleanDisplayText(e.status, "ARMED");
+    const statusTone = /FAIL|ERROR/i.test(status)
+      ? "danger"
+      : status === "DONE" || status === "FIRED" || status === "COMPLETED"
+        ? "success"
+        : "primary";
+    const dueText = cleanDisplayText((e.due_at || "").replace("T", " ").slice(0, 19), "-");
+    const actualText = e.actual_at
+      ? cleanDisplayText(String(e.actual_at).replace("T", " ").slice(0, 19), "-")
+      : "未触发";
     return `
-      ${renderIdentityPassSection()}
-
-      <div class="xp-split-grid" style="margin-bottom: 18px;">
-        <!-- 待取快递动态提醒卡 -->
-        <section class="xp-card">
-          <div class="xp-entity-header" style="margin-bottom: 14px;">
-            <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">📦</div>
-            <div class="xp-entity-title-col">
-              <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">待取快递</h2>
-                <a class="xp-pill xp-pill--compact" href="/parcels">管理快递 →</a>
-              </div>
-              <p class="xp-entity-summary" style="margin-top: 2px;">${
-                readyParcels.length > 0
-                  ? `${readyParcels.length} 件包裹待取`
-                  : "当前无待取快递"
-              }</p>
+      <article class="xp-row-card" data-event-row>
+        <div class="xp-row-card-main">
+          <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">⏱️</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow">
+              <span class="xp-row-card-title">${escapeHtml(kindLabel)}</span>
+              ${xpeachBadge(status, statusTone)}
+              ${xpeachBadge(`代次 ${e.generation ?? 1}`, "neutral")}
+            </div>
+            <div class="xp-row-card-meta">
+              <span>任务：<code>${escapeHtml(String(e.job_id || "-").slice(0, 12))}</code></span>
+              <span>计划时间：<code>${escapeHtml(dueText)}</code></span>
+              <span>实际执行：${escapeHtml(actualText)}</span>
+              ${e.diagnostic_code ? `<span>诊断：<code>${escapeHtml(e.diagnostic_code)}</code></span>` : ""}
             </div>
           </div>
-          ${
-            stationGroups.length === 0
-              ? xpeachEmptyState({
-                  icon: "📦",
-                  title: "暂无待取包裹",
-                  subtitle: "可粘贴取件短信识别，或在客户端同步包裹记录。",
-                  actionLabel: "录入取件码",
-                  actionHref: "/parcels"
-                })
-              : `<div class="stack gap-3">
-                  ${stationGroups
-                    .map(
-                      ([station, list]) => `
-                    <div class="pickup-station-group">
-                      <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 10px;">
-                        <span class="text-sm font-semibold">${escapeHtml(station)}</span>
-                        ${xpeachBadge(`${list.length} 件待取`, "primary")}
-                      </div>
-                      <div class="stack gap-2">
-                        ${list
-                          .slice(0, 3)
-                          .map(
-                            (p) => `
-                          <div class="pickup-code-card">
-                            <div>
-                              <div class="pickup-code-number">${escapeHtml(p.pickup_code || "待出码")}</div>
-                              <div class="text-xs text-muted">${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")} · ${escapeHtml(p.item_title || p.tracking_number)}</div>
-                            </div>
-                            <button type="button" class="xp-pill xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">已取件</button>
-                          </div>`
-                          )
-                          .join("")}
-                      </div>
-                    </div>`
-                    )
-                    .join("")}
-                </div>`
-          }
-        </section>
+        </div>
+      </article>`;
+  }
 
-        <!-- 今日图书馆占座与预约状态卡 -->
-        <section class="xp-card">
-          <div class="xp-entity-header" style="margin-bottom: 14px;">
-            <div class="xp-icon-box" aria-hidden="true">💺</div>
-            <div class="xp-entity-title-col">
-              <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">图书馆预约</h2>
-                <a class="xp-pill xp-pill--active xp-pill--compact" href="/reservations">新建预约 →</a>
-              </div>
-              <p class="xp-entity-summary" style="margin-top: 2px;">${
-                activeJobs.length > 0
-                  ? `${activeJobs.length} 项进行中预约`
-                  : "当前无进行中的座位预约"
-              }</p>
+  function renderAdminUserRow(usr) {
+    const u = usr || {};
+    const displayName = cleanDisplayText(u.display_name || u.username, "未命名用户");
+    const userRoles = Array.isArray(u.roles) ? u.roles.filter(Boolean) : [];
+    const statusText = cleanDisplayText(u.status, "ACTIVE").toUpperCase();
+    const statusTone =
+      statusText === "ACTIVE" ? "success" : statusText === "DISABLED" || statusText === "SUSPENDED" ? "danger" : "neutral";
+    return `
+      <article class="xp-row-card" data-user-row>
+        <div class="xp-row-card-main">
+          <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">👤</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow">
+              <span class="xp-row-card-title">${escapeHtml(displayName)}</span>
+              ${xpeachBadge(`@${cleanDisplayText(u.username, "-")}`, "primary")}
+              ${xpeachBadge(statusText, statusTone)}
+              ${userRoles.slice(0, 4).map((r) => xpeachBadge(r, "peach")).join("")}
+            </div>
+            <div class="xp-row-card-meta">
+              <span>主体：<code>${escapeHtml(u.subject || "-")}</code></span>
+              <span>角色：<code>${escapeHtml(u.role || "user")}</code></span>
+              <span>ID：<code>${escapeHtml(String(u.id || "-").slice(0, 12))}</code></span>
             </div>
           </div>
-          ${
-            activeJobs.length === 0
-              ? xpeachEmptyState({
-                  icon: "📚",
-                  title: "暂无预约计划",
-                  subtitle: "选择楼层区域与备选座位，到点自动提交预约。",
-                  actionLabel: "新建预约",
-                  actionHref: "/reservations"
-                })
-              : `<div class="stack gap-2">
-                  ${activeJobs
-                    .slice(0, 4)
-                    .map((j) => {
-                      const p = plans.find((x) => x.id === j.plan_id) || {};
-                      const seats = Array.isArray(p.candidate_seats) ? p.candidate_seats.join(" / ") : "4N-001";
-                      const repDays = Number(p.repeat_days || j.repeat_days || 1);
-                      const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
-                      return `<div class="pickup-code-card">
-                        <div style="flex:1;min-width:0;">
-                          <div class="text-sm font-semibold">${escapeHtml(p.area_name || "4楼北自习区")} · <code>${escapeHtml(seats)}</code></div>
-                          <div class="text-xs text-muted">日期：${escapeHtml(j.booking_local_date || p.target_local_date || "-")} · 时段：${escapeHtml(p.slot_window || "08:00-22:00")}</div>
-                        </div>
-                        <div class="xp-badge-flow">
-                          ${repDays > 1 ? xpeachBadge(`连续 ${repDays} 天 (剩 ${remDays} 天)`, "primary") : ""}
-                          ${j.state === "CONFIRMED" ? xpeachBadge("已成功", "success") : xpeachBadge("待执行", "primary")}
-                          ${
-                            j.state !== "CONFIRMED"
-                              ? `<button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}">取消</button>`
-                              : ""
-                          }
-                        </div>
-                      </div>`;
-                    })
-                    .join("")}
-                </div>`
-          }
-        </section>
-      </div>
+        </div>
+      </article>`;
+  }
 
-      <!-- 合作社团预览 -->
+  function renderAdminAuditRow(ev) {
+    const e = ev || {};
+    const timeText = cleanDisplayText((e.created_at || "").replace("T", " ").slice(0, 19), "-");
+    const outcome = cleanDisplayText(e.outcome, "SUCCESS");
+    const outcomeTone =
+      outcome === "DENY" || outcome === "ERROR" || outcome === "FAILED"
+        ? "danger"
+        : outcome === "SUCCESS" || outcome === "ALLOW"
+          ? "success"
+          : "warning";
+    const searchText =
+      `${e.actor_kind || ""} ${e.actor_ref || ""} ${e.action || ""} ${e.resource_kind || ""} ${e.resource_ref || ""} ${outcome}`.toLowerCase();
+    return `
+      <article class="xp-row-card" data-audit-row data-audit-search="${escapeHtml(searchText)}">
+        <div class="xp-row-card-main">
+          <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">🛡️</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow">
+              <span class="xp-row-card-title">${escapeHtml(e.action || "AUDIT_EVENT")}</span>
+              ${xpeachBadge(outcome, outcomeTone)}
+              ${xpeachBadge(e.actor_kind || "SYSTEM", "neutral")}
+            </div>
+            <div class="xp-row-card-meta">
+              <span>👤 操作者：<code>${escapeHtml(e.actor_ref || "-")}</code></span>
+              <span>🎯 资源：<code>${escapeHtml(e.resource_kind || "resource")}:${escapeHtml(String(e.resource_ref || "-").slice(0, 24))}</code></span>
+              <span>🕒 ${escapeHtml(timeText)}</span>
+              ${e.detail ? `<span>详情：<code>${escapeHtml(JSON.stringify(e.detail)).slice(0, 80)}</code></span>` : ""}
+            </div>
+          </div>
+        </div>
+      </article>`;
+  }
+
+  function renderFinanceMatrixCard() {
+    if (!financeMatrix) return "";
+    const matrixData =
+      financeMatrix.data && typeof financeMatrix.data === "object" ? financeMatrix.data : financeMatrix;
+    const scalarEntries = Object.entries(matrixData)
+      .filter(([, v]) => ["string", "number", "boolean"].includes(typeof v))
+      .slice(0, 10);
+    const jsonText = JSON.stringify(financeMatrix, null, 2) || "{}";
+    return `
       <section class="xp-card" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
-          <div class="xp-icon-box" aria-hidden="true">🤝</div>
+          <div class="xp-icon-box xp-icon-box--success" aria-hidden="true">💹</div>
           <div class="xp-entity-title-col">
             <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">合作社团</h2>
-              <a class="xp-pill xp-pill--compact" href="/community">查看全部 (${ccClubs.length}) →</a>
+              <h2 class="xp-entity-title">XPeach 财务大盘对账矩阵</h2>
+              ${xpeachBadge("跨站实时同步", "success")}
             </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">校内合作社团与招新交流群。</p>
+            <p class="xp-entity-summary" style="margin-top: 2px;">来自 XPeach 主站财务矩阵接口的站点级 🍑 结算汇总。</p>
           </div>
         </div>
-        <div class="xp-card-grid">
-          ${ccClubs.map((club) => xpeachClubCard(club, { isAdmin: false })).join("")}
-        </div>
-      </section>
-
-      <!-- 学科竞赛目录预览 -->
-      <section class="xp-card">
-        <div class="xp-entity-header" style="margin-bottom: 14px;">
-          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
-          <div class="xp-entity-title-col">
-            <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">学科竞赛目录</h2>
-              <a class="xp-pill xp-pill--active xp-pill--compact" href="/community#section-community-competitions">查看全部 (${ccCompetitions.length}) →</a>
-            </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">按专业方向筛选常见高校学科竞赛与报名信息。</p>
-          </div>
-        </div>
-        <div class="xp-card-grid">
-          ${ccCompetitions.slice(0, 4).map((comp) => xpeachCompetitionCard(comp, { isAdmin: false })).join("")}
-        </div>
-      </section>`;
-  }
-
-  function renderCommunityView() {
-    return `
-      <div class="stack gap-4">
         ${
-          ccBulletin.enabled !== false && ccBulletin.title
-            ? xpeachBulletinHeroCard({
-                title: ccBulletin.title,
-                content: ccBulletin.content,
-                tag: ccBulletin.tag || "公告",
-                version: campusContent.version || 3,
-                clubsCount: ccClubs.length,
-                competitionsCount: ccCompetitions.length
-              })
-            : ""
-        }
-
-        <section class="xp-card">
-          <div class="xp-entity-header" style="margin-bottom: 12px;">
-            <div class="xp-icon-box" aria-hidden="true">🤝</div>
-            <div class="xp-entity-title-col">
-              <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">合作社团 (${ccClubs.length})</h2>
-                ${xpeachStatusDot("支持复制群号或唤起 QQ", "success")}
-              </div>
-            </div>
-          </div>
-          <div class="xp-search-bar" style="margin-bottom: 12px;">
-            <input class="input xp-search-input" id="community-club-search" type="search" placeholder="搜索社团、场地或 QQ 群号…" />
-            <div class="xp-pill-bar" id="community-category-pills">
-              <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-club-filter="ALL">全部 (${ccClubs.length})</button>
-              <button type="button" class="xp-pill xp-pill--compact" data-club-filter="TECH_INNOVATION">科技创新</button>
-              <button type="button" class="xp-pill xp-pill--compact" data-club-filter="ART_PERFORMANCE">文艺展演</button>
-            </div>
-          </div>
-
-          <div class="xp-card-grid" id="community-clubs-grid">
-            ${
-              ccClubs.length === 0
-                ? xpeachEmptyState({
-                    icon: "🤝",
-                    title: "暂无合作社团",
-                    subtitle: "管理员可在后台添加合作社团信息。"
-                  })
-                : ccClubs.map((club) => xpeachClubCard(club, { isAdmin: false })).join("")
-            }
-          </div>
-        </section>
-
-        <section class="xp-card" id="section-community-competitions">
-          <div class="xp-entity-header" style="margin-bottom: 12px;">
-            <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🏆</div>
-            <div class="xp-entity-title-col">
-              <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">学科竞赛目录 (${ccCompetitions.length})</h2>
-                ${xpeachBadge("高校常见赛事", "peach")}
-              </div>
-              <p class="xp-entity-summary" style="margin-top: 2px;">按专业方向或类别筛选赛事，查看报名时间、备赛要点与官网链接。</p>
-            </div>
-          </div>
-
-          <div class="xp-well" style="margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px;">
-            <input class="input" id="community-comp-search" type="search" placeholder="搜索竞赛、主办单位、专业或社团…" />
-            <div>
-              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">适用专业</div>
-              <div class="xp-pill-bar" id="community-comp-major-pills">
-                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-major="ALL">全部专业 (${ccCompetitions.length})</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="CS_AI_SOFTWARE">计算机/软件/AI</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="EE_AUTOMATION_IOT">电气/自动化/物联</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="MECH_VEHICLE_ROBO">机械/机电/机器人</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="FOOD_BIO_CHEM_MAT">粮油/食品/化工</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="ECON_MGMT_FINANCE">经管/金融/电商</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="DESIGN_MEDIA_FOREIGN">艺术/新传/外语</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-major="MATH_PHYSICS_CIVIL">数理/土木/建筑</button>
-              </div>
-            </div>
-            <div>
-              <div class="text-xs text-muted" style="margin-bottom: 6px; font-weight: 600;">赛事类别</div>
-              <div class="xp-pill-bar" id="community-comp-cat-pills">
-                <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-comp-cat="ALL">全部类别</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-beginner-toggle="true">入门友好</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ALGO_PROGRAMMING">算法编程</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="ELECTRONICS_ROBO">硬件机器人</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="MATH_MODELING">数学建模</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="INNOVATION_ENTREPRENEURSHIP">创新创业</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="CYBER_SECURITY_AI">网安与AI</button>
-                <button type="button" class="xp-pill xp-pill--compact" data-comp-cat="DIGITAL_MEDIA_ART">数媒与综合</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="xp-card-grid" id="community-competitions-grid">
-            ${
-              ccCompetitions.length === 0
-                ? xpeachEmptyState({
-                    icon: "🏆",
-                    title: "暂无竞赛指南配置",
-                    subtitle: "管理员可在站点后台动态下发学科竞赛与官网名录。"
-                  })
-                : ccCompetitions.map((comp) => xpeachCompetitionCard(comp, { isAdmin: false })).join("")
-            }
-          </div>
-        </section>
-
-        <section class="xp-card">
-          <div class="xp-entity-header" style="margin-bottom: 12px;">
-            <div class="xp-icon-box" aria-hidden="true">💬</div>
-            <div class="xp-entity-title-col">
-              <div class="xp-badge-flow" style="justify-content: space-between;">
-                <h2 class="xp-entity-title">校园频道</h2>
-                ${xpeachBadge(ccChannels.length > 0 ? `${ccChannels.length} 个频道` : "暂时置空", ccChannels.length > 0 ? "primary" : "neutral")}
-              </div>
-              <p class="xp-entity-summary" style="margin-top: 2px;">校园互助与专题频道由云端统一管控下发。</p>
-            </div>
-          </div>
-          ${
-            ccChannels.length === 0
-              ? xpeachEmptyState({
-                  icon: "💬",
-                  title: "暂无校园频道",
-                  subtitle: "当前仅展示合作社团与交流群，频道列表暂未开放。"
-                })
-              : `<div class="xp-card-grid">${ccChannels.map((ch) => xpeachChannelCard(ch, { isAdmin: false })).join("")}</div>`
-          }
-        </section>
-      </div>`;
-  }
-
-  function renderReservationsView() {
-    return `
-      <section class="xp-card" id="section-reservations">
-        <div class="xp-entity-header" style="margin-bottom: 16px;">
-          <div class="xp-icon-box" aria-hidden="true">📚</div>
-          <div class="xp-entity-title-col">
-            <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">图书馆座位预约</h2>
-              ${xpeachBadge(`${pricePeachText} 🍑 / 次 · 成功扣费 · 余额 🍑 ${peachBalanceFormatted}`, "peach")}
-            </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">绑定学号后选择自习区域与备选座位，到点自动提交预约。</p>
-          </div>
-        </div>
-
-        <div class="xp-split-grid">
-          <!-- Step 1: 绑定校园学号 -->
-          <div class="xp-well" style="padding: 18px;">
-            <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 8px;">
-              <h3 class="xp-entity-title" style="font-size: 15px;">第一步：绑定校园学号</h3>
-              ${
-                activeStudentNo
-                  ? xpeachBadge(`已绑定 ${activeStudentNo}`, "success")
-                  : xpeachBadge("待绑定", "warning")
-              }
-            </div>
-            <p class="text-xs text-muted" style="margin: 0 0 14px;">用于登录图书馆预约系统，绑定状态与客户端同步。</p>
-            <div class="stack gap-3">
-              <div class="field">
-                <label class="label" for="bind-school">所属学校</label>
-                <select class="input" id="bind-school">
-                  <option value="haut">河南工业大学（莲花街校区图书馆）</option>
-                </select>
-              </div>
-              <div class="field">
-                <label class="label" for="bind-student-no">校园学号</label>
-                <input class="input" id="bind-student-no" type="text" placeholder="请输入 12 位学号，例如 241210400802" value="${escapeHtml(activeStudentNo)}" />
-              </div>
-              <div class="field">
-                <label class="label" for="bind-secret">图书馆 / 统一认证密码</label>
-                <input class="input" id="bind-secret" type="password" placeholder="请输入登录密码（加密保存，仅用于座位预约）" />
-              </div>
-              <button type="button" class="btn btn-primary btn-block" id="btn-save-binding">
-                ${activeStudentNo ? "更新绑定学号与密码" : "保存并绑定学号"}
-              </button>
-            </div>
-            <div id="binding-list-box" style="margin-top: 12px;" class="text-xs text-muted">
-              ${
-                activeStudentNo
-                  ? `当前绑定学号：<strong>${escapeHtml(activeStudentNo)}</strong>（河南工业大学）`
-                  : "尚未绑定学号。"
-              }
-            </div>
-          </div>
-
-          <!-- Step 2: 选择区域与座位 -->
-          <div class="xp-well" style="padding: 18px;">
-            <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 8px;">
-              <h3 class="xp-entity-title" style="font-size: 15px;">第二步：选择区域与座位</h3>
-              <span class="xp-badge xp-badge--success" id="live-region-badge" style="display:none;">实时座位数据</span>
-            </div>
-            <p class="text-xs text-muted" style="margin: 0 0 10px;">切换楼层区域并点击座位卡片设置首选与备选座位。</p>
-
-            <div class="xp-pill-bar" id="area-pills-bar" style="margin-bottom: 12px;">
-              <button type="button" class="area-pill active" data-area-pill="4F_NORTH">4楼北自习区</button>
-              <button type="button" class="area-pill" data-area-pill="2F_EAST">2楼东阅览区</button>
-              <button type="button" class="area-pill" data-area-pill="3F_WEST">3楼西电子区</button>
-              <button type="button" class="area-pill" data-area-pill="5F_SOUTH">5楼南考研区</button>
-              <button type="button" class="area-pill" data-area-pill="6F_MAIN">6楼综合自习室</button>
-            </div>
-
-            <div class="stack gap-3">
-              <div class="field">
-                <label class="label" for="plan-area">1. 当前自习区域</label>
-                <select class="input" id="plan-area">
-                  <option value="4F_NORTH">4楼北自习区（安静自习 · 靠窗带插座）</option>
-                  <option value="2F_EAST">2楼东报刊阅览区（采光好 · 临窗座位）</option>
-                  <option value="3F_WEST">3楼西电子阅览区（桌面宽敞 · 全排插）</option>
-                  <option value="5F_SOUTH">5楼南考研专区（独立隔板 · 静音区）</option>
-                  <option value="6F_MAIN">6楼综合自习室（开放式大桌 · 空调充足）</option>
-                </select>
-              </div>
-
-              <div class="field">
-                <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 4px;">
-                  <label class="label" style="margin: 0;">2. 选择座位（蓝色首选，绿色备选）</label>
-                  <span class="text-xs text-muted" id="seat-selection-summary">已选：4N-001 / 4N-002 / 4N-003</span>
-                </div>
-                <div class="seat-visual-grid" id="seat-visual-grid"></div>
-              </div>
-
-              <div class="xp-form-grid-3">
-                <div class="field">
-                  <label class="label" for="plan-seat-1">首选座位</label>
-                  <select class="input" id="plan-seat-1"></select>
-                </div>
-                <div class="field">
-                  <label class="label" for="plan-seat-2">备选座位 1</label>
-                  <select class="input" id="plan-seat-2"></select>
-                </div>
-                <div class="field">
-                  <label class="label" for="plan-seat-3">备选座位 2</label>
-                  <select class="input" id="plan-seat-3"></select>
-                </div>
-              </div>
-
-              <div class="xp-form-grid-3">
-                <div class="field">
-                  <label class="label" for="plan-date">预约开始日期</label>
-                  <input class="input" id="plan-date" type="date" />
-                </div>
-                <div class="field">
-                  <label class="label" for="plan-time">自动执行时间</label>
-                  <select class="input" id="plan-time">
-                    <option value="07:00:00">07:00（早间场次）</option>
-                    <option value="07:30:00">07:30（早间场次）</option>
-                    <option value="08:00:00">08:00（上午场次）</option>
-                    <option value="12:30:00">12:30（午间场次）</option>
-                    <option value="14:00:00">14:00（下午场次）</option>
-                    <option value="18:00:00">18:00（晚间场次）</option>
-                    <option value="21:00:00">21:00（夜间预约次日）</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label class="label" for="plan-repeat-days">重复周期</label>
-                  <select class="input" id="plan-repeat-days">
-                    <option value="1">单次（1 天）</option>
-                    <option value="3">连续 3 天</option>
-                    <option value="7">连续 7 天</option>
-                    <option value="14">连续 14 天</option>
-                    <option value="30">连续 30 天</option>
-                  </select>
-                </div>
-              </div>
-              <div class="field">
-                <label class="label" for="plan-slot">自习用座时段</label>
-                <select class="input" id="plan-slot">
-                  <option value="08:00-22:00">08:00 - 22:00（全天时段）</option>
-                  <option value="08:00-12:00">08:00 - 12:00（上午时段）</option>
-                  <option value="14:00-18:00">14:00 - 18:00（下午时段）</option>
-                  <option value="18:30-22:00">18:30 - 22:00（晚间时段）</option>
-                </select>
-              </div>
-              <div class="xp-action-group">
-                <button type="button" class="btn btn-primary" style="flex:1;" id="btn-create-plan">保存预约计划</button>
-                <button type="button" class="btn btn-secondary" id="btn-fire-now">立即预约</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="divider"></div>
-
-        <h3 class="xp-section-subtitle">预约记录</h3>
-        <div class="xp-row-list" id="jobs-tbody">
-          ${
-            jobs.length === 0
-              ? xpeachEmptyState({
-                  icon: "💺",
-                  title: "暂无预约记录",
-                  subtitle: "选择自习区域与座位后即可创建预约计划。"
-                })
-              : jobs
-                  .map((j) => {
-                    const p = plans.find((x) => x.id === j.plan_id) || {};
-                    return xpeachJobRowCard(j, p, { pricePeachText });
-                  })
-                  .join("")
-          }
-        </div>
-      </section>`;
-  }
-
-  function renderParcelsView() {
-    return `
-      <section class="xp-card" id="section-parcels">
-        <div class="xp-entity-header" style="margin-bottom: 16px;">
-          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">📦</div>
-          <div class="xp-entity-title-col">
-            <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">快递与取件码</h2>
-              ${xpeachBadge(`${readyParcels.length} 件待取件`, "peach")}
-            </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">粘贴取件短信提取取件码与驿站位置，数据与客户端同步。</p>
-          </div>
-        </div>
-
-        <!-- 短信粘贴识别框 -->
-        <div class="xp-well" style="padding: 16px; margin-bottom: 18px;">
-          <div class="xp-form-grid-3" style="align-items: end;">
-            <div class="field" style="grid-column: span 2;">
-              <label class="label" for="parcel-sms">取件短信</label>
-              <input class="input" id="parcel-sms" type="text" placeholder="例如：【菜鸟驿站】您的包裹已到莲花街北苑菜鸟驿站，请凭取件码 3-2-1048 领取" />
-            </div>
-            <div class="field">
-              <label class="label" for="parcel-tracking">运单号（选填）</label>
-              <input class="input" id="parcel-tracking" type="text" placeholder="例如 SF15283910293" />
-            </div>
-          </div>
-          <div class="xp-action-bar" style="margin-top: 10px;">
-            <div id="sms-preview-chip" class="text-xs text-muted">
-              可在「日在校园」App 中绑定手机号自动同步快递信息。
-            </div>
-            <button type="button" class="xp-pill xp-pill--active" id="btn-add-parcel">保存取件码</button>
-          </div>
-        </div>
-
-        <!-- 按驿站分组的大字号取件码卡片 -->
-        ${
-          stationGroups.length > 0
-            ? `<div class="xp-card-grid" style="margin-bottom: 20px;">
-                ${stationGroups
+          scalarEntries.length > 0
+            ? `<div class="xp-well" style="margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px;">
+                ${scalarEntries
                   .map(
-                    ([station, list]) => `
-                  <div class="pickup-station-group">
-                    <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 10px;">
-                      <span class="text-sm font-semibold">${escapeHtml(station)}</span>
-                      ${xpeachBadge(`${list.length} 件待取`, "primary")}
-                    </div>
-                    <div class="stack gap-2">
-                      ${list
-                        .map(
-                          (p) => `
-                        <div class="pickup-code-card">
-                          <div>
-                            <div class="pickup-code-number">${escapeHtml(p.pickup_code || "待出码")}</div>
-                            <div class="text-xs text-muted">${escapeHtml(p.carrier_name || p.carrier_code || "校园快递")} · <code>${escapeHtml(p.tracking_number)}</code></div>
-                          </div>
-                          <button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-pickup-parcel="${escapeHtml(p.id)}">标记已取</button>
-                        </div>`
-                        )
-                        .join("")}
-                    </div>
-                  </div>`
+                    ([k, v]) =>
+                      `<div class="xp-meta-row"><span>${escapeHtml(k)}：</span><strong>${escapeHtml(String(v))}</strong></div>`
                   )
                   .join("")}
               </div>`
             : ""
         }
-
-        <h3 class="xp-section-subtitle">全部快递记录</h3>
-        <div class="xp-row-list" id="parcels-tbody">
-          ${
-            parcels.length === 0
-              ? xpeachEmptyState({
-                  icon: "📦",
-                  title: "暂无快递记录",
-                  subtitle: "粘贴取件短信或在客户端中同步包裹记录。"
-                })
-              : parcels.map((p) => xpeachParcelRowCard(p)).join("")
-          }
-        </div>
+        <details class="xp-well" style="margin: 0;">
+          <summary class="text-xs text-muted" style="cursor: pointer;">查看原始矩阵 JSON</summary>
+          <pre style="margin: 10px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 12px;"><code>${escapeHtml(
+            jsonText.length > 6000 ? `${jsonText.slice(0, 6000)}…` : jsonText
+          )}</code></pre>
+        </details>
       </section>`;
   }
 
-  function renderOrdersView() {
+  function renderSchoolsSection() {
     return `
-      ${renderIdentityPassSection()}
-      <section class="xp-card" id="section-orders">
-        <div class="xp-entity-header" style="margin-bottom: 14px;">
-          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
-          <div class="xp-entity-title-col">
-            <div class="xp-badge-flow" style="justify-content: space-between;">
-              <h2 class="xp-entity-title">消费与退还明细</h2>
-              <a class="xp-pill xp-pill--compact" href="https://sso.xpeach.codes/portal">XPeach 账户账单 →</a>
-            </div>
-            <p class="xp-entity-summary" style="margin-top: 2px;">预约成功扣取 🍑，未成功或已取消不扣费。</p>
-          </div>
-        </div>
-        <div class="xp-row-list" id="orders-tbody">
-          ${
-            orders.length === 0
-              ? xpeachEmptyState({
-                  icon: "🍑",
-                  title: "暂无消费记录",
-                  subtitle: `座位预约成功后扣除 ${pricePeachText} 🍑。`
-                })
-              : orders
-                  .map((o) =>
-                    xpeachOrderRowCard(o, {
-                      isAdmin: false,
-                      pricingMicropeach,
-                      micropeachPerPeach: MICROPEACH_PER_PEACH
-                    })
-                  )
-                  .join("")
-          }
-        </div>
-      </section>`;
-  }
-
-  function renderAdminConsoleView() {
-    const stats = ctx.adminStats || {
-      users_count: 1,
-      active_bindings_count: bindings.length,
-      jobs_count: jobs.length,
-      orders_count: orders.length,
-      parcels_count: parcels.length,
-      audit_events_count: 0
-    };
-    const allOrders = Array.isArray(ctx.allOrders) ? ctx.allOrders : orders;
-    const schools = Array.isArray(ctx.schools) ? ctx.schools : [];
-    const auditEvents = Array.isArray(ctx.auditEvents) ? ctx.auditEvents : [];
-
-    return `
-      <section class="xp-bento-grid" aria-label="站点运行指标">
-        ${xpeachBentoTile({
-          label: "已接入 XPeach 用户",
-          value: String(stats.users_count),
-          hint: `已绑定学号：${stats.active_bindings_count} 人`,
-          badge: xpeachBadge("OIDC PKCE", "primary")
-        })}
-        ${xpeachBentoTile({
-          label: "累计占座预约任务",
-          value: String(stats.jobs_count),
-          hint: "三段式准点调度 (T-30m/T-5m/T)",
-          badge: xpeachBadge("ADR-005", "success")
-        })}
-        ${xpeachBentoTile({
-          label: "累计 🍑 结算账单",
-          value: String(stats.orders_count),
-          hint: "实时上报 XPeach 主站账本",
-          badge: xpeachBadge(`${pricePeachText} 🍑/次`, "peach")
-        })}
-        ${xpeachBentoTile({
-          label: "全站同步快递包裹",
-          value: String(stats.parcels_count),
-          hint: `安全审计记录：${stats.audit_events_count} 条`,
-          badge: xpeachBadge("KMS 加密", "primary")
-        })}
-      </section>
-
       <section class="xp-card" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
           <div class="xp-icon-box" aria-hidden="true">🏫</div>
@@ -1048,10 +517,282 @@ export function renderConsoleHtml(ctx = {}) {
           </div>
         </div>
         <div class="xp-row-list">
-          ${schools.map((s) => xpeachSchoolControlCard(s)).join("")}
+          ${
+            schools.length === 0
+              ? xpeachEmptyState({
+                  icon: "🏫",
+                  title: "暂无接入学校",
+                  subtitle: "学校服务集成由部署配置下发。"
+                })
+              : schools.map((s) => xpeachSchoolControlCard(s)).join("")
+          }
+        </div>
+      </section>`;
+  }
+
+  function renderDashboardView() {
+    const stats = adminStats;
+    return `
+      <section class="xp-bento-grid" aria-label="站点运行指标">
+        ${xpeachBentoTile({
+          label: "已接入 XPeach 用户",
+          value: String(stats.users_count ?? 0),
+          hint: `已绑定学号：${stats.active_bindings_count ?? 0} 人`,
+          badge: xpeachBadge("OIDC PKCE", "primary")
+        })}
+        ${xpeachBentoTile({
+          label: "累计占座预约任务",
+          value: String(stats.jobs_count ?? 0),
+          hint: "三段式准点调度 (T-30m/T-5m/T)",
+          badge: xpeachBadge("ADR-005", "success")
+        })}
+        ${xpeachBentoTile({
+          label: "累计 🍑 结算账单",
+          value: String(stats.orders_count ?? 0),
+          hint: "实时上报 XPeach 主站账本",
+          badge: xpeachBadge(`${pricePeachText} 🍑/次`, "peach")
+        })}
+        ${xpeachBentoTile({
+          label: "全站同步快递包裹",
+          value: String(stats.parcels_count ?? 0),
+          hint: `安全审计记录：${stats.audit_events_count ?? 0} 条`,
+          badge: xpeachBadge("KMS 加密", "primary")
+        })}
+      </section>
+
+      ${renderSchoolsSection()}
+
+      <section class="xp-card" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box" aria-hidden="true">👥</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">接入用户 (${allUsers.length})</h2>
+              ${xpeachBadge("XPeach OIDC 接入", "primary")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">已通过 XPeach 统一认证接入本站的全站用户与角色分配。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${
+            allUsers.length === 0
+              ? xpeachEmptyState({
+                  icon: "👥",
+                  title: "暂无接入用户",
+                  subtitle: "用户通过 XPeach SSO 登录后自动接入。"
+                })
+              : allUsers.map((u) => renderAdminUserRow(u)).join("")
+          }
         </div>
       </section>
 
+      <section class="xp-card" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box" aria-hidden="true">🛡️</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">最近安全与操作审计记录</h2>
+              <a class="xp-pill xp-pill--compact" href="/audit">查看全部 →</a>
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">自动记录凭据加密托管、预约执行、社团云控变更与账单退还操作。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${
+            auditEvents.length === 0
+              ? xpeachEmptyState({
+                  icon: "🛡️",
+                  title: "暂无操作记录"
+                })
+              : auditEvents
+                  .slice(0, 10)
+                  .map((ev) => xpeachAuditRowCard(ev))
+                  .join("")
+          }
+        </div>
+      </section>
+
+      ${renderFinanceMatrixCard()}`;
+  }
+
+  function renderJobsView() {
+    return `
+      <section class="xp-card" id="section-jobs" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box" aria-hidden="true">💺</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">全站预约任务 (${allJobs.length})</h2>
+              ${xpeachBadge("三段式准点调度", "primary")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">按状态筛选或搜索任务 ID、用户名与计划标识，监控占座任务执行结果。</p>
+          </div>
+        </div>
+        <div class="xp-search-bar" style="margin-bottom: 12px;">
+          <input class="input xp-search-input" id="jobs-search" type="search" placeholder="搜索任务 ID、用户名、计划或日期…" />
+          <div class="xp-pill-bar" id="jobs-state-pills">
+            <button type="button" class="xp-pill xp-pill--compact xp-pill--active" data-job-state-filter="ALL">全部 (${allJobs.length})</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-job-state-filter="ACTIVE">进行中</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-job-state-filter="CONFIRMED">已成功</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-job-state-filter="FAILED">失败</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-job-state-filter="CANCELLED">已取消</button>
+            <button type="button" class="xp-pill xp-pill--compact" data-job-state-filter="EXPIRED">已过期</button>
+          </div>
+        </div>
+        <div class="xp-row-list" id="jobs-admin-list">
+          ${
+            allJobs.length === 0
+              ? xpeachEmptyState({
+                  icon: "💺",
+                  title: "暂无预约任务",
+                  subtitle: "用户在客户端创建占座计划后将在此列出。"
+                })
+              : allJobs.map((j) => renderAdminJobRow(j)).join("")
+          }
+        </div>
+      </section>
+
+      ${
+        allEvents
+          ? `<section class="xp-card">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box" aria-hidden="true">⏱️</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">调度事件 (${allEvents.length})</h2>
+              ${xpeachBadge("PRECHECK · FINAL_CHECK · FIRE", "primary")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">每个占座任务的三段式持久化调度事件与诊断状态。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${
+            allEvents.length === 0
+              ? xpeachEmptyState({
+                  icon: "⏱️",
+                  title: "暂无调度事件",
+                  subtitle: "任务创建后会生成预检、终检与执行三条调度事件。"
+                })
+              : allEvents.map((ev) => renderScheduleEventRow(ev)).join("")
+          }
+        </div>
+      </section>`
+          : ""
+      }`;
+  }
+
+  function renderOrdersAdminView() {
+    return `
+      <section class="xp-card" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
+          <div class="xp-entity-title-col">
+            <h2 class="xp-entity-title">全站消费账单对账与一键退还</h2>
+            <p class="xp-entity-summary" style="margin-top: 2px;">每一笔扣费与退还均通过幂等密钥实时同步至 XPeach 主站用户钱包与跨站财务大盘。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${
+            allOrders.length === 0
+              ? xpeachEmptyState({
+                  icon: "🍑",
+                  title: "暂无全站 🍑 消费账单记录"
+                })
+              : allOrders
+                  .map((o) =>
+                    xpeachOrderRowCard(o, {
+                      isAdmin: true,
+                      pricingMicropeach,
+                      micropeachPerPeach: MICROPEACH_PER_PEACH
+                    })
+                  )
+                  .join("")
+          }
+        </div>
+      </section>
+
+      ${renderFinanceMatrixCard()}`;
+  }
+
+  function renderAuditView() {
+    return `
+      <section class="xp-card" id="section-audit">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box" aria-hidden="true">🛡️</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">安全与操作审计日志 (${auditEvents.length})</h2>
+              ${xpeachBadge("服务端已脱敏", "success")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">按操作者、动作、资源或结果关键字检索全站审计事件。</p>
+          </div>
+        </div>
+        <div class="xp-search-bar" style="margin-bottom: 12px;">
+          <input class="input xp-search-input" id="audit-search" type="search" placeholder="搜索操作者、动作、资源或结果…" />
+        </div>
+        <div class="xp-row-list" id="audit-admin-list">
+          ${
+            auditEvents.length === 0
+              ? xpeachEmptyState({
+                  icon: "🛡️",
+                  title: "暂无审计事件",
+                  subtitle: "管理操作与系统事件将自动记录在此。"
+                })
+              : auditEvents.map((ev) => renderAdminAuditRow(ev)).join("")
+          }
+        </div>
+      </section>`;
+  }
+
+  function renderSchoolsView() {
+    const schoolOptions =
+      schools.length > 0
+        ? schools
+            .map(
+              (s) =>
+                `<option value="${escapeHtml(s.school_id || "haut")}">${escapeHtml(s.display_name || s.school_id || "河南工业大学")} (${escapeHtml(s.school_id || "haut")})</option>`
+            )
+            .join("")
+        : `<option value="haut">河南工业大学 (haut)</option>`;
+    return `
+      ${renderSchoolsSection()}
+
+      <section class="xp-card">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">✅</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">运维授权审批</h2>
+              ${xpeachBadge("双人复核", "peach")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">提交学校级敏感操作（如恢复熔断、批量变更）的二级授权审批记录。</p>
+          </div>
+        </div>
+        <div class="xp-well" style="padding: 16px;">
+          <div class="xp-form-grid-3">
+            <div class="field">
+              <label class="label" for="aa-school">目标学校</label>
+              <select class="input" id="aa-school">${schoolOptions}</select>
+            </div>
+            <div class="field">
+              <label class="label" for="aa-approver">二级审批人标识</label>
+              <input class="input" id="aa-approver" type="text" placeholder="如 admin:liwei 或 owner:yellowpeach" />
+            </div>
+            <div class="field">
+              <label class="label" for="aa-evidence">授权凭证引用</label>
+              <input class="input" id="aa-evidence" type="text" placeholder="如 ticket-2026-0001 / 审批单链接" />
+            </div>
+          </div>
+          <div class="xp-action-bar">
+            <span class="text-xs text-muted">POST /api/v1/admin/schools/{schoolId}/authorization-approval</span>
+            <button type="button" class="xp-pill xp-pill--active" id="btn-submit-auth-approval">提交授权审批</button>
+          </div>
+        </div>
+      </section>`;
+  }
+
+  function renderContentView() {
+    return `
       <section class="xp-card" id="section-campus-content-admin" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 16px;">
           <div class="xp-icon-box" aria-hidden="true">📢</div>
@@ -1300,74 +1041,23 @@ export function renderConsoleHtml(ctx = {}) {
             <button type="button" class="xp-pill" id="btn-save-channel">新增 / 更新校园频道</button>
           </div>
         </div>
-      </section>
-
-      <section class="xp-card" style="margin-bottom: 18px;">
-        <div class="xp-entity-header" style="margin-bottom: 14px;">
-          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
-          <div class="xp-entity-title-col">
-            <h2 class="xp-entity-title">全站消费账单对账与一键退还</h2>
-            <p class="xp-entity-summary" style="margin-top: 2px;">每一笔扣费与退还均通过幂等密钥实时同步至 XPeach 主站用户钱包与跨站财务大盘。</p>
-          </div>
-        </div>
-        <div class="xp-row-list">
-          ${
-            allOrders.length === 0
-              ? xpeachEmptyState({
-                  icon: "🍑",
-                  title: "暂无全站 🍑 消费账单记录"
-                })
-              : allOrders
-                  .map((o) =>
-                    xpeachOrderRowCard(o, {
-                      isAdmin: true,
-                      pricingMicropeach,
-                      micropeachPerPeach: MICROPEACH_PER_PEACH
-                    })
-                  )
-                  .join("")
-          }
-        </div>
-      </section>
-
-      <section class="xp-card">
-        <div class="xp-entity-header" style="margin-bottom: 14px;">
-          <div class="xp-icon-box" aria-hidden="true">🛡️</div>
-          <div class="xp-entity-title-col">
-            <h2 class="xp-entity-title">最近安全与操作审计记录</h2>
-            <p class="xp-entity-summary" style="margin-top: 2px;">自动记录凭据加密托管、预约执行、社团云控变更与账单退还操作。</p>
-          </div>
-        </div>
-        <div class="xp-row-list">
-          ${
-            auditEvents.length === 0
-              ? xpeachEmptyState({
-                  icon: "🛡️",
-                  title: "暂无操作记录"
-                })
-              : auditEvents
-                  .slice(0, 15)
-                  .map((ev) => xpeachAuditRowCard(ev))
-                  .join("")
-          }
-        </div>
       </section>`;
   }
 
   const activeMainHtml =
-    activeNav === "reservations"
-      ? renderReservationsView()
-      : activeNav === "parcels"
-        ? renderParcelsView()
-        : activeNav === "community"
-          ? renderCommunityView()
-          : activeNav === "orders"
-            ? renderOrdersView()
-            : activeNav === "console" && isAdmin
-              ? renderAdminConsoleView()
-              : renderPortalView();
+    activeNav === "jobs"
+      ? renderJobsView()
+      : activeNav === "orders"
+        ? renderOrdersAdminView()
+        : activeNav === "audit"
+          ? renderAuditView()
+          : activeNav === "schools"
+            ? renderSchoolsView()
+            : activeNav === "content"
+              ? renderContentView()
+              : renderDashboardView();
 
-  return `${renderHead("日在校园 · XPeach 云端通行证")}
+  return `${renderHead("日在校园 · 运维管理控制台")}
   <body class="console-body">
     ${renderHiddenContractViews()}
     <div class="mobile-topbar">
@@ -1388,13 +1078,8 @@ export function renderConsoleHtml(ctx = {}) {
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
           </svg>
         </button>
-        <button type="button" class="icon-btn" id="mobile-nav-open" aria-label="打开菜单" aria-expanded="false" aria-controls="console-sidebar">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-        </button>
       </div>
     </div>
-
-    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
 
     <div class="console-shell">
       <aside class="sidebar" id="console-sidebar" aria-label="主导航">
@@ -1406,33 +1091,35 @@ export function renderConsoleHtml(ctx = {}) {
               <span class="brand-sub">日在校园</span>
             </div>
           </a>
-          ${xpeachBadge(isAdmin ? "管理员" : "学生通行证", "primary")}
+          ${xpeachBadge(isAdmin ? "运维管理" : "只读访客", "primary")}
         </div>
 
         <nav class="sidebar-nav">
           <div class="nav-section">
-            <div class="nav-section-title">个人中心</div>
-            <a class="nav-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
+            <div class="nav-section-title">站点管理</div>
+            <a class="nav-item ${activeNav === "console" ? "active" : ""}" href="/console">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
-              <span>通行证与 🍑 余额</span>
+              <span>运维总览</span>
             </a>
-            <a class="nav-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+            <a class="nav-item ${activeNav === "jobs" ? "active" : ""}" href="/jobs">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
-              <span>图书馆座位预约</span>
-            </a>
-            <a class="nav-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-              <span>我的快递与取件码</span>
-              ${readyParcels.length > 0 ? `<span class="xp-badge xp-badge--peach" style="margin-left:auto;">${readyParcels.length}</span>` : ""}
-            </a>
-            <a class="nav-item ${activeNav === "community" ? "active" : ""}" href="/community">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-              <span>合作社团与频道</span>
-              <span class="xp-badge xp-badge--primary" style="margin-left:auto;">${ccClubs.length}</span>
+              <span>预约任务</span>
             </a>
             <a class="nav-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-              <span>🍑 消费明细</span>
+              <span>账单退还</span>
+            </a>
+            <a class="nav-item ${activeNav === "audit" ? "active" : ""}" href="/audit">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>审计日志</span>
+            </a>
+            <a class="nav-item ${activeNav === "schools" ? "active" : ""}" href="/schools">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
+              <span>学校服务</span>
+            </a>
+            <a class="nav-item ${activeNav === "content" ? "active" : ""}" href="/content">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+              <span>内容云控</span>
             </a>
           </div>
 
@@ -1447,18 +1134,6 @@ export function renderConsoleHtml(ctx = {}) {
               <span>下载 Android 客户端</span>
             </a>
           </div>
-
-          ${
-            isAdmin
-              ? `<div class="nav-section">
-            <div class="nav-section-title">站点管理</div>
-            <a class="nav-item ${activeNav === "console" ? "active" : ""}" href="/console">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-              <span>服务与云控管理</span>
-            </a>
-          </div>`
-              : ""
-          }
         </nav>
 
         <div class="sidebar-foot">
@@ -1466,7 +1141,13 @@ export function renderConsoleHtml(ctx = {}) {
             <div class="user-avatar">${escapeHtml(userInitial)}</div>
             <div class="user-info">
               <div class="user-name">${escapeHtml(username)}</div>
-              <div class="user-email">🍑 ${escapeHtml(peachBalanceFormatted)} · ${escapeHtml(userGroup)}</div>
+              <div class="xp-badge-flow" style="margin-top: 4px;">
+                ${
+                  roles.length > 0
+                    ? roles.slice(0, 3).map((r) => xpeachBadge(r, "primary")).join("")
+                    : xpeachBadge(user.role || "ADMIN", "primary")
+                }
+              </div>
             </div>
           </div>
           <div class="sidebar-foot-actions">
@@ -1495,8 +1176,7 @@ export function renderConsoleHtml(ctx = {}) {
             <button type="button" class="xp-pill xp-pill--compact" data-ui-style-toggle title="切换液态毛玻璃 / 经典 M3 视觉语言">
               <span data-ui-style-label>✨ 液态毛玻璃</span>
             </button>
-            <button type="button" class="xp-pill xp-pill--compact" id="btn-sync-wallet">同步 🍑 余额</button>
-            <a class="xp-pill xp-pill--active xp-pill--compact" href="https://sso.xpeach.codes/portal">前往 XPeach 主站充值 🍑</a>
+            <a class="xp-pill xp-pill--compact" href="https://sso.xpeach.codes/portal">XPeach 主站 ↗</a>
           </div>
         </header>
 
@@ -1507,25 +1187,25 @@ export function renderConsoleHtml(ctx = {}) {
     </div>
 
     <nav class="mobile-glass-dock" aria-label="快捷导航">
-      <a class="dock-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
+      <a class="dock-item ${activeNav === "console" ? "active" : ""}" href="/console">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
-        <span>通行证</span>
+        <span>总览</span>
       </a>
-      <a class="dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+      <a class="dock-item ${activeNav === "jobs" ? "active" : ""}" href="/jobs">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
-        <span>抢座预约</span>
-      </a>
-      <a class="dock-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-        <span>取件码</span>
-      </a>
-      <a class="dock-item ${activeNav === "community" ? "active" : ""}" href="/community">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
-        <span>合作社团</span>
+        <span>任务</span>
       </a>
       <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-        <span>🍑 账单</span>
+        <span>账单</span>
+      </a>
+      <a class="dock-item ${activeNav === "audit" ? "active" : ""}" href="/audit">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>审计</span>
+      </a>
+      <a class="dock-item ${activeNav === "content" ? "active" : ""}" href="/content">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+        <span>云控</span>
       </a>
     </nav>
 
@@ -1561,14 +1241,6 @@ export function renderConsoleHtml(ctx = {}) {
           });
         });
 
-        var STUDY_AREAS = {
-          "4F_NORTH": { name: "4楼北自习区", prefix: "4N", count: 60, tags: ["靠窗·插座", "带插座", "安静区", "临走道"] },
-          "2F_EAST":  { name: "2楼东报刊阅览区", prefix: "2E", count: 50, tags: ["临窗采光", "木桌座位", "靠窗", "安静区"] },
-          "3F_WEST":  { name: "3楼西电子阅览区", prefix: "3W", count: 60, tags: ["全排插·宽桌", "双插孔", "靠窗·插座", "独立台灯"] },
-          "5F_SOUTH": { name: "5楼南考研专区", prefix: "5S", count: 80, tags: ["独立隔板", "静音插座", "靠窗隔板", "沉浸自习"] },
-          "6F_MAIN":  { name: "6楼综合自习室", prefix: "6M", count: 60, tags: ["四人宽桌", "靠窗大桌", "空调充足", "带插座"] }
-        };
-
         function showToast(msg, isError) {
           var el = document.getElementById("toast-banner");
           if (!el) return;
@@ -1595,7 +1267,12 @@ export function renderConsoleHtml(ctx = {}) {
           });
         }
 
-        // Copy QQ Group & Filter Partner Clubs on /community & /portal
+        // Clean up ?web_ticket query param if present
+        if (window.location.search.indexOf("web_ticket=") !== -1) {
+          window.history.replaceState({}, document.title, window.location.pathname || "/");
+        }
+
+        // Copy QQ Group on admin club / competition cards
         document.querySelectorAll("[data-copy-qq]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var qq = btn.getAttribute("data-copy-qq") || "";
@@ -1604,686 +1281,6 @@ export function renderConsoleHtml(ctx = {}) {
               navigator.clipboard.writeText(qq).catch(function () {});
             }
             showToast("已复制「" + name + "」官方 QQ 群号：" + qq);
-          });
-        });
-
-        var clubSearchInput = document.getElementById("community-club-search");
-        var activeClubFilter = "ALL";
-        function filterCommunityClubs() {
-          var q = clubSearchInput ? clubSearchInput.value.trim().toLowerCase() : "";
-          document.querySelectorAll("[data-club-card]").forEach(function (card) {
-            var cat = card.getAttribute("data-club-category") || "";
-            var haystack = card.getAttribute("data-club-search") || "";
-            var catMatch = activeClubFilter === "ALL" || cat === activeClubFilter;
-            var qMatch = !q || haystack.indexOf(q) !== -1;
-            card.style.display = catMatch && qMatch ? "" : "none";
-          });
-        }
-        if (clubSearchInput) {
-          clubSearchInput.addEventListener("input", filterCommunityClubs);
-        }
-        document.querySelectorAll("[data-club-filter]").forEach(function (pill) {
-          pill.addEventListener("click", function () {
-            activeClubFilter = pill.getAttribute("data-club-filter") || "ALL";
-            document.querySelectorAll("[data-club-filter]").forEach(function (p) {
-              p.classList.toggle("xp-pill--active", p === pill);
-            });
-            filterCommunityClubs();
-          });
-        });
-
-        // Copy Official Competition URL & Filter Competitions by Major / Category / Beginner
-        document.querySelectorAll("[data-copy-url]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            var url = btn.getAttribute("data-copy-url") || "";
-            var name = btn.getAttribute("data-copy-comp-name") || "学科竞赛";
-            if (navigator.clipboard && url) {
-              navigator.clipboard.writeText(url).catch(function () {});
-            }
-            showToast("已复制「" + name + "」官网链接：" + url);
-          });
-        });
-
-        var compSearchInput = document.getElementById("community-comp-search");
-        var activeCompMajor = "ALL";
-        var activeCompCat = "ALL";
-        var onlyCompBeginner = false;
-        function filterCommunityCompetitions() {
-          var q = compSearchInput ? compSearchInput.value.trim().toLowerCase() : "";
-          document.querySelectorAll("[data-comp-card]").forEach(function (card) {
-            var cat = card.getAttribute("data-comp-category") || "";
-            var majors = (card.getAttribute("data-comp-majors") || "").split(",");
-            var isBeg = card.getAttribute("data-comp-beginner") === "true";
-            var haystack = card.getAttribute("data-comp-search") || "";
-            var majorOk =
-              activeCompMajor === "ALL" ||
-              majors.indexOf("ALL_MAJORS") !== -1 ||
-              majors.indexOf(activeCompMajor) !== -1;
-            var catOk = activeCompCat === "ALL" || cat === activeCompCat;
-            var begOk = !onlyCompBeginner || isBeg;
-            var qOk = !q || haystack.indexOf(q) !== -1;
-            card.style.display = majorOk && catOk && begOk && qOk ? "" : "none";
-          });
-        }
-        if (compSearchInput) {
-          compSearchInput.addEventListener("input", filterCommunityCompetitions);
-        }
-        document.querySelectorAll("[data-comp-major]").forEach(function (pill) {
-          pill.addEventListener("click", function () {
-            activeCompMajor = pill.getAttribute("data-comp-major") || "ALL";
-            document.querySelectorAll("[data-comp-major]").forEach(function (p) {
-              p.classList.toggle("xp-pill--active", p === pill);
-            });
-            filterCommunityCompetitions();
-          });
-        });
-        document.querySelectorAll("[data-comp-cat]").forEach(function (pill) {
-          pill.addEventListener("click", function () {
-            activeCompCat = pill.getAttribute("data-comp-cat") || "ALL";
-            document.querySelectorAll("[data-comp-cat]").forEach(function (p) {
-              p.classList.toggle("xp-pill--active", p === pill);
-            });
-            filterCommunityCompetitions();
-          });
-        });
-        document.querySelectorAll("[data-comp-beginner-toggle]").forEach(function (pill) {
-          pill.addEventListener("click", function () {
-            onlyCompBeginner = !onlyCompBeginner;
-            pill.classList.toggle("xp-pill--active", onlyCompBeginner);
-            filterCommunityCompetitions();
-          });
-        });
-
-        // Populate date default in Asia/Shanghai (today if before 07:00, tomorrow if 07:00 or later)
-        var dateInput = document.getElementById("plan-date");
-        if (dateInput && !dateInput.value) {
-          var shNow = new Date(Date.now() + 8 * 3600000);
-          var shHour = shNow.getUTCHours();
-          var targetSh = shHour < 7 ? shNow : new Date(shNow.getTime() + 86400000);
-          dateInput.value = targetSh.toISOString().slice(0, 10);
-        }
-
-        // Interactive area pills + visual seat grid + dropdowns (with live HAUT library loader)
-        var areaSelect = document.getElementById("plan-area");
-        var areaPillsBar = document.getElementById("area-pills-bar");
-        var liveBadge = document.getElementById("live-region-badge");
-        var seat1 = document.getElementById("plan-seat-1");
-        var seat2 = document.getElementById("plan-seat-2");
-        var seat3 = document.getElementById("plan-seat-3");
-        var seatGrid = document.getElementById("seat-visual-grid");
-        var seatSummary = document.getElementById("seat-selection-summary");
-        var LIVE_REGIONS_MAP = {};
-
-        function updateSeatGridHighlights() {
-          if (!seatGrid || !seat1 || !seat2 || !seat3) return;
-          var s1 = seat1.value;
-          var s2 = seat2.value;
-          var s3 = seat3.value;
-          var chosen = [s1, s2, s3].filter(Boolean);
-          if (seatSummary) {
-            seatSummary.textContent = "已选：" + (chosen.length ? chosen.join(" / ") : "请点击下方座位");
-          }
-          seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
-            var code = chip.getAttribute("data-seat-code");
-            chip.classList.remove("selected-primary", "selected-backup");
-            if (code === s1) {
-              chip.classList.add("selected-primary");
-            } else if (code === s2 || code === s3) {
-              chip.classList.add("selected-backup");
-            }
-          });
-        }
-
-        function bindSeatChipsClick() {
-          if (!seatGrid || !seat1 || !seat2 || !seat3) return;
-          seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
-            chip.addEventListener("click", function () {
-              if (chip.disabled) return;
-              var code = chip.getAttribute("data-seat-code");
-              if (seat1.value === code) return;
-              if (seat2.value === code) {
-                seat2.value = seat1.value;
-                seat1.value = code;
-              } else if (seat3.value === code) {
-                seat3.value = seat2.value;
-                seat2.value = seat1.value;
-                seat1.value = code;
-              } else {
-                seat3.value = seat2.value;
-                seat2.value = seat1.value;
-                seat1.value = code;
-              }
-              updateSeatGridHighlights();
-            });
-          });
-        }
-
-        function populateSeatsFromList(seatItems) {
-          if (!seat1 || !seat2 || !seat3) return;
-          var html1 = "";
-          var html2 = '<option value="">不设置备选</option>';
-          var html3 = '<option value="">不设置备选</option>';
-          var gridHtml = "";
-          var availableCodes = [];
-
-          seatItems.forEach(function (item) {
-            var code = String(item.code || "");
-            var tag = String(item.tag || "");
-            var safeCode = escHtml(code);
-            var safeTag = escHtml(tag);
-            var isAvail = item.available !== false;
-            var label = safeCode + "（" + safeTag + "）";
-            html1 += '<option value="' + safeCode + '">' + label + "</option>";
-            html2 += '<option value="' + safeCode + '">' + label + "</option>";
-            html3 += '<option value="' + safeCode + '">' + label + "</option>";
-            if (isAvail) availableCodes.push(code);
-            gridHtml +=
-              '<button type="button" class="seat-chip' + (isAvail ? "" : " occupied") + '" data-seat-code="' +
-              safeCode +
-              '"><span class="seat-chip-code">' +
-              safeCode +
-              '</span><span class="seat-chip-tag">' +
-              safeTag +
-              "</span></button>";
-          });
-
-          seat1.innerHTML = html1;
-          seat2.innerHTML = html2;
-          seat3.innerHTML = html3;
-          if (seatGrid) {
-            seatGrid.innerHTML = gridHtml;
-            bindSeatChipsClick();
-          }
-          var pickPool = availableCodes.length >= 3 ? availableCodes : seatItems.map(function (x) { return x.code; });
-          if (pickPool.length >= 1) seat1.value = pickPool[0];
-          if (pickPool.length >= 2) seat2.value = pickPool[1];
-          if (pickPool.length >= 3) seat3.value = pickPool[2];
-          updateSeatGridHighlights();
-        }
-
-        function populateSeatsForArea() {
-          if (!areaSelect || !seat1 || !seat2 || !seat3) return;
-          var areaKey = areaSelect.value || "4F_NORTH";
-          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
-            pill.classList.toggle("active", pill.getAttribute("data-area-pill") === areaKey);
-          });
-
-          if (LIVE_REGIONS_MAP[areaKey]) {
-            var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-            apiFetch(
-              "/api/v1/schools/haut/library/live-seats?region_id=" +
-                encodeURIComponent(areaKey) +
-                "&booking_date=" +
-                encodeURIComponent(bDate),
-              { method: "GET" }
-            )
-              .then(function (res) {
-                var seats = (res.data && res.data.seats) || [];
-                if (seats.length > 0) {
-                  populateSeatsFromList(
-                    seats.map(function (s) {
-                      var cleanShort = (s.short_name && s.short_name !== "null") ? s.short_name : "";
-                      var cleanFull = (s.seat_name && s.seat_name !== "null") ? s.seat_name : "";
-                      return {
-                        code: cleanShort || cleanFull || String(s.seat_id),
-                        tag: s.available ? "空闲可选" : "已占",
-                        available: Boolean(s.available)
-                      };
-                    })
-                  );
-                } else {
-                  var rMeta = LIVE_REGIONS_MAP[areaKey];
-                  var totalCount = Math.min(Math.max(Number(rMeta && rMeta.totalSeats) || 60, 20), 200);
-                  var genItems = [];
-                  for (var k = 1; k <= totalCount; k++) {
-                    genItems.push({ code: String(k).padStart(3, "0") + "号", tag: "空闲可选", available: true });
-                  }
-                  populateSeatsFromList(genItems);
-                }
-              })
-              .catch(function () {});
-            return;
-          }
-
-          var cfg = STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
-          var fallbackItems = [];
-          for (var i = 1; i <= cfg.count; i++) {
-            var code = cfg.prefix + "-" + String(i).padStart(3, "0");
-            var tag = cfg.tags[(i - 1) % cfg.tags.length];
-            fallbackItems.push({ code: code, tag: tag, available: true });
-          }
-          populateSeatsFromList(fallbackItems);
-        }
-
-        function loadLiveRegionsIfBound() {
-          if (!areaSelect) return;
-          var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-          apiFetch("/api/v1/schools/haut/library/live-regions?booking_date=" + encodeURIComponent(bDate), {
-            method: "GET"
-          })
-            .then(function (res) {
-              var regions = (res.data && res.data.regions) || [];
-              if (!regions.length) return;
-              LIVE_REGIONS_MAP = {};
-              var optHtml = "";
-              var pillsHtml = "";
-              regions.forEach(function (r, idx) {
-                var key = String(r.region_id);
-                var safeKey = escHtml(key);
-                var safeLayer = escHtml(r.layer_name);
-                var safeName = escHtml(r.region_name);
-                var safeAvail = escHtml(r.available_seats);
-                var safeTotal = escHtml(r.total_seats);
-                LIVE_REGIONS_MAP[key] = {
-                  name: r.region_name,
-                  layerName: r.layer_name,
-                  totalSeats: r.total_seats,
-                  availableSeats: r.available_seats
-                };
-                optHtml +=
-                  '<option value="' +
-                  safeKey +
-                  '">' +
-                  safeLayer +
-                  " · " +
-                  safeName +
-                  "（空闲 " +
-                  safeAvail +
-                  "/" +
-                  safeTotal +
-                  "）</option>";
-                if (idx < 8) {
-                  pillsHtml +=
-                    '<button type="button" class="area-pill' +
-                    (idx === 0 ? " active" : "") +
-                    '" data-area-pill="' +
-                    safeKey +
-                    '">' +
-                    safeName +
-                    " (" +
-                    safeAvail +
-                    ")</button>";
-                }
-              });
-              areaSelect.innerHTML = optHtml;
-              if (areaPillsBar && pillsHtml) {
-                areaPillsBar.innerHTML = pillsHtml;
-                areaPillsBar.querySelectorAll("[data-area-pill]").forEach(function (pill) {
-                  pill.addEventListener("click", function () {
-                    areaSelect.value = pill.getAttribute("data-area-pill");
-                    populateSeatsForArea();
-                  });
-                });
-              }
-              if (liveBadge) {
-                liveBadge.style.display = "inline-flex";
-              }
-              populateSeatsForArea();
-            })
-            .catch(function () {});
-        }
-
-        if (areaSelect) {
-          areaSelect.addEventListener("change", populateSeatsForArea);
-          if (dateInput) dateInput.addEventListener("change", loadLiveRegionsIfBound);
-          if (seat1) seat1.addEventListener("change", updateSeatGridHighlights);
-          if (seat2) seat2.addEventListener("change", updateSeatGridHighlights);
-          if (seat3) seat3.addEventListener("change", updateSeatGridHighlights);
-          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
-            pill.addEventListener("click", function () {
-              areaSelect.value = pill.getAttribute("data-area-pill");
-              populateSeatsForArea();
-            });
-          });
-          populateSeatsForArea();
-          loadLiveRegionsIfBound();
-        }
-
-        // Clean up ?web_ticket query param if present
-        if (window.location.search.indexOf("web_ticket=") !== -1) {
-          window.history.replaceState({}, document.title, window.location.pathname || "/");
-        }
-
-        // Sync 🍑 wallet button
-        var btnSyncWallet = document.getElementById("btn-sync-wallet");
-        if (btnSyncWallet) {
-          btnSyncWallet.addEventListener("click", function () {
-            btnSyncWallet.disabled = true;
-            btnSyncWallet.textContent = "同步中…";
-            apiFetch("/api/v1/me/wallet", { method: "GET" })
-              .then(function (res) {
-                var w = res.data || {};
-                var bal = w.peach_balance_formatted || Number(w.peach_balance || 0).toFixed(2);
-                var used = w.peach_used_formatted || Number(w.peach_used || 0).toFixed(2);
-                var el1 = document.getElementById("wallet-balance-text");
-                var el2 = document.getElementById("stat-peach-balance");
-                var el3 = document.getElementById("wallet-used-text");
-                if (el1) el1.textContent = "🍑 " + bal;
-                if (el2) el2.textContent = "🍑 " + bal;
-                if (el3) el3.textContent = "累计已用 🍑 " + used + " · 占座成功每次扣除 " + PRICE_PEACH_TEXT + " 🍑（未成功不扣费）";
-                showToast("已与 XPeach 主站同步最新余额：🍑 " + bal);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              })
-              .finally(function () {
-                btnSyncWallet.disabled = false;
-                btnSyncWallet.textContent = "同步 🍑 余额";
-              });
-          });
-        }
-
-        // Save school binding (live CAS verification + encrypted credential custody)
-        var btnSaveBinding = document.getElementById("btn-save-binding");
-        if (btnSaveBinding) {
-          btnSaveBinding.addEventListener("click", function () {
-            var schoolId = document.getElementById("bind-school").value || "haut";
-            var studentNo = (document.getElementById("bind-student-no").value || "").trim();
-            var secret = (document.getElementById("bind-secret").value || "").trim();
-            if (!studentNo) {
-              showToast("请填写您的校园学号", true);
-              return;
-            }
-            if (!secret) {
-              showToast("请填写您的教务/图书馆通行密码", true);
-              return;
-            }
-            btnSaveBinding.disabled = true;
-            btnSaveBinding.textContent = "正在验证学号…";
-            apiFetch("/api/v1/school-bindings/bind-live", {
-              method: "POST",
-              body: JSON.stringify({ school_id: schoolId, student_no: studentNo, password: secret })
-            })
-              .then(function (r) {
-                var uName = r.data && r.data.user_name ? "（" + r.data.user_name + "）" : "";
-                showToast("学号 " + studentNo + uName + " 验证并绑定成功！");
-                setTimeout(function () { window.location.reload(); }, 600);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              })
-              .finally(function () {
-                btnSaveBinding.disabled = false;
-                btnSaveBinding.textContent = "一键验证并绑定学号";
-              });
-          });
-        }
-
-        function ensureBindingAndConsent() {
-          return Promise.all([
-            apiFetch("/api/v1/school-bindings", { method: "GET" }),
-            apiFetch("/api/v1/me/consents", { method: "GET" })
-          ]).then(function (results) {
-            var bList = (results[0].data && results[0].data.bindings) || [];
-            var cList = (results[1].data && results[1].data.consents) || [];
-            var activeBinding =
-              bList.find(function (b) {
-                return !b.revoked_at && (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE");
-              }) ||
-              bList.find(function (b) {
-                return !b.revoked_at;
-              });
-            if (!activeBinding) {
-              throw new Error("请先在左侧第一步填写并绑定您的校园学号");
-            }
-            var activeConsent = cList.find(function (c) { return !c.withdrawn_at; });
-            if (activeConsent) {
-              return { bindingId: activeBinding.id, consentId: activeConsent.id };
-            }
-            return apiFetch("/api/v1/me/consents", {
-              method: "POST",
-              body: JSON.stringify({ school_id: activeBinding.school_id || "haut" })
-            }).then(function (cr) {
-              return { bindingId: activeBinding.id, consentId: cr.data.id };
-            });
-          });
-        }
-
-        function createReservationPlanFromSelection() {
-          var areaKey = areaSelect ? areaSelect.value : "4F_NORTH";
-          var areaCfg = LIVE_REGIONS_MAP[areaKey] || STUDY_AREAS[areaKey] || STUDY_AREAS["4F_NORTH"];
-          var seats = [seat1.value, seat2.value, seat3.value].filter(Boolean);
-          var targetDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-          var targetTime = document.getElementById("plan-time").value || "07:00:00";
-          var repeatEl = document.getElementById("plan-repeat-days");
-          var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
-          var slot = document.getElementById("plan-slot").value || "08:00-22:00";
-
-          return ensureBindingAndConsent().then(function (ids) {
-            return apiFetch("/api/v1/reservation-plans", {
-              method: "POST",
-              body: JSON.stringify({
-                school_binding_id: ids.bindingId,
-                consent_id: ids.consentId,
-                area_code: areaKey,
-                area_name: areaCfg.name,
-                candidate_seats: seats,
-                slot_window: slot,
-                target_local_date: targetDate,
-                target_local_time: targetTime,
-                repeat_days: repeatDays,
-                remaining_days: repeatDays,
-                replace_existing: true
-              })
-            });
-          });
-        }
-
-        var btnCreatePlan = document.getElementById("btn-create-plan");
-        if (btnCreatePlan) {
-          btnCreatePlan.addEventListener("click", function () {
-            btnCreatePlan.disabled = true;
-            var repeatEl = document.getElementById("plan-repeat-days");
-            var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
-            createReservationPlanFromSelection()
-              .then(function () {
-                showToast(
-                  repeatDays > 1
-                    ? "已保存连续 " + repeatDays + " 天自动抢座计划！每天早间将自动为您准点抢座并续期次日任务。"
-                    : "自动抢座计划已保存！到点将自动为您抢座，并已同步至日在校园 App。"
-                );
-                setTimeout(function () { window.location.reload(); }, 700);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              })
-              .finally(function () {
-                btnCreatePlan.disabled = false;
-              });
-          });
-        }
-
-        function handleExecuteJobResult(execRes) {
-          var data = (execRes && execRes.data) || {};
-          var job = data.job || {};
-          var sr = data.schoolReservation || data.school_reservation || {};
-          if (job.state === "CONFIRMED") {
-            var alias = sr.seat_alias ? "（" + sr.seat_alias + "）" : "";
-            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 " + PRICE_PEACH_TEXT + " 🍑。");
-          } else {
-            showToast("未能锁定所选座位（座位已被占用或未绑定正确图书馆密码），本次未扣费", true);
-          }
-          setTimeout(function () { window.location.reload(); }, 900);
-        }
-
-        var btnFireNow = document.getElementById("btn-fire-now");
-        if (btnFireNow) {
-          btnFireNow.addEventListener("click", function () {
-            btnFireNow.disabled = true;
-            btnFireNow.textContent = "正在占座…";
-            createReservationPlanFromSelection()
-              .then(function (planRes) {
-                var jobId = planRes.data.job_id;
-                return apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/execute-now", {
-                  method: "POST",
-                  body: JSON.stringify({})
-                });
-              })
-              .then(handleExecuteJobResult)
-              .catch(function (err) {
-                showToast(err.message, true);
-              })
-              .finally(function () {
-                btnFireNow.disabled = false;
-                btnFireNow.textContent = "立即预约所选座位";
-              });
-          });
-        }
-
-        document.querySelectorAll("[data-execute-now-job]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            var jobId = btn.getAttribute("data-execute-now-job");
-            btn.disabled = true;
-            btn.textContent = "抢座中…";
-            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/execute-now", {
-              method: "POST",
-              body: JSON.stringify({})
-            })
-              .then(handleExecuteJobResult)
-              .catch(function (err) {
-                showToast(err.message, true);
-                btn.disabled = false;
-                btn.textContent = "⚡ 立即抢一次";
-              });
-          });
-        });
-
-        // Cancel reservation job buttons
-        document.querySelectorAll("[data-cancel-job]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            var jobId = btn.getAttribute("data-cancel-job");
-            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/cancel", {
-              method: "POST",
-              body: JSON.stringify({})
-            })
-              .then(function () {
-                showToast("预约已取消");
-                setTimeout(function () { window.location.reload(); }, 500);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              });
-          });
-        });
-
-        // Release live confirmed seat booking buttons
-        document.querySelectorAll("[data-cancel-seat-job]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            var jobId = btn.getAttribute("data-cancel-seat-job");
-            btn.disabled = true;
-            btn.textContent = "释放中…";
-            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/cancel-seat", {
-              method: "POST",
-              body: JSON.stringify({})
-            })
-              .then(function (r) {
-                showToast((r.data && r.data.message) || "座位已成功取消释放");
-                setTimeout(function () { window.location.reload(); }, 500);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-                btn.disabled = false;
-                btn.textContent = "退座释放";
-              });
-          });
-        });
-
-        // Real-time SMS pickup code preview
-        var smsInput = document.getElementById("parcel-sms");
-        var smsPreview = document.getElementById("sms-preview-chip");
-        function parseSmsText(sms) {
-          var codeMatch = sms.match(/([0-9A-Za-z]{1,4}-[0-9A-Za-z]{1,4}-[0-9A-Za-z]{2,6})/) ||
-                          sms.match(/取件码[为是：:\\s]*([0-9A-Za-z-]{4,12})/);
-          var pickupCode = codeMatch ? codeMatch[1] : "";
-          var stationName = "莲花街南苑菜鸟驿站";
-          if (sms.indexOf("北苑") !== -1) stationName = "莲花街北苑菜鸟驿站";
-          else if (sms.indexOf("东苑") !== -1) stationName = "莲花街东苑快递中心";
-          else if (sms.indexOf("丰巢") !== -1) stationName = "学生公寓丰巢智能柜";
-          var carrierName = "菜鸟驿站";
-          if (sms.indexOf("顺丰") !== -1) carrierName = "顺丰速运";
-          else if (sms.indexOf("京东") !== -1) carrierName = "京东快递";
-          else if (sms.indexOf("中通") !== -1) carrierName = "中通快递";
-          else if (sms.indexOf("圆通") !== -1) carrierName = "圆通速递";
-          else if (sms.indexOf("申通") !== -1) carrierName = "申通快递";
-          else if (sms.indexOf("韵达") !== -1) carrierName = "韵达快递";
-          else if (sms.indexOf("极兔") !== -1) carrierName = "极兔速递";
-          return { pickupCode: pickupCode, stationName: stationName, carrierName: carrierName };
-        }
-
-        if (smsInput && smsPreview) {
-          smsInput.addEventListener("input", function () {
-            var val = smsInput.value.trim();
-            if (!val) {
-              smsPreview.textContent = "💡 提示：在「日在校园」App 中可通过手机号一键绑定小米智能助理，全自动同步您的所有校园快递与取件码。";
-              return;
-            }
-            var parsed = parseSmsText(val);
-            if (parsed.pickupCode) {
-              smsPreview.innerHTML = "✅ 已识别取件码：<strong class='xp-meta-highlight'>" + escHtml(parsed.pickupCode) + "</strong> · 驿站：<strong>" + escHtml(parsed.stationName) + "</strong> · 快递：<strong>" + escHtml(parsed.carrierName) + "</strong>";
-            } else {
-              smsPreview.textContent = "正在识别取件码格式（例如 3-2-1048）…";
-            }
-          });
-        }
-
-        // Add parcel / parse SMS
-        var btnAddParcel = document.getElementById("btn-add-parcel");
-        if (btnAddParcel) {
-          btnAddParcel.addEventListener("click", function () {
-            var sms = (document.getElementById("parcel-sms").value || "").trim();
-            var tracking = (document.getElementById("parcel-tracking").value || "").trim();
-            if (!sms && !tracking) {
-              showToast("请粘贴取件短信或填写运单号", true);
-              return;
-            }
-            var parsed = parseSmsText(sms);
-            var pickupCode = parsed.pickupCode || "1-2-1088";
-            var stationName = parsed.stationName;
-            var carrierName = parsed.carrierName;
-            if (!tracking) {
-              tracking = "YT" + String(Date.now()).slice(-10);
-            }
-            btnAddParcel.disabled = true;
-            apiFetch("/api/v1/parcels/imports", {
-              method: "POST",
-              body: JSON.stringify({
-                tracking_number: tracking,
-                carrier_code: "cainiao",
-                carrier_name: carrierName,
-                status: "READY_FOR_PICKUP",
-                pickup_code: pickupCode,
-                station_name: stationName,
-                raw_notification_text: sms || "网页端录入取件码"
-              })
-            })
-              .then(function () {
-                showToast("取件码 " + pickupCode + " 已保存并同步至 App！");
-                setTimeout(function () { window.location.reload(); }, 600);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              })
-              .finally(function () {
-                btnAddParcel.disabled = false;
-              });
-          });
-        }
-
-        // Mark parcel picked up
-        document.querySelectorAll("[data-pickup-parcel]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            var parcelId = btn.getAttribute("data-pickup-parcel");
-            apiFetch("/api/v1/parcels/" + encodeURIComponent(parcelId) + "/tracking", {
-              method: "POST",
-              body: JSON.stringify({ status: "PICKED_UP" })
-            })
-              .then(function () {
-                showToast("已标记为已取件");
-                setTimeout(function () { window.location.reload(); }, 450);
-              })
-              .catch(function (err) {
-                showToast(err.message, true);
-              });
           });
         });
 
@@ -2327,6 +1324,84 @@ export function renderConsoleHtml(ctx = {}) {
               });
           });
         });
+
+        // Admin: jobs table state pills + text search
+        var jobsSearchInput = document.getElementById("jobs-search");
+        var activeJobStateFilter = "ALL";
+        var TERMINAL_JOB_STATES = ["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"];
+        function filterAdminJobs() {
+          var q = jobsSearchInput ? jobsSearchInput.value.trim().toLowerCase() : "";
+          document.querySelectorAll("[data-job-row]").forEach(function (row) {
+            var st = row.getAttribute("data-job-state") || "";
+            var haystack = row.getAttribute("data-job-search") || "";
+            var stOk =
+              activeJobStateFilter === "ALL" ||
+              (activeJobStateFilter === "ACTIVE"
+                ? TERMINAL_JOB_STATES.indexOf(st) === -1
+                : st === activeJobStateFilter);
+            var qOk = !q || haystack.indexOf(q) !== -1;
+            row.style.display = stOk && qOk ? "" : "none";
+          });
+        }
+        if (jobsSearchInput) {
+          jobsSearchInput.addEventListener("input", filterAdminJobs);
+        }
+        document.querySelectorAll("[data-job-state-filter]").forEach(function (pill) {
+          pill.addEventListener("click", function () {
+            activeJobStateFilter = pill.getAttribute("data-job-state-filter") || "ALL";
+            document.querySelectorAll("[data-job-state-filter]").forEach(function (p) {
+              p.classList.toggle("xp-pill--active", p === pill);
+            });
+            filterAdminJobs();
+          });
+        });
+
+        // Admin: audit table text search
+        var auditSearchInput = document.getElementById("audit-search");
+        function filterAuditRows() {
+          var q = auditSearchInput ? auditSearchInput.value.trim().toLowerCase() : "";
+          document.querySelectorAll("[data-audit-row]").forEach(function (row) {
+            var haystack = row.getAttribute("data-audit-search") || "";
+            row.style.display = !q || haystack.indexOf(q) !== -1 ? "" : "none";
+          });
+        }
+        if (auditSearchInput) {
+          auditSearchInput.addEventListener("input", filterAuditRows);
+        }
+
+        // Admin: school authorization-approval submission
+        var btnAuthApproval = document.getElementById("btn-submit-auth-approval");
+        if (btnAuthApproval) {
+          btnAuthApproval.addEventListener("click", function () {
+            var schoolEl = document.getElementById("aa-school");
+            var schoolId = ((schoolEl && schoolEl.value) || "haut").trim();
+            var approver = (document.getElementById("aa-approver").value || "").trim();
+            var evidence = (document.getElementById("aa-evidence").value || "").trim();
+            if (!approver || !evidence) {
+              showToast("请填写二级审批人标识与授权凭证引用", true);
+              return;
+            }
+            btnAuthApproval.disabled = true;
+            apiFetch(
+              "/api/v1/admin/schools/" + encodeURIComponent(schoolId) + "/authorization-approval",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  secondary_approver_ref: approver,
+                  authorization_evidence_ref: evidence
+                })
+              }
+            )
+              .then(function () {
+                showToast("授权审批已提交并记录审计！");
+                setTimeout(function () { window.location.reload(); }, 600);
+              })
+              .catch(function (err) {
+                btnAuthApproval.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
 
         // Admin: Cloud-Controlled Campus Channels & Student Clubs
         var btnSaveBulletin = document.getElementById("btn-save-bulletin");

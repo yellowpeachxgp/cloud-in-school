@@ -2591,22 +2591,34 @@ export function createCampusCloudApp(options = {}) {
       }
 
       const webConsoleRoutes = new Map([
-        ["/", "portal"],
-        ["/portal", "portal"],
-        ["/reservations", "reservations"],
-        ["/parcels", "parcels"],
-        ["/community", "community"],
-        ["/orders", "orders"],
+        ["/", "console"],
         ["/console", "console"],
-        ["/console/", "console"]
+        ["/console/jobs", "jobs"],
+        ["/console/orders", "orders"],
+        ["/console/audit", "audit"],
+        ["/console/schools", "schools"],
+        ["/console/content", "content"]
       ]);
+      const retiredConsoleRoutes = new Set(["/portal", "/reservations", "/parcels", "/community", "/orders"]);
+
+      if (upperMethod === "GET" && retiredConsoleRoutes.has(pathname)) {
+        return {
+          status: 302,
+          headers: { Location: "/console", "cache-control": "no-store", "x-request-id": requestId },
+          rawBody: "",
+          body: okEnvelope("CONSOLE_ROUTE_RETIRED", { to: "/console" }, requestId)
+        };
+      }
 
       if (upperMethod === "GET" && webConsoleRoutes.has(pathname)) {
         const activeNav = webConsoleRoutes.get(pathname);
-        const cookieAuth = identity.verifyWebSessionCookie(
+        let cookieAuth = identity.verifyWebSessionCookie(
           headers?.cookie || headers?.Cookie || "",
           nowMs
         );
+        if (cookieAuth && !store.hasAdminAccess?.(cookieAuth.cloudUserId)) {
+          cookieAuth = null;
+        }
         const referer = String(headers?.referer || headers?.Referer || "");
         let isTrustedSsoReferer = false;
         if (referer) {
@@ -2643,60 +2655,57 @@ export function createCampusCloudApp(options = {}) {
           campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false })
         };
         if (cookieAuth) {
-          const wallet = await financeService.getWalletSnapshot(cookieAuth.cloudUserId);
-          const bindings = store.recordsForUser("schoolBindings", cookieAuth.cloudUserId);
-          const plans = store.recordsForUser("reservationPlans", cookieAuth.cloudUserId);
-          const jobs = store.recordsForUser("reservationJobs", cookieAuth.cloudUserId);
-          const parcels = parcelHub.listUserParcels(cookieAuth.cloudUserId);
-          const orders = store.recordsForUser("reservationOrders", cookieAuth.cloudUserId);
-          const isAdminUser =
-            cookieAuth.roles.includes("ADMIN") ||
-            cookieAuth.roles.includes("OPERATOR") ||
-            cookieAuth.roles.includes("FINANCE") ||
-            cookieAuth.user.role === "admin";
-          let adminCtx = {};
-          if (isAdminUser && activeNav === "console") {
-            const financeMatrix = await financeBridge.getSiteFinanceMatrix();
-            adminCtx = {
-              adminStats: {
-                users_count: store.users.size,
-                active_bindings_count: Array.from(store.schoolBindings.values()).filter(
-                  (b) => !b.revoked_at
-                ).length,
-                jobs_count: store.reservationJobs.size,
-                orders_count: store.reservationOrders.size,
-                parcels_count: store.parcels.size,
-                audit_events_count: store.auditEvents.length
-              },
-              allOrders: Array.from(store.reservationOrders.values()).map((o) => {
-                const u = store.users.get(o.cloud_user_id);
-                return {
-                  ...o,
-                  username: u?.username || u?.display_name || o.cloud_user_id,
-                  sso_subject: u?.subject || "-"
-                };
-              }),
-              allJobs: Array.from(store.reservationJobs.values()),
-              schools: Array.from(store.schoolIntegrations.values()),
-              campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: true }),
-              auditEvents: store.auditEvents.slice(-50).reverse(),
-              financeMatrix
+          const nowIso = new Date(nowMs).toISOString();
+          const allJobs = Array.from(store.reservationJobs.values()).map((j) => {
+            const u = store.users.get(j.cloud_user_id);
+            const p = j.plan_id ? store.reservationPlans.get(j.plan_id) : null;
+            return {
+              ...j,
+              username: u?.username || u?.display_name || j.cloud_user_id,
+              plan_label: p?.area_name || p?.area_code || null
             };
-          }
+          });
+          const allOrders = Array.from(store.reservationOrders.values()).map((o) => {
+            const u = store.users.get(o.cloud_user_id);
+            return {
+              ...o,
+              username: u?.username || u?.display_name || o.cloud_user_id,
+              sso_subject: u?.subject || "-"
+            };
+          });
+          const allUsers = Array.from(store.users.values()).map((u) => ({
+            id: u.id,
+            username: u.username,
+            display_name: u.display_name,
+            subject: u.subject,
+            role: u.role,
+            status: u.status,
+            roles: store.getUserRoles(u.id)
+          }));
           consoleCtx = {
             user: cookieAuth.user,
-            wallet,
             roles: cookieAuth.roles,
             activeNav,
-            bindings,
-            plans,
-            jobs,
-            parcels,
-            orders,
+            nowIso,
             pricingMicropeach: store.pricingMicropeach,
-            campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false }),
             accessToken: cookieAuth.accessToken,
-            ...adminCtx
+            adminStats: {
+              users_count: store.users.size,
+              active_bindings_count: Array.from(store.schoolBindings.values()).filter(
+                (b) => !b.revoked_at
+              ).length,
+              jobs_count: store.reservationJobs.size,
+              orders_count: store.reservationOrders.size,
+              parcels_count: store.parcels.size,
+              audit_events_count: store.auditEvents.length
+            },
+            allJobs,
+            allOrders,
+            allUsers,
+            schools: Array.from(store.schoolIntegrations.values()),
+            auditEvents: store.auditEvents.slice(-200).reverse(),
+            campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: true }),
+            financeMatrix: await financeBridge.getSiteFinanceMatrix().catch(() => null)
           };
         }
 

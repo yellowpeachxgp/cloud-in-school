@@ -43,7 +43,7 @@ test("Contract Parity: Operations Console exposes all 12 mandatory views", () =>
   }
 });
 
-test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /community route, and 1 🍑 pricing", async () => {
+test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /console/content admin route, and 1 🍑 pricing", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   assert.equal(app.store.pricingMicropeach, 10_000, "Default reservation price must be 10,000 micropeach (1 🍑)");
 
@@ -65,7 +65,7 @@ test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /co
   });
   const commRes = await app.inject({
     method: "GET",
-    url: "/community",
+    url: "/console/content",
     headers: { cookie: `dis_web_session=${encodeURIComponent(cookieVal)}` }
   });
   assert.equal(commRes.status, 200);
@@ -74,4 +74,13 @@ test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /co
   assert.ok(commRes.rawBody.includes("计算机服务社"));
   assert.ok(commRes.rawBody.includes("xp-entity-header"));
   assert.ok(!commRes.rawBody.includes("0.1 🍑"));
+
+  // Retired user-facing pages redirect to the admin dashboard
+  const retiredRes = await app.inject({
+    method: "GET",
+    url: "/community",
+    headers: { cookie: `dis_web_session=${encodeURIComponent(cookieVal)}` }
+  });
+  assert.equal(retiredRes.status, 302);
+  assert.equal(retiredRes.headers?.location || retiredRes.headers?.Location, "/console");
 });
