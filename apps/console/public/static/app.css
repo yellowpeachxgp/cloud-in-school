@@ -3705,3 +3705,10 @@ dialog.glass-modal.glass-modal-xl {
 
 
 
+
+/* Mobile drawer remains available for logout and admin navigation. */
+.sidebar-backdrop { display: none; }
+@media (max-width: 860px) {
+  html[data-mobile-menu-open] body.console-body .sidebar { display: flex; z-index: 61; }
+  html[data-mobile-menu-open] .sidebar-backdrop { display: block; position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.5); }
+}

@@ -12,10 +12,13 @@ import { ContractError } from "../../contracts/src/index.mjs";
 export class KmsEnvelopeVault {
   constructor(options = {}) {
     this.activeKekId = options.activeKekId || process.env.KMS_KEY_ID || "cn-kms-campus-cloud-kek-v1";
-    const initialKekMaterial =
-      options.initialKekMaterial ||
-      process.env.KMS_MASTER_SEED ||
-      "cn-campus-cloud-kms-seed-2026-argongate";
+    const suppliedMaterial = options.initialKekMaterial || process.env.KMS_MASTER_SEED;
+    if ((options.environment || process.env.NODE_ENV) === "production" &&
+        (!suppliedMaterial || Buffer.byteLength(suppliedMaterial) < 32 || String(suppliedMaterial).startsWith("secret://") || suppliedMaterial === "cn-campus-cloud-kms-seed-2026-argongate")) {
+      throw new Error("Production requires KMS_MASTER_SEED with at least 32 bytes of resolved secret material");
+    }
+    // Development-only in-memory vaults use a fresh key, never a public default.
+    const initialKekMaterial = suppliedMaterial || crypto.randomBytes(32);
     this.kekRing = new Map();
     this.kekRing.set(this.activeKekId, crypto.createHash("sha256").update(initialKekMaterial).digest());
     this.permitSecret = crypto

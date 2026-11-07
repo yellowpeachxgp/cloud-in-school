@@ -58,10 +58,11 @@ test("UI SDK & Pricing Parity: Unified XPeach Web UI SDK, Liquid Glass mode, /co
     username: "yellowpeach",
     role: "admin"
   });
+  const session = app.identity.issueDeviceSession(user, "contract-fixture");
   const cookieVal = app.identity.signWebSessionCookie({
     cloudUserId: user.id,
-    accessToken: "tok",
-    refreshToken: "ref"
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token
   });
   const commRes = await app.inject({
     method: "GET",

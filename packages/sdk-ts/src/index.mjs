@@ -1,6 +1,6 @@
 export class CampusCloudClient {
   constructor({ baseUrl, accessToken = null, fetchImpl = globalThis.fetch }) {
-    this.baseUrl = String(baseUrl || '').replace(/\/+$/, '');
+    this.baseUrl = String(baseUrl || '').replace(/\/+$/, '').replace(/\/api$/, '');
     this.accessToken = accessToken;
     this.fetchImpl = fetchImpl;
   }
@@ -33,38 +33,53 @@ export class CampusCloudClient {
   }
 
   getHealth() {
-    return this.request('GET', '/v1/health');
+    return this.request('GET', '/healthz');
   }
 
   startOidcLogin(payload) {
-    return this.request('POST', '/v1/auth/oidc/start', { body: payload });
+    return this.request('POST', '/api/v1/auth/mobile/start', { body: payload });
   }
 
   exchangeAppTicket(payload) {
-    return this.request('POST', '/v1/auth/oidc/exchange-ticket', { body: payload });
+    return this.request('POST', '/api/v1/auth/mobile/exchange', { body: payload });
   }
 
   getWalletSummary() {
-    return this.request('GET', '/v1/wallet/peach/summary');
+    return this.request('GET', '/api/v1/me/wallet');
   }
 
-  createReservationOrder(payload, idempotencyKey) {
-    return this.request('POST', '/v1/reservations/orders', { body: payload, idempotencyKey });
+  createReservationPlan(payload, idempotencyKey) {
+    return this.request('POST', '/api/v1/reservation-plans', { body: payload, idempotencyKey });
   }
 
-  getReservationOrder(orderId) {
-    return this.request('GET', `/v1/reservations/orders/${encodeURIComponent(orderId)}`);
+  listReservationOrders() {
+    return this.request('GET', '/api/v1/me/orders');
+  }
+
+  // An order is produced by confirmed execution, not created by a client.
+  // Do not silently reinterpret a monetary API as a booking action.
+  createReservationOrder() {
+    throw new Error('Unsupported operation: use createReservationPlan with explicit price acceptance');
+  }
+
+  async getReservationOrder(orderId) {
+    const result = await this.listReservationOrders();
+    if (!result.ok) return result;
+    const order = result.data?.orders?.find((item) => item.id === orderId);
+    if (order) return { ...result, data: order };
+    return { ...result, status: 404, ok: false, data: undefined,
+      error: { code: 'NOT_FOUND', message: 'Order not found', retryable: false } };
   }
 
   listParcels() {
-    return this.request('GET', '/v1/parcels');
+    return this.request('GET', '/api/v1/parcels');
   }
 
   upsertParcel(payload) {
-    return this.request('POST', '/v1/parcels', { body: payload });
+    return this.request('POST', '/api/v1/parcels/imports', { body: payload });
   }
 
   listPlugins() {
-    return this.request('GET', '/v1/plugins/registry');
+    return this.request('GET', '/api/v1/plugins/registry');
   }
 }

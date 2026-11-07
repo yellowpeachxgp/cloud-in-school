@@ -236,9 +236,8 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
           })
             .then(function (r) { return r.json(); })
             .then(function (res) {
-              if (res && res.ok && res.data && res.data.access_token) {
-                localStorage.setItem("dis_web_session", JSON.stringify(res.data));
-              }
+              // The exchange sets an HttpOnly cookie. Never persist bearer credentials in JS storage.
+              try { localStorage.removeItem("dis_web_session"); } catch (e) {}
               window.location.replace(window.location.pathname || "/");
             })
             .catch(function () {
@@ -337,7 +336,7 @@ export function renderConsoleHtml(ctx = {}) {
   const ccClubs = Array.isArray(campusContent.clubs) ? campusContent.clubs : [];
   const ccCompetitions = Array.isArray(campusContent.competitions) ? campusContent.competitions : [];
 
-  const accessToken = ctx.accessToken || "";
+
 
   const pageHeaderConfig = {
     portal: {
@@ -1511,23 +1510,23 @@ export function renderConsoleHtml(ctx = {}) {
     </div>
 
     <nav class="mobile-glass-dock" aria-label="快捷导航">
-      <a class="dock-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
+      <a class="mobile-dock-item ${activeNav === "portal" ? "active" : ""}" href="/portal">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         <span>通行证</span>
       </a>
-      <a class="dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+      <a class="mobile-dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
         <span>抢座预约</span>
       </a>
-      <a class="dock-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
+      <a class="mobile-dock-item ${activeNav === "parcels" ? "active" : ""}" href="/parcels">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
         <span>取件码</span>
       </a>
-      <a class="dock-item ${activeNav === "community" ? "active" : ""}" href="/community">
+      <a class="mobile-dock-item ${activeNav === "community" ? "active" : ""}" href="/community">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
         <span>合作社团</span>
       </a>
-      <a class="dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
+      <a class="mobile-dock-item ${activeNav === "orders" ? "active" : ""}" href="/orders">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
         <span>🍑 账单</span>
       </a>
@@ -1536,7 +1535,6 @@ export function renderConsoleHtml(ctx = {}) {
     <script src="/static/app.js" defer></script>
     <script>
       (function () {
-        var SERVER_TOKEN = ${JSON.stringify(accessToken).replace(/</g, "\\u003c")};
         var PRICE_PEACH_TEXT = ${JSON.stringify(pricePeachText)};
         var ACCEPTED_PRICE_MICROPEACH = ${JSON.stringify(pricingMicropeach)};
         var ACCEPTED_PRICE_VERSION = ${JSON.stringify(getReservationPriceVersion(pricingMicropeach))};
@@ -1588,9 +1586,8 @@ export function renderConsoleHtml(ctx = {}) {
         function apiFetch(url, options) {
           options = options || {};
           options.headers = options.headers || {};
-          if (SERVER_TOKEN) {
-            options.headers["Authorization"] = "Bearer " + SERVER_TOKEN;
-          }
+          // Same-origin HttpOnly session cookie; no bearer token embedded in HTML.
+          options.credentials = "same-origin";
           options.headers["Content-Type"] = "application/json";
           return fetch(url, options).then(function (r) {
             return r.json().then(function (d) {
@@ -2213,7 +2210,7 @@ export function renderConsoleHtml(ctx = {}) {
           var codeMatch = sms.match(/([0-9A-Za-z]{1,4}-[0-9A-Za-z]{1,4}-[0-9A-Za-z]{2,6})/) ||
                           sms.match(/取件码[为是：:\\s]*([0-9A-Za-z-]{4,12})/);
           var pickupCode = codeMatch ? codeMatch[1] : "";
-          var stationName = "莲花街南苑菜鸟驿站";
+          var stationName = null;
           if (sms.indexOf("北苑") !== -1) stationName = "莲花街北苑菜鸟驿站";
           else if (sms.indexOf("东苑") !== -1) stationName = "莲花街东苑快递中心";
           else if (sms.indexOf("丰巢") !== -1) stationName = "学生公寓丰巢智能柜";
@@ -2255,7 +2252,7 @@ export function renderConsoleHtml(ctx = {}) {
               return;
             }
             var parsed = parseSmsText(sms);
-            var pickupCode = parsed.pickupCode || "1-2-1088";
+            var pickupCode = parsed.pickupCode || null;
             var stationName = parsed.stationName;
             var carrierName = parsed.carrierName;
             if (!tracking) {
@@ -2268,14 +2265,14 @@ export function renderConsoleHtml(ctx = {}) {
                 tracking_number: tracking,
                 carrier_code: "cainiao",
                 carrier_name: carrierName,
-                status: "READY_FOR_PICKUP",
+                status: pickupCode ? "READY_FOR_PICKUP" : "IN_TRANSIT",
                 pickup_code: pickupCode,
                 station_name: stationName,
                 raw_notification_text: sms || "网页端录入取件码"
               })
             })
               .then(function () {
-                showToast("取件码 " + pickupCode + " 已保存并同步至 App！");
+                showToast(pickupCode ? "取件码 " + pickupCode + " 已保存并同步至 App！" : "运单已保存，等待有效取件码。");
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {

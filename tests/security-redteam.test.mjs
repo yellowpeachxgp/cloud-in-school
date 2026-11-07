@@ -392,6 +392,7 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
     url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",
     headers: rlHeaders
   });
+  for (let i = 0; i < 58; i++) await app.inject({ method: "GET", url: "/api/v1/auth/mobile/status?txn=txn_nonexistent", headers: rlHeaders });
   const req3 = await app.inject({
     method: "GET",
     url: "/api/v1/auth/mobile/status?txn=txn_nonexistent",

@@ -1109,30 +1109,27 @@ export class CloudDatabaseStore {
 
   _syncAdminRoleIfEligible(user) {
     if (!user) return;
-    if (
-      user.role === "admin" ||
-      user.subject === "856f-cf51-b064-5d84"
-    ) {
-      const roles = this.userRoles.get(user.id) || new Set(["USER"]);
-      roles.add("ADMIN");
-      roles.add("OPERATOR");
-      roles.add("FINANCE");
-      roles.add("PLATFORM_OWNER");
-      roles.add("OPERATIONS_ADMIN");
-      roles.add("SCHOOL_OPERATOR");
-      roles.add("FINANCE_OPERATOR");
-      roles.add("SECURITY_AUDITOR");
-      this.userRoles.set(user.id, roles);
+    // Keep intentional local grants separate from recomputed upstream grants.
+    // Legacy unlabelled elevations fail closed after a profile refresh.
+    const roles = new Set(["USER", ...(user.local_roles || [])]);
+    if (user.role === "admin") {
+      for (const role of ["ADMIN", "OPERATOR", "FINANCE", "PLATFORM_OWNER", "OPERATIONS_ADMIN",
+        "SCHOOL_OPERATOR", "FINANCE_OPERATOR", "SECURITY_AUDITOR"]) roles.add(role);
     }
+    this.userRoles.set(user.id, roles);
   }
 
   getUserRoles(cloudUserId) {
-    const set = this.userRoles.get(cloudUserId);
-    return set ? Array.from(set) : ["USER"];
+    const user = this.users.get(cloudUserId);
+    if (user) this._syncAdminRoleIfEligible(user);
+    return Array.from(this.userRoles.get(cloudUserId) || ["USER"]);
   }
 
   setUserRoles(cloudUserId, roles) {
-    this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])]));
+    const user = this.users.get(cloudUserId);
+    if (!user) { this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])])); this.saveSnapshot(); return; }
+    user.local_roles = Array.from(new Set(roles || []));
+    this._syncAdminRoleIfEligible(user);
     this.saveSnapshot();
   }
 

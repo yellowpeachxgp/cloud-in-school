@@ -177,6 +177,9 @@ export class ParcelHubService {
     this.kmsVault = kmsVault;
     this.environment = environment;
     this.parcelIndexByUserTracking = new Map(); // `${userId}:${trackingNumber}` -> parcelId
+    for (const parcel of this.store.parcels.values()) {
+      this.parcelIndexByUserTracking.set(`${parcel.cloud_user_id}:${parcel.tracking_number}`, parcel.id);
+    }
     this.aiConsents = new Map(); // userId -> { allow_ai_summary, allowed_fields }
   }
 
@@ -204,6 +207,9 @@ export class ParcelHubService {
   }
 
   enforceProviderAuthority(providerId, { channel = "CLIENT_IMPORT", sandboxOverride = false } = {}) {
+    if (!["CLIENT_IMPORT", "CLOUD_BACKGROUND_POLL"].includes(channel)) {
+      throw new ContractError("PARCEL_PROVIDER_NOT_AUTHORIZED", "Unknown parcel import channel");
+    }
     const entry = PROVIDER_AUTHORITY_MATRIX[providerId];
     if (!entry) {
       throw new ContractError(
@@ -226,14 +232,16 @@ export class ParcelHubService {
     }
     if (
       entry.authority_status === "RESEARCH_SANDBOX_ONLY" &&
-      this.environment === "production" &&
-      !sandboxOverride
+      this.environment === "production"
     ) {
       throw new ContractError(
         "PARCEL_PROVIDER_NOT_AUTHORIZED",
         `Provider '${providerId}' is restricted to RESEARCH_SANDBOX_ONLY and blocked in production`,
         { provider_id: providerId, authority_status: entry.authority_status }
       );
+    }
+    if (channel === "CLIENT_IMPORT" && !entry.allow_client_import && this.environment === "production") {
+      throw new ContractError("PARCEL_PROVIDER_NOT_AUTHORIZED", "Client import is not authorized");
     }
     return entry;
   }
@@ -430,9 +438,10 @@ export class ParcelHubService {
       EXCEPTION: 35
     };
     if (
+      parcel.status !== "PICKED_UP" && (
       (statusRank[effectiveStatus] || 0) >= (statusRank[parcel.status] || 0) ||
       incomingPriority >= (parcel.field_provenance.status?.priority || 0) ||
-      (parcel.status === "READY_FOR_PICKUP" && !parcel.pickup_code && !effectivePickupCode && effectiveStatus === "IN_TRANSIT")
+      (parcel.status === "READY_FOR_PICKUP" && !parcel.pickup_code && !effectivePickupCode && effectiveStatus === "IN_TRANSIT"))
     ) {
       parcel.status = effectiveStatus;
       parcel.field_provenance.status = {

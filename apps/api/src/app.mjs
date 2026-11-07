@@ -63,10 +63,11 @@ export function createCampusCloudApp(options = {}) {
   const kmsVault =
     options.kmsVault ||
     new KmsEnvelopeVault({
+      environment: options.environment,
       onAudit: (ev) => store.recordAudit(ev),
       ...options.kmsOptions
     });
-  const identity = options.identity || new CloudIdentityService(store, options.identityOptions);
+  const identity = options.identity || new CloudIdentityService(store, { environment: options.environment, ...options.identityOptions });
   const cookieVault = options.cookieVault || new ScopedSchoolCookieVault();
   const schoolProvider =
     options.schoolProvider || new HautLibraryProvider(options.schoolProviderOptions);
@@ -229,8 +230,8 @@ export function createCampusCloudApp(options = {}) {
       }
       return {
         cloudUserId: cookieAuth.cloudUserId,
-        familyId: "web_cookie_family",
-        sessionId: "web_cookie_session",
+        familyId: cookieAuth.familyId,
+        sessionId: cookieAuth.sessionId,
         ssoIssuer: cookieAuth.user.issuer,
         ssoSubject: cookieAuth.user.subject,
         roles: cookieAuth.roles
@@ -1589,7 +1590,7 @@ export function createCampusCloudApp(options = {}) {
   register("GET", "/api/v1/auth/web/logout", "logoutWebSession", "public", async ({ headers, nowMs }) => {
     const cookieAuth = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs);
     if (cookieAuth?.cloudUserId) {
-      identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+      identity.revokeSessionFamily(cookieAuth.familyId, "WEB_USER_LOGOUT", nowMs);
     }
     return {
       status: 302,
@@ -2228,6 +2229,7 @@ export function createCampusCloudApp(options = {}) {
   async function inject({
     method = "GET",
     url = "/healthz",
+    remoteAddress = "anon_default",
     headers = {},
     body = undefined,
     nowMs = Date.now()
@@ -2442,16 +2444,9 @@ export function createCampusCloudApp(options = {}) {
         matchedRoute.auth === "single_use_ticket" ||
         matchedRoute.auth === "oidc_state_nonce"
       ) {
-        const clientIp =
-          String(
-            headers?.["x-rate-limit-key"] ||
-              headers?.["x-real-ip"] ||
-              headers?.["x-forwarded-for"] ||
-              "anon_default"
-          )
-            .split(",")[0]
-            .trim() || "anon_default";
-        const maxReqs = Math.max(1, Number(headers?.["x-rate-limit-max"]) || 60);
+        // Only the transport, never an arbitrary HTTP header, chooses the bucket.
+        const clientIp = String(remoteAddress || "anon_default");
+        const maxReqs = 60;
         const rl = await redisBuffer.checkRateLimit(
           `${matchedRoute.operationId}:${clientIp}`,
           maxReqs,
@@ -2579,6 +2574,7 @@ export function createCampusCloudApp(options = {}) {
       const response = await inject({
         method: req.method,
         url: req.url,
+        remoteAddress: req.socket.remoteAddress,
         headers: req.headers,
         body: parsedBody
       });
