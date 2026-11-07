@@ -464,6 +464,232 @@ export function createDefaultHautCampusContent() {
   };
 }
 
+
+export function createDefaultHautMomentsState(nowIso = new Date().toISOString()) {
+  return {
+    school_id: "haut",
+    updated_at: nowIso,
+    posts: [
+      {
+        id: "mp_found_card_01",
+        type: "FOUND",
+        title: "拾到校园一卡通一张（信息学院 23 级）",
+        category: "校园卡/证件",
+        campus: "莲花街校区",
+        location: "图书馆三层西书库北区自习桌",
+        description: "在三层西书库北区 06 桌附近捡到一张校园卡，卡面姓名为张*宇，已放在三楼服务台旁书架，也可联系我直接拿。",
+        contact: "QQ: 2418903312",
+        reward_note: "凭学号尾号认领",
+        status: "OPEN",
+        author_name: "林同学",
+        author_student_no_masked: "23***06",
+        likes_count: 6,
+        favorites_count: 2,
+        comments: [
+          {
+            id: "mc_01",
+            author_name: "张同学",
+            content: "同班同学，已转告失主联系你，十分感谢！",
+            contact_hint: "",
+            created_at: nowIso
+          }
+        ],
+        created_at: nowIso,
+        updated_at: nowIso
+      },
+      {
+        id: "mp_lost_airpods_02",
+        type: "LOST",
+        title: "寻 AirPods Pro 2 充电仓（带浅灰硅胶套）",
+        category: "数码耳机",
+        campus: "莲花街校区",
+        location: "1号教学楼 1204 教室至二餐厅沿线",
+        description: "今天上午第 3-4 节下课后从 1 号楼走到二餐厅二楼就餐，途中遗失 AirPods Pro 2 充电仓（内无耳机），套有浅灰色保护壳。",
+        contact: "微信: haut_chen23",
+        reward_note: "请喝瑞幸或奶茶酬谢",
+        status: "OPEN",
+        author_name: "陈同学",
+        author_student_no_masked: "23***18",
+        likes_count: 9,
+        favorites_count: 4,
+        comments: [],
+        created_at: nowIso,
+        updated_at: nowIso
+      },
+      {
+        id: "mp_found_keys_03",
+        type: "FOUND",
+        title: "二餐厅一楼拾到宿舍钥匙串（挂小熊挂件）",
+        category: "钥匙饰品",
+        campus: "莲花街校区",
+        location: "二餐厅一楼黄焖鸡窗口旁餐桌",
+        description: "共两把钥匙加一枚蓝色门禁扣，挂有棕色小熊钥匙扣，目前暂存本人处，失主请加 QQ 联系。",
+        contact: "QQ: 1908273645",
+        reward_note: "描述挂件细节即可认领",
+        status: "OPEN",
+        author_name: "王同学",
+        author_student_no_masked: "24***11",
+        likes_count: 5,
+        favorites_count: 1,
+        comments: [],
+        created_at: nowIso,
+        updated_at: nowIso
+      },
+      {
+        id: "mp_lost_cup_04",
+        type: "LOST",
+        title: "寻象印白色保温杯（杯底贴有防丢码）",
+        category: "水杯雨伞",
+        campus: "嵩山路校区",
+        location: "嵩山路校区 3 号楼阶梯教室",
+        description: "480ml 白色保温杯，杯身有轻微磕碰，杯底贴有防丢码标签 HAUT-TAG-7E2A9B。",
+        contact: "QQ: 310948271",
+        reward_note: "感谢好心人归还",
+        status: "OPEN",
+        author_name: "孙同学",
+        author_student_no_masked: "23***28",
+        likes_count: 4,
+        favorites_count: 1,
+        comments: [],
+        created_at: nowIso,
+        updated_at: nowIso
+      }
+    ],
+    book_listings: [
+      {
+        id: "mb_math_01",
+        title: "高等数学（同济第八版 上+下册）含配套习题全解",
+        isbn: "9787040589818",
+        author_publisher: "同济大学数学科学学院 · 高等教育出版社",
+        course_name: "高等数学A",
+        major_track: "ALL_MAJORS",
+        campus: "莲花街校区",
+        condition_label: "九成新 · 含期末重点勾画",
+        price_yuan: 18,
+        original_price_yuan: 89,
+        delivery_mode: "莲花街北苑/钟楼自提",
+        contact: "QQ: 2310406002",
+        seller_name: "黄同学",
+        status: "AVAILABLE",
+        likes_count: 12,
+        created_at: nowIso
+      },
+      {
+        id: "mb_ds_02",
+        title: "数据结构（C语言版 第2版）严蔚敏 + 算法笔记",
+        isbn: "9787115379504",
+        author_publisher: "严蔚敏 · 人民邮电出版社",
+        course_name: "数据结构",
+        major_track: "CS_AI_SOFTWARE",
+        campus: "莲花街校区",
+        condition_label: "九成新 · 无折痕",
+        price_yuan: 15,
+        original_price_yuan: 49,
+        delivery_mode: "8号楼或宿舍楼下交接",
+        contact: "微信: cs_book_haut",
+        seller_name: "李同学",
+        status: "AVAILABLE",
+        likes_count: 8,
+        created_at: nowIso
+      },
+      {
+        id: "mb_circuit_03",
+        title: "电路（第6版）邱关源 + 历年期末复习题",
+        isbn: "9787040565560",
+        author_publisher: "邱关源 / 罗先觉 · 高等教育出版社",
+        course_name: "电路原理",
+        major_track: "EE_AUTOMATION_IOT",
+        campus: "莲花街校区",
+        condition_label: "含重点笔记与实验指导",
+        price_yuan: 16,
+        original_price_yuan: 65,
+        delivery_mode: "莲花街南苑/图书馆自提",
+        contact: "QQ: 178293041",
+        seller_name: "周同学",
+        status: "AVAILABLE",
+        likes_count: 7,
+        created_at: nowIso
+      },
+      {
+        id: "mb_food_04",
+        title: "谷物加工工艺学 + 生物化学（王镜岩精简笔记）",
+        isbn: "9787518432103",
+        author_publisher: "中国轻工业出版社",
+        course_name: "谷物加工工艺学",
+        major_track: "FOOD_BIO_CHEM_MAT",
+        campus: "莲花街校区",
+        condition_label: "全新未拆封 / 笔记齐全",
+        price_yuan: 20,
+        original_price_yuan: 78,
+        delivery_mode: "粮油食品学院楼下或北苑交接",
+        contact: "QQ: 904817263",
+        seller_name: "赵同学",
+        status: "AVAILABLE",
+        likes_count: 10,
+        created_at: nowIso
+      }
+    ],
+    anti_lost_tags: [
+      {
+        id: "tag_default_01",
+        tag_code: "HAUT-TAG-7E2A9B",
+        item_name: "象印白色保温杯 & 校园卡套",
+        category: "水杯雨伞",
+        campus: "莲花街校区",
+        owner_name: "孙同学",
+        owner_contact: "QQ: 310948271",
+        return_note: "若拾到请放至图书馆一楼服务台或通过下方留言告知位置，万分感谢！",
+        status: "NORMAL",
+        reports: [],
+        created_at: nowIso,
+        updated_at: nowIso
+      }
+    ],
+    isbn_catalog: [
+      {
+        isbn: "9787040589818",
+        title: "高等数学（第八版 上册）",
+        author_publisher: "同济大学数学科学学院 · 高等教育出版社",
+        course_name: "高等数学A",
+        major_track: "ALL_MAJORS",
+        original_price_yuan: 49
+      },
+      {
+        isbn: "9787040599053",
+        title: "工程数学 线性代数（第七版）",
+        author_publisher: "同济大学数学科学学院 · 高等教育出版社",
+        course_name: "线性代数",
+        major_track: "ALL_MAJORS",
+        original_price_yuan: 36
+      },
+      {
+        isbn: "9787115379504",
+        title: "数据结构（C语言版 第2版）",
+        author_publisher: "严蔚敏 · 人民邮电出版社",
+        course_name: "数据结构",
+        major_track: "CS_AI_SOFTWARE",
+        original_price_yuan: 49
+      },
+      {
+        isbn: "9787040565560",
+        title: "电路（第6版）",
+        author_publisher: "邱关源 / 罗先觉 · 高等教育出版社",
+        course_name: "电路原理",
+        major_track: "EE_AUTOMATION_IOT",
+        original_price_yuan: 65
+      },
+      {
+        isbn: "9787040512113",
+        title: "概率论与数理统计（第五版）",
+        author_publisher: "浙大盛骤 · 高等教育出版社",
+        course_name: "概率论与数理统计",
+        major_track: "ALL_MAJORS",
+        original_price_yuan: 45
+      }
+    ]
+  };
+}
+
 export function listMigrations() {
   const files = fs.readdirSync(MIGRATIONS_DIR).sort();
   const upFiles = files.filter((f) => f.endsWith(".sql") && !f.endsWith(".down.sql"));
@@ -522,7 +748,8 @@ export class CloudDatabaseStore {
     this.pluginInstallations = new Map(); // `${userId}:${pluginId}` -> installation
 
     // Cloud-Controlled Campus Channels, Clubs & Dynamic Content
-    this.campusContent = new Map(); // schoolId -> { school_id, version, updated_at, bulletin, channels, clubs }
+    this.campusContent = new Map();
+    this.momentsState = createDefaultHautMomentsState(); // schoolId -> { school_id, version, updated_at, bulletin, channels, clubs }
 
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
@@ -571,6 +798,12 @@ export class CloudDatabaseStore {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
       loadMap(this.notifications, raw.notifications);
+      if (raw.momentsState && typeof raw.momentsState === "object") {
+        this.momentsState = {
+          ...createDefaultHautMomentsState(),
+          ...raw.momentsState
+        };
+      }
       if (Array.isArray(raw.auditEvents)) {
         this.auditEvents = raw.auditEvents.slice(-500);
       }
@@ -605,6 +838,7 @@ export class CloudDatabaseStore {
         parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
         pluginInstallations: Array.from(this.pluginInstallations.entries()),
         campusContent: Array.from(this.campusContent.entries()),
+        momentsState: this.momentsState,
         notifications: Array.from(this.notifications.entries()),
         auditEvents: this.auditEvents.slice(-500)
       };

@@ -2256,6 +2256,281 @@ export function createCampusCloudApp(options = {}) {
     }
   );
 
+
+  // --- Campus Moments (Lost & Found Plaza, Second-Hand Textbooks, Anti-Lost QR Code Tags) ---
+  function escapeClaimHtml(raw) {
+    return String(raw ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function computePostMatches(targetPost, allPosts) {
+    if (!targetPost) return [];
+    const oppositeType = targetPost.type === "LOST" ? "FOUND" : "LOST";
+    const tokens = String(targetPost.title + " " + targetPost.description + " " + targetPost.location)
+      .toLowerCase()
+      .split(/[\s,，。！!？?、·/]+/)
+      .filter((t) => t.length >= 2);
+    return (allPosts || [])
+      .filter((p) => p.id !== targetPost.id && p.type === oppositeType && p.status !== "RESOLVED")
+      .map((p) => {
+        let score = 0;
+        if (p.category === targetPost.category) score += 45;
+        if (p.campus === targetPost.campus) score += 25;
+        const hay = (p.title + " " + p.description + " " + p.location).toLowerCase();
+        for (const tk of tokens) {
+          if (hay.includes(tk)) score += 12;
+        }
+        return { post: p, match_score: Math.min(score, 98) };
+      })
+      .filter((m) => m.match_score >= 45)
+      .sort((a, b) => b.match_score - a.match_score)
+      .slice(0, 3);
+  }
+
+  registerExtension("GET", "/api/v1/moments/snapshot", "getMomentsSnapshot", "public", async ({ query }) => {
+    const ms = store.momentsState || { posts: [], book_listings: [], anti_lost_tags: [], isbn_catalog: [] };
+    const typeFilter = (query.get("type") || "").trim().toUpperCase();
+    const campusFilter = (query.get("campus") || "").trim();
+    const kw = (query.get("keyword") || "").trim().toLowerCase();
+    let posts = Array.isArray(ms.posts) ? ms.posts : [];
+    if (typeFilter === "LOST" || typeFilter === "FOUND") {
+      posts = posts.filter((p) => p.type === typeFilter);
+    }
+    if (campusFilter && campusFilter !== "全部" && campusFilter !== "ALL") {
+      posts = posts.filter((p) => p.campus === campusFilter);
+    }
+    if (kw) {
+      posts = posts.filter((p) =>
+        (p.title + " " + p.category + " " + p.location + " " + p.description).toLowerCase().includes(kw)
+      );
+    }
+    const enrichedPosts = posts.map((p) => ({
+      ...p,
+      matched_clues: computePostMatches(p, ms.posts || []).map((m) => ({
+        id: m.post.id,
+        type: m.post.type,
+        title: m.post.title,
+        location: m.post.location,
+        contact: m.post.contact,
+        match_score: m.match_score
+      }))
+    }));
+    return {
+      status: 200,
+      code: "MOMENTS_SNAPSHOT_OK",
+      data: {
+        school_id: "haut",
+        updated_at: ms.updated_at || new Date().toISOString(),
+        posts: enrichedPosts,
+        book_listings: Array.isArray(ms.book_listings) ? ms.book_listings : [],
+        anti_lost_tags: Array.isArray(ms.anti_lost_tags) ? ms.anti_lost_tags : [],
+        isbn_catalog: Array.isArray(ms.isbn_catalog) ? ms.isbn_catalog : []
+      }
+    };
+  });
+
+  registerExtension("POST", "/api/v1/moments/posts", "createMomentsPost", "public", async ({ body, nowMs }) => {
+    const title = String(body?.title || "").trim().slice(0, 64);
+    if (!title) throw new ContractError("BAD_REQUEST", "请填写物品名称或标题");
+    const nowIso = new Date(nowMs).toISOString();
+    const newPost = {
+      id: body?.id ? String(body.id).trim().slice(0, 40) : ("mp_" + crypto.randomUUID().slice(0, 10)),
+      type: String(body?.type || "LOST").toUpperCase() === "FOUND" ? "FOUND" : "LOST",
+      title,
+      category: String(body?.category || "其他物品").trim().slice(0, 24),
+      campus: String(body?.campus || "莲花街校区").trim().slice(0, 24),
+      location: String(body?.location || "校内").trim().slice(0, 64),
+      description: String(body?.description || "").trim().slice(0, 360),
+      contact: String(body?.contact || "").trim().slice(0, 64),
+      reward_note: String(body?.reward_note || "").trim().slice(0, 64),
+      status: "OPEN",
+      author_name: String(body?.author_name || "河工大同学").trim().slice(0, 24),
+      author_student_no_masked: String(body?.author_student_no_masked || "").trim().slice(0, 16),
+      likes_count: 0,
+      favorites_count: 0,
+      comments: [],
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    store.momentsState.posts = [
+      newPost,
+      ...(store.momentsState.posts || []).filter((p) => p.id !== newPost.id)
+    ].slice(0, 200);
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 201, code: "MOMENTS_POST_CREATED", data: newPost };
+  });
+
+  registerExtension("POST", "/api/v1/moments/posts/{postId}/comments", "addMomentsPostComment", "public", async ({ params, body, nowMs }) => {
+    const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
+    if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+    const content = String(body?.content || "").trim().slice(0, 240);
+    if (!content) throw new ContractError("BAD_REQUEST", "留言内容不能为空");
+    const nowIso = new Date(nowMs).toISOString();
+    const comment = {
+      id: "mc_" + crypto.randomUUID().slice(0, 8),
+      author_name: String(body?.author_name || "热心同学").trim().slice(0, 24),
+      content,
+      contact_hint: String(body?.contact_hint || "").trim().slice(0, 48),
+      created_at: nowIso
+    };
+    if (!Array.isArray(post.comments)) post.comments = [];
+    post.comments.push(comment);
+    post.updated_at = nowIso;
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 201, code: "MOMENTS_COMMENT_ADDED", data: post };
+  });
+
+  registerExtension("POST", "/api/v1/moments/posts/{postId}/action", "mutateMomentsPost", "public", async ({ params, body, nowMs }) => {
+    const posts = store.momentsState.posts || [];
+    const idx = posts.findIndex((p) => p.id === params.postId);
+    if (idx < 0) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+    const act = String(body?.action || "").toUpperCase();
+    const post = posts[idx];
+    const nowIso = new Date(nowMs).toISOString();
+    if (act === "DELETE") {
+      posts.splice(idx, 1);
+      store.momentsState.updated_at = nowIso;
+      store.saveSnapshot();
+      return { status: 200, code: "MOMENTS_POST_DELETED", data: { deleted_id: params.postId } };
+    }
+    if (act === "RESOLVE") post.status = "RESOLVED";
+    else if (act === "REOPEN") post.status = "OPEN";
+    else if (act === "LIKE") post.likes_count = Number(post.likes_count || 0) + 1;
+    else if (act === "FAVORITE") post.favorites_count = Number(post.favorites_count || 0) + 1;
+    post.updated_at = nowIso;
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 200, code: "MOMENTS_POST_UPDATED", data: post };
+  });
+
+  registerExtension("POST", "/api/v1/moments/books", "createMomentsBookListing", "public", async ({ body, nowMs }) => {
+    const title = String(body?.title || "").trim().slice(0, 80);
+    if (!title) throw new ContractError("BAD_REQUEST", "请填写教材名称");
+    const nowIso = new Date(nowMs).toISOString();
+    const book = {
+      id: body?.id ? String(body.id).trim().slice(0, 40) : ("mb_" + crypto.randomUUID().slice(0, 10)),
+      title,
+      isbn: String(body?.isbn || "").trim().slice(0, 24),
+      author_publisher: String(body?.author_publisher || "高校教材").trim().slice(0, 64),
+      course_name: String(body?.course_name || "").trim().slice(0, 40),
+      major_track: String(body?.major_track || "ALL_MAJORS").trim().slice(0, 32),
+      campus: String(body?.campus || "莲花街校区").trim().slice(0, 24),
+      condition_label: String(body?.condition_label || "九成新").trim().slice(0, 32),
+      price_yuan: Math.max(0, Math.min(500, Number(body?.price_yuan ?? 15) || 15)),
+      original_price_yuan: Math.max(0, Math.min(999, Number(body?.original_price_yuan ?? 55) || 55)),
+      delivery_mode: String(body?.delivery_mode || "校内自提").trim().slice(0, 40),
+      contact: String(body?.contact || "").trim().slice(0, 64),
+      seller_name: String(body?.seller_name || "河工大同学").trim().slice(0, 24),
+      status: "AVAILABLE",
+      likes_count: 0,
+      created_at: nowIso
+    };
+    store.momentsState.book_listings = [
+      book,
+      ...(store.momentsState.book_listings || []).filter((b) => b.id !== book.id)
+    ].slice(0, 200);
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 201, code: "MOMENTS_BOOK_CREATED", data: book };
+  });
+
+  registerExtension("POST", "/api/v1/moments/books/{bookId}/action", "mutateMomentsBookListing", "public", async ({ params, body, nowMs }) => {
+    const books = store.momentsState.book_listings || [];
+    const idx = books.findIndex((b) => b.id === params.bookId);
+    if (idx < 0) throw new ContractError("NOT_FOUND", "未找到该教材挂单");
+    const act = String(body?.action || "").toUpperCase();
+    const book = books[idx];
+    const nowIso = new Date(nowMs).toISOString();
+    if (act === "DELETE") {
+      books.splice(idx, 1);
+      store.momentsState.updated_at = nowIso;
+      store.saveSnapshot();
+      return { status: 200, code: "MOMENTS_BOOK_DELETED", data: { deleted_id: params.bookId } };
+    }
+    if (act === "MARK_SOLD") book.status = "SOLD";
+    else if (act === "MARK_AVAILABLE") book.status = "AVAILABLE";
+    else if (act === "LIKE") book.likes_count = Number(book.likes_count || 0) + 1;
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 200, code: "MOMENTS_BOOK_UPDATED", data: book };
+  });
+
+  registerExtension("GET", "/api/v1/moments/isbn-resolve", "resolveMomentsIsbn", "public", async ({ query }) => {
+    const q = (query.get("isbn") || query.get("keyword") || "").replace(/[^0-9a-zA-Z\u4e00-\u9fa5]/g, "").toLowerCase();
+    const catalog = store.momentsState?.isbn_catalog || [];
+    const matched = catalog.find(
+      (c) =>
+        String(c.isbn || "").toLowerCase().includes(q) ||
+        String(c.title || "").toLowerCase().includes(q) ||
+        String(c.course_name || "").toLowerCase().includes(q)
+    ) || null;
+    return { status: 200, code: "MOMENTS_ISBN_RESOLVED", data: { matched, catalog } };
+  });
+
+  registerExtension("POST", "/api/v1/moments/anti-lost-tags", "upsertAntiLostTag", "public", async ({ body, nowMs }) => {
+    const itemName = String(body?.item_name || "").trim().slice(0, 48);
+    if (!itemName) throw new ContractError("BAD_REQUEST", "请填写随身物品名称");
+    const nowIso = new Date(nowMs).toISOString();
+    const rawCode = String(body?.tag_code || "").trim().toUpperCase();
+    const tagCode = /^HAUT-TAG-[A-Z0-9]{4,10}$/.test(rawCode)
+      ? rawCode
+      : ("HAUT-TAG-" + crypto.randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase());
+    const tags = store.momentsState.anti_lost_tags || [];
+    const existing = tags.find((t) => t.tag_code === tagCode);
+    const updatedTag = {
+      id: existing?.id || ("tag_" + crypto.randomUUID().slice(0, 8)),
+      tag_code: tagCode,
+      item_name: itemName,
+      category: String(body?.category || existing?.category || "随身物品").trim().slice(0, 24),
+      campus: String(body?.campus || existing?.campus || "莲花街校区").trim().slice(0, 24),
+      owner_name: String(body?.owner_name || existing?.owner_name || "河工大同学").trim().slice(0, 24),
+      owner_contact: String(body?.owner_contact || existing?.owner_contact || "").trim().slice(0, 64),
+      return_note: String(body?.return_note || existing?.return_note || "拾到请联系失主或放至就近服务台").trim().slice(0, 160),
+      status: String(body?.status || existing?.status || "NORMAL").toUpperCase(),
+      reports: Array.isArray(existing?.reports) ? existing.reports : [],
+      created_at: existing?.created_at || nowIso,
+      updated_at: nowIso
+    };
+    store.momentsState.anti_lost_tags = [
+      updatedTag,
+      ...tags.filter((t) => t.tag_code !== tagCode)
+    ].slice(0, 120);
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 200, code: "ANTI_LOST_TAG_UPSERTED", data: updatedTag };
+  });
+
+  registerExtension("POST", "/api/v1/moments/anti-lost-tags/{tagCode}/report-found", "reportAntiLostTagFound", "public", async ({ params, body, nowMs }) => {
+    const cleanCode = String(params.tagCode || "").trim().toUpperCase();
+    const tags = store.momentsState.anti_lost_tags || [];
+    const tag = tags.find((t) => t.tag_code.toUpperCase() === cleanCode);
+    if (!tag) throw new ContractError("NOT_FOUND", "未找到防丢码 " + cleanCode);
+    const foundLocation = String(body?.found_location || "").trim().slice(0, 80);
+    if (!foundLocation) throw new ContractError("BAD_REQUEST", "请填写拾得位置或放置地点");
+    const nowIso = new Date(nowMs).toISOString();
+    const report = {
+      id: "rep_" + crypto.randomUUID().slice(0, 8),
+      finder_name: String(body?.finder_name || "热心同学").trim().slice(0, 24),
+      found_location: foundLocation,
+      finder_contact: String(body?.finder_contact || "").trim().slice(0, 64),
+      message: String(body?.message || "").trim().slice(0, 200),
+      created_at: nowIso
+    };
+    if (!Array.isArray(tag.reports)) tag.reports = [];
+    tag.reports.unshift(report);
+    tag.status = "FOUND_REPORTED";
+    tag.updated_at = nowIso;
+    store.momentsState.updated_at = nowIso;
+    store.saveSnapshot();
+    return { status: 200, code: "ANTI_LOST_FOUND_REPORTED", data: tag };
+  });
+
   async function inject({
     method = "GET",
     url = "/healthz",
@@ -2428,6 +2703,64 @@ export function createCampusCloudApp(options = {}) {
           },
           rawBody: renderConsoleHtml(consoleCtx),
           body: okEnvelope("CONSOLE_PORTAL_OK", { portal: "cloud-in-school-console" }, requestId)
+        };
+      }
+
+      if (upperMethod === "GET" && pathname.startsWith("/claim/")) {
+        const rawCode = decodeURIComponent(pathname.slice("/claim/".length)).trim().toUpperCase();
+        const tag = (store.momentsState?.anti_lost_tags || []).find((t) => t.tag_code.toUpperCase() === rawCode);
+        const itemTitle = tag ? escapeClaimHtml(tag.item_name) : "校园随身物品防丢标签";
+        const ownerName = tag ? escapeClaimHtml(tag.owner_name) : "河工大同学";
+        const ownerContact = tag ? escapeClaimHtml(tag.owner_contact) : "请通过下方表单留言";
+        const returnNote = tag ? escapeClaimHtml(tag.return_note) : "若您拾到此物品，请在下方填写拾得地点与联系方式，失主将立即收到通知。";
+        const html = [
+          '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>',
+          '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>',
+          '<title>防丢码认领 · ' + escapeClaimHtml(rawCode) + '</title>',
+          '<style>',
+          'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:20px;}',
+          '.card{max-width:440px;margin:16px auto;background:#fff;border-radius:18px;padding:22px;box-shadow:0 8px 24px rgba(15,23,42,0.06);}',
+          '.badge{display:inline-block;background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;}',
+          'h1{font-size:20px;margin:10px 0 4px;}',
+          '.meta{font-size:13px;color:#4b5563;margin-bottom:14px;}',
+          '.note{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px;font-size:14px;line-height:1.5;margin-bottom:16px;}',
+          'label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}',
+          'input,textarea{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:10px;font-size:14px;}',
+          'button{width:100%;margin-top:14px;background:#0284c7;color:#fff;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:600;cursor:pointer;}',
+          '.msg{margin-top:12px;font-size:13px;color:#059669;font-weight:600;display:none;}',
+          '</style></head><body><div class="card">',
+          '<span class="badge">日在校园 · 防丢码 ' + escapeClaimHtml(rawCode) + '</span>',
+          '<h1>' + itemTitle + '</h1>',
+          '<div class="meta">失主：' + ownerName + ' · 联系：' + ownerContact + '</div>',
+          '<div class="note">' + returnNote + '</div>',
+          '<form id="f">',
+          '<label>拾得/放置地点 *</label>',
+          '<input id="loc" required placeholder="例如：图书馆一楼服务台 / 二餐厅一楼窗口"/>',
+          '<label>您的称呼或联系方式</label>',
+          '<input id="contact" placeholder="例如：QQ / 微信 / 电话（选填）"/>',
+          '<label>补充留言</label>',
+          '<textarea id="memo" rows="2" placeholder="描述物品当前放置位置"></textarea>',
+          '<button type="submit">通知失主已拾得</button>',
+          '<div id="ok" class="msg">已提交拾得线索，失主打开「日在校园」即可收到提醒，感谢您的热心相助！</div>',
+          '</form></div>',
+          '<script>',
+          'document.getElementById("f").addEventListener("submit", function(e){',
+          '  e.preventDefault();',
+          '  fetch("/api/v1/moments/anti-lost-tags/" + encodeURIComponent(' + JSON.stringify(rawCode) + ') + "/report-found", {',
+          '    method: "POST", headers: {"Content-Type": "application/json"},',
+          '    body: JSON.stringify({found_location: document.getElementById("loc").value, finder_contact: document.getElementById("contact").value, message: document.getElementById("memo").value})',
+          '  }).then(function(){ document.getElementById("ok").style.display = "block"; });',
+          '});',
+          '</script></body></html>'
+        ].join("\n");
+        return {
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "x-request-id": requestId
+          },
+          rawBody: html,
+          body: okEnvelope("CLAIM_PAGE_OK", { tag_code: rawCode }, requestId)
         };
       }
 
