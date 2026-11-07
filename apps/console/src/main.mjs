@@ -2,7 +2,8 @@ import http from "node:http";
 import {
   DEFAULT_RESERVATION_PRICE_MICROPEACH,
   MICROPEACH_PER_PEACH,
-  formatPeachFromMicropeach
+  formatPeachFromMicropeach,
+  getReservationPriceVersion
 } from "../../../packages/contracts/src/index.mjs";
 import {
   cleanDisplayText,
@@ -63,7 +64,7 @@ function renderHead(title = "日在校园 · XPeach 云端通行证") {
           var theme = savedTheme === "dark" || savedTheme === "light" ? savedTheme : (prefersDark ? "dark" : "light");
           document.documentElement.setAttribute("data-theme", theme);
           var savedStyle = localStorage.getItem("xpeach-ui-style");
-          var uiStyle = savedStyle === "flutter-m3" || savedStyle === "liquid-glass" ? savedStyle : "liquid-glass";
+          var uiStyle = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"].includes(savedStyle) ? savedStyle : "liquid-glass";
           document.documentElement.setAttribute("data-ui-style", uiStyle);
         } catch (e) {}
       })();
@@ -208,13 +209,14 @@ function renderUnauthenticatedLandingHtml(pricePeachText = "1") {
         function syncStyleLabel() {
           if (!styleLabel) return;
           var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-          styleLabel.textContent = cur === "liquid-glass" ? "毛玻璃" : "经典 M3";
+          styleLabel.textContent = ({ "liquid-glass": "毛玻璃", "flutter-m3": "经典 M3", "fresh-breeze": "清新森系", "cream-pastel": "奶油手账" })[cur] || "毛玻璃";
         }
         syncStyleLabel();
         if (styleBtn) {
           styleBtn.addEventListener("click", function () {
             var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-            var next = cur === "liquid-glass" ? "flutter-m3" : "liquid-glass";
+            var styles = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"];
+            var next = styles[(styles.indexOf(cur) + 1) % styles.length];
             document.documentElement.setAttribute("data-ui-style", next);
             try { localStorage.setItem("xpeach-ui-style", next); } catch (e) {}
             syncStyleLabel();
@@ -286,6 +288,8 @@ export function renderConsoleHtml(ctx = {}) {
     roles.includes("ADMIN") ||
     roles.includes("OPERATOR") ||
     roles.includes("FINANCE") ||
+    roles.includes("FINANCE_OPERATOR") ||
+    roles.includes("PLATFORM_OWNER") ||
     user.role === "admin";
   const activeNav = ctx.activeNav || "portal";
 
@@ -1534,6 +1538,8 @@ export function renderConsoleHtml(ctx = {}) {
       (function () {
         var SERVER_TOKEN = ${JSON.stringify(accessToken).replace(/</g, "\\u003c")};
         var PRICE_PEACH_TEXT = ${JSON.stringify(pricePeachText)};
+        var ACCEPTED_PRICE_MICROPEACH = ${JSON.stringify(pricingMicropeach)};
+        var ACCEPTED_PRICE_VERSION = ${JSON.stringify(getReservationPriceVersion(pricingMicropeach))};
         function escHtml(v) {
           return String(v == null ? "" : v)
             .replace(/&/g, "&amp;")
@@ -1543,18 +1549,19 @@ export function renderConsoleHtml(ctx = {}) {
             .replace(/'/g, "&#39;");
         }
 
-        // Liquid Glass / Flutter M3 UI style switcher
+        // Cycle all supported UI styles without changing the light/dark preference.
         function syncAllStyleLabels() {
           var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
           document.querySelectorAll("[data-ui-style-label]").forEach(function (el) {
-            el.textContent = cur === "liquid-glass" ? "✨ 液态毛玻璃" : "🎨 经典 M3";
+            el.textContent = ({ "liquid-glass": "毛玻璃", "flutter-m3": "经典 M3", "fresh-breeze": "清新森系", "cream-pastel": "奶油手账" })[cur] || "毛玻璃";
           });
         }
         syncAllStyleLabels();
         document.querySelectorAll("[data-ui-style-toggle]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var cur = document.documentElement.getAttribute("data-ui-style") || "liquid-glass";
-            var next = cur === "liquid-glass" ? "flutter-m3" : "liquid-glass";
+            var styles = ["liquid-glass", "flutter-m3", "fresh-breeze", "cream-pastel"];
+            var next = styles[(styles.indexOf(cur) + 1) % styles.length];
             document.documentElement.setAttribute("data-ui-style", next);
             try { localStorage.setItem("xpeach-ui-style", next); } catch (e) {}
             syncAllStyleLabels();
@@ -2055,6 +2062,8 @@ export function renderConsoleHtml(ctx = {}) {
               body: JSON.stringify({
                 school_binding_id: ids.bindingId,
                 consent_id: ids.consentId,
+                accepted_price_version: ACCEPTED_PRICE_VERSION,
+                accepted_price_micropeach: ACCEPTED_PRICE_MICROPEACH,
                 area_code: areaKey,
                 area_name: areaCfg.name,
                 candidate_seats: seats,
@@ -2099,7 +2108,16 @@ export function renderConsoleHtml(ctx = {}) {
           var sr = data.schoolReservation || data.school_reservation || {};
           if (job.state === "CONFIRMED") {
             var alias = sr.seat_alias ? "（" + sr.seat_alias + "）" : "";
-            showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 " + PRICE_PEACH_TEXT + " 🍑。");
+            var order = data.order || {};
+            if (order.payment_state === "PAID") {
+              showToast("占座成功！" + alias + " 已从您的 XPeach 账户扣除 " + (order.price_micropeach / 10000) + " 🍑。");
+            } else if (order.payment_state === "PAYMENT_DUE") {
+              showToast("占座成功！" + alias + " 余额不足，订单待支付；已确认的座位仍保留。", true);
+            } else if (order.payment_state === "NOT_REQUIRED") {
+              showToast("占座成功！" + alias + " 本次无需支付。");
+            } else {
+              showToast("占座成功！" + alias + " 扣费结果待核实，请查看账单。", true);
+            }
           } else {
             showToast("未能锁定所选座位（座位已被占用或未绑定正确图书馆密码），本次未扣费", true);
           }
@@ -2306,23 +2324,33 @@ export function renderConsoleHtml(ctx = {}) {
           });
         });
 
-        // Admin: 1-click order refund
+        // Admin: one operator requests, another authenticates and approves the saved refund.
         document.querySelectorAll("[data-refund-order]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var orderId = btn.getAttribute("data-refund-order");
+            var refundRequestId = btn.getAttribute("data-refund-request") || null;
+            var refundPayload = refundRequestId
+              ? { refund_request_id: refundRequestId }
+              : { reason: "管理员在站点后台申请退还 🍑" };
+            var priorLabel = btn.textContent;
             btn.disabled = true;
-            btn.textContent = "退还中…";
+            btn.textContent = "处理中…";
             apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/quick-refund", {
               method: "POST",
-              body: JSON.stringify({ reason: "管理员在站点后台执行一键退还 🍑" })
+              body: JSON.stringify(refundPayload)
             })
-              .then(function () {
-                showToast("已将 " + PRICE_PEACH_TEXT + " 🍑 原路退还至用户 XPeach 账户！");
+              .then(function (res) {
+                var order = (res && res.data) || {};
+                if (order.payment_state === "REFUNDED") {
+                  showToast("已将 " + (order.refunded_micropeach / 10000) + " 🍑 原路退还至用户 XPeach 账户！");
+                } else {
+                  showToast("退款申请已保存，需另一位有权限的财务人员登录审批；尚未退款。");
+                }
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {
                 btn.disabled = false;
-                btn.textContent = "退还 🍑";
+                btn.textContent = priorLabel;
                 showToast(err.message, true);
               });
           });

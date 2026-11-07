@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { ContractError } from "../../contracts/src/index.mjs";
+import { ContractError, getReservationPriceVersion } from "../../contracts/src/index.mjs";
 
 /**
  * Direct XPEACH SSO 🍑 Wallet Synchronization & Post-Confirmation Deduction Engine.
@@ -33,8 +33,8 @@ export class IsolatedFinanceBridge {
       options.internalServiceKey || process.env.SSO_INTERNAL_SERVICE_KEY || "";
     this.realDebitsEnabled =
       options.realDebitsEnabled !== undefined
-        ? Boolean(options.realDebitsEnabled)
-        : Boolean(this.internalServiceKey || process.env.FINANCE_ENABLE_REAL_DEBITS === "true");
+        ? options.realDebitsEnabled === true
+        : process.env.FINANCE_ENABLE_REAL_DEBITS === "true";
     this.allowSandboxFallback =
       options.allowSandboxFallback !== undefined
         ? Boolean(options.allowSandboxFallback)
@@ -351,8 +351,8 @@ export class IsolatedFinanceBridge {
         return out;
       }
 
-      if (!hasExplicitSandbox && !this.allowSandboxFallback && isRealUser) {
-        throw new ContractError("SSO_UNAVAILABLE", "Sandbox balance fallback is disabled in production");
+      if (isRealUser) {
+        throw new ContractError("SSO_UNAVAILABLE", "Live wallet adjustments are disabled; synthetic sandbox credit cannot settle a real user order");
       }
 
       const currentMicro = this.getSandboxBalance(cloudUserId);
@@ -439,21 +439,47 @@ export class FinanceSagaService {
     return snapshot;
   }
 
+  persistFinancialState(cloudUserId) {
+    const required = this.financeBridge.realDebitsEnabled && !this.financeBridge.sandboxBalancesMicropeach?.has(cloudUserId);
+    const saved = typeof this.store.saveSnapshot === "function" && this.store.saveSnapshot({ required });
+    if (required && saved !== true) {
+      throw new ContractError("CONFLICT", "Live wallet operations require durable financial state");
+    }
+  }
+
+  assertLiveDebitAllowed(job, cloudUserId) {
+    if (!this.financeBridge.realDebitsEnabled || this.financeBridge.sandboxBalancesMicropeach?.has(cloudUserId)) return;
+    const evidence = job && this.store.schoolReservations.get(job.id);
+    if (job?.capability !== "AUTHORIZED_AUTOMATION" || job?.state !== "CONFIRMED" ||
+        !job?.result_verified_at || evidence?.official_status !== "CONFIRMED" ||
+        !evidence?.external_booking_id || !evidence?.evidence_sha256 ||
+        /^(haut_mock_|mock[_-])/.test(String(evidence.external_booking_id))) {
+      throw new ContractError("SCHOOL_PERMISSION_REQUIRED", "Only an authorized, verified live reservation may trigger a real debit");
+    }
+  }
+
   async createAndSettleOrderForConfirmedJob({ job, plan, nowMs = Date.now() }) {
     let order = Array.from(this.store.reservationOrders.values()).find((o) => o.job_id === job.id);
     if (!order) {
+      if (plan?.price_micropeach !== 0) this.assertLiveDebitAllowed(job, job.cloud_user_id);
+      // Legacy plans without an accepted quote must be re-created, never charged at today's price.
+      const acceptedPrice = plan?.price_micropeach;
+      if (!Number.isSafeInteger(acceptedPrice) || acceptedPrice < 0 ||
+          plan?.price_version !== getReservationPriceVersion(acceptedPrice) || !plan?.price_accepted_at) {
+        throw new ContractError("CONFLICT", "Reservation plan has no valid accepted price snapshot");
+      }
       const orderId = crypto.randomUUID();
-      const pricePeach = this.store.pricingMicropeach / MICROPEACH_PER_PEACH;
+      const pricePeach = acceptedPrice / MICROPEACH_PER_PEACH;
       order = {
         id: orderId,
         job_id: job.id,
         cloud_user_id: job.cloud_user_id,
         price_peach: pricePeach,
-        price_micropeach: this.store.pricingMicropeach,
-        price_version: plan?.price_version || "price-library-cloud-2026-11-v1",
-        accepted_at: plan?.created_at || new Date(nowMs).toISOString(),
+        price_micropeach: acceptedPrice,
+        price_version: plan.price_version,
+        accepted_at: plan.price_accepted_at,
         school_result: "CONFIRMED",
-        payment_state: this.store.pricingMicropeach === 0 ? "NOT_REQUIRED" : "DEBIT_PENDING",
+        payment_state: acceptedPrice === 0 ? "NOT_REQUIRED" : "DEBIT_PENDING",
         paid_at: null,
         created_at: new Date(nowMs).toISOString()
       };
@@ -494,6 +520,7 @@ export class FinanceSagaService {
         return order;
       }
 
+      this.assertLiveDebitAllowed(this.store.reservationJobs.get(order.job_id), order.cloud_user_id);
       const eventKey = buildDebitEventKey(order.id);
       let op = this.store.financeOperations.get(eventKey);
       const pricePeach = order.price_peach ?? order.price_micropeach / MICROPEACH_PER_PEACH;
@@ -516,7 +543,9 @@ export class FinanceSagaService {
       }
 
       op.attempt_count += 1;
+      op.status = "IN_FLIGHT";
       op.updated_at = new Date(nowMs).toISOString();
+      this.persistFinancialState(order.cloud_user_id);
       const user = this.store.users.get(order.cloud_user_id);
 
       let bridgeRes;
@@ -533,109 +562,153 @@ export class FinanceSagaService {
       } catch (err) {
         op.status = "FAILED_RETRYABLE";
         op.last_error_code = err?.code || "SSO_UNAVAILABLE";
-        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        this.persistFinancialState(order.cloud_user_id);
         throw err;
       }
 
-      if (!bridgeRes.ok && bridgeRes.error === "WALLET_INSUFFICIENT") {
+      if (bridgeRes?.ok !== true && bridgeRes?.error === "WALLET_INSUFFICIENT") {
         op.status = "FAILED_INSUFFICIENT";
         op.last_error_code = "WALLET_INSUFFICIENT";
         order.payment_state = "PAYMENT_DUE";
-        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        this.persistFinancialState(order.cloud_user_id);
         return order;
       }
 
+      if (bridgeRes?.ok !== true) {
+        op.status = "FAILED_RETRYABLE";
+        op.last_error_code = bridgeRes?.error || "SSO_UNAVAILABLE";
+        this.persistFinancialState(order.cloud_user_id);
+        throw new ContractError("SSO_UNAVAILABLE", "Debit was not confirmed by the finance bridge");
+      }
       op.status = "SUCCEEDED";
+      op.last_error_code = null;
       op.sso_request_id = bridgeRes.ssoRequestId;
       order.payment_state = "PAID";
       order.paid_at = order.paid_at || new Date(nowMs).toISOString();
-      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+      this.persistFinancialState(order.cloud_user_id);
       return order;
     });
   }
 
-  async issueRefundForOrder(orderId, { peachAmount, amountMicropeach, reason, actorRef, secondApproverRef }, nowMs = Date.now()) {
+  async issueRefundForOrder(orderId, { peachAmount, amountMicropeach, reason, actorRef, refundRequestId }, nowMs = Date.now()) {
     return this.withOrderLock(orderId, async () => {
+      // actorRef comes only from the authenticated request context, never the request body.
+      const cleanActor = typeof actorRef === "string" ? actorRef.trim() : "";
+      const requireFinanceActor = (id) => {
+        if (!this.store.users.has(id)) throw new ContractError("FORBIDDEN", "Authenticated finance operator required");
+        this.store.requireRole({ cloudUserId: id }, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      };
+      requireFinanceActor(cleanActor);
       const order = this.store.reservationOrders.get(orderId);
       if (!order) throw new ContractError("NOT_FOUND", "Order not found");
       if (order.payment_state === "REFUNDED") {
+        this.persistFinancialState(order.cloud_user_id);
         return order;
       }
       if (order.payment_state !== "PAID") {
         throw new ContractError("CONFLICT", "Only PAID orders are eligible for refund");
       }
-      const cleanActor = typeof actorRef === "string" ? actorRef.trim() : "";
-      const cleanSecond = typeof secondApproverRef === "string" ? secondApproverRef.trim() : "";
-      if (!cleanActor || !cleanSecond || cleanSecond === cleanActor) {
-        throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
-      }
       const resolvedMicro =
-        typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
+        typeof amountMicropeach === "number" && Number.isSafeInteger(amountMicropeach)
           ? amountMicropeach
-          : typeof peachAmount === "number"
-            ? Math.round(peachAmount * MICROPEACH_PER_PEACH)
-            : 0;
-      if (!Number.isInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
-        throw new ContractError(
-          "BAD_REQUEST",
-          `Refund amount must be between 0.01 🍑 and paid amount`
-        );
+          : typeof peachAmount === "number" ? Math.round(peachAmount * MICROPEACH_PER_PEACH) : 0;
+      if (!Number.isSafeInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
+        throw new ContractError("BAD_REQUEST", "Refund amount must be positive and no greater than the paid amount");
       }
+      const cleanReason = typeof reason === "string" ? reason.trim() : "";
+      if (!cleanReason) throw new ContractError("BAD_REQUEST", "Refund reason is required");
+
+      let approval = order.refund_request;
+      if (!approval) {
+        if (refundRequestId) throw new ContractError("CONFLICT", "Refund request does not exist");
+        approval = {
+          id: crypto.randomUUID(),
+          amount_micropeach: resolvedMicro,
+          reason: cleanReason,
+          requested_by: cleanActor,
+          requested_at: new Date(nowMs).toISOString(),
+          approved_by: null,
+          approved_at: null,
+          status: "PENDING_APPROVAL"
+        };
+        order.refund_request = approval;
+        this.store.recordAudit({ actor_kind: "FINANCE_OPERATOR", actor_ref: cleanActor,
+          action: "REQUEST_REFUND", resource_kind: "reservation_order", resource_ref: order.id,
+          outcome: "PENDING_APPROVAL" });
+        this.persistFinancialState(order.cloud_user_id);
+        return order;
+      }
+      if (approval.amount_micropeach !== resolvedMicro || approval.reason !== cleanReason) {
+        throw new ContractError("CONFLICT", "Refund amount and reason must match the saved request");
+      }
+      if (!refundRequestId && approval.requested_by === cleanActor && approval.status === "PENDING_APPROVAL") {
+        this.persistFinancialState(order.cloud_user_id);
+        return order; // Idempotent initiation, without approval or money movement.
+      }
+      if (refundRequestId !== approval.id) throw new ContractError("CONFLICT", "Matching refund_request_id is required");
+      if (approval.requested_by === cleanActor) {
+        throw new ContractError("FORBIDDEN", "A different authenticated finance operator must approve the refund");
+      }
+      requireFinanceActor(approval.requested_by);
+      if (approval.approved_by && approval.approved_by !== cleanActor) {
+        throw new ContractError("FORBIDDEN", "Only the recorded second approver may retry this refund");
+      }
+      approval.approved_by = cleanActor;
+      approval.approved_at ||= new Date(nowMs).toISOString();
+      approval.status = "APPROVED";
+      // Persist the exact two-party authorization before any outbound adjustment.
+      this.persistFinancialState(order.cloud_user_id);
 
       const eventKey = buildRefundEventKey(order.id);
       const resolvedPeach = resolvedMicro / MICROPEACH_PER_PEACH;
       let op = this.store.financeOperations.get(eventKey);
+      if (op && op.amount_micropeach !== resolvedMicro) {
+        throw new ContractError("CONFLICT", "Existing refund operation has a different amount");
+      }
       if (!op) {
         op = {
-          id: crypto.randomUUID(),
-          order_id: order.id,
-          kind: "REFUND",
-          event_key: eventKey,
-          peach_amount: resolvedPeach,
-          amount_micropeach: resolvedMicro,
-          status: "IN_FLIGHT",
-          sso_request_id: null,
-          last_error_code: null,
-          attempt_count: 0,
-          created_at: new Date(nowMs).toISOString(),
-          updated_at: new Date(nowMs).toISOString()
+          id: crypto.randomUUID(), order_id: order.id, kind: "REFUND", event_key: eventKey,
+          peach_amount: resolvedPeach, amount_micropeach: resolvedMicro, status: "IN_FLIGHT",
+          sso_request_id: null, last_error_code: null, attempt_count: 0,
+          created_at: new Date(nowMs).toISOString(), updated_at: new Date(nowMs).toISOString()
         };
         this.store.financeOperations.set(eventKey, op);
       }
-
       op.attempt_count += 1;
+      op.status = "IN_FLIGHT";
       op.updated_at = new Date(nowMs).toISOString();
+      this.persistFinancialState(order.cloud_user_id);
       const user = this.store.users.get(order.cloud_user_id);
       let bridgeRes;
       try {
         bridgeRes = await this.financeBridge.adjustBalanceIdempotent({
-          cloudUserId: order.cloud_user_id,
-          ssoSubject: user?.subject,
-          deltaPeach: resolvedPeach,
-          deltaMicropeach: resolvedMicro,
-          eventKey,
-          reason: `日在校园预约订单退还 (${order.id}): ${reason}`,
-          userObj: user
+          cloudUserId: order.cloud_user_id, ssoSubject: user?.subject,
+          deltaPeach: resolvedPeach, deltaMicropeach: resolvedMicro, eventKey,
+          reason: `日在校园预约订单退还 (${order.id}): ${approval.reason}`, userObj: user
         });
+        if (bridgeRes?.ok !== true) {
+          const failure = new ContractError("SSO_UNAVAILABLE", "Refund was not confirmed by the finance bridge");
+          failure.bridgeError = bridgeRes?.error || "SSO_UNAVAILABLE";
+          throw failure;
+        }
       } catch (err) {
         op.status = "FAILED_RETRYABLE";
-        op.last_error_code = err?.code || "SSO_UNAVAILABLE";
-        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        op.last_error_code = err?.bridgeError || err?.code || "SSO_UNAVAILABLE";
+        approval.status = "FAILED_RETRYABLE";
+        this.persistFinancialState(order.cloud_user_id);
         throw err;
       }
-
       op.status = "SUCCEEDED";
+      op.last_error_code = null;
       op.sso_request_id = bridgeRes.ssoRequestId;
+      approval.status = "REFUNDED";
       order.payment_state = "REFUNDED";
-      this.store.recordAudit({
-        actor_kind: "FINANCE_OPERATOR",
-        actor_ref: `${cleanActor}+${cleanSecond}`,
-        action: "REFUND_ORDER",
-        resource_kind: "reservation_order",
-        resource_ref: order.id,
-        outcome: "REFUNDED"
-      });
-      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+      order.refunded_micropeach = resolvedMicro;
+      order.refunded_at = new Date(nowMs).toISOString();
+      this.store.recordAudit({ actor_kind: "FINANCE_OPERATOR",
+        actor_ref: `${approval.requested_by}+${cleanActor}`, action: "REFUND_ORDER",
+        resource_kind: "reservation_order", resource_ref: order.id, outcome: "REFUNDED" });
+      this.persistFinancialState(order.cloud_user_id);
       return order;
     });
   }

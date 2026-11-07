@@ -89,7 +89,7 @@
 }
 
 /* Fresh Breeze (清新森系 · 氧气呼吸) Mode Overrides */
-[data-ui-style="fresh-breeze"] {
+[data-ui-style="fresh-breeze"]:not([data-theme="dark"]) {
   --xp-radius-card: 22px;
   --xp-radius-well: 16px;
   --xp-primary: #10b981;
@@ -104,7 +104,7 @@
 }
 
 /* Cream Pastel (奶油手账 · 温柔马卡龙) Mode Overrides */
-[data-ui-style="cream-pastel"] {
+[data-ui-style="cream-pastel"]:not([data-theme="dark"]) {
   --xp-radius-card: 24px;
   --xp-radius-well: 16px;
   --xp-primary: #ec4899;
@@ -739,4 +739,20 @@ body.auth-body {
   .xp-split-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Style preferences also work in dark mode; never apply pastel light surfaces. */
+[data-theme="dark"][data-ui-style="fresh-breeze"] {
+  --xp-radius-card: 22px;
+  --xp-radius-well: 16px;
+  --xp-primary: #6ee7b7;
+  --xp-primary-soft: rgba(110, 231, 183, 0.12);
+  --xp-primary-border: rgba(110, 231, 183, 0.28);
+}
+[data-theme="dark"][data-ui-style="cream-pastel"] {
+  --xp-radius-card: 24px;
+  --xp-radius-well: 16px;
+  --xp-primary: #f9a8d4;
+  --xp-primary-soft: rgba(249, 168, 212, 0.14);
+  --xp-primary-border: rgba(249, 168, 212, 0.28);
 }

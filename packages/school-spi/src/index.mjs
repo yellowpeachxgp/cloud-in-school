@@ -129,12 +129,7 @@ export class HautLibraryProvider {
   }
 
   getCapabilities(schoolIntegration) {
-    const liveAuthorized =
-      Boolean(schoolIntegration?.enabled) &&
-      schoolIntegration?.kill_switch === false &&
-      Boolean(schoolIntegration?.authorization_evidence_ref) &&
-      Boolean(schoolIntegration?.approver_primary_ref) &&
-      Boolean(schoolIntegration?.approver_secondary_ref);
+    const liveAuthorized = this.isLiveAuthorized(schoolIntegration);
 
     return [
       {
@@ -171,37 +166,51 @@ export class HautLibraryProvider {
     ];
   }
 
-  assertOperationAllowed(operation, schoolIntegration, { requireLiveAutomation = false } = {}) {
-    if (operation === "SIGN_IN") {
-      throw new ContractError(
-        "SCHOOL_PERMISSION_REQUIRED",
-        "Remote or automated library SIGN_IN is strictly prohibited by school policy"
-      );
+  isLiveAuthorized(integration) {
+    const approval = integration?.authorization_approval;
+    const primary = cleanSpiText(integration?.approver_primary_ref);
+    const secondary = cleanSpiText(integration?.approver_secondary_ref);
+    return integration?.school_id === this.schoolId && integration?.enabled === true &&
+      integration?.kill_switch === false && Boolean(cleanSpiText(integration?.authorization_evidence_ref)) &&
+      Boolean(primary && secondary && primary !== secondary) &&
+      Boolean(approval?.id) && approval?.status === "APPROVED" &&
+      Date.parse(approval.expires_at) > Date.now() &&
+      approval.evidence_ref === integration.authorization_evidence_ref &&
+      approval.primary_actor_ref === primary && approval.secondary_actor_ref === secondary;
+  }
+
+  assertOperationAllowed(operation, schoolIntegration, { requireLiveAutomation = false, allowMock = false } = {}) {
+    if (["SIGN_IN", "SIGN_OFF"].includes(operation)) {
+      throw new ContractError("SCHOOL_PERMISSION_REQUIRED", "Automated attendance operations are prohibited");
     }
-    if (operation === "CREATE_BOOKING") {
-      if (schoolIntegration?.kill_switch === true) {
-        throw new ContractError(
-          "SCHOOL_PERMISSION_REQUIRED",
-          "School kill_switch is active; automated booking is halted"
-        );
+    if (["CREATE_BOOKING", "CANCEL_BOOKING"].includes(operation)) {
+      if (allowMock && !requireLiveAutomation) return { executionPath: "MOCK_ONLY" };
+      if (this.isLiveAuthorized(schoolIntegration)) return { executionPath: "AUTHORIZED_AUTOMATION" };
+      if (requireLiveAutomation || schoolIntegration?.kill_switch === true) {
+        throw new ContractError("SCHOOL_PERMISSION_REQUIRED", "Live writes require same-school authorization, distinct authenticated approvals and an explicitly disabled kill switch");
       }
-      const hasDualApprovalAndEvidence =
-        Boolean(schoolIntegration?.enabled) &&
-        Boolean(schoolIntegration?.authorization_evidence_ref) &&
-        Boolean(schoolIntegration?.approver_primary_ref) &&
-        Boolean(schoolIntegration?.approver_secondary_ref);
-      if (!hasDualApprovalAndEvidence) {
-        if (requireLiveAutomation) {
-          throw new ContractError(
-            "SCHOOL_PERMISSION_REQUIRED",
-            "Dual-person approval and written school authorization evidence are required before live CREATE_BOOKING"
-          );
-        }
-        return { executionPath: "MOCK_ONLY" };
-      }
-      return { executionPath: "AUTHORIZED_AUTOMATION" };
     }
     return { executionPath: "MOCK_ONLY" };
+  }
+
+  assertSchoolScope(job, binding, plan = null) {
+    if (job?.school_id !== this.schoolId || binding?.school_id !== this.schoolId ||
+        (plan && plan.school_id !== this.schoolId) ||
+        (job.school_binding_id && job.school_binding_id !== binding.id)) {
+      throw new ContractError("FORBIDDEN", "Cross-school or binding provider mismatch");
+    }
+  }
+
+  matchesAttempt(active, target, expectedId = null) {
+    return Boolean(active?.bookingId && target?.seat_id && target?.binding_id &&
+      target.school_id === this.schoolId &&
+      (!expectedId || String(active.bookingId) === String(expectedId)) &&
+      [1, 2, 3, 4].includes(Number(active.bookingStatus)) &&
+      String(active.seatId) === String(target.seat_id) &&
+      String(active.startDate).replace("T", " ") === target.start_full &&
+      String(active.endDate).replace("T", " ") === target.end_full &&
+      target.start_full.slice(0, 10) === target.booking_local_date &&
+      target.end_full.slice(0, 10) === target.booking_local_date);
   }
 
   normalizeRawToken(token) {
@@ -740,98 +749,87 @@ export class HautLibraryProvider {
     };
   }
 
-  async fetchCurrentActiveBooking(rawToken) {
-    const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
-    const data = curJson?.data || curJson?.booking || null;
-    if (data && data.id && ["1", "2", "3", "4"].includes(String(data.bookingStatus))) {
+  async fetchCurrentActiveBooking(rawToken, { expectedBookingId = null } = {}) {
+    const inconclusive = () => new ContractError("BOOKING_VERIFICATION_PENDING", "Authoritative school booking read is inconclusive");
+    const normalize = (data) => {
+      if (!data || typeof data !== "object" || Array.isArray(data) ||
+          !/^\d+$/.test(String(data.id || "")) ||
+          !["1", "2", "3", "4"].includes(String(data.bookingStatus))) throw inconclusive();
       return {
-        bookingId: String(data.id),
-        seatId: data.seatId ? Number(data.seatId) : null,
-        seatName: String(data.seatName || "").trim(),
-        regionName: String(data.regionName || "").trim(),
+        bookingId: String(data.id), seatId: data.seatId ? Number(data.seatId) : null,
+        seatName: String(data.seatName || "").trim(), regionName: String(data.regionName || "").trim(),
         buildingLayerRegionId: data.buildingLayerRegionId ? Number(data.buildingLayerRegionId) : null,
-        startDate: String(data.startDate || "").trim(),
-        endDate: String(data.endDate || "").trim(),
+        startDate: String(data.startDate || "").trim(), endDate: String(data.endDate || "").trim(),
         bookingStatus: Number(data.bookingStatus)
       };
+    };
+    const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
+    if (curJson?.code !== 200 || (!Object.hasOwn(curJson, "data") && !Object.hasOwn(curJson, "booking"))) throw inconclusive();
+    const data = Object.hasOwn(curJson, "data") ? curJson.data : curJson.booking;
+    if (data !== null) {
+      const active = normalize(data);
+      if (!expectedBookingId || active.bookingId === String(expectedBookingId)) return active;
     }
+    // Missing, failed or truncated fallback results are not proof of absence.
     const inProgJson = await this.wslibGetJson(
-      "/seatbook/user/mybookingInProgress?bookingstatus=0&pageSize=15&pageNum=1",
-      rawToken
-    ).catch(() => null);
-    const rows = inProgJson?.rows || [];
-    for (const row of rows) {
-      if (row && row.id && ["1", "2", "3", "4"].includes(String(row.bookingStatus))) {
-        return {
-          bookingId: String(row.id),
-          seatId: row.seatId ? Number(row.seatId) : null,
-          seatName: String(row.seatName || "").trim(),
-          regionName: String(row.regionName || "").trim(),
-          buildingLayerRegionId: row.buildingLayerRegionId ? Number(row.buildingLayerRegionId) : null,
-          startDate: String(row.startDate || "").trim(),
-          endDate: String(row.endDate || "").trim(),
-          bookingStatus: Number(row.bookingStatus)
-        };
-      }
-    }
+      "/seatbook/user/mybookingInProgress?bookingstatus=0&pageSize=15&pageNum=1", rawToken
+    );
+    if (inProgJson?.code !== 200 || !Array.isArray(inProgJson.rows)) throw inconclusive();
+    const activeRows = inProgJson.rows.map(normalize);
+    const match = activeRows.find(row => !expectedBookingId || row.bookingId === String(expectedBookingId));
+    if (match) return match;
+    if (inProgJson.total !== undefined &&
+        (!Number.isInteger(Number(inProgJson.total)) || Number(inProgJson.total) < 0 || Number(inProgJson.total) > activeRows.length)) throw inconclusive();
+    if (inProgJson.total === undefined && activeRows.length >= 15) throw inconclusive();
     return null;
   }
 
-  async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
-    const auth = await this.authenticateHautSession(decryptedSecret, binding);
-    const rawToken = auth.rawToken;
-    let targetBookingId =
-      externalBookingId && /^\d+$/.test(String(externalBookingId).trim())
-        ? String(externalBookingId).trim()
-        : null;
-
-    if (!targetBookingId) {
-      const current = await this.fetchCurrentActiveBooking(rawToken);
-      if (current?.bookingId) {
-        targetBookingId = current.bookingId;
+  async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId, schoolIntegration, beforeCancel }) {
+    const assertCancellationAllowed = () => {
+      if (binding?.school_id !== this.schoolId) throw new ContractError("FORBIDDEN", "Cross-school cancellation");
+      if (binding.revoked_at || binding.status !== "DELEGATED_ACTIVE") {
+        throw new ContractError("CONSENT_WITHDRAWN", "Active delegated binding is required for cancellation");
       }
-    }
-    if (!targetBookingId) {
-      return {
-        cancelled: true,
-        alreadyReleased: true,
-        message: "当前账号下无生效中的图书馆座位预约"
-      };
-    }
-
-    const cancelJson = await this.wslibGetJson(
-      `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
-      rawToken
-    );
-    if (cancelJson?.code === 200) {
-      return {
-        cancelled: true,
-        bookingId: targetBookingId,
-        message: cancelJson?.msg || "已成功取消学校图书馆座位预约并释放座位"
-      };
-    }
-
-    // Fallback to signoff if booking window already started
-    const signOffJson = await this.wslibGetJson(
-      `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`,
-      rawToken
-    ).catch(() => null);
-    if (signOffJson?.code === 200) {
-      return {
-        cancelled: true,
-        bookingId: targetBookingId,
-        message: "已自动通过签退释放学校图书馆座位"
-      };
-    }
-
-    return {
-      cancelled: false,
-      bookingId: targetBookingId,
-      message: cancelJson?.msg || signOffJson?.msg || "取消座位预约未成功"
+      this.assertOperationAllowed("CANCEL_BOOKING", schoolIntegration, { requireLiveAutomation: true });
     };
+    assertCancellationAllowed();
+    if (!/^\d+$/.test(String(externalBookingId || ""))) {
+      throw new ContractError("BAD_REQUEST", "An exact explicit school booking ID is required");
+    }
+    if (this.mockBackend || !this.parseCredentialBundle(decryptedSecret, binding).isLiveCredential) {
+      throw new ContractError("SCHOOL_AUTH_EXPIRED", "Live cancellation requires live credentials");
+    }
+    const auth = await this.authenticateHautSession(decryptedSecret, binding);
+    const current = await this.fetchCurrentActiveBooking(auth.rawToken);
+    if (!current || String(current.bookingId) !== String(externalBookingId)) {
+      return { cancelled: false, bookingId: String(externalBookingId), message: "Exact booking not found; no cancellation sent" };
+    }
+    if (typeof beforeCancel !== "function") throw new ContractError("BAD_REQUEST", "Current cancellation authorization callback is required");
+    await beforeCancel();
+    assertCancellationAllowed();
+    const result = await this.wslibGetJson(
+      `/seatbook/user/cancel?bookingid=${encodeURIComponent(externalBookingId)}&channelType=1003`, auth.rawToken
+    );
+    if (result?.code !== 200) {
+      return { cancelled: false, bookingId: String(externalBookingId), message: result?.msg || "Cancellation not confirmed" };
+    }
+    try {
+      const remaining = await this.fetchCurrentActiveBooking(auth.rawToken, { expectedBookingId: externalBookingId });
+      return { cancelled: remaining === null, bookingId: String(externalBookingId),
+        message: remaining === null ? "Cancellation confirmed by school readback" : "Cancellation not confirmed" };
+    } catch {
+      return { cancelled: false, bookingId: String(externalBookingId), message: "Cancellation readback is inconclusive" };
+    }
+  }
+
+  matchesRequestedSeat(seat, wanted) {
+    const requested = String(wanted || "").replace(/号座?$/, "").trim();
+    return requested !== "" && [String(seat.id), seat.seat_name, seat.short_name].includes(requested);
   }
 
   async prewarmJobTargetSeats({ job, plan, binding, decryptedSecret }) {
+    this.assertSchoolScope(job, binding, plan);
+    if (this.mockBackend || job.capability === "MOCK_ONLY") return null;
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
     if (!credBundle.isLiveCredential) return null;
     // Force a fresh token verification or CAS login during prewarm
@@ -847,7 +845,7 @@ export class HautLibraryProvider {
       plan?.area_name ||
       plan?.preferences_json?.preferred_area_ids?.[0] ||
       plan?.area_code ||
-      "四层东书库南区";
+      "";
     const wantedSeats = (
       plan?.candidate_seats ||
       plan?.preferences_json?.preferred_seat_ids ||
@@ -860,39 +858,23 @@ export class HautLibraryProvider {
       return { auth, prewarmed: null };
     }
 
-    const cleanWantedArea = String(preferredArea)
-      .replace(/^[1-9]F_[A-Z]+$/i, "")
-      .trim();
+    const cleanWantedArea = String(preferredArea).trim();
+    const allowAlt = plan.preferences_json?.allow_alternative_seat === true;
     const matchedRegions = allRegions.filter(
-      (r) =>
-        String(r.id) === cleanWantedArea ||
-        r.region_name === cleanWantedArea ||
-        r.region_name.includes(cleanWantedArea) ||
-        cleanWantedArea.includes(r.region_name)
+      r => cleanWantedArea !== "" && (String(r.id) === cleanWantedArea || r.region_name === cleanWantedArea)
     );
-    const primaryRegion = matchedRegions[0] || allRegions[0];
+    const primaryRegion = matchedRegions[0] || (allowAlt ? allRegions[0] : null);
+    if (!primaryRegion) return { auth, prewarmed: null };
     const seatSnap = await this.fetchLiveRegionSeats(rawToken, primaryRegion.id, targetDate);
     const allSeatsInRegion = seatSnap.seats || [];
-
     const matchedCandidateSeats = [];
     for (const wanted of wantedSeats) {
-      const cleanWanted = wanted.replace(/号座?$/, "").trim();
-      const found = allSeatsInRegion.find(
-        (s) =>
-          s.seat_name === cleanWanted ||
-          s.short_name === cleanWanted ||
-          s.seat_name.endsWith(cleanWanted) ||
-          s.short_name.endsWith(cleanWanted) ||
-          String(s.id) === cleanWanted
-      );
-      if (found && !matchedCandidateSeats.some((c) => c.id === found.id)) {
-        matchedCandidateSeats.push({
-          id: found.id,
-          seat_name: found.seat_name,
-          short_name: found.short_name
-        });
+      const found = allSeatsInRegion.find(s => this.matchesRequestedSeat(s, wanted));
+      if (found && !matchedCandidateSeats.some(c => c.id === found.id)) {
+        matchedCandidateSeats.push({ id: found.id, seat_name: found.seat_name, short_name: found.short_name });
       }
     }
+    if (matchedCandidateSeats.length === 0) return { auth, prewarmed: null };
 
     const openTime = cleanSpiText(primaryRegion.open_time, "07:30") || "07:30";
     const closeTime = cleanSpiText(primaryRegion.close_time, "22:00") || "22:00";
@@ -912,398 +894,129 @@ export class HautLibraryProvider {
     return { auth, prewarmed };
   }
 
-  async executeMockOrAuthorizedCreate({
-    job,
-    plan,
-    binding,
-    schoolIntegration,
-    decryptedSecret = null,
-    nowInstant,
-    allowDateFallbackToToday = false
-  }) {
-    if (job.school_id !== this.schoolId) {
-      throw new ContractError("FORBIDDEN", "Cross-school provider mismatch");
-    }
-    if (binding.status !== "DELEGATED_ACTIVE" && binding.status !== "VERIFIED_LOCAL_ONLY") {
+  async executeMockOrAuthorizedCreate({ job, plan, binding, schoolIntegration, decryptedSecret = null, nowInstant, beforeCreate }) {
+    this.assertSchoolScope(job, binding, plan);
+    if (!["DELEGATED_ACTIVE", "VERIFIED_LOCAL_ONLY"].includes(binding.status)) {
       throw new ContractError("SCHOOL_AUTH_EXPIRED", "School binding is not active");
     }
-
-    // Check window at fire time in Asia/Shanghai
-    const rules = this.getRules();
     const fireLocalTime = formatLocalTimeInShanghai(nowInstant);
+    const rules = this.getRules();
     if (fireLocalTime < rules.window_start || fireLocalTime >= rules.window_end_exclusive) {
-      throw new ContractError(
-        "BOOKING_WINDOW_CLOSED",
-        `Target execution time ${fireLocalTime} is outside official window [${rules.window_start}, ${rules.window_end_exclusive})`
-      );
+      throw new ContractError("BOOKING_WINDOW_CLOSED", "Execution is outside the official booking window");
     }
-
-    if (this.mockBackend) {
-      return this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
-    }
-
+    const mockOnly = Boolean(this.mockBackend) || job.capability === "MOCK_ONLY";
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
-    if (credBundle.isLiveCredential) {
-      // Use cached raw_token immediately at 07:00:00 if present so Wave 0 has zero auth RTT;
-      // otherwise authenticate now.
-      let rawToken = credBundle.raw_token;
-      if (!rawToken) {
-        const auth = await this.authenticateHautSession(credBundle, binding);
-        rawToken = auth.rawToken;
-      }
-
-      const shanghaiToday = formatLocalDateInShanghai(nowInstant);
-      const datesToTry =
-        allowDateFallbackToToday && job.booking_local_date !== shanghaiToday
-          ? [job.booking_local_date, shanghaiToday]
-          : [job.booking_local_date];
-
-      const preferredArea =
-        plan.area_name ||
-        plan.preferences_json?.preferred_area_ids?.[0] ||
-        plan.area_code ||
-        "四层东书库南区";
-      const wantedSeats = (
-        plan.candidate_seats ||
-        plan.preferences_json?.preferred_seat_ids ||
-        []
-      ).map((s) => String(s).trim());
-      const allowAlt = plan.preferences_json?.allow_alternative_seat !== false;
-
-      let lastMsg = "";
-      const prewarmed = job.prewarmed_targets;
-      const isMorningOpeningWindow = fireLocalTime >= "07:00:00" && fireLocalTime < "07:25:00";
-
-      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, fire addbooking directly at 0ms!
-      if (
-        prewarmed &&
-        Array.isArray(prewarmed.candidate_seats) &&
-        prewarmed.candidate_seats.length > 0 &&
-        prewarmed.start_full &&
-        prewarmed.end_full &&
-        (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
-      ) {
-        for (let fastAttempt = 0; fastAttempt < 2; fastAttempt++) {
-          if (fastAttempt > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 180));
-          }
-          try {
-            let needWaitOpening = false;
-            for (const cand of prewarmed.candidate_seats) {
-              const addRes = await this.wslibGetJson(
-                `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                  cand.id
-                )}&starttime=${encodeURIComponent(
-                  prewarmed.start_full
-                )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
-                rawToken
-              );
-              lastMsg = String(addRes?.msg || "").trim();
-              if (addRes?.code === 200) {
-                const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                return {
-                  outcome: "SUBMITTED",
-                  externalBookingId: confirmed?.bookingId || bookedId || String(cand.id),
-                  seatAlias: confirmed?.seatName || cand.seat_name,
-                  regionAlias: confirmed?.regionName || prewarmed.region_name,
-                  rawToken
-                };
-              }
-              if (/已有.*预约|不能重复|已预约/.test(lastMsg)) {
-                const existing = await this.fetchCurrentActiveBooking(rawToken);
-                if (existing) {
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: existing.bookingId,
-                    seatAlias: existing.seatName,
-                    regionAlias: existing.regionName,
-                    rawToken
-                  };
-                }
-              }
-              if (/未到|未开放|不在.*时间/.test(lastMsg)) {
-                needWaitOpening = true;
-                break;
-              }
-            }
-            if (!needWaitOpening && allowAlt && prewarmed.region_id) {
-              const qJson = await this.wslibGetJson(
-                `/seatbook/layout/query?starttime=${encodeURIComponent(
-                  prewarmed.start_full
-                )}&endtime=${encodeURIComponent(
-                  prewarmed.end_full
-                )}&regionid=${encodeURIComponent(prewarmed.region_id)}`,
-                rawToken
-              );
-              const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
-              const freeSeats = rawSeats.filter((s) => s?.id && Number(s.seatStatus ?? 1) === 2);
-              for (const freeSeat of freeSeats.slice(0, 4)) {
-                const addRes = await this.wslibGetJson(
-                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                    freeSeat.id
-                  )}&starttime=${encodeURIComponent(
-                    prewarmed.start_full
-                  )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
-                  rawToken
-                );
-                lastMsg = String(addRes?.msg || "").trim();
-                if (addRes?.code === 200) {
-                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(freeSeat.id),
-                    seatAlias:
-                      confirmed?.seatName || cleanSpiText(freeSeat.seatName, String(freeSeat.id)),
-                    regionAlias: confirmed?.regionName || prewarmed.region_name,
-                    rawToken
-                  };
-                }
-              }
-            }
-            if (!needWaitOpening) break;
-          } catch (err) {
-            if (err?.code === "SCHOOL_AUTH_EXPIRED") {
-              const freshAuth = await this.authenticateHautSession(
-                { ...credBundle, raw_token: "" },
-                binding
-              );
-              rawToken = freshAuth.rawToken;
-            }
-            lastMsg = err?.message || lastMsg;
-          }
-        }
-      }
-
-      // Check if user already has an active seat booking before full discovery waves
-      try {
-        const existingActive = await this.fetchCurrentActiveBooking(rawToken);
-        if (existingActive) {
-          return {
-            outcome: "SUBMITTED",
-            externalBookingId: existingActive.bookingId,
-            seatAlias: existingActive.seatName,
-            regionAlias: existingActive.regionName,
-            rawToken
-          };
-        }
-      } catch (err) {
-        if (err?.code === "SCHOOL_AUTH_EXPIRED") {
-          const freshAuth = await this.authenticateHautSession(
-            { ...credBundle, raw_token: "" },
-            binding
-          );
-          rawToken = freshAuth.rawToken;
-        }
-      }
-
-      const waveDelaysMs = [0, 300, 650, 1100, 1800];
-      for (let wave = 0; wave < waveDelaysMs.length; wave++) {
-        if (waveDelaysMs[wave] > 0) {
-          await new Promise((resolve) => setTimeout(resolve, waveDelaysMs[wave]));
-        }
-        try {
-          for (const targetDate of datesToTry) {
-            const regSnap = await this.fetchLiveStudyRegions(rawToken, targetDate);
-            const allRegions = regSnap.regions || [];
-            if (allRegions.length === 0) continue;
-
-            // Match region by name/floor, or fall back to regions with available seats
-            const cleanWantedArea = String(preferredArea)
-              .replace(/^[1-9]F_[A-Z]+$/i, "")
-              .trim();
-            let matchedRegions = allRegions.filter(
-              (r) =>
-                String(r.id) === cleanWantedArea ||
-                r.region_name === cleanWantedArea ||
-                r.region_name.includes(cleanWantedArea) ||
-                cleanWantedArea.includes(r.region_name)
-            );
-            if (matchedRegions.length === 0) {
-              const floorHint = cleanWantedArea.match(/(一|二|三|四|五|六|七|八|九|十|[1-9])/)?.[1];
-              const floorMap = {
-                "1": "一层",
-                "2": "二层",
-                "3": "三层",
-                "4": "四层",
-                "5": "五层",
-                "6": "六层",
-                "7": "七层",
-                "8": "八层",
-                "9": "九层"
-              };
-              const floorCn = floorMap[floorHint] || (floorHint ? `${floorHint}层` : "");
-              if (floorCn) {
-                matchedRegions = allRegions.filter(
-                  (r) => r.region_name.includes(floorCn) && r.available_seats > 0
-                );
-              }
-            }
-            if (allowAlt) {
-              const otherAvailRegions = allRegions.filter(
-                (r) => r.available_seats > 0 && !matchedRegions.some((m) => m.id === r.id)
-              );
-              matchedRegions = [...matchedRegions, ...otherAvailRegions.slice(0, 2)];
-            }
-
-            for (const region of matchedRegions.slice(0, 3)) {
-              const seatSnap = await this.fetchLiveRegionSeats(rawToken, region.id, targetDate);
-              const availSeats = (seatSnap.seats || []).filter((s) => s.available);
-              if (availSeats.length === 0) continue;
-
-              const orderedCandidates = [];
-              for (const wanted of wantedSeats) {
-                const cleanWanted = wanted.replace(/号座?$/, "").trim();
-                const found = availSeats.find(
-                  (s) =>
-                    s.seat_name === cleanWanted ||
-                    s.short_name === cleanWanted ||
-                    s.seat_name.endsWith(cleanWanted) ||
-                    s.short_name.endsWith(cleanWanted) ||
-                    String(s.id) === cleanWanted
-                );
-                if (found && !orderedCandidates.some((c) => c.id === found.id)) {
-                  orderedCandidates.push(found);
-                }
-              }
-              if (allowAlt) {
-                for (const altSeat of availSeats.slice(0, 5)) {
-                  if (!orderedCandidates.some((c) => c.id === altSeat.id)) {
-                    orderedCandidates.push(altSeat);
-                  }
-                }
-              }
-
-              for (const seat of orderedCandidates.slice(0, 5)) {
-                const addRes = await this.wslibGetJson(
-                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                    seat.id
-                  )}&starttime=${encodeURIComponent(
-                    seatSnap.start_full
-                  )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
-                  rawToken
-                );
-                lastMsg = String(addRes?.msg || "").trim();
-                if (addRes?.code === 200) {
-                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
-                    seatAlias: confirmed?.seatName || seat.seat_name,
-                    regionAlias: confirmed?.regionName || region.region_name,
-                    rawToken
-                  };
-                }
-                if (/已有.*预约|不能重复|已预约/.test(lastMsg)) {
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  if (confirmed) {
-                    return {
-                      outcome: "SUBMITTED",
-                      externalBookingId: confirmed.bookingId,
-                      seatAlias: confirmed.seatName,
-                      regionAlias: confirmed.regionName,
-                      rawToken
-                    };
-                  }
-                }
-              }
-            }
-          }
-        } catch (err) {
-          if (err?.code === "SCHOOL_AUTH_EXPIRED") {
-            try {
-              const freshAuth = await this.authenticateHautSession(
-                { ...credBundle, raw_token: "" },
-                binding
-              );
-              rawToken = freshAuth.rawToken;
-            } catch (reauthErr) {
-              lastMsg = reauthErr?.message || lastMsg;
-            }
-          } else {
-            lastMsg = err?.message || lastMsg;
-          }
-        }
-      }
-
-      return {
-        outcome: "FAILED",
-        errorCode: "SCHOOL_REJECTED",
-        diagnosticMessage: lastMsg || "目标自习室暂无可用空座或不在开放预约时段"
-      };
+    this.assertOperationAllowed("CREATE_BOOKING", schoolIntegration, {
+      allowMock: mockOnly, requireLiveAutomation: !mockOnly && credBundle.isLiveCredential
+    });
+    if (!mockOnly && job.capability === "AUTHORIZED_AUTOMATION" && !credBundle.isLiveCredential) {
+      throw new ContractError("SCHOOL_AUTH_EXPIRED", "Live booking requires live credentials");
     }
-
-    // Default deterministic mock reservation result (safe sandbox for unit/redteam tests)
-    const seatAlias = plan.preferences_json?.preferred_seat_ids?.[0] || "N4-088";
-    const regionAlias = plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区";
-    const externalBookingId = `haut_mock_${job.booking_local_date}_${seatAlias}_${binding.id.slice(0, 6)}`;
-    return {
-      outcome: "SUBMITTED",
-      externalBookingId,
-      seatAlias,
-      regionAlias
-    };
+    if (mockOnly || !credBundle.isLiveCredential) {
+      if (this.mockBackend) return this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
+      const seatAlias = plan.preferences_json?.preferred_seat_ids?.[0] || "N4-088";
+      return { outcome: "SUBMITTED", externalBookingId: `haut_mock_${job.booking_local_date}_${seatAlias}_${binding.id.slice(0, 6)}`,
+        seatAlias, regionAlias: plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区" };
+    }
+    if (job.booking_local_date !== formatLocalDateInShanghai(nowInstant)) {
+      throw new ContractError("BOOKING_WINDOW_CLOSED", "Only the exact same-day booking target is allowed");
+    }
+    const rawToken = credBundle.raw_token || (await this.authenticateHautSession(credBundle, binding)).rawToken;
+    const existing = await this.fetchCurrentActiveBooking(rawToken);
+    if (job.submission_target || existing) {
+      if (job.submission_target?.binding_id === binding.id && job.submission_target.booking_local_date === job.booking_local_date && this.matchesAttempt(existing, job.submission_target, job.pending_external_booking_id)) {
+        return { outcome: "SUBMITTED", externalBookingId: existing.bookingId, rawToken };
+      }
+      return { outcome: "TIMEOUT_AMBIGUOUS", errorCode: "BOOKING_VERIFICATION_PENDING", rawToken };
+    }
+    let target = null;
+    const prewarmed = job.prewarmed_targets;
+    const wantedArea = String(plan.area_name || plan.preferences_json?.preferred_area_ids?.[0] || plan.area_code || "").trim();
+    const allowAlt = plan.preferences_json?.allow_alternative_seat === true;
+    const wantedSeats = (plan.candidate_seats || plan.preferences_json?.preferred_seat_ids || []).map(String);
+    const cachedRegionAllowed = allowAlt || (wantedArea !== "" && [String(prewarmed?.region_id), prewarmed?.region_name].includes(wantedArea));
+    const cachedSeat = Array.isArray(prewarmed?.candidate_seats) ? prewarmed.candidate_seats.find(
+      seat => allowAlt || wantedSeats.some(wanted => this.matchesRequestedSeat(seat, wanted))
+    ) : null;
+    if (cachedRegionAllowed && cachedSeat && prewarmed.start_full?.startsWith(`${job.booking_local_date} `) &&
+        prewarmed.end_full?.startsWith(`${job.booking_local_date} `)) {
+      const seat = cachedSeat;
+      target = { seat_id: String(seat.id), region_id: String(prewarmed.region_id), start_full: prewarmed.start_full,
+        end_full: prewarmed.end_full, seat_alias: seat.seat_name, region_alias: prewarmed.region_name };
+    } else {
+      const regions = (await this.fetchLiveStudyRegions(rawToken, job.booking_local_date)).regions || [];
+      const preferred = regions.filter(r => wantedArea !== "" && (String(r.id) === wantedArea || r.region_name === wantedArea));
+      const candidates = allowAlt ? [...preferred, ...regions.filter(r => !preferred.includes(r))] : preferred;
+      for (const region of candidates) {
+        const snap = await this.fetchLiveRegionSeats(rawToken, region.id, job.booking_local_date);
+        const available = (snap.seats || []).filter(s => s.available);
+        const seat = available.find(s => wantedSeats.some(w => this.matchesRequestedSeat(s, w))) ||
+          (allowAlt ? available[0] : null);
+        if (seat) {
+          target = { seat_id: String(seat.id), region_id: String(region.id), start_full: snap.start_full,
+            end_full: snap.end_full, seat_alias: seat.seat_name, region_alias: region.region_name };
+          break;
+        }
+      }
+    }
+    if (!target) return { outcome: "FAILED", errorCode: "SCHOOL_REJECTED", diagnosticMessage: "No eligible seat" };
+    target = { ...target, school_id: this.schoolId, binding_id: binding.id, booking_local_date: job.booking_local_date };
+    if (!/^\d+$/.test(target.seat_id) || !target.start_full?.startsWith(`${job.booking_local_date} `) ||
+        !target.end_full?.startsWith(`${job.booking_local_date} `) || target.start_full >= target.end_full) {
+      throw new ContractError("BAD_REQUEST", "Invalid exact booking target");
+    }
+    if (typeof beforeCreate !== "function") throw new ContractError("BAD_REQUEST", "Durable submission intent callback is required");
+    await beforeCreate(target);
+    job.submission_target = target;
+    this.assertOperationAllowed("CREATE_BOOKING", schoolIntegration, { requireLiveAutomation: true });
+    // No write retry, alternate seat, date fallback, or reauthentication after this point.
+    let response;
+    try {
+      response = await this.wslibGetJson(`/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(target.seat_id)}&starttime=${encodeURIComponent(target.start_full)}&endtime=${encodeURIComponent(target.end_full)}`, rawToken);
+    } catch {
+      // The server may have committed even when the transport timed out.
+    }
+    const expectedId = response?.bookingid ? String(response.bookingid) : null;
+    if (expectedId) job.pending_external_booking_id = expectedId;
+    let active = null;
+    try { active = await this.fetchCurrentActiveBooking(rawToken); } catch { /* Remain uncertain. */ }
+    if (this.matchesAttempt(active, target, expectedId)) {
+      return { outcome: "SUBMITTED", externalBookingId: active.bookingId, seatAlias: active.seatName, regionAlias: active.regionName, rawToken };
+    }
+    return { outcome: "TIMEOUT_AMBIGUOUS", externalBookingId: expectedId, errorCode: "BOOKING_VERIFICATION_PENDING", rawToken };
   }
 
-  async verifyBookingAuthoritative({
-    job,
-    binding,
-    decryptedSecret = null,
-    rawToken = null,
-    expectedExternalBookingId
-  }) {
-    if (this.mockBackend) {
-      return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
-    }
-    if (!expectedExternalBookingId) {
-      return { verified: false, officialStatus: "NOT_CREATED" };
-    }
-
+  async verifyBookingAuthoritative({ job, binding, decryptedSecret = null, rawToken = null, expectedExternalBookingId }) {
+    this.assertSchoolScope(job, binding);
+    if (this.mockBackend) return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
+    const isMockId = /^haut_mock_/.test(String(expectedExternalBookingId || ""));
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
-    if (credBundle.isLiveCredential && !String(expectedExternalBookingId).startsWith("haut_mock_")) {
-      let tokenToUse = rawToken;
-      if (!tokenToUse) {
-        const auth = await this.authenticateHautSession(credBundle, binding);
-        tokenToUse = auth.rawToken;
+    if (isMockId && (job.capability === "MOCK_ONLY" || !credBundle.isLiveCredential)) {
+      const prefix = `haut_mock_${job.booking_local_date}_`;
+      if (!String(expectedExternalBookingId).startsWith(prefix) || !String(expectedExternalBookingId).endsWith(`_${binding.id.slice(0, 6)}`)) {
+        return { verified: false, officialStatus: "TARGET_MISMATCH" };
       }
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 350));
-        }
-        const active = await this.fetchCurrentActiveBooking(tokenToUse);
-        if (active && active.bookingId) {
-          const evidenceSha256 = crypto
-            .createHash("sha256")
-            .update(`haut_live|${binding.id}|${active.bookingId}|${active.seatName}|CONFIRMED`)
-            .digest("hex");
-          return {
-            verified: true,
-            externalBookingId: active.bookingId,
-            officialStatus: "CONFIRMED",
-            seatAlias: active.seatName,
-            regionAlias: active.regionName,
-            startAt: active.startDate,
-            endAt: active.endDate,
-            evidenceSha256
-          };
-        }
-      }
-      return { verified: false, officialStatus: "NOT_FOUND_ON_WSLIB" };
+      return { verified: true, externalBookingId: expectedExternalBookingId, officialStatus: "CONFIRMED",
+        evidenceSha256: crypto.createHash("sha256").update(`${job.school_id}|${binding.id}|${expectedExternalBookingId}|CONFIRMED`).digest("hex") };
     }
-
-    const evidenceSha256 = crypto
-      .createHash("sha256")
-      .update(`${job.school_id}|${binding.id}|${expectedExternalBookingId}|CONFIRMED`)
-      .digest("hex");
-    return {
-      verified: true,
-      externalBookingId: expectedExternalBookingId,
-      officialStatus: "CONFIRMED",
-      evidenceSha256
-    };
+    const target = job.submission_target;
+    if (job.capability === "MOCK_ONLY" || isMockId || !credBundle.isLiveCredential ||
+        target?.binding_id !== binding.id || target?.booking_local_date !== job.booking_local_date) {
+      return { verified: false, officialStatus: "TARGET_MISMATCH" };
+    }
+    const token = rawToken || (await this.authenticateHautSession(credBundle, binding)).rawToken;
+    const active = await this.fetchCurrentActiveBooking(token);
+    const expectedId = expectedExternalBookingId || job.pending_external_booking_id;
+    if (expectedExternalBookingId && job.pending_external_booking_id &&
+        String(expectedExternalBookingId) !== String(job.pending_external_booking_id)) {
+      return { verified: false, officialStatus: "TARGET_MISMATCH" };
+    }
+    if (!this.matchesAttempt(active, target, expectedId)) return { verified: false, officialStatus: "NOT_FOUND_ON_WSLIB" };
+    return { verified: true, externalBookingId: active.bookingId, officialStatus: "CONFIRMED", seatAlias: active.seatName,
+      regionAlias: active.regionName, startAt: active.startDate, endAt: active.endDate,
+      evidenceSha256: crypto.createHash("sha256").update(JSON.stringify({ binding: binding.id, target, active })).digest("hex") };
   }
+
 }
 
 export function formatLocalTimeInShanghai(dateOrIso) {

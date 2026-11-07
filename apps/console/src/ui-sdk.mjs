@@ -485,14 +485,18 @@ export function xpeachOrderRowCard(
   const o = order || {};
   const shortId = String(o.id || "").slice(0, 12);
   const peachAmt = Number(
-    o.price_peach ?? (o.price_micropeach || pricingMicropeach) / micropeachPerPeach
+    o.price_peach ?? (o.price_micropeach ?? pricingMicropeach) / micropeachPerPeach
   ).toFixed(2);
   const stBadge =
     o.payment_state === "PAID"
       ? xpeachBadge(isAdmin ? "已扣费" : "已从 XPeach 扣除", "success")
       : o.payment_state === "REFUNDED"
         ? xpeachBadge(isAdmin ? "已退还 🍑" : "已退还 🍑 至 XPeach", "neutral")
-        : xpeachBadge("待结算", "warning");
+        : o.payment_state === "NOT_REQUIRED"
+          ? xpeachBadge("无需支付", "neutral")
+          : o.payment_state === "PAYMENT_DUE"
+            ? xpeachBadge("待支付", "warning")
+            : xpeachBadge("待结算", "warning");
   const timeText = cleanDisplayText((o.paid_at || o.created_at || "").replace("T", " ").slice(0, 19), "-");
 
   return `
@@ -519,7 +523,8 @@ export function xpeachOrderRowCard(
       ${
         isAdmin && o.payment_state === "PAID"
           ? `<div class="xp-row-card-actions">
-              <button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}">退还 🍑</button>
+              <button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}" data-refund-request="${escapeHtml(o.refund_request?.id || "")}">${o.refund_request ? "审批退还 🍑" : "申请退还 🍑"}</button>
+              ${o.refund_request ? `<span class="xp-muted">申请人 ${escapeHtml(o.refund_request.requested_by)} · 申请退款 ${escapeHtml(String(o.refund_request.amount_micropeach / 10000))} 🍑 · ${escapeHtml(o.refund_request.reason)}</span>` : ""}
             </div>`
           : ""
       }

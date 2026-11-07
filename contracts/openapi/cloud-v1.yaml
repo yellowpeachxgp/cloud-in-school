@@ -1363,7 +1363,7 @@ paths:
       tags: [admin]
       security:
         - bearerAuth: []
-      summary: Issue an idempotent refund for a PAID order (`dis:reservation:<orderUUID>:refund:v1`, capped at paid amount)
+      summary: Request a refund or approve the saved request as a distinct authenticated finance operator
       parameters:
         - name: orderId
           in: path
@@ -1379,7 +1379,13 @@ paths:
               $ref: '#/components/schemas/AdminRefundRequest'
       responses:
         '200':
-          description: Order refunded
+          description: Order refunded after a distinct authenticated operator approved the matching request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderEnvelope'
+        '202':
+          description: Refund request saved; another authenticated finance operator must approve refund_request_id
           content:
             application/json:
               schema:
@@ -1469,10 +1475,28 @@ paths:
       tags: [admin]
       security:
         - bearerAuth: []
-      summary: Issue an immediate admin 1-click refund to the user's XPeach wallet
+      summary: Request full refund or approve the saved request as a distinct authenticated finance operator
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                refund_request_id:
+                  type: string
+                  format: uuid
       responses:
         '200':
-          description: Order refunded
+          description: Order refunded after two authenticated approvals
+        '202':
+          description: Refund request saved, awaiting another finance operator
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/v1/reservation-jobs/{jobId}/execute-now:
     post:
       operationId: executeReservationJobNow
@@ -2210,6 +2234,8 @@ components:
         - target_local_time
         - time_zone
         - consent_id
+        - accepted_price_version
+        - accepted_price_micropeach
       properties:
         school_binding_id:
           type: string
@@ -2250,11 +2276,16 @@ components:
           default: 300
         max_lateness_seconds:
           type: integer
-          minimum: 0
+          minimum: 1
           maximum: 1800
-          default: 0
+          default: 1800
         accepted_price_version:
           type: string
+          description: Exact current quote version returned by GET /api/v1/pricing/library-booking
+        accepted_price_micropeach:
+          type: integer
+          minimum: 0
+          description: Explicitly accepted per-reservation amount; locked for this plan including recurring jobs
         accepted_policy_version:
           type: string
         repeat_days:
@@ -2788,27 +2819,36 @@ components:
     AdminApprovalRequest:
       type: object
       additionalProperties: false
-      required: [evidence_ref, expires_at, note]
+      description: First operator proposes evidence; a second authenticated eligible operator approves the exact request ID. Approval does not disable the kill switch.
+      oneOf:
+        - required: [evidence_ref, expires_at]
+        - required: [authorization_request_id]
       properties:
         evidence_ref:
           type: string
+          minLength: 1
         expires_at:
           type: string
           format: date-time
+        authorization_request_id:
+          type: string
+          format: uuid
         note:
           type: string
     AdminRefundRequest:
       type: object
       additionalProperties: false
-      required: [amount_micropeach, reason, second_approver_ref]
+      required: [amount_micropeach, reason]
       properties:
         amount_micropeach:
           type: integer
           minimum: 1
         reason:
           type: string
-        second_approver_ref:
+        refund_request_id:
           type: string
+          format: uuid
+          description: Saved request ID, required for approval by a different authenticated finance operator
     AuditEventListEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]

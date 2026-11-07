@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getReservationPriceVersion } from "../packages/contracts/src/index.mjs";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { validateAllowedSchoolUrl } from "../packages/school-spi/src/index.mjs";
 import { assertSafeRelativeArtifactPath } from "../packages/plugin-sdk/src/index.mjs";
@@ -299,7 +300,8 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
 
   const order = await app.financeService.createAndSettleOrderForConfirmedJob({
     job: { id: "job_fin_mutex_1", cloud_user_id: user.id },
-    plan: { id: "plan_fin_mutex_1" }
+    plan: { id: "plan_fin_mutex_1", price_micropeach: 10_000,
+      price_version: getReservationPriceVersion(10_000), price_accepted_at: new Date().toISOString() }
   });
   assert.equal(order.payment_state, "PAID");
   assert.equal(app.financeBridge.getSandboxBalance(user.id), 40_000);
@@ -316,20 +318,18 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
     (err) => err?.code === "FORBIDDEN"
   );
 
-  // Concurrent refund attempts must serialize and only refund once
+  const operators = ["requester", "approver"].map((subject) => {
+    const actor = app.store.findOrCreateCloudUser({ issuer: "https://sso.xpeach.codes", subject: `test_mutex_${subject}` });
+    app.store.setUserRoles(actor.id, ["FINANCE_OPERATOR"]);
+    return actor;
+  });
+  const request = { amountMicropeach: 10_000, reason: "Concurrent refund", actorRef: operators[0].id };
+  const pending = await app.financeService.issueRefundForOrder(order.id, request);
+  const approval = { ...request, refundRequestId: pending.refund_request.id, actorRef: operators[1].id };
+  // Concurrent authenticated approvals must serialize and only refund once.
   const [r1, r2] = await Promise.all([
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 1",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    }),
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 2",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    })
+    app.financeService.issueRefundForOrder(order.id, approval),
+    app.financeService.issueRefundForOrder(order.id, approval)
   ]);
   assert.equal(r1.payment_state, "REFUNDED");
   assert.equal(r2.payment_state, "REFUNDED");
@@ -420,13 +420,16 @@ test("Security Red-Team: OIDC missing-nonce rejection, unknown school_id DoS gua
 
 test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency, and multi-day rollover prewarmed date rewrite (SCHED-REDTEAM-004)", async () => {
   const app = createCampusCloudApp();
+  const nowMs = Date.parse("2026-11-08T07:00:00+08:00");
+  const inject = app.inject;
+  app.inject = (request) => inject({ ...request, nowMs });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "test_sched_redteam_user",
     displayName: "Sched User"
   });
   app.financeBridge.setSandboxBalance(user.id, 100_000);
-  const sess = app.identity.issueDeviceSession(user, "Phone");
+  const sess = app.identity.issueDeviceSession(user, "Phone", null, 1, nowMs);
 
   const bindInit = await app.inject({
     method: "POST",
@@ -462,6 +465,8 @@ test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency,
       area_code: "5F_MID",
       area_name: "五层中区",
       candidate_seats: ["001", "002"],
+      accepted_price_version: getReservationPriceVersion(app.store.pricingMicropeach),
+      accepted_price_micropeach: app.store.pricingMicropeach,
       target_local_date: "2026-11-08",
       target_local_time: "07:00:00",
       repeat_days: 2
