@@ -1689,63 +1689,9 @@ export function createCampusCloudApp(options = {}) {
 
   register("POST", "/api/v1/sync/snapshot", "pushUserSyncSnapshot", "bearer", async ({ auth, body, nowMs }) => {
     if (body && typeof body === "object") {
-      if (Array.isArray(body.school_binding_upserts)) {
-        for (const bItem of body.school_binding_upserts) {
-          const studentNo = String(bItem?.student_no || "").trim();
-          if (!studentNo) continue;
-          const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
-          let existingBinding = Array.from(store.schoolBindings.values()).find(
-            (b) => b.cloud_user_id === auth.cloudUserId && b.school_id === schoolId && !b.revoked_at
-          );
-          if (!existingBinding) {
-            const bindingId = crypto.randomUUID();
-            existingBinding = {
-              id: bindingId,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              student_no: studentNo,
-              student_no_masked: studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
-              status: "DELEGATED_ACTIVE",
-              credential_ref: null,
-              credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
-              created_at: new Date(nowMs).toISOString(),
-              revoked_at: null
-            };
-            store.schoolBindings.set(bindingId, existingBinding);
-          } else {
-            existingBinding.student_no = studentNo;
-            existingBinding.student_no_masked = studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
-            existingBinding.status = "DELEGATED_ACTIVE";
-          }
-          if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-            const encrypted = kmsVault.encryptSecret({
-              bindingId: existingBinding.id,
-              schoolId,
-              credentialKind: "DELEGATED_SESSION_BUNDLE",
-              plaintext: String(bItem.delegated_secret).trim(),
-              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-            });
-            store.encryptedCredentials.set(encrypted.id, encrypted);
-            existingBinding.credential_ref = encrypted.id;
-            existingBinding.credential_expires_at = encrypted.expires_at;
-          }
-          const hasActiveConsent = Array.from(store.consents.values()).some(
-            (c) => c.cloud_user_id === auth.cloudUserId && c.school_id === schoolId && !c.withdrawn_at && ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"].every((scope) => c.scope_list?.includes(scope))
-          );
-          if (!hasActiveConsent) {
-            const cid = crypto.randomUUID();
-            store.consents.set(cid, {
-              id: cid,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-              policy_version: "policy-2026-11-v4",
-              granted_at: new Date(nowMs).toISOString(),
-              withdrawn_at: null
-            });
-          }
-        }
-      }
+      // Bindings, delegated credentials and consent are security state, not snapshot data.
+      // Only the explicit enrolment/completion and consent endpoints may change them.
+      // In particular, stale devices must not recreate revoked bindings or withdrawn consent.
 
       if (Array.isArray(body.parcel_upserts)) {
         for (const pItem of body.parcel_upserts) {
@@ -1782,13 +1728,27 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
-      if (Array.isArray(body.reservation_cancellations)) {
-        for (const cancelId of body.reservation_cancellations) {
+      const syncUser = store.users.get(auth.cloudUserId);
+      const cancelledSyncIds = new Set(syncUser?.reservation_sync_tombstones || []);
+      const snapshotCancellations = [
+        ...(Array.isArray(body.reservation_cancellations) ? body.reservation_cancellations : []),
+        ...(Array.isArray(body.reservation_plan_upserts) ? body.reservation_plan_upserts : [])
+          .filter(p => p && (p.enabled === false || p.deleted_at || p.cancelled_at || p.tombstone === true))
+          .map(p => p.plan_id)
+      ];
+      if (snapshotCancellations.length) {
+        for (const rawCancelId of snapshotCancellations) {
+          const cancelId = typeof rawCancelId === "string" ? rawCancelId.trim() : "";
+          if (!cancelId || cancelId.length > 200) continue;
+          cancelledSyncIds.add(cancelId);
+          if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
             await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs);
           }
-          const plan = store.reservationPlans.get(cancelId);
+          const plan = store.reservationPlans.get(cancelId) || Array.from(store.reservationPlans.values()).find(
+            p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === cancelId
+          );
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
             for (const j of store.reservationJobs.values()) {
@@ -1800,6 +1760,77 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      if (Array.isArray(body.reservation_plan_upserts)) {
+        const activeBinding = Array.from(store.schoolBindings.values()).find(
+          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at
+        );
+        const activeConsent = Array.from(store.consents.values()).find(
+          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at &&
+            c.school_id === activeBinding?.school_id && c.scope_list?.includes("LIBRARY_SEAT_RESERVATION")
+        );
+        if (activeBinding && activeConsent) {
+          for (const rpItem of body.reservation_plan_upserts) {
+            // Snapshot replay cannot re-enable server plans or resurrect cancelled client IDs.
+            const sourceId = typeof rpItem?.plan_id === "string" ? rpItem.plan_id.trim() : "";
+            if (!sourceId || sourceId.length > 200 || cancelledSyncIds.has(sourceId)) continue;
+            if (rpItem.enabled === false || rpItem.deleted_at || rpItem.cancelled_at || rpItem.tombstone === true) {
+              cancelledSyncIds.add(sourceId);
+              if (syncUser) syncUser.reservation_sync_tombstones = [...cancelledSyncIds];
+              continue;
+            }
+            if (store.reservationPlans.has(sourceId) || Array.from(store.reservationPlans.values()).some(
+              p => p.cloud_user_id === auth.cloudUserId && p.sync_source_id === sourceId
+            )) continue;
+            const targetDate = String(rpItem?.target_local_date || "").trim();
+            const targetTime = String(rpItem?.target_local_time || "07:00:00").trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) continue;
+            const alreadyActive = Array.from(store.reservationJobs.values()).some(
+              (j) =>
+                j.cloud_user_id === auth.cloudUserId &&
+                j.booking_local_date === targetDate &&
+                !["CANCELLED", "FAILED", "EXPIRED", "REVOKED"].includes(j.state)
+            );
+            if (alreadyActive) continue;
+            const areaName = String(rpItem?.area_name || rpItem?.area_code || "五层中区").trim();
+            const seats = Array.isArray(rpItem?.candidate_seats)
+              ? rpItem.candidate_seats.map((s) => String(s).trim()).filter(Boolean)
+              : ["01桌 B座"];
+            const repeatDays = Math.min(Math.max(Number(rpItem?.repeat_days ?? 1) || 1, 1), 30);
+            const remainingDays = Math.min(
+              Math.max(Number(rpItem?.remaining_days ?? repeatDays) || repeatDays, 1),
+              repeatDays
+            );
+            try {
+              reservationEngine.createPlanAndJob(
+                auth.cloudUserId,
+                {
+                  sync_source_id: sourceId,
+                  accepted_price_version: rpItem.accepted_price_version,
+                  accepted_price_micropeach: rpItem.accepted_price_micropeach,
+                  school_binding_id: activeBinding.id,
+                  consent_id: activeConsent.id,
+                  area_code: areaName,
+                  area_name: areaName,
+                  candidate_seats: seats,
+                  preferred_area_ids: [areaName],
+                  preferred_seat_ids: seats,
+                  target_local_date: targetDate,
+                  target_local_time: targetTime,
+                  repeat_days: repeatDays,
+                  remaining_days: remainingDays,
+                  allow_alternative_seat: rpItem?.allow_alternative_seat === true,
+                  replace_existing: false
+                },
+                nowMs
+              );
+            } catch {
+              // Ignore expired window or validation errors during background snapshot sync
+            }
+          }
+        }
+      }
+
+      store.saveSnapshot?.();
       await syncUserToSso(auth.cloudUserId);
     }
 

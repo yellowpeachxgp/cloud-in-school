@@ -28,6 +28,28 @@ export const HAUT_CAS_LOGIN_URL =
 export const HAUT_WSLIB_API_BASE = "https://wslib.haut.edu.cn/spacelink/api";
 const HAUT_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
+const HAUT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8";
+
+export function translateWslibDiagnosticMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  if (!text) return "";
+  if (/seat\.10056/i.test(text)) return "预约开始时间须大于当前时间";
+  if (/seat\.10057/i.test(text)) return "只能预约1天之内的时间(含当天)";
+  if (/seat\.10058/i.test(text)) return "预约时间不在自习室开放时段内";
+  if (/seat\.10062/i.test(text)) return "本座位已锁定 请稍后再试!";
+  if (/seat\.10079/i.test(text)) return "未到07:00开放时间或该时段内已有生效预约";
+  return text;
+}
+
+export function isWslibNotYetOpenMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  return /未到|未开放|不在.*时间|只能预约|尚未开放|seat\.10057|seat\.10058|seat\.10079/i.test(text);
+}
+
+export function isWslibAlreadyBookedMessage(rawMsg) {
+  const text = String(rawMsg || "").trim();
+  return /已有.*预约|不能重复|已预约|只能预约一个座位|seat\.10060|seat\.10061|seat\.10079/i.test(text);
+}
 
 export function validateAllowedSchoolUrl(urlString, allowedHosts) {
   let parsed;
@@ -202,9 +224,9 @@ export class HautLibraryProvider {
   }
 
   matchesAttempt(active, target, expectedId = null) {
-    return Boolean(active?.bookingId && target?.seat_id && target?.binding_id &&
+    return Boolean(expectedId && active?.bookingId && target?.seat_id && target?.binding_id &&
       target.school_id === this.schoolId &&
-      (!expectedId || String(active.bookingId) === String(expectedId)) &&
+      String(active.bookingId) === String(expectedId) &&
       [1, 2, 3, 4].includes(Number(active.bookingStatus)) &&
       String(active.seatId) === String(target.seat_id) &&
       String(active.startDate).replace("T", " ") === target.start_full &&
@@ -293,6 +315,7 @@ export class HautLibraryProvider {
         redirect: "error",
         headers: {
           "User-Agent": HAUT_USER_AGENT,
+          "Accept-Language": HAUT_ACCEPT_LANGUAGE,
           Authorization: `Bearer ${cleanToken}`,
           Accept: "application/json, text/plain, */*"
         },
@@ -572,6 +595,7 @@ export class HautLibraryProvider {
       redirect: "error",
       headers: {
         "User-Agent": HAUT_USER_AGENT,
+        "Accept-Language": HAUT_ACCEPT_LANGUAGE,
         Authorization: `Bearer ${cleanToken}`,
         Accept: "application/json, text/plain, */*"
       },
@@ -583,6 +607,10 @@ export class HautLibraryProvider {
     const json = await res.json();
     if (json?.code === 401) {
       throw new ContractError("SCHOOL_AUTH_EXPIRED", "图书馆登录 Token 已过期");
+    }
+    if (json && typeof json.msg === "string" && json.msg.includes("No message found under code")) {
+      json.raw_msg = json.msg;
+      json.msg = translateWslibDiagnosticMessage(json.msg);
     }
     return json;
   }
@@ -976,7 +1004,7 @@ export class HautLibraryProvider {
     } catch {
       // The server may have committed even when the transport timed out.
     }
-    const expectedId = response?.bookingid ? String(response.bookingid) : null;
+    const expectedId = response?.code === 200 && response?.bookingid ? String(response.bookingid) : null;
     if (expectedId) job.pending_external_booking_id = expectedId;
     let active = null;
     try { active = await this.fetchCurrentActiveBooking(rawToken); } catch { /* Remain uncertain. */ }

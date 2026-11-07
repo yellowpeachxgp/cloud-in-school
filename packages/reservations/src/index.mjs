@@ -240,6 +240,7 @@ export class TripleScheduleEngine {
         allow_alternative_seat: payload.allow_alternative_seat === true
       },
       generation,
+      ...(payload.sync_source_id ? { sync_source_id: payload.sync_source_id } : {}),
       enabled: true,
       created_at: new Date(nowMs).toISOString()
     };
@@ -319,7 +320,6 @@ export class TripleScheduleEngine {
     for (const ev of events) {
       this.store.scheduleEvents.set(ev.id, ev);
     }
-
     this.store.saveSnapshot?.();
 
     return {
@@ -353,6 +353,9 @@ export class TripleScheduleEngine {
     job.state = nextState;
     job.state_version += 1;
     Object.assign(job, patch);
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
     return true;
   }
 

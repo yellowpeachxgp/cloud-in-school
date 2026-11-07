@@ -85,13 +85,13 @@ test('strict live verification rejects wrong ID, seat, date, interval and inacti
   assert.equal((await provider.verifyBookingAuthoritative({ ...args, expectedExternalBookingId: '42', rawToken: token })).verified, true);
 });
 
-test('uncertain response reconciles matching persisted target, not unrelated active booking', async () => {
+test('uncertain response without explicit booking ID stays pending even with matching target', async () => {
   for (const match of [true, false]) {
     const { provider, args, active } = fixture();
     let reads = 0, writes = 0;
     provider.fetchCurrentActiveBooking = async () => ++reads === 1 ? null : { ...active, seatId: match ? 8 : 9 };
     provider.wslibGetJson = async () => { writes++; throw new Error('timeout'); };
-    assert.equal((await provider.executeMockOrAuthorizedCreate(args)).outcome, match ? 'SUBMITTED' : 'TIMEOUT_AMBIGUOUS');
+    assert.equal((await provider.executeMockOrAuthorizedCreate(args)).outcome, 'TIMEOUT_AMBIGUOUS');
     assert.equal(writes, 1);
   }
 });
