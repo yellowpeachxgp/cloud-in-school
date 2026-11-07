@@ -38,7 +38,8 @@ import { greetCampus } from "../../../examples/hello-campus-plugin/dist/index.mj
 import { queryStationHours } from "../../../examples/parcel-station-plugin/dist/index.mjs";
 import {
   renderConsoleHtml,
-  renderMobileCallbackHtml
+  renderMobileCallbackHtml,
+  CONSOLE_UI_VERSION
 } from "../../console/src/main.mjs";
 import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs";
 
@@ -253,6 +254,39 @@ export function createCampusCloudApp(options = {}) {
   }
 
   const ssoSyncState = new Map(); // cloudUserId -> { lastMs, inFlight }
+
+  // Console page perf: never block page render on the SSO finance-matrix call.
+  // Serve last-known value; refresh in the background when stale (60s TTL).
+  const financeMatrixCache = { atMs: 0, data: null, inFlight: null };
+  const FINANCE_MATRIX_TTL_MS = 60_000;
+  function getFinanceMatrixCached(nowMs = Date.now()) {
+    const fresh =
+      financeMatrixCache.data !== null && nowMs - financeMatrixCache.atMs < FINANCE_MATRIX_TTL_MS;
+    if (!fresh && !financeMatrixCache.inFlight) {
+      financeMatrixCache.inFlight = financeBridge
+        .getSiteFinanceMatrix()
+        .then((d) => {
+          if (d && typeof d === "object") {
+            financeMatrixCache.data = d;
+            financeMatrixCache.atMs = Date.now();
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          financeMatrixCache.inFlight = null;
+        });
+    }
+    return financeMatrixCache.data;
+  }
+
+  // Short-lived per-view payload memo: SPA prefetch + rapid nav clicks would
+  // otherwise rebuild identical collections on every request.
+  const consoleViewDataMemo = new Map(); // activeNav -> { atMs, data }
+  const CONSOLE_VIEW_MEMO_MS = 1_500;
+
+  // /static/* in-memory asset cache (buffer + weak etag; stat revalidated ≤5s).
+  const staticAssetCache = new Map(); // filePath -> { buf, etag, mime, atMs }
+
   async function syncUserToSso(cloudUserId) {
     const st = ssoSyncState.get(cloudUserId);
     if (st?.inFlight) return st.inFlight;
@@ -2559,6 +2593,8 @@ export function createCampusCloudApp(options = {}) {
       const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
+      // In-memory buffer cache (5s stat freshness) + weak ETag so repeat loads
+      // skip disk I/O and unchanged assets answer 304 instead of re-downloading.
       if (upperMethod === "GET" && (pathname.startsWith("/static/") || pathname === "/favicon.ico")) {
         const staticDir = path.join(REPO_ROOT, "apps/console/public/static");
         const fileName =
@@ -2566,25 +2602,51 @@ export function createCampusCloudApp(options = {}) {
             ? "xpeach-logo.png"
             : path.basename(pathname);
         const filePath = path.join(staticDir, fileName);
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const ext = path.extname(fileName).toLowerCase();
-          const mime =
-            ext === ".css"
-              ? "text/css; charset=utf-8"
-              : ext === ".js"
-                ? "application/javascript; charset=utf-8"
-                : ext === ".png"
-                  ? "image/png"
-                  : "application/octet-stream";
-          const buf = fs.readFileSync(filePath);
+        let asset = staticAssetCache.get(filePath);
+        if (!asset || nowMs - asset.atMs > 5_000) {
+          const st = fs.statSync(filePath, { throwIfNoEntry: false });
+          if (!st?.isFile()) {
+            staticAssetCache.delete(filePath);
+            asset = null;
+          } else {
+            const ext = path.extname(fileName).toLowerCase();
+            asset = {
+              buf: fs.readFileSync(filePath),
+              etag: `W/"${st.size}-${Math.trunc(st.mtimeMs)}"`,
+              mime:
+                ext === ".css"
+                  ? "text/css; charset=utf-8"
+                  : ext === ".js"
+                    ? "application/javascript; charset=utf-8"
+                    : ext === ".png"
+                      ? "image/png"
+                      : "application/octet-stream",
+              atMs: nowMs
+            };
+            staticAssetCache.set(filePath, asset);
+          }
+        }
+        if (asset) {
+          if (
+            headers?.["if-none-match"] === asset.etag ||
+            headers?.["If-None-Match"] === asset.etag
+          ) {
+            return {
+              status: 304,
+              headers: { etag: asset.etag, "cache-control": "public, max-age=3600" },
+              rawBody: "",
+              body: okEnvelope("STATIC_ASSET_NOT_MODIFIED", { file: fileName }, requestId)
+            };
+          }
           return {
             status: 200,
             headers: {
-              "content-type": mime,
+              "content-type": asset.mime,
+              etag: asset.etag,
               "cache-control": "public, max-age=3600",
               "x-request-id": requestId
             },
-            rawBody: buf,
+            rawBody: asset.buf,
             body: okEnvelope("STATIC_ASSET_OK", { file: fileName }, requestId)
           };
         }
@@ -2615,6 +2677,27 @@ export function createCampusCloudApp(options = {}) {
 
       if (upperMethod === "GET" && webConsoleRoutes.has(consolePathname)) {
         const activeNav = webConsoleRoutes.get(consolePathname);
+        // Stage-nav version handshake: a cached page holding an older
+        // UI_ASSET_VERSION must full-reload instead of partial-swapping
+        // markup built for a different JS/CSS bundle.
+        const stageNavVersion = headers?.["x-stage-nav"] || headers?.["X-Stage-Nav"];
+        if (stageNavVersion && stageNavVersion !== CONSOLE_UI_VERSION) {
+          return {
+            status: 200,
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "no-store",
+              "x-request-id": requestId
+            },
+            rawBody: JSON.stringify({
+              ok: false,
+              code: "UI_VERSION_STALE",
+              reload: true,
+              version: CONSOLE_UI_VERSION
+            }),
+            body: okEnvelope("UI_VERSION_STALE", { reload: true }, requestId)
+          };
+        }
         let cookieAuth = identity.verifyWebSessionCookie(
           headers?.cookie || headers?.Cookie || "",
           nowMs
@@ -2658,57 +2741,73 @@ export function createCampusCloudApp(options = {}) {
           campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false })
         };
         if (cookieAuth) {
-          const nowIso = new Date(nowMs).toISOString();
-          const allJobs = Array.from(store.reservationJobs.values()).map((j) => {
-            const u = store.users.get(j.cloud_user_id);
-            const p = j.plan_id ? store.reservationPlans.get(j.plan_id) : null;
-            return {
-              ...j,
-              username: u?.username || u?.display_name || j.cloud_user_id,
-              plan_label: p?.area_name || p?.area_code || null
-            };
-          });
-          const allOrders = Array.from(store.reservationOrders.values()).map((o) => {
-            const u = store.users.get(o.cloud_user_id);
-            return {
-              ...o,
-              username: u?.username || u?.display_name || o.cloud_user_id,
-              sso_subject: u?.subject || "-"
-            };
-          });
-          const allUsers = Array.from(store.users.values()).map((u) => ({
-            id: u.id,
-            username: u.username,
-            display_name: u.display_name,
-            subject: u.subject,
-            role: u.role,
-            status: u.status,
-            roles: store.getUserRoles(u.id)
-          }));
+          const memoEntry = consoleViewDataMemo.get(activeNav);
+          let viewData =
+            memoEntry && nowMs - memoEntry.atMs < CONSOLE_VIEW_MEMO_MS ? memoEntry.data : null;
+          if (!viewData) {
+            viewData = {};
+            if (activeNav === "console") {
+              viewData.adminStats = {
+                users_count: store.users.size,
+                active_bindings_count: Array.from(store.schoolBindings.values()).filter(
+                  (b) => !b.revoked_at
+                ).length,
+                jobs_count: store.reservationJobs.size,
+                orders_count: store.reservationOrders.size,
+                parcels_count: store.parcels.size,
+                audit_events_count: store.auditEvents.length
+              };
+              viewData.allUsers = Array.from(store.users.values()).map((u) => ({
+                id: u.id,
+                username: u.username,
+                display_name: u.display_name,
+                subject: u.subject,
+                role: u.role,
+                status: u.status,
+                roles: store.getUserRoles(u.id)
+              }));
+              viewData.auditEvents = store.auditEvents.slice(-10).reverse();
+              viewData.financeMatrix = getFinanceMatrixCached(nowMs);
+            } else if (activeNav === "jobs") {
+              viewData.allJobs = Array.from(store.reservationJobs.values()).map((j) => {
+                const u = store.users.get(j.cloud_user_id);
+                const p = j.plan_id ? store.reservationPlans.get(j.plan_id) : null;
+                return {
+                  ...j,
+                  username: u?.username || u?.display_name || j.cloud_user_id,
+                  plan_label: p?.area_name || p?.area_code || null
+                };
+              });
+              viewData.allEvents = Array.from(store.scheduleEvents.values());
+            } else if (activeNav === "orders") {
+              viewData.allOrders = Array.from(store.reservationOrders.values()).map((o) => {
+                const u = store.users.get(o.cloud_user_id);
+                return {
+                  ...o,
+                  username: u?.username || u?.display_name || o.cloud_user_id,
+                  sso_subject: u?.subject || "-"
+                };
+              });
+              viewData.financeMatrix = getFinanceMatrixCached(nowMs);
+            } else if (activeNav === "audit") {
+              viewData.auditEvents = store.auditEvents.slice(-200).reverse();
+            } else if (activeNav === "schools") {
+              viewData.schools = Array.from(store.schoolIntegrations.values());
+            } else if (activeNav === "content") {
+              viewData.campusContent = store.getCampusContent(DEFAULT_SCHOOL_ID, {
+                includeDisabled: true
+              });
+            }
+            consoleViewDataMemo.set(activeNav, { atMs: nowMs, data: viewData });
+          }
           consoleCtx = {
             user: cookieAuth.user,
             roles: cookieAuth.roles,
             activeNav,
-            nowIso,
+            nowIso: new Date(nowMs).toISOString(),
             pricingMicropeach: store.pricingMicropeach,
             accessToken: cookieAuth.accessToken,
-            adminStats: {
-              users_count: store.users.size,
-              active_bindings_count: Array.from(store.schoolBindings.values()).filter(
-                (b) => !b.revoked_at
-              ).length,
-              jobs_count: store.reservationJobs.size,
-              orders_count: store.reservationOrders.size,
-              parcels_count: store.parcels.size,
-              audit_events_count: store.auditEvents.length
-            },
-            allJobs,
-            allOrders,
-            allUsers,
-            schools: Array.from(store.schoolIntegrations.values()),
-            auditEvents: store.auditEvents.slice(-200).reverse(),
-            campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: true }),
-            financeMatrix: await financeBridge.getSiteFinanceMatrix().catch(() => null)
+            ...viewData
           };
         }
 
@@ -2717,7 +2816,9 @@ export function createCampusCloudApp(options = {}) {
           headers: {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store, no-cache, must-revalidate",
-            "x-request-id": requestId
+            "x-request-id": requestId,
+            "x-response-time": `${Date.now() - nowMs}ms`,
+            "server-timing": `app;dur=${Date.now() - nowMs}`
           },
           rawBody: renderConsoleHtml(consoleCtx),
           body: okEnvelope("CONSOLE_PORTAL_OK", { portal: "cloud-in-school-console" }, requestId)

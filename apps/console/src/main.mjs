@@ -34,6 +34,8 @@ export const CONSOLE_VIEWS = [
   { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
+export const CONSOLE_UI_VERSION = "20261108a";
+
 function renderHiddenContractViews() {
   return `<template id="contract-views-marker" hidden>${CONSOLE_VIEWS.map(
     (v) => `<section id="view-${v.id}" data-role="${v.role}"></section>`
@@ -65,14 +67,8 @@ function renderHead(title = "日在校园 · 运维管理控制台") {
         } catch (e) {}
       })();
     </script>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-    />
-    <link rel="stylesheet" href="/static/app.css" />
-    <link rel="stylesheet" href="/static/xpeach-sdk.css" />
+    <link rel="stylesheet" href="/static/app.css?v=${CONSOLE_UI_VERSION}" />
+    <link rel="stylesheet" href="/static/xpeach-sdk.css?v=${CONSOLE_UI_VERSION}" />
   </head>`;
 }
 
@@ -112,7 +108,7 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
         <span>🍑 XPeach Account Center · 日在校园</span>
       </footer>
     </div>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=${CONSOLE_UI_VERSION}" defer></script>
     <script>
       (function () {
         var target = ${JSON.stringify(customSchemeUrl).replace(/</g, "\\u003c")};
@@ -197,7 +193,7 @@ function renderUnauthenticatedLandingHtml() {
         <a href="https://github.com/yellowpeachxgp/day-in-school/releases/latest" target="_blank" rel="noopener">Android 客户端下载</a>
       </footer>
     </div>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=${CONSOLE_UI_VERSION}" defer></script>
     <script>
       (function () {
         var styleBtn = document.querySelector("[data-ui-style-toggle]");
@@ -1224,7 +1220,7 @@ export function renderConsoleHtml(ctx = {}) {
       </a>
     </nav>
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=${CONSOLE_UI_VERSION}" defer></script>
     <script>
       (function () {
         var SERVER_TOKEN = ${JSON.stringify(accessToken).replace(/</g, "\\u003c")};
