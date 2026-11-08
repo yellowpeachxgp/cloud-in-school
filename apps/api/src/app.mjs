@@ -996,11 +996,25 @@ export function createCampusCloudApp(options = {}) {
       if (!plan || plan.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
-      if (body?.preferred_seat_ids) {
-        plan.preferences_json.preferred_seat_ids = body.preferred_seat_ids;
+      const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
+      if (Array.isArray(nextSeats) && nextSeats.length > 0) {
+        const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
+        plan.candidate_seats = cleanSeats;
+        plan.preferences_json.preferred_seat_ids = cleanSeats;
       }
-      if (body?.preferred_area_ids) {
-        plan.preferences_json.preferred_area_ids = body.preferred_area_ids;
+      const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
+      if (Array.isArray(nextAreas) && nextAreas.length > 0) {
+        const cleanArea = String(nextAreas[0]).trim();
+        plan.area_name = cleanArea;
+        plan.area_code = cleanArea;
+        plan.preferences_json.preferred_area_ids = [cleanArea];
+      }
+      if (nextSeats || nextAreas) {
+        for (const j of store.reservationJobs.values()) {
+          if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+            j.prewarmed_targets = null;
+          }
+        }
       }
       if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
         const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
@@ -1703,16 +1717,25 @@ export function createCampusCloudApp(options = {}) {
             existingBinding.status = "DELEGATED_ACTIVE";
           }
           if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-            const encrypted = kmsVault.encryptSecret({
-              bindingId: existingBinding.id,
-              schoolId,
-              credentialKind: "DELEGATED_SESSION_BUNDLE",
-              plaintext: String(bItem.delegated_secret).trim(),
-              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-            });
-            store.encryptedCredentials.set(encrypted.id, encrypted);
-            existingBinding.credential_ref = encrypted.id;
-            existingBinding.credential_expires_at = encrypted.expires_at;
+            const allActiveBindings = store
+              .recordsForUser("schoolBindings", auth.cloudUserId)
+              .filter((b) => b.school_id === schoolId && !b.revoked_at);
+            for (const targetBind of allActiveBindings) {
+              const encrypted = kmsVault.encryptSecret({
+                bindingId: targetBind.id,
+                schoolId,
+                credentialKind: "DELEGATED_SESSION_BUNDLE",
+                plaintext: String(bItem.delegated_secret).trim(),
+                expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+              });
+              store.encryptedCredentials.set(encrypted.id, encrypted);
+              targetBind.credential_ref = encrypted.id;
+              targetBind.credential_expires_at = encrypted.expires_at;
+              targetBind.student_no = studentNo;
+              targetBind.student_no_masked =
+                studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
+              targetBind.status = "DELEGATED_ACTIVE";
+            }
           }
           const hasActiveConsent = store.recordsForUser("consents", auth.cloudUserId).some(
             (c) => !c.withdrawn_at

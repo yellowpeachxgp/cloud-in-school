@@ -393,19 +393,44 @@ export class TripleScheduleEngine {
     return true;
   }
 
-  _decryptBindingCredential(job, binding, nowMs = Date.now()) {
+  _decryptSingleBinding(jobId, schoolId, binding, nowMs = Date.now()) {
     if (!binding?.credential_ref) return null;
     const credRecord = this.store.encryptedCredentials.get(binding.credential_ref);
     if (!credRecord || credRecord.revoked_at) return null;
     const permit = this.kmsVault.issueAccessPermit({
-      taskId: job.id,
-      schoolId: job.school_id,
+      taskId: jobId,
+      schoolId,
       bindingId: binding.id,
       credentialRef: binding.credential_ref,
       ttlSeconds: 15,
       nowMs
     });
     return this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+  }
+
+  _decryptBindingCredential(job, binding, nowMs = Date.now()) {
+    const primarySecret = this._decryptSingleBinding(job.id, job.school_id, binding, nowMs);
+    if (typeof this.schoolProvider?.parseCredentialBundle === "function") {
+      const primaryBundle = this.schoolProvider.parseCredentialBundle(primarySecret, binding);
+      if (!primaryBundle.isLiveCredential && job.cloud_user_id) {
+        const userBindings = this.store
+          .recordsForUser("schoolBindings", job.cloud_user_id)
+          .filter((b) => b.school_id === job.school_id && !b.revoked_at && b.id !== binding?.id);
+        for (let i = userBindings.length - 1; i >= 0; i--) {
+          const altBind = userBindings[i];
+          try {
+            const altSecret = this._decryptSingleBinding(job.id, job.school_id, altBind, nowMs);
+            const altBundle = this.schoolProvider.parseCredentialBundle(altSecret, altBind);
+            if (altBundle.isLiveCredential) {
+              return altSecret;
+            }
+          } catch {
+            // Ignore failed sibling binding
+          }
+        }
+      }
+    }
+    return primarySecret;
   }
 
   _updateBindingCredentialTokens(binding, authResult, oldSecret, nowMs = Date.now()) {
@@ -724,6 +749,7 @@ export class TripleScheduleEngine {
               last_error_code: "SCHOOL_REJECTED",
               last_diagnostic_message: "回查到的有效预约与目标候选座位或日期不匹配"
             });
+            this.rolloverMultiDayPlanIfEligible(plan, job, "当日预约核验不匹配", nowMs);
             return { job, event };
           }
           job.pending_external_booking_id = submitRes.externalBookingId;
