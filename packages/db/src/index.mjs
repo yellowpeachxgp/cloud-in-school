@@ -1534,9 +1534,18 @@ export class CloudDatabaseStore {
             : "NOT_REQUESTED";
         mutated = true;
       }
-      if (!j.display_status) {
-        j.display_status = this.computeJobDisplayStatus(j);
-        j.status_label = this.computeJobStatusLabel(j);
+      for (const att of jobAttempts) {
+        if (att.external_execution_state === "DISPATCH_INTENT") {
+          att.external_execution_state = "RESULT_UNKNOWN";
+          att.updated_at = ts;
+          mutated = true;
+        }
+      }
+      const nextDisplay = this.computeJobDisplayStatus(j);
+      const nextLabel = this.computeJobStatusLabel(j);
+      if (j.display_status !== nextDisplay || j.status_label !== nextLabel) {
+        j.display_status = nextDisplay;
+        j.status_label = nextLabel;
         mutated = true;
       }
     }

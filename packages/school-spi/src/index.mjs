@@ -2146,7 +2146,7 @@ export class HautLibraryProvider {
 
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
     if (credBundle.isLiveCredential && !String(expectedExternalBookingId || "").startsWith("haut_mock_")) {
-      let tokenToUse = rawToken;
+      let tokenToUse = rawToken || credBundle.raw_token;
       if (!tokenToUse) {
         const auth = await this.authenticateHautSession(credBundle, binding);
         tokenToUse = auth.rawToken;
