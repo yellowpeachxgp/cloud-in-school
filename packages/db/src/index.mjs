@@ -1437,11 +1437,23 @@ export class CloudDatabaseStore {
       throw new ContractError("NOT_FOUND", "School binding not found");
     }
     const ts = new Date(nowMs).toISOString();
+    const targetStudentNo = String(binding.student_no || "").trim();
+    for (const b of this.schoolBindings.values()) {
+      if (
+        b.cloud_user_id === cloudUserId &&
+        b.school_id === binding.school_id &&
+        (b.id === bindingId || (targetStudentNo && String(b.student_no || "").trim() === targetStudentNo)) &&
+        !b.revoked_at
+      ) {
+        b.revoked_at = ts;
+        b.status = "REVOKED";
+        if (b.credential_ref && this.encryptedCredentials.has(b.credential_ref)) {
+          this.encryptedCredentials.get(b.credential_ref).revoked_at = ts;
+        }
+      }
+    }
     binding.revoked_at = ts;
     binding.status = "REVOKED";
-    if (binding.credential_ref && this.encryptedCredentials.has(binding.credential_ref)) {
-      this.encryptedCredentials.get(binding.credential_ref).revoked_at = ts;
-    }
 
     const cancelledJobIds = [];
     for (const p of this.reservationPlans.values()) {

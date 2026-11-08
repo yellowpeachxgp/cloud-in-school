@@ -1760,7 +1760,8 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
-      // Phase 2: Atomic state mutation (never resurrect revoked bindings or withdrawn consents)
+      // Phase 2: Atomic state mutation (evaluate current authorization generation; never resurrect revoked state,
+      // but allow sync when the user has an active binding and active consent in the current generation)
       for (const { studentNo, schoolId, cleanSecretText } of validatedBindingUpserts) {
         const allBindingsForStudent = store
           .recordsForUser("schoolBindings", auth.cloudUserId)
@@ -1769,22 +1770,25 @@ export function createCampusCloudApp(options = {}) {
               b.school_id === schoolId &&
               String(b.student_no || "").trim() === studentNo
           );
-        const hasRevokedBinding = allBindingsForStudent.some(
-          (b) => Boolean(b.revoked_at) || b.status === "REVOKED"
-        );
-        const userConsentsForSchool = store
-          .recordsForUser("consents", auth.cloudUserId)
-          .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId);
-        const hasWithdrawnConsent = userConsentsForSchool.some((c) => Boolean(c.withdrawn_at));
-
-        // Revoked bindings and withdrawn consents cannot be resurrected via ordinary snapshot sync
-        if (hasRevokedBinding || hasWithdrawnConsent) {
-          continue;
-        }
-
         const sameStudentBindings = allBindingsForStudent.filter(
           (b) => !b.revoked_at && b.status !== "REVOKED"
         );
+        const isBindingCurrentlyRevoked =
+          allBindingsForStudent.length > 0 && sameStudentBindings.length === 0;
+
+        const userConsentsForSchool = store
+          .recordsForUser("consents", auth.cloudUserId)
+          .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId);
+        const activeConsentsForSchool = userConsentsForSchool.filter((c) => !c.withdrawn_at);
+        const isConsentCurrentlyWithdrawn =
+          userConsentsForSchool.length > 0 && activeConsentsForSchool.length === 0;
+
+        // If the current generation is revoked or withdrawn without explicit re-consent & re-binding/reauthorization,
+        // ordinary snapshot sync must not resurrect it.
+        if (isBindingCurrentlyRevoked || isConsentCurrentlyWithdrawn) {
+          continue;
+        }
+
         if (sameStudentBindings.length === 0) {
           const bindingId = crypto.randomUUID();
           const createdBind = {
@@ -1825,8 +1829,7 @@ export function createCampusCloudApp(options = {}) {
           }
         }
 
-        const hasActiveConsent = userConsentsForSchool.some((c) => !c.withdrawn_at);
-        if (!hasActiveConsent && !hasWithdrawnConsent) {
+        if (activeConsentsForSchool.length === 0 && userConsentsForSchool.length === 0) {
           const cid = crypto.randomUUID();
           store.indexUserScoped?.("consents", cid, auth.cloudUserId);
           store.consents.set(cid, {
@@ -1902,28 +1905,20 @@ export function createCampusCloudApp(options = {}) {
 
       if (Array.isArray(body.reservation_plan_upserts)) {
         const allUserBindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
-        const revokedStudentNos = new Set(
-          allUserBindings
-            .filter((b) => Boolean(b.revoked_at) || b.status === "REVOKED")
-            .map((b) => String(b.student_no || "").trim())
-            .filter(Boolean)
-        );
         const userActiveBindings = allUserBindings.filter(
-          (b) =>
-            !b.revoked_at &&
-            b.status === "DELEGATED_ACTIVE" &&
-            !revokedStudentNos.has(String(b.student_no || "").trim())
+          (b) => !b.revoked_at && b.status === "DELEGATED_ACTIVE"
         );
         const distinctStudentNos = new Set(
           userActiveBindings.map((b) => String(b.student_no || "").trim()).filter(Boolean)
         );
         const activeBinding =
           distinctStudentNos.size <= 1 ? userActiveBindings[userActiveBindings.length - 1] || null : null;
-        const userConsents = store.recordsForUser("consents", auth.cloudUserId);
-        const hasWithdrawnConsent = userConsents.some((c) => Boolean(c.withdrawn_at));
-        const activeConsent = !hasWithdrawnConsent
-          ? userConsents.find((c) => !c.withdrawn_at) || null
-          : null;
+        const targetSchoolId = activeBinding?.school_id || DEFAULT_SCHOOL_ID;
+        const userConsents = store
+          .recordsForUser("consents", auth.cloudUserId)
+          .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === targetSchoolId);
+        const activeConsents = userConsents.filter((c) => !c.withdrawn_at);
+        const activeConsent = activeConsents[activeConsents.length - 1] || null;
         if (activeBinding && activeConsent) {
           for (const rpItem of body.reservation_plan_upserts) {
             const targetDate = String(rpItem?.target_local_date || "").trim();

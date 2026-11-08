@@ -773,4 +773,101 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
     0,
     "Ordinary snapshot sync must never resurrect a revoked school binding"
   );
+
+  // 3. When user withdraws consent, and THEN explicitly re-grants consent + reauthorizes (or creates new binding),
+  // subsequent snapshot sync MUST update credentials AND create reservation jobs (historical withdrawn/revoked records must not veto new generation)!
+  const activeConsentId = goodSync.body.data.consents?.find((c) => !c.withdrawn_at)?.id ||
+    Array.from(app.store.consents.values()).find((c) => !c.withdrawn_at)?.id;
+  if (activeConsentId) {
+    const withdrawRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/me/consents/${activeConsentId}`,
+      headers: userHeaders
+    });
+    assert.equal(withdrawRes.status, 200);
+  }
+
+  // Ordinary sync while withdrawn must still be ignored
+  const syncWhileWithdrawn = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd3" })
+        }
+      ]
+    }
+  });
+  assert.equal(
+    syncWhileWithdrawn.body.data.school_bindings.filter((b) => b.status === "DELEGATED_ACTIVE" && !b.revoked_at).length,
+    0,
+    "Ordinary sync while consent is withdrawn must not resurrect binding"
+  );
+
+  // Now user explicitly grants new consent AND reauthorizes binding (new generation!)
+  const newConsentRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: userHeaders,
+    body: { school_id: "haut" }
+  });
+  assert.equal(newConsentRes.status, 201);
+
+  const reauthRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${createdBindingId}/reauthorize`,
+    headers: userHeaders,
+    body: {
+      delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_reauth" })
+    }
+  });
+  assert.equal(reauthRes.status, 200);
+
+  const futureDate = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const syncAfterReconsent = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_synced_after_reconsent" })
+        }
+      ],
+      reservation_plan_upserts: [
+        {
+          target_local_date: futureDate,
+          target_local_time: "07:00:00",
+          area_name: "四层西书库北区",
+          candidate_seats: ["05桌 A座"]
+        }
+      ]
+    }
+  });
+  assert.equal(syncAfterReconsent.status, 200);
+  const activeAfterReconsent = syncAfterReconsent.body.data.school_bindings.filter(
+    (b) => b.status === "DELEGATED_ACTIVE" && !b.revoked_at
+  );
+  assert.equal(activeAfterReconsent.length, 1, "Active binding must remain active after re-consent sync");
+  const updatedBindObj = app.store.schoolBindings.get(createdBindingId);
+  const decryptedAfterSync = app.reservationEngine._decryptBindingCredential(
+    { id: "diag-job", school_id: "haut", school_binding_id: createdBindingId },
+    updatedBindObj,
+    Date.now()
+  );
+  assert.ok(
+    decryptedAfterSync.includes("pwd_synced_after_reconsent"),
+    "Snapshot sync after explicit re-consent & reauthorize must update credential"
+  );
+  assert.equal(
+    syncAfterReconsent.body.data.reservation_jobs.length,
+    1,
+    "Snapshot sync after explicit re-consent & reauthorize must create reservation job"
+  );
 });
