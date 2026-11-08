@@ -767,7 +767,7 @@ export class CloudDatabaseStore {
     if (this._snapshotFlushTimer) return;
     this._snapshotFlushTimer = setTimeout(() => {
       this._snapshotFlushTimer = null;
-      this._flushSnapshotSync();
+      this._flushSnapshotSync({ strict: false });
     }, 200);
     this._snapshotFlushTimer.unref?.();
   }
@@ -777,7 +777,15 @@ export class CloudDatabaseStore {
       clearTimeout(this._snapshotFlushTimer);
       this._snapshotFlushTimer = null;
     }
-    this._flushSnapshotSync();
+    this._flushSnapshotSync({ strict: false });
+  }
+
+  flushSnapshotStrictSync() {
+    if (this._snapshotFlushTimer) {
+      clearTimeout(this._snapshotFlushTimer);
+      this._snapshotFlushTimer = null;
+    }
+    this._flushSnapshotSync({ strict: true });
   }
 
   pruneAuthEphemera(nowMs = Date.now()) {
@@ -800,7 +808,7 @@ export class CloudDatabaseStore {
     }
   }
 
-  _flushSnapshotSync() {
+  _flushSnapshotSync({ strict = false } = {}) {
     if (!this.snapshotPath) return;
     this.pruneAuthEphemera();
     try {
@@ -833,11 +841,23 @@ export class CloudDatabaseStore {
         notifications: Array.from(this.notifications.entries()),
         auditEvents: this.auditEvents.slice(-500)
       };
-      const tmp = `${this.snapshotPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+      const tmp = `${this.snapshotPath}.tmp.${process.pid}`;
+      const serialized = JSON.stringify(data);
+      const fd = fs.openSync(tmp, "w");
+      try {
+        fs.writeFileSync(fd, serialized, "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmp, this.snapshotPath);
-    } catch {
-      // Ignore write error
+    } catch (err) {
+      if (strict) {
+        throw new ContractError(
+          "STORAGE_PERSISTENCE_FAILED",
+          `Failed to durably persist reservation state before external write: ${err?.message || "I/O error"}`
+        );
+      }
     }
   }
 

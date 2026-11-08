@@ -406,3 +406,320 @@ test("Fault Injection 5: Legacy plans without verifiable authorization provenanc
   assert.equal(syncRes.body.data.sync_report.plans_needing_reconfirmation_count, 1);
   assert.ok(syncRes.body.data.sync_report.summary_message.includes("需要重新确认授权"));
 });
+
+test("Fault Injection 6 (P1 Durable Pre-Write Flush): DISPATCH_INTENT is synchronously flushed to disk (0ms) BEFORE addbooking is sent, and disk persistence failure blocks external write", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cloud-durable-flush-"));
+  const snapFile = path.join(tmpDir, "cloud-state.json");
+  const tokenNowMs = Date.parse("2026-11-13T06:00:00+08:00");
+  const fireNowMs = Date.parse("2026-11-13T07:00:02+08:00");
+
+  const app = createCampusCloudApp({
+    requireAdminAccess: false,
+    storeOptions: { snapshotPath: snapFile }
+  });
+  const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_durable_flush_6"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-13",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "五层中区",
+      candidate_seats: ["05桌 A座"],
+      preferred_area_ids: ["五层中区"],
+      preferred_seat_ids: ["05桌 A座"]
+    },
+    nowMs: tokenNowMs
+  });
+  const jobId = planRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+  job.prewarmed_targets = {
+    region_id: 23,
+    region_name: "五层中区",
+    open_time: "07:30",
+    close_time: "22:00",
+    start_full: "2026-11-13 08:00:00",
+    end_full: "2026-11-13 22:00:00",
+    candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+  };
+
+  let diskStateAtExactMomentOfWrite = null;
+  let crashedSnapCopy = null;
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      // Read the disk file IMMEDIATELY (0ms) when addbooking is invoked, before any 200ms timer could fire!
+      const rawDisk = fs.readFileSync(snapFile, "utf8");
+      crashedSnapCopy = rawDisk;
+      diskStateAtExactMomentOfWrite = JSON.parse(rawDisk);
+      return { code: 200, bookingid: "66554433", msg: "预约成功" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: {
+          id: "66554433",
+          seatId: 501,
+          seatName: "五层中区05桌 A座",
+          regionName: "五层中区",
+          buildingLayerRegionId: 23,
+          startDate: "2026-11-13 08:00:00",
+          endDate: "2026-11-13 22:00:00",
+          bookingStatus: 1
+        }
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+  assert.ok(diskStateAtExactMomentOfWrite, "Snapshot must exist on disk at the exact moment addbooking is called");
+  const diskJobsMap = new Map(diskStateAtExactMomentOfWrite.reservationJobs || []);
+  const diskAttemptsMap = new Map(diskStateAtExactMomentOfWrite.reservationAttempts || []);
+  const diskJob = diskJobsMap.get(jobId);
+  assert.equal(
+    diskJob?.external_execution_state,
+    "DISPATCH_INTENT",
+    "Disk snapshot at the moment of addbooking must already record external_execution_state=DISPATCH_INTENT"
+  );
+  assert.equal(diskAttemptsMap.size, 1, "Disk snapshot at the moment of addbooking must already contain the attempt record");
+
+  // Simulate process crash at the exact moment addbooking was sent by restoring crashedSnapCopy and booting a new app instance
+  const crashRecoverFile = path.join(tmpDir, "cloud-crashed.json");
+  fs.writeFileSync(crashRecoverFile, crashedSnapCopy, "utf8");
+  const recoveredApp = createCampusCloudApp({
+    requireAdminAccess: false,
+    storeOptions: { snapshotPath: crashRecoverFile }
+  });
+  const recoveredJob = recoveredApp.store.reservationJobs.get(jobId);
+  assert.equal(
+    recoveredJob.state,
+    "RESULT_UNKNOWN",
+    "Process restart from mid-write disk snapshot must recover job as RESULT_UNKNOWN (never ARMED)"
+  );
+  assert.equal(recoveredJob.external_execution_state, "RESULT_UNKNOWN");
+
+  // Part B: Disk persistence failure BEFORE external write must fail-closed and NEVER call addbooking!
+  const planRes2 = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_durable_flush_fail_6b"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-14",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "五层中区",
+      candidate_seats: ["05桌 A座"],
+      preferred_area_ids: ["五层中区"],
+      preferred_seat_ids: ["05桌 A座"]
+    },
+    nowMs: tokenNowMs
+  });
+  const jobId2 = planRes2.body.data.job_id;
+  const job2 = app.store.reservationJobs.get(jobId2);
+  job2.prewarmed_targets = {
+    region_id: 23,
+    region_name: "五层中区",
+    open_time: "07:30",
+    close_time: "22:00",
+    start_full: "2026-11-14 08:00:00",
+    end_full: "2026-11-14 22:00:00",
+    candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+  };
+
+  // Point snapshotPath to an invalid path where directory creation/file open will fail (a file used as parent dir)
+  const blockerFile = path.join(tmpDir, "blocker-not-a-dir");
+  fs.writeFileSync(blockerFile, "x", "utf8");
+  app.store.snapshotPath = path.join(blockerFile, "impossible.json");
+
+  let writeCountWhenDiskFails = 0;
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      writeCountWhenDiskFails += 1;
+      return { code: 200, bookingid: "should_never_happen" };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const fireFailRes = await app.reservationEngine.runScheduleEvent(
+    jobId2,
+    "FIRE",
+    Date.parse("2026-11-14T07:00:02+08:00")
+  );
+  assert.equal(writeCountWhenDiskFails, 0, "Must NEVER call addbooking when pre-write disk persistence fails");
+  assert.equal(fireFailRes.job.external_execution_state, "SCHOOL_REJECTED");
+  assert.equal(fireFailRes.job.last_error_code, "STORAGE_PERSISTENCE_FAILED");
+});
+
+test("Fault Injection 7 (P1 Authoritative School Cancellation): When cancel & signoff both fail or list is incomplete, cancelLiveSeatBooking returns CANCEL_RESULT_UNKNOWN (never false SCHOOL_CANCELLED)", async () => {
+  const provider = new HautLibraryProvider({});
+
+  // Scenario A: cancel & signoff both fail (code 500), and crrentbooking/mybookingInProgress return empty -> must NOT claim SCHOOL_CANCELLED!
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) {
+      return { code: 500, msg: "取消失败" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/signoff")) {
+      return { code: 500, msg: "签退失败" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return { code: 200, data: null };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, rows: [], total: 0 };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return { code: 200, rows: [] };
+    }
+    return { code: 200 };
+  };
+
+  const resBothFailed = await provider.cancelLiveSeatBooking({
+    decryptedSecret: JSON.stringify({
+      student_no: "2026990101",
+      raw_token: "tok_live_fault_test_0123456789_abcdef_xyz"
+    }),
+    binding: { student_no: "2026990101" },
+    externalBookingId: "55443322"
+  });
+  assert.equal(resBothFailed.cancelled, false, "Must NOT report cancelled=true when cancel and signoff both failed");
+  assert.equal(resBothFailed.outcome, "CANCEL_RESULT_UNKNOWN");
+  assert.equal(resBothFailed.school_cancellation_state, "CANCEL_RESULT_UNKNOWN");
+
+  // Scenario B: cancel returns 200, crrentbooking returns another booking (id=11111111), and mybookingInProgress still has targetBookingId (55443322) active!
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) {
+      return { code: 200, msg: "ok" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: { id: "11111111", bookingStatus: 1, seatName: "其他座" }
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return {
+        code: 200,
+        rows: [{ id: "55443322", bookingStatus: 1, seatName: "五层中区05桌 A座" }],
+        total: 1
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const resStillInProgress = await provider.cancelLiveSeatBooking({
+    decryptedSecret: JSON.stringify({
+      student_no: "2026990101",
+      raw_token: "tok_live_fault_test_0123456789_abcdef_xyz"
+    }),
+    binding: { student_no: "2026990101" },
+    externalBookingId: "55443322"
+  });
+  assert.equal(
+    resStillInProgress.cancelled,
+    false,
+    "Must check mybookingInProgress even when crrentbooking is non-empty, and detect targetBookingId is still active"
+  );
+  assert.equal(resStillInProgress.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  // Scenario C: cancel returns 200, but mybookingInProgress returns an incomplete/paginated list (total: 60, rows: 15) -> must return CANCEL_RESULT_UNKNOWN
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) {
+      return { code: 200, msg: "ok" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return { code: 200, data: null };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, rows: [], total: 5 };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const resIncompleteList = await provider.cancelLiveSeatBooking({
+    decryptedSecret: JSON.stringify({
+      student_no: "2026990101",
+      raw_token: "tok_live_fault_test_0123456789_abcdef_xyz"
+    }),
+    binding: { student_no: "2026990101" },
+    externalBookingId: "55443322"
+  });
+  assert.equal(resIncompleteList.cancelled, false, "Incomplete/truncated list must return CANCEL_RESULT_UNKNOWN");
+  assert.equal(resIncompleteList.outcome, "CANCEL_RESULT_UNKNOWN");
+});
+
+test("Fault Injection 8 (Multi-Device & Engine Switch Coordination): Second device / replace_existing cannot overwrite an in-flight, RESULT_UNKNOWN, or CONFIRMED job for the same student and date", async () => {
+  const tokenNowMs = Date.parse("2026-11-15T06:00:00+08:00");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+  const planRes1 = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_multidevice_a"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-15",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "五层中区",
+      candidate_seats: ["05桌 A座"],
+      preferred_area_ids: ["五层中区"],
+      preferred_seat_ids: ["05桌 A座"],
+      replace_existing: true
+    },
+    nowMs: tokenNowMs
+  });
+  assert.equal(planRes1.status, 201);
+  const jobId1 = planRes1.body.data.job_id;
+  const job1 = app.store.reservationJobs.get(jobId1);
+
+  // Transition job1 to RESULT_UNKNOWN (write already dispatched)
+  job1.state = "RESULT_UNKNOWN";
+  job1.external_execution_state = "RESULT_UNKNOWN";
+
+  // Device B attempts to submit a replacement plan for the same student & date with replace_existing: true
+  const planRes2 = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_multidevice_b"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-15",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "五层中区",
+      candidate_seats: ["06桌 B座"],
+      preferred_area_ids: ["五层中区"],
+      preferred_seat_ids: ["06桌 B座"],
+      replace_existing: true
+    },
+    nowMs: tokenNowMs + 1000
+  });
+  assert.equal(planRes2.status, 409, "Must reject replace_existing when existing job is in RESULT_UNKNOWN");
+  assert.equal(app.store.reservationJobs.get(jobId1).state, "RESULT_UNKNOWN");
+});

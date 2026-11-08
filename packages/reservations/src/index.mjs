@@ -174,19 +174,60 @@ export class TripleScheduleEngine {
       throw new ContractError("CONFLICT", "Binding and consent authorization versions do not match");
     }
 
-    // Conflict check: same user + binding + date active job
-    const duplicateActive = this.store.recordsForUser("reservationJobs", cloudUserId).find(
-      (j) =>
-        j.school_binding_id === binding.id &&
-        j.booking_local_date === payload.target_local_date &&
-        !["CANCELLED", "FAILED", "EXPIRED"].includes(j.state)
-    );
-    if (duplicateActive) {
-      if (payload.replace_existing === true && duplicateActive.state !== "CONFIRMED") {
-        duplicateActive.state = "CANCELLED";
-        duplicateActive.state_version += 1;
-        const oldPlan = this.store.reservationPlans.get(duplicateActive.plan_id);
-        if (oldPlan) oldPlan.enabled = false;
+    // Conflict check: same user/student_no + date active or in-flight job across bindings/devices
+    const targetStudentNo = String(binding.student_no || "").trim();
+    const matchingJobsForDate = Array.from(this.store.reservationJobs.values()).filter((j) => {
+      if (j.booking_local_date !== payload.target_local_date) return false;
+      if (["CANCELLED", "FAILED", "EXPIRED", "SCHOOL_CANCELLED"].includes(j.state)) return false;
+      if (j.school_binding_id === binding.id) return true;
+      if (j.cloud_user_id === cloudUserId && j.school_id === binding.school_id) {
+        const otherBind = this.store.schoolBindings.get(j.school_binding_id);
+        const otherSno = String(otherBind?.student_no || "").trim();
+        if (!targetStudentNo || !otherSno || otherSno === targetStudentNo) return true;
+      }
+      return false;
+    });
+
+    if (matchingJobsForDate.length > 0) {
+      const unreplaceableJob = matchingJobsForDate.find(
+        (j) =>
+          (j.external_execution_state &&
+            j.external_execution_state !== "NOT_DISPATCHED" &&
+            j.external_execution_state !== "SCHOOL_REJECTED") ||
+          [
+            "EXECUTING",
+            "RESULT_UNKNOWN",
+            "CONFIRMED",
+            "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+            "CANCEL_RESULT_UNKNOWN"
+          ].includes(j.state)
+      );
+      if (unreplaceableJob) {
+        throw new ContractError(
+          "CONFLICT",
+          `A reservation for ${payload.target_local_date} is already dispatched, awaiting verification (${unreplaceableJob.state}), or confirmed on school; refusing duplicate submission`
+        );
+      }
+      if (payload.replace_existing === true) {
+        const ts = new Date(nowMs).toISOString();
+        for (const dupJob of matchingJobsForDate) {
+          dupJob.user_intent_state = "STOP_REQUESTED";
+          dupJob.external_execution_state = "NOT_DISPATCHED";
+          dupJob.state = "CANCELLED";
+          dupJob.state_version += 1;
+          this.store.syncJobDisplayStatus?.(dupJob);
+          for (const ev of this.store.eventsForJob(dupJob.id)) {
+            if (ev.status === "ARMED") {
+              ev.status = "ABORTED_REVOKED";
+              ev.actual_at = ts;
+            }
+          }
+          const oldPlan = this.store.reservationPlans.get(dupJob.plan_id);
+          if (oldPlan) {
+            oldPlan.enabled = false;
+            oldPlan.user_intent_state = "STOP_REQUESTED";
+          }
+        }
       } else {
         throw new ContractError(
           "CONFLICT",
@@ -363,7 +404,9 @@ export class TripleScheduleEngine {
       this.store.scheduleEvents.set(ev.id, ev);
       this.store.indexScheduleEvent?.(ev.id, ev);
     }
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
 
@@ -387,7 +430,9 @@ export class TripleScheduleEngine {
           if (prewarmRes?.prewarmed) {
             job.prewarmed_targets = prewarmRes.prewarmed;
           }
-          if (typeof this.store.saveSnapshot === "function") {
+          if (typeof this.store.flushSnapshotSync === "function") {
+            this.store.flushSnapshotSync();
+          } else if (typeof this.store.saveSnapshot === "function") {
             this.store.saveSnapshot();
           }
         })
@@ -447,7 +492,9 @@ export class TripleScheduleEngine {
     job.state_version += 1;
     Object.assign(job, patch);
     this.store.syncJobDisplayStatus?.(job);
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
     return true;
@@ -593,7 +640,9 @@ export class TripleScheduleEngine {
       job.last_diagnostic_message = "任务所属授权版本或同意记录已失效，已终止旧授权任务";
     }
     this.store.syncJobDisplayStatus?.(job);
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
     return { job, event };
@@ -719,7 +768,9 @@ export class TripleScheduleEngine {
       body: `您在预约请求发出后停止或撤回了委托，但学校端已完成座位预约（${regionAlias} ${seatAlias}，预约号：${externalBookingId}）。系统未扣费且已停止后续计划，请前往核对或按需取消该笔学校预约。`
     });
 
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
     return {
@@ -781,7 +832,9 @@ export class TripleScheduleEngine {
             "委托已停止，已发出的请求结果待核对",
             new Date(nowMs).toISOString()
           );
-          if (typeof this.store.saveSnapshot === "function") {
+          if (typeof this.store.flushSnapshotSync === "function") {
+            this.store.flushSnapshotSync();
+          } else if (typeof this.store.saveSnapshot === "function") {
             this.store.saveSnapshot();
           }
           return {
@@ -1068,14 +1121,27 @@ export class TripleScheduleEngine {
             user_intent_state_at_dispatch: job.user_intent_state || "ACTIVE",
             dispatch_intent_at: new Date(nowMs).toISOString()
           });
-          writeDispatchedInThisRun = true;
-          activeAttempt = attempt;
           job.external_execution_state = "DISPATCH_INTENT";
           job.latest_attempt_id = attempt.id;
           this.store.syncJobDisplayStatus?.(job);
-          if (typeof this.store.saveSnapshot === "function") {
-            this.store.saveSnapshot();
+          try {
+            if (typeof this.store.flushSnapshotStrictSync === "function") {
+              this.store.flushSnapshotStrictSync();
+            } else if (typeof this.store.flushSnapshotSync === "function") {
+              this.store.flushSnapshotSync();
+            } else if (typeof this.store.saveSnapshot === "function") {
+              this.store.saveSnapshot();
+            }
+          } catch (persistErr) {
+            // Rollback in-memory attempt if disk persistence failed and abort BEFORE calling school write API!
+            this.store.reservationAttempts?.delete(attempt.id);
+            job.external_execution_state = "NOT_DISPATCHED";
+            job.latest_attempt_id = null;
+            this.store.syncJobDisplayStatus?.(job);
+            throw persistErr;
           }
+          writeDispatchedInThisRun = true;
+          activeAttempt = attempt;
           return attempt;
         };
 
@@ -1098,7 +1164,9 @@ export class TripleScheduleEngine {
             job.pending_external_booking_id = outcomeInfo.externalBookingId;
             job.external_booking_id = outcomeInfo.externalBookingId;
           }
-          if (typeof this.store.saveSnapshot === "function") {
+          if (typeof this.store.flushSnapshotSync === "function") {
+            this.store.flushSnapshotSync();
+          } else if (typeof this.store.saveSnapshot === "function") {
             this.store.saveSnapshot();
           }
         };
@@ -1189,7 +1257,9 @@ export class TripleScheduleEngine {
             submitRes.diagnosticMessage ||
             (revokedAfterDispatch ? "委托已停止，但已发出的选座请求结果待核对" : null);
           this.store.syncJobDisplayStatus?.(job);
-          if (typeof this.store.saveSnapshot === "function") {
+          if (typeof this.store.flushSnapshotSync === "function") {
+            this.store.flushSnapshotSync();
+          } else if (typeof this.store.saveSnapshot === "function") {
             this.store.saveSnapshot();
           }
           return { job, event };
@@ -1336,7 +1406,9 @@ export class TripleScheduleEngine {
           job.state = "RESULT_UNKNOWN";
           job.state_version += 1;
           this.store.syncJobDisplayStatus?.(job);
-          if (typeof this.store.saveSnapshot === "function") {
+          if (typeof this.store.flushSnapshotSync === "function") {
+            this.store.flushSnapshotSync();
+          } else if (typeof this.store.saveSnapshot === "function") {
             this.store.saveSnapshot();
           }
           return { job, event };
@@ -1577,7 +1649,9 @@ export class TripleScheduleEngine {
     }
 
     this.store.syncJobDisplayStatus?.(job);
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
     return {
@@ -1755,7 +1829,9 @@ export class TripleScheduleEngine {
       this.store.scheduleEvents.set(ev.id, ev);
       this.store.indexScheduleEvent?.(ev.id, ev);
     }
-    if (typeof this.store.saveSnapshot === "function") {
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
     return nextJob;
