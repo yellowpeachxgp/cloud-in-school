@@ -971,7 +971,7 @@ export function createCampusCloudApp(options = {}) {
           body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
       });
       const userObj = store.users.get(auth.cloudUserId);
-      if (!binding.revoked_at && userObj) {
+      if (userObj) {
         userObj.auth_version = Number(userObj.auth_version || 1) + 1;
       }
       const authVer = Number(userObj?.auth_version || 1);
@@ -1911,10 +1911,16 @@ export function createCampusCloudApp(options = {}) {
             !isBindingCurrentlyRevoked &&
             !isConsentCurrentlyWithdrawn
           ) {
-            if (!reqBindId || !reqConsentId) {
+            if (
+              !reqBindId ||
+              !reqConsentId ||
+              reqAuthVer === null ||
+              reqAuthVer === undefined ||
+              Number(reqAuthVer) !== serverAuthVersion
+            ) {
               throw new ContractError(
                 "CONFLICT",
-                "Stale snapshot rejected: binding_id and consent_id for the current authorization generation are required"
+                "Stale snapshot rejected: explicit auth_version, binding_id, and consent_id for the current authorization generation are required"
               );
             }
             const bObj = store.schoolBindings.get(reqBindId);
@@ -2012,10 +2018,16 @@ export function createCampusCloudApp(options = {}) {
               .recordsForUser("consents", auth.cloudUserId)
               .some((c) => !c.withdrawn_at);
             if (hasAnyActiveBind && hasAnyActiveConsent) {
-              if (!rpBindId || !rpConsentId) {
+              if (
+                !rpBindId ||
+                !rpConsentId ||
+                rpAuthVer === null ||
+                rpAuthVer === undefined ||
+                Number(rpAuthVer) !== serverAuthVersion
+              ) {
                 throw new ContractError(
                   "CONFLICT",
-                  "Stale reservation_plan_upserts rejected: school_binding_id and consent_id for current authorization generation are required"
+                  "Stale reservation_plan_upserts rejected: explicit auth_version, school_binding_id, and consent_id for current authorization generation are required"
                 );
               }
             }

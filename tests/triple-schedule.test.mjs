@@ -957,3 +957,111 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
   assert.equal(app.store.reservationPlans.get(sibPlanId).enabled, false, "Sibling binding plan must be disabled on revoke");
   assert.equal(app.store.reservationJobs.get(sibJobId).state, "CANCELLED", "Sibling binding job must be cancelled on revoke");
 });
+
+
+test("High-Risk Regression: Same binding_id/consent_id snapshot omitting auth_version is rejected after reauthorize, and queued old-version jobs abort before write", async () => {
+  const { createCampusCloudApp } = await import("../apps/api/src/app.mjs");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders: userHeaders } = setupBoundUser(app, Date.now());
+
+  const c1Res = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: userHeaders,
+    body: { school_id: "haut" }
+  });
+  const c1Id = c1Res.body.data.id;
+
+  const b1Init = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: userHeaders,
+    body: { school_id: "haut", student_no: "231040100777", consent_id: c1Id }
+  });
+  const b1Id = b1Init.body.data.id;
+
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b1Id}/complete`,
+    headers: userHeaders,
+    body: {
+      consent_id: c1Id,
+      delegated_secret: JSON.stringify({ student_no: "231040100777", password: "pwd_v1" })
+    }
+  });
+
+  // Create a queued job under auth_version = 1
+  const futureDate = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: userHeaders,
+    body: {
+      school_binding_id: b1Id,
+      consent_id: c1Id,
+      target_local_date: futureDate,
+      target_local_time: "07:00:00",
+      area_name: "四层西书库北区",
+      candidate_seats: ["05桌 A座"]
+    }
+  });
+  assert.equal(planRes.status, 201);
+  const queuedJobId = planRes.body.data.job_id;
+
+  // Reauthorize in-place reusing the SAME b1Id and SAME c1Id!
+  const reauthRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b1Id}/reauthorize`,
+    headers: userHeaders,
+    body: {
+      consent_id: c1Id,
+      delegated_secret: JSON.stringify({ student_no: "231040100777", password: "pwd_v2_reauthorized" })
+    }
+  });
+  assert.equal(reauthRes.status, 200);
+  assert.ok(reauthRes.body.data.auth_version > 1);
+
+  // 1. Old snapshot carrying matching binding_id (b1Id) and consent_id (c1Id) but OMITTING auth_version MUST be rejected!
+  const omittedVerSync = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          binding_id: b1Id,
+          consent_id: c1Id,
+          school_id: "haut",
+          student_no: "231040100777",
+          delegated_secret: JSON.stringify({ student_no: "231040100777", password: "pwd_v1_stale" })
+        }
+      ]
+    }
+  });
+  assert.equal(
+    omittedVerSync.status,
+    409,
+    "Snapshot reusing same binding_id & consent_id after reauthorize but omitting auth_version must be rejected with 409"
+  );
+  const decAfterOmitted = app.reservationEngine._decryptBindingCredential(
+    { id: "diag-omitted", school_id: "haut", school_binding_id: b1Id },
+    app.store.schoolBindings.get(b1Id),
+    Date.now()
+  );
+  assert.ok(
+    decAfterOmitted.includes("pwd_v2_reauthorized"),
+    "Reauthorized credential must not be overwritten by snapshot omitting auth_version"
+  );
+
+  // 2. The queued job created under old auth_version = 1 MUST abort immediately at execution without entering write path!
+  let writeEntered = false;
+  app.schoolProvider.executeMockOrAuthorizedCreate = async () => {
+    writeEntered = true;
+    throw new Error("Must never enter executeMockOrAuthorizedCreate for stale-auth job");
+  };
+  const fireMs = Date.parse(`${futureDate}T07:00:05+08:00`);
+  const execOldJob = await app.reservationEngine.runScheduleEvent(queuedJobId, "FIRE", fireMs);
+  assert.equal(writeEntered, false, "Queued job from old auth_version must never enter write path");
+  assert.equal(execOldJob.job.state, "CANCELLED", "Queued job from old auth_version must be cancelled");
+  assert.equal(execOldJob.event.status, "ABORTED_REVOKED", "Schedule event must be ABORTED_REVOKED");
+});

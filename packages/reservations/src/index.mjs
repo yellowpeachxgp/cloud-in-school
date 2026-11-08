@@ -230,12 +230,19 @@ export class TripleScheduleEngine {
     );
     const endLocalDate = addDaysToLocalDate(schedule.targetLocalDate, remainingDays - 1);
 
+    const currentAuthVersion = Number(
+      this.store.users?.get(cloudUserId)?.auth_version ||
+        binding.auth_version ||
+        consent.auth_version ||
+        1
+    );
     const plan = {
       id: planId,
       cloud_user_id: cloudUserId,
       school_binding_id: binding.id,
       school_id: binding.school_id,
       consent_id: consent.id,
+      auth_version: currentAuthVersion,
       execution_mode: "CLOUD_HOSTED",
       target_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
@@ -303,6 +310,8 @@ export class TripleScheduleEngine {
       plan_id: planId,
       cloud_user_id: cloudUserId,
       school_binding_id: binding.id,
+      consent_id: consent.id,
+      auth_version: currentAuthVersion,
       school_id: binding.school_id,
       booking_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
@@ -452,6 +461,79 @@ export class TripleScheduleEngine {
     }
   }
 
+  _isJobAuthorizationCurrent(job, plan, binding, consent) {
+    if (
+      !job ||
+      !plan ||
+      !plan.enabled ||
+      !binding ||
+      binding.revoked_at ||
+      binding.status === "REVOKED" ||
+      !consent ||
+      consent.withdrawn_at
+    ) {
+      return false;
+    }
+    if (binding.id !== job.school_binding_id || binding.cloud_user_id !== job.cloud_user_id) {
+      return false;
+    }
+    if (consent.cloud_user_id !== job.cloud_user_id) {
+      return false;
+    }
+    if ((consent.school_id || binding.school_id) !== binding.school_id) {
+      return false;
+    }
+    if (job.consent_id && consent.id !== job.consent_id) {
+      return false;
+    }
+    if (binding.consent_id && binding.consent_id !== consent.id) {
+      return false;
+    }
+    const userAuthVer = Number(this.store.users?.get(job.cloud_user_id)?.auth_version || 1);
+    const bindAuthVer = Number(binding.auth_version || 1);
+    const consentAuthVer = Number(consent.auth_version || 1);
+    const jobAuthVer = Number(job.auth_version ?? plan.auth_version ?? 1);
+    if (
+      jobAuthVer !== userAuthVer ||
+      bindAuthVer !== userAuthVer ||
+      consentAuthVer !== userAuthVer
+    ) {
+      return false;
+    }
+    if (typeof this.store.recordsForUser === "function") {
+      const activeSchoolConsents = this.store
+        .recordsForUser("consents", job.cloud_user_id)
+        .filter((c) => (c.school_id || job.school_id) === job.school_id && !c.withdrawn_at);
+      if (activeSchoolConsents.length > 0) {
+        const latestActiveConsent = activeSchoolConsents[activeSchoolConsents.length - 1];
+        if (latestActiveConsent.id !== consent.id) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  _abortJobForStaleAuthorization(job, plan, event, nowMs = Date.now()) {
+    const ts = new Date(nowMs).toISOString();
+    event.status = "ABORTED_REVOKED";
+    event.actual_at = ts;
+    if (plan) {
+      plan.enabled = false;
+    }
+    this.casJobState(job.id, job.state_version, "CANCELLED", {
+      last_error_code: "CONSENT_WITHDRAWN",
+      last_diagnostic_message: "任务所属授权版本或同意记录已失效，已终止旧授权任务"
+    });
+    for (const ev of this.store.eventsForJob(job.id)) {
+      if (ev.status === "ARMED") {
+        ev.status = "ABORTED_REVOKED";
+        ev.actual_at = ts;
+      }
+    }
+    return { job, event };
+  }
+
   async runScheduleEvent(jobId, kind, nowMs = Date.now(), options = {}) {
     return this.withJobLock(jobId, async () => {
       const job = this.store.reservationJobs.get(jobId);
@@ -474,12 +556,9 @@ export class TripleScheduleEngine {
         return { job, event, schoolReservation };
       }
 
-      // Revocation check before any stage
-      if (!plan?.enabled || !binding || binding.revoked_at || !consent || consent.withdrawn_at) {
-        event.status = "ABORTED_REVOKED";
-        event.actual_at = new Date(nowMs).toISOString();
-        this.casJobState(jobId, job.state_version, "CANCELLED", { last_error_code: "CONSENT_WITHDRAWN" });
-        return { job, event };
+      // Strict authorization version, binding, and consent correspondence check before any stage
+      if (!this._isJobAuthorizationCurrent(job, plan, binding, consent)) {
+        return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
       }
 
       if (kind === "PRECHECK") {
@@ -654,6 +733,11 @@ export class TripleScheduleEngine {
           this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
           this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
           return { job, event };
+        }
+
+        // Re-verify authorization version & consent immediately before acquiring execution lock and writing
+        if (!this._isJobAuthorizationCurrent(job, plan, binding, consent)) {
+          return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
         }
 
         // Acquire CAS execution lock
@@ -917,6 +1001,8 @@ export class TripleScheduleEngine {
       plan_id: plan.id,
       cloud_user_id: plan.cloud_user_id,
       school_binding_id: plan.school_binding_id,
+      consent_id: plan.consent_id,
+      auth_version: Number(plan.auth_version ?? finishedJob?.auth_version ?? 1),
       school_id: plan.school_id,
       booking_local_date: nextDate,
       target_local_time: nextSchedule.targetLocalTime,

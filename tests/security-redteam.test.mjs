@@ -461,7 +461,8 @@ test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency,
       target_local_date: "2026-11-08",
       target_local_time: "07:00:00",
       repeat_days: 2
-    }
+    },
+    nowMs: Date.parse("2026-11-08T06:00:00+08:00")
   });
   assert.equal(planRes.status, 201);
   const jobId = planRes.body.data.job_id;
@@ -477,7 +478,8 @@ test("Security Red-Team: Triple-schedule per-job mutex, execute-now idempotency,
     method: "POST",
     url: `/api/v1/reservation-jobs/${jobId}/execute-now`,
     headers: { authorization: `Bearer ${sess.access_token}` },
-    body: {}
+    body: {},
+    nowMs: Date.parse("2026-11-08T07:00:05+08:00")
   });
   assert.equal(exec1.status, 200);
   assert.equal(exec1.body.data.job.state, "CONFIRMED");
