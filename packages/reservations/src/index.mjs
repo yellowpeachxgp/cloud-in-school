@@ -601,12 +601,22 @@ export class TripleScheduleEngine {
           try {
             const readback = await this.schoolProvider.verifyBookingAuthoritative({
               job,
+              plan,
               binding,
               decryptedSecret,
               expectedExternalBookingId: job.pending_external_booking_id
             });
             if (readback.verified) {
               return this.finalizeConfirmedBooking(job, binding, readback, event, nowMs);
+            }
+            if (readback.officialStatus === "MISMATCHED_TARGET_SEAT_OR_DATE") {
+              event.status = "FAILED";
+              event.actual_at = new Date(nowMs).toISOString();
+              this.casJobState(jobId, job.state_version, "FAILED", {
+                last_error_code: "SCHOOL_REJECTED",
+                last_diagnostic_message: "回查到的有效预约与目标候选座位或日期不匹配"
+              });
+              return { job, event };
             }
           } catch {
             // Keep RESULT_UNKNOWN on transient verification failure
@@ -668,12 +678,13 @@ export class TripleScheduleEngine {
           );
         }
 
-        if (submitRes.outcome === "TIMEOUT_AMBIGUOUS") {
+        if (submitRes.outcome === "TIMEOUT_AMBIGUOUS" || submitRes.outcome === "RESULT_UNKNOWN") {
           job.pending_external_booking_id = submitRes.externalBookingId || null;
           event.status = "RESULT_UNKNOWN";
           event.actual_at = new Date(nowMs).toISOString();
           this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
-            last_error_code: "BOOKING_RESULT_UNKNOWN"
+            last_error_code: "BOOKING_RESULT_UNKNOWN",
+            last_diagnostic_message: submitRes.diagnosticMessage || null
           });
           return { job, event };
         }
@@ -694,15 +705,27 @@ export class TripleScheduleEngine {
         try {
           verifyRes = await this.schoolProvider.verifyBookingAuthoritative({
             job,
+            plan,
             binding,
             decryptedSecret,
             rawToken: submitRes.rawToken || null,
-            expectedExternalBookingId: submitRes.externalBookingId
+            expectedExternalBookingId: submitRes.externalBookingId,
+            expectedSeatAlias: submitRes.seatAlias || null,
+            expectedRegionAlias: submitRes.regionAlias || null
           });
         } catch {
-          verifyRes = { verified: false };
+          verifyRes = { verified: false, officialStatus: "READBACK_ERROR" };
         }
         if (!verifyRes.verified) {
+          if (verifyRes.officialStatus === "MISMATCHED_TARGET_SEAT_OR_DATE") {
+            event.status = "FAILED";
+            event.actual_at = new Date(nowMs).toISOString();
+            this.casJobState(jobId, job.state_version, "FAILED", {
+              last_error_code: "SCHOOL_REJECTED",
+              last_diagnostic_message: "回查到的有效预约与目标候选座位或日期不匹配"
+            });
+            return { job, event };
+          }
           job.pending_external_booking_id = submitRes.externalBookingId;
           event.status = "RESULT_UNKNOWN";
           event.actual_at = new Date(nowMs).toISOString();

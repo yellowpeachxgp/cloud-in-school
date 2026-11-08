@@ -367,3 +367,146 @@ test("Cloud-Native Campus Content: Public /api/v1/campus-content and Admin contr
   assert.equal(pubRes2.body.data.channels[0].id, "ch_ai_lab");
   assert.equal(pubRes2.body.data.channels[0].pinned, true);
 });
+
+
+test("HautLibraryProvider: Stops immediately on readback failure (never writes cand[1]) and rejects unrelated seat/date bookings", async () => {
+  const { HautLibraryProvider } = await import("../packages/school-spi/src/index.mjs");
+  const provider = new HautLibraryProvider();
+  const fakeJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIyMzEwNDAxMDA0MjgifQ.signature_long_enough_for_live_cred_check";
+  const binding = {
+    id: "bind-live-test-001",
+    school_id: "haut",
+    status: "DELEGATED_ACTIVE",
+    student_no: "231040100428"
+  };
+  const plan = {
+    id: "plan-live-test-001",
+    area_name: "四层西书库北区",
+    candidate_seats: ["05桌 A座", "06桌 F座", "08桌 A座"],
+    preferences_json: {
+      preferred_area_ids: ["四层西书库北区"],
+      preferred_seat_ids: ["05桌 A座", "06桌 F座", "08桌 A座"],
+      allow_alternative_seat: false
+    }
+  };
+  const job = {
+    id: "job-live-test-001",
+    school_id: "haut",
+    booking_local_date: "2026-11-08",
+    prewarmed_targets: {
+      region_id: 13,
+      region_name: "四层西书库北区",
+      start_full: "2026-11-08 07:30:00",
+      end_full: "2026-11-08 22:00:00",
+      candidate_seats: [
+        { id: 618, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" },
+        { id: 659, seat_name: "四层西书库北区 06桌 F座", short_name: "06桌 F座" },
+        { id: 621, seat_name: "四层西书库北区 08桌 A座", short_name: "08桌 A座" }
+      ]
+    }
+  };
+
+  // Case 1: addbooking throws or returns 200, and readback fails -> must stop immediately without writing cand[1] (659)
+  const addBookingSeatsCalled1 = [];
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      return { code: 200, msg: "成功", seatList: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      const m = pathAndQuery.match(/seatid=(\d+)/);
+      if (m) addBookingSeatsCalled1.push(Number(m[1]));
+      throw new Error("Network timeout during addbooking");
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      throw new Error("Readback network failure");
+    }
+    throw new Error("Unexpected call: " + pathAndQuery);
+  };
+
+  const res1 = await provider.executeMockOrAuthorizedCreate({
+    job,
+    plan,
+    binding,
+    schoolIntegration: { enabled: true, kill_switch: false },
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    nowInstant: new Date("2026-11-08T00:05:00.000Z") // 08:05:00 CST
+  });
+  assert.equal(res1.outcome, "TIMEOUT_AMBIGUOUS");
+  assert.deepEqual(addBookingSeatsCalled1, [618], "Must stop immediately after cand[0] unknown write without touching cand[1]");
+
+  // Case 2: Readback returns an unrelated booking (wrong seat 01桌 B座 seatId=610 or wrong date 2026-11-07)
+  const addBookingSeatsCalled2 = [];
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      const m = pathAndQuery.match(/seatid=(\d+)/);
+      if (m) addBookingSeatsCalled2.push(Number(m[1]));
+      return { code: 200, bookingid: 9140049, msg: "成功" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: {
+          id: 9140049,
+          seatId: 610,
+          seatName: "四层西书库北区 01桌 B座",
+          regionName: "四层西书库北区",
+          buildingLayerRegionId: 13,
+          startDate: "2026-11-08 07:30:00",
+          endDate: "2026-11-08 22:00:00",
+          bookingStatus: "1"
+        }
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const res2 = await provider.executeMockOrAuthorizedCreate({
+    job,
+    plan,
+    binding,
+    schoolIntegration: { enabled: true, kill_switch: false },
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    nowInstant: new Date("2026-11-08T00:05:00.000Z")
+  });
+  assert.notEqual(res2.outcome, "SUBMITTED", "Unrelated seat 01桌 B座 must never be accepted as SUBMITTED");
+  assert.deepEqual(addBookingSeatsCalled2, [618], "Must not continue writing cand[1] after cand[0] returned 200");
+
+  const verifyWrongSeat = await provider.verifyBookingAuthoritative({
+    job,
+    plan,
+    binding,
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    rawToken: fakeJwt,
+    expectedExternalBookingId: "9140049"
+  });
+  assert.equal(verifyWrongSeat.verified, false, "verifyBookingAuthoritative must reject wrong seat 01桌 B座");
+
+  // Case 3: Readback returns matching seat (618 05桌 A座), but wrong date (2026-11-07)
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: {
+          id: 9137299,
+          seatId: 618,
+          seatName: "四层西书库北区 05桌 A座",
+          regionName: "四层西书库北区",
+          buildingLayerRegionId: 13,
+          startDate: "2026-11-07 07:30:00",
+          endDate: "2026-11-07 22:00:00",
+          bookingStatus: "1"
+        }
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+  const verifyWrongDate = await provider.verifyBookingAuthoritative({
+    job,
+    plan,
+    binding,
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    rawToken: fakeJwt,
+    expectedExternalBookingId: "9137299"
+  });
+  assert.equal(verifyWrongDate.verified, false, "verifyBookingAuthoritative must reject wrong date 2026-11-07");
+});

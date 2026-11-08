@@ -61,6 +61,153 @@ export function isWslibSeatOccupiedByOthersMessage(rawMsg, code = null) {
   );
 }
 
+export function normalizeSeatComparisonToken(rawSeat, regionName = "") {
+  let text = cleanSpiText(rawSeat, "");
+  if (!text) return "";
+  const cleanReg = cleanSpiText(regionName, "").replace(/^[1-9]F_[A-Z]+$/i, "").trim();
+  if (cleanReg && text.startsWith(cleanReg)) {
+    text = text.slice(cleanReg.length).trim();
+  }
+  const parts = text.split(/\s+/);
+  if (parts.length >= 2 && /(层|楼|区|书库|自习|阅览)/.test(parts[0])) {
+    text = parts.slice(1).join("");
+  }
+  return text
+    .replace(/号座?$/g, "")
+    .replace(/\s+/g, "")
+    .replace(/^0+(\d+)/, "$1")
+    .toUpperCase();
+}
+
+export function isBookingMatchingTarget(
+  booking,
+  {
+    targetDates = [],
+    regionId = null,
+    regionName = "",
+    candidateSeats = [],
+    wantedSeatNames = [],
+    specificSeat = null,
+    expectedBookingId = null
+  } = {}
+) {
+  if (!booking || !booking.bookingId) return false;
+  if (
+    expectedBookingId &&
+    !String(expectedBookingId).startsWith("haut_mock_") &&
+    String(booking.bookingId) !== String(expectedBookingId)
+  ) {
+    return false;
+  }
+
+  const validDates = (targetDates || []).map((d) => String(d || "").trim()).filter(Boolean);
+  if (validDates.length > 0) {
+    const startStr = String(booking.startDate || booking.endDate || "").trim();
+    if (!startStr || !validDates.some((d) => startStr.startsWith(d))) {
+      return false;
+    }
+  }
+
+  const cleanWantedRegion = cleanSpiText(regionName, "")
+    .replace(/^[1-9]F_[A-Z]+$/i, "")
+    .trim();
+  if (
+    regionId !== null &&
+    regionId !== undefined &&
+    booking.buildingLayerRegionId !== null &&
+    booking.buildingLayerRegionId !== undefined
+  ) {
+    if (Number(booking.buildingLayerRegionId) !== Number(regionId)) {
+      return false;
+    }
+  }
+  if (cleanWantedRegion) {
+    const bookReg = cleanSpiText(booking.regionName, "");
+    const bookSeat = cleanSpiText(booking.seatName, "");
+    if (bookReg) {
+      if (
+        bookReg !== cleanWantedRegion &&
+        !bookReg.includes(cleanWantedRegion) &&
+        !cleanWantedRegion.includes(bookReg)
+      ) {
+        return false;
+      }
+    } else if (
+      regionId === null ||
+      regionId === undefined ||
+      booking.buildingLayerRegionId === null ||
+      booking.buildingLayerRegionId === undefined
+    ) {
+      if (!bookSeat.includes(cleanWantedRegion)) {
+        return false;
+      }
+    }
+  }
+
+  const matchesSeatSpec = (spec) => {
+    if (!spec) return false;
+    if (typeof spec === "object") {
+      const specId = spec.id ?? spec.seat_id;
+      const hasBothIds =
+        specId !== null &&
+        specId !== undefined &&
+        booking.seatId !== null &&
+        booking.seatId !== undefined;
+      if (hasBothIds && Number(booking.seatId) !== Number(specId)) {
+        return false;
+      }
+      const normBook = normalizeSeatComparisonToken(
+        booking.seatName,
+        booking.regionName || cleanWantedRegion
+      );
+      const normSpecFull = normalizeSeatComparisonToken(
+        spec.seat_name || spec.seatName || "",
+        cleanWantedRegion
+      );
+      const normSpecShort = normalizeSeatComparisonToken(
+        spec.short_name || spec.shortName || "",
+        cleanWantedRegion
+      );
+      if (normBook && (normSpecFull || normSpecShort)) {
+        if (normBook !== normSpecFull && normBook !== normSpecShort) {
+          return false;
+        }
+        return true;
+      }
+      return hasBothIds && Number(booking.seatId) === Number(specId);
+    }
+    const rawStr = String(spec).trim();
+    if (!rawStr) return false;
+    if (/^\d+$/.test(rawStr) && booking.seatId !== null && booking.seatId !== undefined) {
+      if (String(booking.seatId) === rawStr) return true;
+    }
+    const normBook = normalizeSeatComparisonToken(
+      booking.seatName,
+      booking.regionName || cleanWantedRegion
+    );
+    const normWanted = normalizeSeatComparisonToken(rawStr, cleanWantedRegion);
+    return Boolean(normBook && normWanted && normBook === normWanted);
+  };
+
+  if (specificSeat) {
+    return matchesSeatSpec(specificSeat);
+  }
+
+  const candObjects = Array.isArray(candidateSeats) ? candidateSeats.filter(Boolean) : [];
+  const candNames = Array.isArray(wantedSeatNames)
+    ? wantedSeatNames.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
+  if (candObjects.length > 0 || candNames.length > 0) {
+    const matchedObj = candObjects.some((c) => matchesSeatSpec(c));
+    const matchedName = candNames.some((n) => matchesSeatSpec(n));
+    if (!matchedObj && !matchedName) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function isWslibAlreadyBookedMessage(rawMsg) {
   const text = String(rawMsg || "").trim();
   if (isWslibSeatOccupiedByOthersMessage(text)) return false;
@@ -784,11 +931,15 @@ export class HautLibraryProvider {
     };
   }
 
-  async fetchCurrentActiveBooking(rawToken) {
+  async fetchActiveBookings(rawToken) {
+    const results = [];
     const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
+    if (!curJson || (typeof curJson.code === "number" && curJson.code !== 200)) {
+      throw new Error(curJson?.msg || "Failed to read current booking");
+    }
     const data = curJson?.data || curJson?.booking || null;
     if (data && data.id && ["1", "2", "3", "4"].includes(String(data.bookingStatus))) {
-      return {
+      results.push({
         bookingId: String(data.id),
         seatId: data.seatId ? Number(data.seatId) : null,
         seatName: String(data.seatName || "").trim(),
@@ -797,16 +948,22 @@ export class HautLibraryProvider {
         startDate: String(data.startDate || "").trim(),
         endDate: String(data.endDate || "").trim(),
         bookingStatus: Number(data.bookingStatus)
-      };
+      });
+    }
+    if (results.length > 0) {
+      return results;
     }
     const inProgJson = await this.wslibGetJson(
       "/seatbook/user/mybookingInProgress?bookingstatus=0&pageSize=15&pageNum=1",
       rawToken
-    ).catch(() => null);
+    );
+    if (!inProgJson || (typeof inProgJson.code === "number" && inProgJson.code !== 200)) {
+      throw new Error(inProgJson?.msg || "Failed to read in-progress bookings");
+    }
     const rows = inProgJson?.rows || [];
     for (const row of rows) {
       if (row && row.id && ["1", "2", "3", "4"].includes(String(row.bookingStatus))) {
-        return {
+        results.push({
           bookingId: String(row.id),
           seatId: row.seatId ? Number(row.seatId) : null,
           seatName: String(row.seatName || "").trim(),
@@ -815,10 +972,233 @@ export class HautLibraryProvider {
           startDate: String(row.startDate || "").trim(),
           endDate: String(row.endDate || "").trim(),
           bookingStatus: Number(row.bookingStatus)
-        };
+        });
       }
     }
-    return null;
+    return results;
+  }
+
+  async fetchCurrentActiveBooking(rawToken) {
+    const list = await this.fetchActiveBookings(rawToken);
+    return list[0] || null;
+  }
+
+  async submitCandidateSeatAndVerify({
+    cand,
+    startFull,
+    endFull,
+    targetDate,
+    regionId,
+    regionName,
+    candidateSeats,
+    wantedSeats,
+    rawToken
+  }) {
+    const verifyReadback = async (specificSeat, expectedBookingId = null) => {
+      let bookings;
+      try {
+        bookings = await this.fetchActiveBookings(rawToken);
+      } catch {
+        return { status: "READBACK_FAILED", matched: null, unrelated: null };
+      }
+      const matched = bookings.find((b) =>
+        isBookingMatchingTarget(b, {
+          targetDates: [targetDate],
+          regionId,
+          regionName,
+          candidateSeats,
+          wantedSeatNames: wantedSeats,
+          specificSeat,
+          expectedBookingId
+        })
+      );
+      if (matched) {
+        return { status: "MATCHED", matched, unrelated: null };
+      }
+      const unrelated = bookings[0] || null;
+      return { status: unrelated ? "UNRELATED_FOUND" : "EMPTY", matched: null, unrelated };
+    };
+
+    let addRes;
+    try {
+      addRes = await this.wslibGetJson(
+        `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+          cand.id
+        )}&starttime=${encodeURIComponent(startFull)}&endtime=${encodeURIComponent(
+          endFull
+        )}`,
+        rawToken
+      );
+    } catch (addErr) {
+      // Ambiguous write failure: verify via readback once, and ALWAYS stop retrying if not confirmed!
+      const rb = await verifyReadback(cand, null);
+      if (rb.status === "MATCHED" && rb.matched) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "SUBMITTED",
+            externalBookingId: rb.matched.bookingId,
+            seatAlias: rb.matched.seatName || cand.seat_name,
+            regionAlias: rb.matched.regionName || regionName,
+            rawToken
+          }
+        };
+      }
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "TIMEOUT_AMBIGUOUS",
+          errorCode: "BOOKING_RESULT_UNKNOWN",
+          diagnosticMessage:
+            "选座写入请求响应异常且未能确认目标预约状态，已停止重试以防止重复预约",
+          rawToken
+        }
+      };
+    }
+
+    if (!addRes || typeof addRes.code !== "number") {
+      const rb = await verifyReadback(cand, null);
+      if (rb.status === "MATCHED" && rb.matched) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "SUBMITTED",
+            externalBookingId: rb.matched.bookingId,
+            seatAlias: rb.matched.seatName || cand.seat_name,
+            regionAlias: rb.matched.regionName || regionName,
+            rawToken
+          }
+        };
+      }
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "TIMEOUT_AMBIGUOUS",
+          errorCode: "BOOKING_RESULT_UNKNOWN",
+          diagnosticMessage: "选座响应报文格式未知，已停止重试以防止重复预约",
+          rawToken
+        }
+      };
+    }
+
+    const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
+    const translated = translateWslibDiagnosticMessage(rawErrText);
+
+    if (addRes.code === 200) {
+      const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
+      const rb = await verifyReadback(cand, bookedId);
+      if (rb.status === "MATCHED" && rb.matched) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "SUBMITTED",
+            externalBookingId: rb.matched.bookingId,
+            seatAlias: rb.matched.seatName || cand.seat_name,
+            regionAlias: rb.matched.regionName || regionName,
+            rawToken
+          }
+        };
+      }
+      if (rb.status === "UNRELATED_FOUND" && rb.unrelated) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "FAILED",
+            errorCode: "SCHOOL_REJECTED",
+            diagnosticMessage: `回查到的预约（${rb.unrelated.seatName || rb.unrelated.bookingId}）与目标候选座位或日期不匹配`,
+            rawToken
+          }
+        };
+      }
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "TIMEOUT_AMBIGUOUS",
+          externalBookingId: bookedId,
+          errorCode: "BOOKING_RESULT_UNKNOWN",
+          diagnosticMessage: "选座请求已受理但回查未能核实目标座位与日期，已停止重试",
+          rawToken
+        }
+      };
+    }
+
+    if (
+      isWslibSeatOccupiedByOthersMessage(rawErrText, addRes.code) ||
+      isWslibSeatOccupiedByOthersMessage(translated, addRes.code)
+    ) {
+      return { action: "SEAT_OCCUPIED_BY_OTHERS", lastMsg: translated || rawErrText };
+    }
+
+    if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(translated)) {
+      return { action: "NOT_YET_OPEN", lastMsg: translated || rawErrText };
+    }
+
+    if (
+      isWslibSeatLockedMessage(rawErrText, addRes.code) ||
+      isWslibSeatLockedMessage(translated, addRes.code)
+    ) {
+      return { action: "SEAT_LOCKED", lastMsg: translated || rawErrText };
+    }
+
+    if (isWslibAlreadyBookedMessage(rawErrText) || isWslibAlreadyBookedMessage(translated)) {
+      const rb = await verifyReadback(null, null);
+      if (rb.status === "MATCHED" && rb.matched) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "SUBMITTED",
+            externalBookingId: rb.matched.bookingId,
+            seatAlias: rb.matched.seatName,
+            regionAlias: rb.matched.regionName || regionName,
+            rawToken
+          }
+        };
+      }
+      if (rb.status === "UNRELATED_FOUND" && rb.unrelated) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "FAILED",
+            errorCode: "SCHOOL_REJECTED",
+            diagnosticMessage: `当前账号已有其他非目标预约（${rb.unrelated.seatName || rb.unrelated.bookingId}），已停止抢座`,
+            rawToken
+          }
+        };
+      }
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "TIMEOUT_AMBIGUOUS",
+          errorCode: "BOOKING_RESULT_UNKNOWN",
+          diagnosticMessage: "学校提示已有预约但回查未能核实目标座位与日期，已停止重试",
+          rawToken
+        }
+      };
+    }
+
+    // Any other unrecognized error response after a write attempt: verify via readback and stop retrying!
+    const rb = await verifyReadback(cand, null);
+    if (rb.status === "MATCHED" && rb.matched) {
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "SUBMITTED",
+          externalBookingId: rb.matched.bookingId,
+          seatAlias: rb.matched.seatName || cand.seat_name,
+          regionAlias: rb.matched.regionName || regionName,
+          rawToken
+        }
+      };
+    }
+    return {
+      action: "RETURN_FINAL",
+      result: {
+        outcome: "TIMEOUT_AMBIGUOUS",
+        errorCode: "BOOKING_RESULT_UNKNOWN",
+        diagnosticMessage: translated || rawErrText || "选座结果未知，已停止重试",
+        rawToken
+      }
+    };
   }
 
   async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
@@ -988,8 +1368,6 @@ export class HautLibraryProvider {
 
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
     if (credBundle.isLiveCredential) {
-      // Use cached raw_token immediately at 07:00:00 if present so Wave 0 has zero auth RTT;
-      // otherwise authenticate now.
       let rawToken = credBundle.raw_token;
       if (!rawToken) {
         const auth = await this.authenticateHautSession(credBundle, binding);
@@ -1011,12 +1389,13 @@ export class HautLibraryProvider {
         plan.candidate_seats ||
         plan.preferences_json?.preferred_seat_ids ||
         []
-      ).map((s) => String(s).trim()).filter(Boolean);
+      )
+        .map((s) => String(s).trim())
+        .filter(Boolean);
       const prewarmed = job.prewarmed_targets;
       const hasExplicitCandidateSeats =
         wantedSeats.length > 0 ||
         (Array.isArray(prewarmed?.candidate_seats) && prewarmed.candidate_seats.length > 0);
-      // Never silently book an unrequested random seat (e.g. 01桌 B座) when the user explicitly chose candidate seats
       const allowAlt =
         !hasExplicitCandidateSeats && plan.preferences_json?.allow_alternative_seat === true;
 
@@ -1024,8 +1403,8 @@ export class HautLibraryProvider {
       const isMorningOpeningWindow = fireLocalTime >= "07:00:00" && fireLocalTime < "07:25:00";
       const isExactOpeningBurst = fireLocalTime >= "07:00:00" && fireLocalTime <= "07:00:03";
 
-      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, protect against pre-opening 3s Redis seat lock
-      // and retry only the user-selected candidate seats in strict priority order.
+      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, use read-only gate check and submit
+      // strictly in candidate order; stop immediately on any unknown write result or readback failure.
       if (
         prewarmed &&
         Array.isArray(prewarmed.candidate_seats) &&
@@ -1034,7 +1413,6 @@ export class HautLibraryProvider {
         prewarmed.end_full &&
         (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
       ) {
-        // Read-only gate check at 07:00:00..07:00:03 via GET /seatbook/layout/query (never writes or books any seat)
         if (isExactOpeningBurst && prewarmed.region_id) {
           for (let probeIdx = 0; probeIdx < 12; probeIdx++) {
             if (probeIdx > 0) {
@@ -1057,9 +1435,13 @@ export class HautLibraryProvider {
           }
         }
 
+        const targetDateForPrewarmed =
+          String(prewarmed.start_full).slice(0, 10) || job.booking_local_date;
         const seatLockedUntilMs = new Map();
         const permanentlyOccupiedIds = new Set();
-        const fastWaveDelaysMs = [0, 180, 220, 250, 280, 320, 380, 450, 520, 600, 700, 800, 900, 1000, 1000, 1000];
+        const fastWaveDelaysMs = [
+          0, 180, 220, 250, 280, 320, 380, 450, 520, 600, 700, 800, 900, 1000, 1000, 1000
+        ];
         for (let fastAttempt = 0; fastAttempt < fastWaveDelaysMs.length; fastAttempt++) {
           if (fastAttempt > 0) {
             const nowMs = Date.now();
@@ -1081,115 +1463,91 @@ export class HautLibraryProvider {
               await new Promise((resolve) => setTimeout(resolve, waitMs));
             }
           }
-          try {
-            let needWaitOpening = false;
-            let hasLockedCandidate = false;
-            for (const cand of prewarmed.candidate_seats) {
-              if (permanentlyOccupiedIds.has(cand.id)) {
-                continue;
-              }
-              if ((seatLockedUntilMs.get(cand.id) || 0) > Date.now()) {
-                hasLockedCandidate = true;
-                continue;
-              }
-              let addRes;
-              try {
-                addRes = await this.wslibGetJson(
-                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                    cand.id
-                  )}&starttime=${encodeURIComponent(
-                    prewarmed.start_full
-                  )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
-                  rawToken
-                );
-              } catch (addErr) {
-                if (addErr?.code === "SCHOOL_AUTH_EXPIRED") throw addErr;
-                // Readback before trying next candidate seat in case the write succeeded before network error
-                const readbackAfterErr = await this.fetchCurrentActiveBooking(rawToken).catch(() => null);
-                if (readbackAfterErr && readbackAfterErr.bookingId) {
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: readbackAfterErr.bookingId,
-                    seatAlias: readbackAfterErr.seatName || cand.seat_name,
-                    regionAlias: readbackAfterErr.regionName || prewarmed.region_name,
-                    rawToken
-                  };
-                }
-                throw addErr;
-              }
-              const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
-              lastMsg = translateWslibDiagnosticMessage(rawErrText);
-              if (addRes?.code === 200) {
-                const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                return {
-                  outcome: "SUBMITTED",
-                  externalBookingId: confirmed?.bookingId || bookedId || String(cand.id),
-                  seatAlias: confirmed?.seatName || cand.seat_name,
-                  regionAlias: confirmed?.regionName || prewarmed.region_name,
-                  rawToken
-                };
-              }
-              if (isWslibSeatOccupiedByOthersMessage(rawErrText, addRes?.code) || isWslibSeatOccupiedByOthersMessage(lastMsg, addRes?.code)) {
-                permanentlyOccupiedIds.add(cand.id);
-                continue;
-              }
-              if (isWslibAlreadyBookedMessage(rawErrText) || isWslibAlreadyBookedMessage(lastMsg)) {
-                const existing = await this.fetchCurrentActiveBooking(rawToken);
-                if (existing) {
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: existing.bookingId,
-                    seatAlias: existing.seatName,
-                    regionAlias: existing.regionName,
-                    rawToken
-                  };
-                }
-              }
-              if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(lastMsg)) {
-                // wslib places a 3.0s Redis lock on any seatid hit before opening; record it and break immediately
-                // so we never domino-lock cand[1] and cand[2] while the gate is still closed!
-                seatLockedUntilMs.set(cand.id, Date.now() + 3050);
-                needWaitOpening = true;
-                break;
-              }
-              if (isWslibSeatLockedMessage(rawErrText, addRes?.code) || isWslibSeatLockedMessage(lastMsg, addRes?.code)) {
-                if ((seatLockedUntilMs.get(cand.id) || 0) <= Date.now()) {
-                  seatLockedUntilMs.set(cand.id, Date.now() + 1050);
-                }
-                hasLockedCandidate = true;
-                continue;
-              }
+
+          let needWaitOpening = false;
+          let hasLockedCandidate = false;
+          for (const cand of prewarmed.candidate_seats) {
+            if (permanentlyOccupiedIds.has(cand.id)) {
+              continue;
             }
-            if (permanentlyOccupiedIds.size >= prewarmed.candidate_seats.length) {
+            if ((seatLockedUntilMs.get(cand.id) || 0) > Date.now()) {
+              hasLockedCandidate = true;
+              continue;
+            }
+            const step = await this.submitCandidateSeatAndVerify({
+              cand,
+              startFull: prewarmed.start_full,
+              endFull: prewarmed.end_full,
+              targetDate: targetDateForPrewarmed,
+              regionId: prewarmed.region_id,
+              regionName: prewarmed.region_name || preferredArea,
+              candidateSeats: prewarmed.candidate_seats,
+              wantedSeats,
+              rawToken
+            });
+            if (step.action === "RETURN_FINAL") {
+              return step.result;
+            }
+            if (step.lastMsg) {
+              lastMsg = step.lastMsg;
+            }
+            if (step.action === "SEAT_OCCUPIED_BY_OTHERS") {
+              permanentlyOccupiedIds.add(cand.id);
+              continue;
+            }
+            if (step.action === "NOT_YET_OPEN") {
+              seatLockedUntilMs.set(cand.id, Date.now() + 3050);
+              needWaitOpening = true;
               break;
             }
-            if (!needWaitOpening && !hasLockedCandidate) {
-              break;
+            if (step.action === "SEAT_LOCKED") {
+              if ((seatLockedUntilMs.get(cand.id) || 0) <= Date.now()) {
+                seatLockedUntilMs.set(cand.id, Date.now() + 1050);
+              }
+              hasLockedCandidate = true;
+              continue;
             }
-          } catch (err) {
-            if (err?.code === "SCHOOL_AUTH_EXPIRED") {
-              const freshAuth = await this.authenticateHautSession(
-                { ...credBundle, raw_token: "" },
-                binding
-              );
-              rawToken = freshAuth.rawToken;
-            }
-            lastMsg = err?.message || lastMsg;
+          }
+          if (permanentlyOccupiedIds.size >= prewarmed.candidate_seats.length) {
+            break;
+          }
+          if (!needWaitOpening && !hasLockedCandidate) {
+            break;
           }
         }
       }
 
-      // Check if user already has an active seat booking before full discovery waves
+      // Check if user already has an active seat booking before full discovery waves;
+      // strictly verify target date, region, and candidate seat before treating as SUBMITTED.
       try {
-        const existingActive = await this.fetchCurrentActiveBooking(rawToken);
-        if (existingActive) {
+        const existingBookings = await this.fetchActiveBookings(rawToken);
+        const matchingExisting = existingBookings.find((b) =>
+          isBookingMatchingTarget(b, {
+            targetDates: datesToTry,
+            regionId: prewarmed?.region_id ?? null,
+            regionName: prewarmed?.region_name || preferredArea,
+            candidateSeats: prewarmed?.candidate_seats || [],
+            wantedSeatNames: wantedSeats
+          })
+        );
+        if (matchingExisting) {
           return {
             outcome: "SUBMITTED",
-            externalBookingId: existingActive.bookingId,
-            seatAlias: existingActive.seatName,
-            regionAlias: existingActive.regionName,
+            externalBookingId: matchingExisting.bookingId,
+            seatAlias: matchingExisting.seatName,
+            regionAlias: matchingExisting.regionName,
             rawToken
+          };
+        }
+        const sameDayUnrelated = existingBookings.find((b) => {
+          const startStr = String(b.startDate || b.endDate || "").trim();
+          return datesToTry.some((d) => startStr.startsWith(d));
+        });
+        if (sameDayUnrelated) {
+          return {
+            outcome: "FAILED",
+            errorCode: "SCHOOL_REJECTED",
+            diagnosticMessage: `当前账号今日已有其他非目标预约（${sameDayUnrelated.seatName || sameDayUnrelated.bookingId}），已停止抢座`
           };
         }
       } catch (err) {
@@ -1202,18 +1560,21 @@ export class HautLibraryProvider {
         }
       }
 
+      const seatLockedInWave = new Map();
+      const permanentlyOccupiedInWave = new Set();
       const waveDelaysMs = [0, 300, 600, 900, 1300, 1800, 2400];
       for (let wave = 0; wave < waveDelaysMs.length; wave++) {
         if (waveDelaysMs[wave] > 0) {
           await new Promise((resolve) => setTimeout(resolve, waveDelaysMs[wave]));
         }
+        let needWaitOpeningWave = false;
+        let hasLockedWave = false;
         try {
           for (const targetDate of datesToTry) {
             const regSnap = await this.fetchLiveStudyRegions(rawToken, targetDate);
             const allRegions = regSnap.regions || [];
             if (allRegions.length === 0) continue;
 
-            // Match region by name/floor, or fall back to regions with available seats
             const cleanWantedArea = String(preferredArea)
               .replace(/^[1-9]F_[A-Z]+$/i, "")
               .trim();
@@ -1224,7 +1585,7 @@ export class HautLibraryProvider {
                 r.region_name.includes(cleanWantedArea) ||
                 cleanWantedArea.includes(r.region_name)
             );
-            if (matchedRegions.length === 0) {
+            if (matchedRegions.length === 0 && !hasExplicitCandidateSeats) {
               const floorHint = cleanWantedArea.match(/(一|二|三|四|五|六|七|八|九|十|[1-9])/)?.[1];
               const floorMap = {
                 "1": "一层",
@@ -1253,18 +1614,18 @@ export class HautLibraryProvider {
 
             for (const region of matchedRegions.slice(0, 3)) {
               const seatSnap = await this.fetchLiveRegionSeats(rawToken, region.id, targetDate);
-              const availSeats = (seatSnap.seats || []).filter((s) => s.available);
-              if (availSeats.length === 0) continue;
+              const allRegionSeats = seatSnap.seats || [];
+              if (allRegionSeats.length === 0) continue;
 
               const orderedCandidates = [];
               for (const wanted of wantedSeats) {
                 const cleanWanted = wanted.replace(/号座?$/, "").trim();
-                const found = availSeats.find(
+                const found = allRegionSeats.find(
                   (s) =>
                     s.seat_name === cleanWanted ||
                     s.short_name === cleanWanted ||
-                    s.seat_name.endsWith(cleanWanted) ||
-                    s.short_name.endsWith(cleanWanted) ||
+                    normalizeSeatComparisonToken(s.seat_name, region.region_name) ===
+                      normalizeSeatComparisonToken(cleanWanted, region.region_name) ||
                     String(s.id) === cleanWanted
                 );
                 if (found && !orderedCandidates.some((c) => c.id === found.id)) {
@@ -1272,6 +1633,7 @@ export class HautLibraryProvider {
                 }
               }
               if (allowAlt) {
+                const availSeats = allRegionSeats.filter((s) => s.available);
                 for (const altSeat of availSeats.slice(0, 5)) {
                   if (!orderedCandidates.some((c) => c.id === altSeat.id)) {
                     orderedCandidates.push(altSeat);
@@ -1280,58 +1642,43 @@ export class HautLibraryProvider {
               }
 
               for (const seat of orderedCandidates.slice(0, 5)) {
-                let addRes;
-                try {
-                  addRes = await this.wslibGetJson(
-                    `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                      seat.id
-                    )}&starttime=${encodeURIComponent(
-                      seatSnap.start_full
-                    )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
-                    rawToken
-                  );
-                } catch (addErr) {
-                  if (addErr?.code === "SCHOOL_AUTH_EXPIRED") throw addErr;
-                  const readbackAfterErr = await this.fetchCurrentActiveBooking(rawToken).catch(() => null);
-                  if (readbackAfterErr && readbackAfterErr.bookingId) {
-                    return {
-                      outcome: "SUBMITTED",
-                      externalBookingId: readbackAfterErr.bookingId,
-                      seatAlias: readbackAfterErr.seatName || seat.seat_name,
-                      regionAlias: readbackAfterErr.regionName || region.region_name,
-                      rawToken
-                    };
-                  }
-                  throw addErr;
+                if (permanentlyOccupiedInWave.has(seat.id)) continue;
+                if ((seatLockedInWave.get(seat.id) || 0) > Date.now()) {
+                  hasLockedWave = true;
+                  continue;
                 }
-                lastMsg = String(addRes?.msg || "").trim();
-                if (addRes?.code === 200) {
-                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(seat.id),
-                    seatAlias: confirmed?.seatName || seat.seat_name,
-                    regionAlias: confirmed?.regionName || region.region_name,
-                    rawToken
-                  };
+                const step = await this.submitCandidateSeatAndVerify({
+                  cand: seat,
+                  startFull: seatSnap.start_full,
+                  endFull: seatSnap.end_full,
+                  targetDate,
+                  regionId: region.id,
+                  regionName: region.region_name,
+                  candidateSeats: orderedCandidates,
+                  wantedSeats,
+                  rawToken
+                });
+                if (step.action === "RETURN_FINAL") {
+                  return step.result;
                 }
-                const rawSeatErr = String(addRes?.raw_msg || addRes?.msg || "").trim();
-                lastMsg = translateWslibDiagnosticMessage(rawSeatErr);
-                if (isWslibAlreadyBookedMessage(rawSeatErr) || isWslibAlreadyBookedMessage(lastMsg)) {
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  if (confirmed) {
-                    return {
-                      outcome: "SUBMITTED",
-                      externalBookingId: confirmed.bookingId,
-                      seatAlias: confirmed.seatName,
-                      regionAlias: confirmed.regionName,
-                      rawToken
-                    };
-                  }
+                if (step.lastMsg) {
+                  lastMsg = step.lastMsg;
                 }
-                if (isWslibNotYetOpenMessage(rawSeatErr) || isWslibNotYetOpenMessage(lastMsg)) {
+                if (step.action === "SEAT_OCCUPIED_BY_OTHERS") {
+                  permanentlyOccupiedInWave.add(seat.id);
+                  continue;
+                }
+                if (step.action === "NOT_YET_OPEN") {
+                  seatLockedInWave.set(seat.id, Date.now() + 3050);
+                  needWaitOpeningWave = true;
                   break;
+                }
+                if (step.action === "SEAT_LOCKED") {
+                  if ((seatLockedInWave.get(seat.id) || 0) <= Date.now()) {
+                    seatLockedInWave.set(seat.id, Date.now() + 1050);
+                  }
+                  hasLockedWave = true;
+                  continue;
                 }
               }
             }
@@ -1351,27 +1698,16 @@ export class HautLibraryProvider {
             lastMsg = err?.message || lastMsg;
           }
         }
-      }
-
-      try {
-        const finalConfirmed = await this.fetchCurrentActiveBooking(rawToken);
-        if (finalConfirmed && finalConfirmed.bookingId) {
-          return {
-            outcome: "SUBMITTED",
-            externalBookingId: finalConfirmed.bookingId,
-            seatAlias: finalConfirmed.seatName,
-            regionAlias: finalConfirmed.regionName,
-            rawToken
-          };
+        if (!needWaitOpeningWave && !hasLockedWave) {
+          break;
         }
-      } catch {
-        // Ignore readback error on final fallback
       }
 
       return {
         outcome: "FAILED",
         errorCode: "SCHOOL_REJECTED",
-        diagnosticMessage: translateWslibDiagnosticMessage(lastMsg) || "目标自习室暂无可用空座或不在开放预约时段"
+        diagnosticMessage:
+          translateWslibDiagnosticMessage(lastMsg) || "目标自习室候选座位暂无可用或不在开放预约时段"
       };
     }
 
@@ -1389,10 +1725,13 @@ export class HautLibraryProvider {
 
   async verifyBookingAuthoritative({
     job,
+    plan = null,
     binding,
     decryptedSecret = null,
     rawToken = null,
-    expectedExternalBookingId
+    expectedExternalBookingId,
+    expectedSeatAlias = null,
+    expectedRegionAlias = null
   }) {
     if (this.mockBackend) {
       return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
@@ -1405,27 +1744,65 @@ export class HautLibraryProvider {
         const auth = await this.authenticateHautSession(credBundle, binding);
         tokenToUse = auth.rawToken;
       }
+      const preferredArea =
+        expectedRegionAlias ||
+        job?.prewarmed_targets?.region_name ||
+        plan?.area_name ||
+        plan?.preferences_json?.preferred_area_ids?.[0] ||
+        plan?.area_code ||
+        "";
+      const wantedSeats = (
+        plan?.candidate_seats ||
+        plan?.preferences_json?.preferred_seat_ids ||
+        []
+      )
+        .map((s) => String(s).trim())
+        .filter(Boolean);
+      const candidateSeats = Array.isArray(job?.prewarmed_targets?.candidate_seats)
+        ? job.prewarmed_targets.candidate_seats
+        : [];
+      const specificSeat = expectedSeatAlias ? { seat_name: expectedSeatAlias } : null;
+
+      let sawUnrelatedActive = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (attempt > 0) {
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
-        const active = await this.fetchCurrentActiveBooking(tokenToUse);
-        if (active && active.bookingId) {
+        const bookings = await this.fetchActiveBookings(tokenToUse);
+        const matched = bookings.find((b) =>
+          isBookingMatchingTarget(b, {
+            targetDates: job?.booking_local_date ? [job.booking_local_date] : [],
+            regionId: job?.prewarmed_targets?.region_id ?? null,
+            regionName: preferredArea,
+            candidateSeats,
+            wantedSeatNames: wantedSeats,
+            specificSeat,
+            expectedBookingId: expectedExternalBookingId || null
+          })
+        );
+        if (matched && matched.bookingId) {
           const evidenceSha256 = crypto
             .createHash("sha256")
-            .update(`haut_live|${binding.id}|${active.bookingId}|${active.seatName}|CONFIRMED`)
+            .update(`haut_live|${binding.id}|${matched.bookingId}|${matched.seatName}|CONFIRMED`)
             .digest("hex");
           return {
             verified: true,
-            externalBookingId: active.bookingId,
+            externalBookingId: matched.bookingId,
             officialStatus: "CONFIRMED",
-            seatAlias: active.seatName,
-            regionAlias: active.regionName,
-            startAt: active.startDate,
-            endAt: active.endDate,
+            seatAlias: matched.seatName,
+            regionAlias: matched.regionName,
+            startAt: matched.startDate,
+            endAt: matched.endDate,
             evidenceSha256
           };
         }
+        if (bookings.length > 0) {
+          sawUnrelatedActive = true;
+          break;
+        }
+      }
+      if (sawUnrelatedActive) {
+        return { verified: false, officialStatus: "MISMATCHED_TARGET_SEAT_OR_DATE" };
       }
       return { verified: false, officialStatus: "NOT_FOUND_ON_WSLIB" };
     }
