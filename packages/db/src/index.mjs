@@ -538,6 +538,7 @@ export class CloudDatabaseStore {
     this.reservationJobs = new Map(); // jobId -> job
     this.scheduleEvents = new Map(); // eventId -> event
     this.schoolReservations = new Map(); // jobId -> verified school reservation
+    this.reservationAttempts = new Map(); // attemptId -> persistent execution attempt
 
     // Finance & Outbox
     this.reservationOrders = new Map(); // orderId -> order
@@ -566,6 +567,7 @@ export class CloudDatabaseStore {
     this.runMigrations();
     this._loadSnapshot();
     this._rebuildIndexes();
+    this.migrateAndRecoverState();
   }
 
   _rebuildIndexes() {
@@ -589,7 +591,11 @@ export class CloudDatabaseStore {
       this.indexScheduleEvent(id, ev);
     }
     this._idxIdsByUser = new Map();
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications"]) {
+    this._idxAttemptIdsByJob = new Map();
+    for (const [id, att] of this.reservationAttempts) {
+      this.indexReservationAttempt(id, att);
+    }
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -635,6 +641,27 @@ export class CloudDatabaseStore {
     if (!byUser || !cloudUserId) return;
     if (!byUser.has(cloudUserId)) byUser.set(cloudUserId, new Set());
     byUser.get(cloudUserId).add(id);
+  }
+
+  indexReservationAttempt(id, att) {
+    if (!this._idxAttemptIdsByJob) this._idxAttemptIdsByJob = new Map();
+    if (!att?.job_id) return;
+    if (!this._idxAttemptIdsByJob.has(att.job_id)) this._idxAttemptIdsByJob.set(att.job_id, new Set());
+    this._idxAttemptIdsByJob.get(att.job_id).add(id);
+  }
+
+  attemptsForJob(jobId) {
+    if (!this._idxAttemptIdsByJob) {
+      return Array.from(this.reservationAttempts.values()).filter((a) => a.job_id === jobId);
+    }
+    const ids = this._idxAttemptIdsByJob.get(jobId);
+    if (!ids) return [];
+    const out = [];
+    for (const id of ids) {
+      const a = this.reservationAttempts.get(id);
+      if (a) out.push(a);
+    }
+    return out;
   }
 
   indexScheduleEvent(id, ev) {
@@ -708,6 +735,7 @@ export class CloudDatabaseStore {
       loadMap(this.reservationJobs, raw.reservationJobs);
       loadMap(this.scheduleEvents, raw.scheduleEvents);
       loadMap(this.schoolReservations, raw.schoolReservations);
+      loadMap(this.reservationAttempts, raw.reservationAttempts);
       loadMap(this.reservationOrders, raw.reservationOrders);
       loadMap(this.financeOperations, raw.financeOperations);
       loadMap(this.parcels, raw.parcels);
@@ -792,6 +820,7 @@ export class CloudDatabaseStore {
         reservationJobs: Array.from(this.reservationJobs.entries()),
         scheduleEvents: Array.from(this.scheduleEvents.entries()),
         schoolReservations: Array.from(this.schoolReservations.entries()),
+        reservationAttempts: Array.from(this.reservationAttempts.entries()),
         reservationOrders: Array.from(this.reservationOrders.entries()),
         financeOperations: Array.from(this.financeOperations.entries()),
         parcels: Array.from(this.parcels.entries()),
@@ -1380,10 +1409,258 @@ export class CloudDatabaseStore {
     return n;
   }
 
+  migrateAndRecoverState(nowMs = Date.now()) {
+    const ts = new Date(nowMs).toISOString();
+    let mutated = false;
+
+    // 1. Recover in-flight attempts that crashed in DISPATCH_INTENT / DISPATCHED -> RESULT_UNKNOWN (never blind-retry!)
+    for (const att of this.reservationAttempts.values()) {
+      if (att.status === "DISPATCH_INTENT" || att.status === "DISPATCHED") {
+        att.status = "RESULT_UNKNOWN";
+        att.completed_at = att.completed_at || ts;
+        mutated = true;
+      }
+    }
+
+    // 2. Migrate legacy plans lacking verifiable authorization provenance -> NEEDS_RECONFIRMATION
+    for (const p of this.reservationPlans.values()) {
+      const user = this.users.get(p.cloud_user_id);
+      const userAuthVer = Number(user?.auth_version || 1);
+      const bind = p.school_binding_id ? this.schoolBindings.get(p.school_binding_id) : null;
+      const consent = p.consent_id ? this.consents.get(p.consent_id) : null;
+      const hasVerifiableOrigin =
+        Boolean(bind) &&
+        bind.cloud_user_id === p.cloud_user_id &&
+        Boolean(String(bind.student_no || "").trim()) &&
+        Boolean(consent) &&
+        consent.cloud_user_id === p.cloud_user_id &&
+        (p.auth_version !== undefined || userAuthVer === 1);
+
+      if (!hasVerifiableOrigin) {
+        if (p.user_intent_state !== "NEEDS_RECONFIRMATION") {
+          p.enabled = false;
+          p.user_intent_state = "NEEDS_RECONFIRMATION";
+          p.migration_status = "NEEDS_RECONFIRMATION";
+          mutated = true;
+        }
+      } else if (!p.user_intent_state) {
+        p.user_intent_state = p.enabled === false ? "STOP_REQUESTED" : "ACTIVE";
+        if (p.auth_version === undefined) {
+          p.auth_version = Number(bind.auth_version || consent.auth_version || userAuthVer || 1);
+        }
+        mutated = true;
+      }
+    }
+
+    // 3. Backfill three-axis state on jobs and recover in-flight / legacy jobs
+    for (const j of this.reservationJobs.values()) {
+      const p = j.plan_id ? this.reservationPlans.get(j.plan_id) : null;
+      const sr = this.schoolReservations.get(j.id);
+      const jobAttempts = this.attemptsForJob(j.id);
+      const hadDispatchedAttempt =
+        jobAttempts.length > 0 ||
+        Number(j.attempt_count || 0) > 0 ||
+        j.external_execution_state === "DISPATCH_INTENT" ||
+        j.external_execution_state === "RESULT_UNKNOWN" ||
+        j.state === "EXECUTING" ||
+        j.state === "RESULT_UNKNOWN";
+
+      // Crash recovery: if job was left in EXECUTING or DISPATCH_INTENT, transition to RESULT_UNKNOWN
+      if (j.state === "EXECUTING" || j.external_execution_state === "DISPATCH_INTENT") {
+        j.state = "RESULT_UNKNOWN";
+        j.external_execution_state = "RESULT_UNKNOWN";
+        j.attempt_count = Math.max(Number(j.attempt_count || 0), 1);
+        j.last_error_code = j.last_error_code || "CRASH_RECOVERY_RESULT_UNKNOWN";
+        j.last_diagnostic_message =
+          j.last_diagnostic_message || "进程恢复：预约请求可能已发出，已转入待核对状态（禁止盲目重发）";
+        for (const ev of this.eventsForJob(j.id)) {
+          if (ev.kind === "FIRE" && ev.generation === j.generation) {
+            ev.status = "RESULT_UNKNOWN";
+            ev.actual_at = ev.actual_at || ts;
+          }
+        }
+        mutated = true;
+      }
+
+      if (p?.user_intent_state === "NEEDS_RECONFIRMATION") {
+        if (hadDispatchedAttempt && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+          j.state = "RESULT_UNKNOWN";
+          j.user_intent_state = "NEEDS_RECONFIRMATION";
+          j.external_execution_state = "RESULT_UNKNOWN";
+          j.display_status = "RESULT_UNKNOWN";
+          j.status_label = "结果待核对";
+          mutated = true;
+        } else if (!hadDispatchedAttempt && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "NEEDS_RECONFIRMATION"].includes(j.state)) {
+          j.state = "NEEDS_RECONFIRMATION";
+          j.user_intent_state = "NEEDS_RECONFIRMATION";
+          j.external_execution_state = "NOT_DISPATCHED";
+          j.display_status = "NEEDS_RECONFIRMATION";
+          j.status_label = "待重新确认授权";
+          j.last_diagnostic_message = "旧计划缺少可验证的授权版本来源，请重新确认授权后再启用";
+          for (const ev of this.eventsForJob(j.id)) {
+            if (ev.status === "ARMED") {
+              ev.status = "SKIPPED_NEEDS_RECONFIRMATION";
+              ev.actual_at = ts;
+            }
+          }
+          mutated = true;
+        }
+      }
+
+      if (!j.user_intent_state) {
+        j.user_intent_state =
+          j.state === "CANCELLED" || j.state === "REVOKED"
+            ? j.last_error_code === "CONSENT_WITHDRAWN" || j.last_error_code === "BINDING_REVOKED"
+              ? "REVOKED"
+              : "STOP_REQUESTED"
+            : "ACTIVE";
+        mutated = true;
+      }
+      if (!j.external_execution_state) {
+        j.external_execution_state =
+          j.state === "CONFIRMED" || sr?.official_status === "CONFIRMED"
+            ? "SCHOOL_CONFIRMED"
+            : j.state === "RESULT_UNKNOWN"
+              ? "RESULT_UNKNOWN"
+              : j.state === "FAILED"
+                ? "SCHOOL_REJECTED"
+                : "NOT_DISPATCHED";
+        mutated = true;
+      }
+      if (!j.school_cancellation_state) {
+        j.school_cancellation_state =
+          sr?.official_status === "CANCELLED" || sr?.official_status === "SCHOOL_CANCELLED"
+            ? "SCHOOL_CANCELLED"
+            : "NOT_REQUESTED";
+        mutated = true;
+      }
+      if (!j.display_status) {
+        j.display_status = this.computeJobDisplayStatus(j);
+        j.status_label = this.computeJobStatusLabel(j);
+        mutated = true;
+      }
+    }
+
+    if (mutated) {
+      this.saveSnapshot();
+    }
+  }
+
+  computeJobDisplayStatus(job) {
+    if (!job) return "UNKNOWN";
+    const intent = job.user_intent_state || "ACTIVE";
+    const exec = job.external_execution_state || "NOT_DISPATCHED";
+    const cancel = job.school_cancellation_state || "NOT_REQUESTED";
+
+    if (intent === "NEEDS_RECONFIRMATION" && exec === "NOT_DISPATCHED") {
+      return "NEEDS_RECONFIRMATION";
+    }
+    if (cancel === "SCHOOL_CANCELLED") {
+      return "SCHOOL_CANCELLED";
+    }
+    if (cancel === "CANCEL_RESULT_UNKNOWN") {
+      return "CANCEL_RESULT_UNKNOWN";
+    }
+    if ((intent === "REVOKED" || intent === "STOP_REQUESTED") && exec === "SCHOOL_CONFIRMED") {
+      return "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+    }
+    if ((intent === "REVOKED" || intent === "STOP_REQUESTED") && (exec === "RESULT_UNKNOWN" || exec === "DISPATCH_INTENT")) {
+      return "DELEGATION_STOPPED_RESULT_UNKNOWN";
+    }
+    if (intent === "REVOKED" || intent === "STOP_REQUESTED") {
+      return "DELEGATION_STOPPED";
+    }
+    if (exec === "SCHOOL_CONFIRMED" || job.state === "CONFIRMED") {
+      return "SCHOOL_CONFIRMED";
+    }
+    if (exec === "RESULT_UNKNOWN" || job.state === "RESULT_UNKNOWN") {
+      return "RESULT_UNKNOWN";
+    }
+    if (exec === "SCHOOL_REJECTED" || job.state === "FAILED") {
+      return "SCHOOL_REJECTED";
+    }
+    return job.state || "ARMED";
+  }
+
+  computeJobStatusLabel(job) {
+    const ds = this.computeJobDisplayStatus(job);
+    switch (ds) {
+      case "NEEDS_RECONFIRMATION":
+        return "待重新确认授权";
+      case "SCHOOL_CANCELLED":
+        return "学校已取消预约";
+      case "CANCEL_RESULT_UNKNOWN":
+        return "退座结果待核对";
+      case "DELEGATION_STOPPED_SCHOOL_CONFIRMED":
+        return "委托已停止，但学校预约已成功";
+      case "DELEGATION_STOPPED_RESULT_UNKNOWN":
+        return "委托已停止，结果待核对";
+      case "DELEGATION_STOPPED":
+        return "已停止委托";
+      case "SCHOOL_CONFIRMED":
+        return "学校预约成功";
+      case "RESULT_UNKNOWN":
+        return "结果待核对";
+      case "SCHOOL_REJECTED":
+        return "未抢到座位";
+      default:
+        return "排队等待执行";
+    }
+  }
+
+  _applyRevocationToJob(j, reason, ts) {
+    const execState = j.external_execution_state || "NOT_DISPATCHED";
+    const isInFlightOrDispatched =
+      execState === "DISPATCH_INTENT" ||
+      execState === "RESULT_UNKNOWN" ||
+      j.state === "RESULT_UNKNOWN";
+    const isAlreadyConfirmed =
+      execState === "SCHOOL_CONFIRMED" ||
+      j.state === "CONFIRMED" ||
+      Boolean(this.schoolReservations.get(j.id)?.external_booking_id);
+
+    j.user_intent_state = "REVOKED";
+    j.last_error_code = reason;
+
+    if (isAlreadyConfirmed) {
+      j.external_execution_state = "SCHOOL_CONFIRMED";
+      if (j.school_cancellation_state !== "SCHOOL_CANCELLED") {
+        j.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+      }
+      j.display_status = this.computeJobDisplayStatus(j);
+      j.status_label = this.computeJobStatusLabel(j);
+      return false;
+    }
+
+    if (isInFlightOrDispatched) {
+      // Request has already been dispatched! Do NOT mark state as CANCELLED or discard future return value;
+      // mark user_intent_state = REVOKED, billing_state = HELD_PENDING_REVIEW, and school_cancellation_state = MANUAL_ACTION_REQUIRED.
+      j.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+      j.billing_state = "HELD_PENDING_REVIEW";
+      if (j.state !== "EXECUTING") {
+        j.state = "RESULT_UNKNOWN";
+        j.external_execution_state = "RESULT_UNKNOWN";
+      }
+      j.state_version += 1;
+      j.display_status = this.computeJobDisplayStatus(j);
+      j.status_label = this.computeJobStatusLabel(j);
+      return true;
+    }
+
+    // Not yet dispatched: safe to cancel immediately
+    j.external_execution_state = "NOT_DISPATCHED";
+    j.school_cancellation_state = "NOT_REQUESTED";
+    j.state = "CANCELLED";
+    j.state_version += 1;
+    j.display_status = this.computeJobDisplayStatus(j);
+    j.status_label = this.computeJobStatusLabel(j);
+    return true;
+  }
+
   haltAllUserPlansAndBindings(cloudUserId, reason = "CONSENT_WITHDRAWN", nowMs = Date.now()) {
     const ts = new Date(nowMs).toISOString();
     const cancelledJobIds = [];
-    const cancelledJobIdSet = new Set();
+    const affectedJobIdSet = new Set();
 
     const user = this.users.get(cloudUserId);
     if (user) {
@@ -1407,26 +1684,27 @@ export class CloudDatabaseStore {
     }
 
     for (const p of this.reservationPlans.values()) {
-      if (p.cloud_user_id === cloudUserId && p.enabled) {
+      if (p.cloud_user_id === cloudUserId) {
         p.enabled = false;
+        p.user_intent_state = "REVOKED";
       }
     }
 
     for (const j of this.reservationJobs.values()) {
       if (
         j.cloud_user_id === cloudUserId &&
-        !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
+        !["FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
-        j.state_version += 1;
-        j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
-        cancelledJobIdSet.add(j.id);
+        const affected = this._applyRevocationToJob(j, reason, ts);
+        if (affected) {
+          cancelledJobIds.push(j.id);
+        }
+        affectedJobIdSet.add(j.id);
       }
     }
 
     for (const ev of this.scheduleEvents.values()) {
-      if (cancelledJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
+      if (affectedJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
         ev.status = "ABORTED_REVOKED";
         ev.actual_at = ts;
       }
@@ -1483,27 +1761,28 @@ export class CloudDatabaseStore {
     }
 
     const cancelledJobIds = [];
-    const cancelledJobIdSet = new Set();
+    const affectedJobIdSet = new Set();
     for (const p of this.reservationPlans.values()) {
       if (p.cloud_user_id === cloudUserId && affectedBindingIds.has(p.school_binding_id)) {
         p.enabled = false;
+        p.user_intent_state = "REVOKED";
       }
     }
     for (const j of this.reservationJobs.values()) {
       if (
         j.cloud_user_id === cloudUserId &&
         affectedBindingIds.has(j.school_binding_id) &&
-        !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
+        !["FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
-        j.state = "CANCELLED";
-        j.state_version += 1;
-        j.last_error_code = reason;
-        cancelledJobIds.push(j.id);
-        cancelledJobIdSet.add(j.id);
+        const affected = this._applyRevocationToJob(j, reason, ts);
+        if (affected) {
+          cancelledJobIds.push(j.id);
+        }
+        affectedJobIdSet.add(j.id);
       }
     }
     for (const ev of this.scheduleEvents.values()) {
-      if (cancelledJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
+      if (affectedJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
         ev.status = "ABORTED_REVOKED";
         ev.actual_at = ts;
       }
