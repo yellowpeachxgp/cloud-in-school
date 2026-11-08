@@ -1075,7 +1075,10 @@ export class HautLibraryProvider {
     candidateSeats,
     wantedSeats,
     rawToken,
-    assertStillAuthorized = null
+    assertStillAuthorized = null,
+    isStillAuthorized = null,
+    onBeforeExternalWrite = null,
+    onAfterExternalWrite = null
   }) {
     const verifyReadback = async (specificSeat, expectedBookingId = null) => {
       let bookings;
@@ -1108,6 +1111,18 @@ export class HautLibraryProvider {
     if (typeof assertStillAuthorized === "function") {
       assertStillAuthorized();
     }
+    let attemptRecord = null;
+    if (typeof onBeforeExternalWrite === "function") {
+      attemptRecord = await onBeforeExternalWrite({
+        cand,
+        targetDate,
+        startFull,
+        endFull,
+        slotWindow: expectedSlotWindow,
+        regionId,
+        regionName
+      });
+    }
     let addRes;
     try {
       addRes = await this.wslibGetJson(
@@ -1120,6 +1135,37 @@ export class HautLibraryProvider {
       );
     } catch (addErr) {
       if (addErr?.code === "CONSENT_WITHDRAWN") throw addErr;
+      if (typeof onAfterExternalWrite === "function") {
+        await onAfterExternalWrite(attemptRecord?.id, {
+          writeDispatched: true,
+          httpError: addErr?.message || "NETWORK_OR_TIMEOUT_ERROR",
+          rawResponseCode: String(addErr?.code || "ERROR"),
+          rawResponseMsg: String(addErr?.message || ""),
+          seatAlias: cand.seat_name,
+          regionAlias: regionName,
+          startFull,
+          endFull
+        });
+      }
+      const stillAuthedOnCatch = typeof isStillAuthorized === "function" ? isStillAuthorized() : true;
+      if (!stillAuthedOnCatch) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "TIMEOUT_AMBIGUOUS",
+            writeDispatched: true,
+            revokedDuringFlight: true,
+            attemptId: attemptRecord?.id || null,
+            seatAlias: cand.seat_name,
+            regionAlias: regionName,
+            startFull,
+            endFull,
+            errorCode: "BOOKING_RESULT_UNKNOWN",
+            diagnosticMessage: "委托已停止，但已发出的选座请求响应超时，结果待核对",
+            rawToken
+          }
+        };
+      }
       // Ambiguous write failure: verify via readback once, and ALWAYS stop retrying if not confirmed!
       const rb = await verifyReadback(cand, null);
       if (rb.status === "MATCHED" && rb.matched) {
@@ -1127,6 +1173,8 @@ export class HautLibraryProvider {
           action: "RETURN_FINAL",
           result: {
             outcome: "SUBMITTED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
@@ -1140,9 +1188,105 @@ export class HautLibraryProvider {
         action: "RETURN_FINAL",
         result: {
           outcome: "TIMEOUT_AMBIGUOUS",
+          writeDispatched: true,
+          attemptId: attemptRecord?.id || null,
+          seatAlias: cand.seat_name,
+          regionAlias: regionName,
+          startFull,
+          endFull,
           errorCode: "BOOKING_RESULT_UNKNOWN",
           diagnosticMessage:
             "选座写入请求响应异常且未能确认目标预约状态，已停止重试以防止重复预约",
+          rawToken
+        }
+      };
+    }
+
+    const bookedIdFromAdd = addRes?.bookingid ? String(addRes.bookingid) : null;
+    const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
+    const translated = translateWslibDiagnosticMessage(rawErrText);
+    if (typeof onAfterExternalWrite === "function") {
+      await onAfterExternalWrite(attemptRecord?.id, {
+        writeDispatched: true,
+        rawResponseCode: addRes && typeof addRes.code !== "undefined" ? String(addRes.code) : "UNKNOWN",
+        rawResponseMsg: translated || rawErrText || "",
+        externalBookingId: bookedIdFromAdd,
+        seatAlias: cand.seat_name,
+        regionAlias: regionName,
+        startFull,
+        endFull
+      });
+    }
+
+    const stillAuthedAfterAdd = typeof isStillAuthorized === "function" ? isStillAuthorized() : true;
+    if (!stillAuthedAfterAdd) {
+      if (addRes && addRes.code === 200) {
+        if (bookedIdFromAdd) {
+          return {
+            action: "RETURN_FINAL",
+            result: {
+              outcome: "SUBMITTED",
+              writeDispatched: true,
+              revokedDuringFlight: true,
+              attemptId: attemptRecord?.id || null,
+              externalBookingId: bookedIdFromAdd,
+              seatAlias: cand.seat_name,
+              regionAlias: regionName,
+              startFull,
+              endFull,
+              rawToken
+            }
+          };
+        }
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "TIMEOUT_AMBIGUOUS",
+            writeDispatched: true,
+            revokedDuringFlight: true,
+            attemptId: attemptRecord?.id || null,
+            seatAlias: cand.seat_name,
+            regionAlias: regionName,
+            startFull,
+            endFull,
+            errorCode: "BOOKING_RESULT_UNKNOWN",
+            diagnosticMessage: "委托已停止，学校选座返回成功但缺少预约编号，结果待核对",
+            rawToken
+          }
+        };
+      }
+      if (
+        !addRes ||
+        typeof addRes.code !== "number" ||
+        isWslibAlreadyBookedMessage(rawErrText) ||
+        isWslibAlreadyBookedMessage(translated)
+      ) {
+        return {
+          action: "RETURN_FINAL",
+          result: {
+            outcome: "TIMEOUT_AMBIGUOUS",
+            writeDispatched: true,
+            revokedDuringFlight: true,
+            attemptId: attemptRecord?.id || null,
+            seatAlias: cand.seat_name,
+            regionAlias: regionName,
+            startFull,
+            endFull,
+            errorCode: "BOOKING_RESULT_UNKNOWN",
+            diagnosticMessage: "委托已停止，已发出的选座请求响应待核对",
+            rawToken
+          }
+        };
+      }
+      return {
+        action: "RETURN_FINAL",
+        result: {
+          outcome: "FAILED",
+          writeDispatched: true,
+          revokedDuringFlight: true,
+          attemptId: attemptRecord?.id || null,
+          errorCode: "SCHOOL_REJECTED",
+          diagnosticMessage: translated || rawErrText || "委托已停止且当次选座未成功",
           rawToken
         }
       };
@@ -1155,6 +1299,8 @@ export class HautLibraryProvider {
           action: "RETURN_FINAL",
           result: {
             outcome: "SUBMITTED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
@@ -1168,6 +1314,12 @@ export class HautLibraryProvider {
         action: "RETURN_FINAL",
         result: {
           outcome: "TIMEOUT_AMBIGUOUS",
+          writeDispatched: true,
+          attemptId: attemptRecord?.id || null,
+          seatAlias: cand.seat_name,
+          regionAlias: regionName,
+          startFull,
+          endFull,
           errorCode: "BOOKING_RESULT_UNKNOWN",
           diagnosticMessage: "选座响应报文格式未知，已停止重试以防止重复预约",
           rawToken
@@ -1175,17 +1327,16 @@ export class HautLibraryProvider {
       };
     }
 
-    const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
-    const translated = translateWslibDiagnosticMessage(rawErrText);
-
     if (addRes.code === 200) {
-      const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
+      const bookedId = bookedIdFromAdd;
       const rb = await verifyReadback(cand, bookedId);
       if (rb.status === "MATCHED" && rb.matched) {
         return {
           action: "RETURN_FINAL",
           result: {
             outcome: "SUBMITTED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
@@ -1200,6 +1351,8 @@ export class HautLibraryProvider {
           action: "RETURN_FINAL",
           result: {
             outcome: "FAILED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             errorCode: "SCHOOL_REJECTED",
             diagnosticMessage: `回查到的预约（${rb.unrelated.seatName || rb.unrelated.bookingId}）与目标候选座位或日期不匹配`,
             rawToken
@@ -1210,7 +1363,13 @@ export class HautLibraryProvider {
         action: "RETURN_FINAL",
         result: {
           outcome: "TIMEOUT_AMBIGUOUS",
+          writeDispatched: true,
+          attemptId: attemptRecord?.id || null,
           externalBookingId: bookedId,
+          seatAlias: cand.seat_name,
+          regionAlias: regionName,
+          startFull,
+          endFull,
           errorCode: "BOOKING_RESULT_UNKNOWN",
           diagnosticMessage: "选座请求已受理但回查未能核实目标座位与日期，已停止重试",
           rawToken
@@ -1243,6 +1402,8 @@ export class HautLibraryProvider {
           action: "RETURN_FINAL",
           result: {
             outcome: "SUBMITTED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName,
             regionAlias: rb.matched.regionName || regionName,
@@ -1257,6 +1418,8 @@ export class HautLibraryProvider {
           action: "RETURN_FINAL",
           result: {
             outcome: "FAILED",
+            writeDispatched: true,
+            attemptId: attemptRecord?.id || null,
             errorCode: "SCHOOL_REJECTED",
             diagnosticMessage: `当前账号已有其他非目标预约（${rb.unrelated.seatName || rb.unrelated.bookingId}），已停止抢座`,
             rawToken
@@ -1267,6 +1430,8 @@ export class HautLibraryProvider {
         action: "RETURN_FINAL",
         result: {
           outcome: "TIMEOUT_AMBIGUOUS",
+          writeDispatched: true,
+          attemptId: attemptRecord?.id || null,
           errorCode: "BOOKING_RESULT_UNKNOWN",
           diagnosticMessage: "学校提示已有预约但回查未能核实目标座位与日期，已停止重试",
           rawToken
@@ -1281,6 +1446,8 @@ export class HautLibraryProvider {
         action: "RETURN_FINAL",
         result: {
           outcome: "SUBMITTED",
+          writeDispatched: true,
+          attemptId: attemptRecord?.id || null,
           externalBookingId: rb.matched.bookingId,
           seatAlias: rb.matched.seatName || cand.seat_name,
           regionAlias: rb.matched.regionName || regionName,
@@ -1292,6 +1459,8 @@ export class HautLibraryProvider {
       action: "RETURN_FINAL",
       result: {
         outcome: "TIMEOUT_AMBIGUOUS",
+        writeDispatched: true,
+        attemptId: attemptRecord?.id || null,
         errorCode: "BOOKING_RESULT_UNKNOWN",
         diagnosticMessage: translated || rawErrText || "选座结果未知，已停止重试",
         rawToken
@@ -1300,57 +1469,95 @@ export class HautLibraryProvider {
   }
 
   async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
-    const auth = await this.authenticateHautSession(decryptedSecret, binding);
-    const rawToken = auth.rawToken;
-    let targetBookingId =
-      externalBookingId && /^\d+$/.test(String(externalBookingId).trim())
-        ? String(externalBookingId).trim()
-        : null;
-
+    const targetBookingId = externalBookingId ? String(externalBookingId).trim() : "";
     if (!targetBookingId) {
-      const current = await this.fetchCurrentActiveBooking(rawToken);
-      if (current?.bookingId) {
-        targetBookingId = current.bookingId;
+      return {
+        cancelled: false,
+        outcome: "MISSING_EXACT_BOOKING_ID",
+        school_cancellation_state: "MANUAL_ACTION_REQUIRED",
+        message: "缺少精确关联的学校预约 ID，拒绝盲目取消当前账号下的其他预约"
+      };
+    }
+
+    if (this.mockBackend && typeof this.mockBackend.handleCancelReservation === "function") {
+      return this.mockBackend.handleCancelReservation({ binding, externalBookingId: targetBookingId });
+    }
+    if (targetBookingId.startsWith("haut_mock_")) {
+      return {
+        cancelled: true,
+        outcome: "SCHOOL_CANCELLED",
+        school_cancellation_state: "SCHOOL_CANCELLED",
+        bookingId: targetBookingId,
+        message: "已确认取消学校图书馆座位预约并释放座位"
+      };
+    }
+
+    const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
+    let rawToken = credBundle.raw_token;
+    if (!rawToken) {
+      const auth = await this.authenticateHautSession(credBundle, binding);
+      rawToken = auth.rawToken;
+    }
+
+    let cancelJson = null;
+    let cancelHttpFailed = false;
+    try {
+      cancelJson = await this.wslibGetJson(
+        `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
+        rawToken
+      );
+    } catch {
+      cancelHttpFailed = true;
+    }
+
+    if (!cancelHttpFailed && cancelJson?.code !== 200) {
+      const signOffJson = await this.wslibGetJson(
+        `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`,
+        rawToken
+      ).catch(() => null);
+      if (signOffJson?.code === 200) {
+        cancelJson = signOffJson;
       }
     }
-    if (!targetBookingId) {
-      return {
-        cancelled: true,
-        alreadyReleased: true,
-        message: "当前账号下无生效中的图书馆座位预约"
-      };
-    }
 
-    const cancelJson = await this.wslibGetJson(
-      `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
-      rawToken
-    );
-    if (cancelJson?.code === 200) {
+    // Verify via readback whether the exact targetBookingId is still active
+    try {
+      const activeList = await this.fetchActiveBookings(rawToken);
+      const stillActive = activeList.some((b) => String(b.bookingId) === targetBookingId);
+      if (!stillActive) {
+        return {
+          cancelled: true,
+          outcome: "SCHOOL_CANCELLED",
+          school_cancellation_state: "SCHOOL_CANCELLED",
+          bookingId: targetBookingId,
+          message: cancelJson?.msg || "已通过学校回查确认该笔预约已取消并释放座位"
+        };
+      }
+      if (cancelHttpFailed || !cancelJson || typeof cancelJson.code !== "number") {
+        return {
+          cancelled: false,
+          outcome: "CANCEL_RESULT_UNKNOWN",
+          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+          bookingId: targetBookingId,
+          message: "取消接口异常且回查仍见预约记录，取消结果待核对"
+        };
+      }
       return {
-        cancelled: true,
+        cancelled: false,
+        outcome: "CANCEL_REJECTED",
+        school_cancellation_state: "MANUAL_ACTION_REQUIRED",
         bookingId: targetBookingId,
-        message: cancelJson?.msg || "已成功取消学校图书馆座位预约并释放座位"
+        message: cancelJson?.msg || "学校拒绝取消该笔座位预约，请人工核对"
       };
-    }
-
-    // Fallback to signoff if booking window already started
-    const signOffJson = await this.wslibGetJson(
-      `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`,
-      rawToken
-    ).catch(() => null);
-    if (signOffJson?.code === 200) {
+    } catch {
       return {
-        cancelled: true,
+        cancelled: false,
+        outcome: "CANCEL_RESULT_UNKNOWN",
+        school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
         bookingId: targetBookingId,
-        message: "已自动通过签退释放学校图书馆座位"
+        message: "取消请求已发送但回查超时，取消结果待核对"
       };
     }
-
-    return {
-      cancelled: false,
-      bookingId: targetBookingId,
-      message: cancelJson?.msg || signOffJson?.msg || "取消座位预约未成功"
-    };
   }
 
   async prewarmJobTargetSeats({ job, plan, binding, decryptedSecret }) {
@@ -1443,7 +1650,10 @@ export class HautLibraryProvider {
     decryptedSecret = null,
     nowInstant,
     allowDateFallbackToToday = false,
-    assertStillAuthorized = null
+    assertStillAuthorized = null,
+    isStillAuthorized = null,
+    onBeforeExternalWrite = null,
+    onAfterExternalWrite = null
   }) {
     if (job.school_id !== this.schoolId) {
       throw new ContractError("FORBIDDEN", "Cross-school provider mismatch");
@@ -1466,7 +1676,36 @@ export class HautLibraryProvider {
       assertStillAuthorized();
     }
     if (this.mockBackend) {
-      return this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
+      let attemptRecord = null;
+      if (typeof onBeforeExternalWrite === "function") {
+        attemptRecord = await onBeforeExternalWrite({
+          cand: { id: "mock_seat", seat_name: plan.preferences_json?.preferred_seat_ids?.[0] || "N4-088" },
+          targetDate: job.booking_local_date,
+          startFull: `${job.booking_local_date} 08:00:00`,
+          endFull: `${job.booking_local_date} 22:00:00`,
+          slotWindow: plan.slot_window || "08:00-22:00",
+          regionId: 7,
+          regionName: plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区"
+        });
+      }
+      const mockRes = await this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
+      if (typeof onAfterExternalWrite === "function") {
+        await onAfterExternalWrite(attemptRecord?.id, {
+          writeDispatched: true,
+          rawResponseCode: mockRes?.outcome === "SUBMITTED" ? "200" : String(mockRes?.errorCode || "MOCK"),
+          rawResponseMsg: String(mockRes?.diagnosticMessage || mockRes?.outcome || ""),
+          externalBookingId: mockRes?.externalBookingId || null,
+          seatAlias: mockRes?.seatAlias || null,
+          regionAlias: mockRes?.regionAlias || null
+        });
+      }
+      const stillAuthedAfterMock = typeof isStillAuthorized === "function" ? isStillAuthorized() : true;
+      return {
+        ...mockRes,
+        writeDispatched: true,
+        revokedDuringFlight: !stillAuthedAfterMock,
+        attemptId: attemptRecord?.id || null
+      };
     }
 
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
@@ -1595,7 +1834,10 @@ export class HautLibraryProvider {
               candidateSeats: prewarmed.candidate_seats,
               wantedSeats,
               rawToken,
-              assertStillAuthorized
+              assertStillAuthorized,
+              isStillAuthorized,
+              onBeforeExternalWrite,
+              onAfterExternalWrite
             });
             if (step.action === "RETURN_FINAL") {
               return step.result;
@@ -1786,7 +2028,10 @@ export class HautLibraryProvider {
                   candidateSeats: orderedCandidates,
                   wantedSeats,
                   rawToken,
-                  assertStillAuthorized
+                  assertStillAuthorized,
+                  isStillAuthorized,
+                  onBeforeExternalWrite,
+                  onAfterExternalWrite
                 });
                 if (step.action === "RETURN_FINAL") {
                   return step.result;
@@ -1843,11 +2088,40 @@ export class HautLibraryProvider {
     }
 
     // Default deterministic mock reservation result (safe sandbox for unit/redteam tests)
+    if (typeof assertStillAuthorized === "function") {
+      assertStillAuthorized();
+    }
     const seatAlias = plan.preferences_json?.preferred_seat_ids?.[0] || "N4-088";
     const regionAlias = plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区";
     const externalBookingId = `haut_mock_${job.booking_local_date}_${seatAlias}_${binding.id.slice(0, 6)}`;
+    let attemptRecord = null;
+    if (typeof onBeforeExternalWrite === "function") {
+      attemptRecord = await onBeforeExternalWrite({
+        cand: { id: seatAlias, seat_name: seatAlias },
+        targetDate: job.booking_local_date,
+        startFull: `${job.booking_local_date} 08:00:00`,
+        endFull: `${job.booking_local_date} 22:00:00`,
+        slotWindow: plan.slot_window || "08:00-22:00",
+        regionId: 7,
+        regionName: regionAlias
+      });
+    }
+    if (typeof onAfterExternalWrite === "function") {
+      await onAfterExternalWrite(attemptRecord?.id, {
+        writeDispatched: true,
+        rawResponseCode: "200",
+        rawResponseMsg: "SUBMITTED",
+        externalBookingId,
+        seatAlias,
+        regionAlias
+      });
+    }
+    const stillAuthedSandbox = typeof isStillAuthorized === "function" ? isStillAuthorized() : true;
     return {
       outcome: "SUBMITTED",
+      writeDispatched: true,
+      revokedDuringFlight: !stillAuthedSandbox,
+      attemptId: attemptRecord?.id || null,
       externalBookingId,
       seatAlias,
       regionAlias

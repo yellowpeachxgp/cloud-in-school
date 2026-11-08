@@ -362,8 +362,10 @@ export function createCampusCloudApp(options = {}) {
     const plans = store.recordsForUser("reservationPlans", cloudUserId);
     const jobs = store.recordsForUser("reservationJobs", cloudUserId)
       .map((j) => {
+        store.syncJobDisplayStatus?.(j);
         const p = store.reservationPlans.get(j.plan_id) || {};
         const sr = store.schoolReservations.get(j.id) || null;
+        const attempts = store.attemptsForJob?.(j.id) || [];
         return {
           ...j,
           area_code: p.area_code || "4F_NORTH",
@@ -373,7 +375,8 @@ export function createCampusCloudApp(options = {}) {
           repeat_days: Math.max(Number(p.repeat_days || 1), Number(j.repeat_days || 1)),
           remaining_days: Number(j.remaining_days ?? p.remaining_days ?? 1),
           end_local_date: p.end_local_date || j.end_local_date || j.booking_local_date,
-          school_reservation: sr
+          school_reservation: sr,
+          attempts
         };
       });
     const orders = store.recordsForUser("reservationOrders", cloudUserId)
@@ -412,6 +415,7 @@ export function createCampusCloudApp(options = {}) {
       consents,
       reservation_plans: plans,
       reservation_jobs: jobs,
+      reservation_attempts: store.recordsForUser("reservationAttempts", cloudUserId),
       orders,
       parcels,
       parcel_connections: parcelConnections,
@@ -1133,10 +1137,15 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
       plan.enabled = false;
+      plan.user_intent_state = "STOP_REQUESTED";
+      const ts = new Date().toISOString();
       for (const j of store.reservationJobs.values()) {
-        if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)) {
-          j.state = "CANCELLED";
-          j.state_version += 1;
+        if (j.plan_id === plan.id) {
+          store._applyRevocationToJob?.(j, "用户停止预约计划委托", ts);
+          if (j.user_intent_state === "REVOKED") {
+            j.user_intent_state = "STOP_REQUESTED";
+          }
+          store.syncJobDisplayStatus?.(j);
         }
       }
       await syncUserToSso(auth.cloudUserId);
@@ -1145,7 +1154,10 @@ export function createCampusCloudApp(options = {}) {
   );
 
   register("GET", "/api/v1/reservation-jobs", "listReservationJobs", "bearer", async ({ auth }) => {
-    const jobs = store.recordsForUser("reservationJobs", auth.cloudUserId);
+    const jobs = store.recordsForUser("reservationJobs", auth.cloudUserId).map((j) => {
+      store.syncJobDisplayStatus?.(j);
+      return j;
+    });
     return { status: 200, code: "RESERVATION_JOBS_LISTED", data: { jobs } };
   });
 
@@ -1160,8 +1172,14 @@ export function createCampusCloudApp(options = {}) {
       if (job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("FORBIDDEN", "Cross-user reservation job access denied");
       }
+      store.syncJobDisplayStatus?.(job);
       const events = store.eventsForJob(job.id);
-      return { status: 200, code: "RESERVATION_JOB_OK", data: { ...job, schedule_events: events } };
+      const attempts = store.attemptsForJob?.(job.id) || [];
+      return {
+        status: 200,
+        code: "RESERVATION_JOB_OK",
+        data: { ...job, schedule_events: events, attempts }
+      };
     }
   );
 
@@ -1176,11 +1194,36 @@ export function createCampusCloudApp(options = {}) {
       if (job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("FORBIDDEN", "Cross-user reservation job cancel denied");
       }
-      if (["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(job.state)) {
+      if (
+        [
+          "CONFIRMED",
+          "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+          "SCHOOL_CANCELLED",
+          "FAILED",
+          "CANCELLED",
+          "EXPIRED"
+        ].includes(job.state)
+      ) {
         throw new ContractError("JOB_ALREADY_TERMINAL", `Job is already in terminal state ${job.state}`);
       }
-      job.state = "CANCELLED";
-      job.state_version += 1;
+      const ts = new Date().toISOString();
+      if (job.external_execution_state && job.external_execution_state !== "NOT_DISPATCHED") {
+        store._applyRevocationToJob?.(job, "用户停止任务委托", ts);
+        job.user_intent_state = "STOP_REQUESTED";
+        store.syncJobDisplayStatus?.(job);
+      } else {
+        job.user_intent_state = "STOP_REQUESTED";
+        job.external_execution_state = "NOT_DISPATCHED";
+        job.state = "CANCELLED";
+        job.state_version += 1;
+        for (const ev of store.eventsForJob(job.id)) {
+          if (ev.status === "ARMED") {
+            ev.status = "ABORTED_REVOKED";
+            ev.actual_at = ts;
+          }
+        }
+        store.syncJobDisplayStatus?.(job);
+      }
       await syncUserToSso(auth.cloudUserId);
       return { status: 200, code: "RESERVATION_JOB_CANCELLED", data: job };
     }
@@ -1197,14 +1240,23 @@ export function createCampusCloudApp(options = {}) {
       if (job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("FORBIDDEN", "Cross-user evidence access denied");
       }
+      store.syncJobDisplayStatus?.(job);
       const schoolRes = store.schoolReservations.get(job.id) || null;
+      const attempts = store.attemptsForJob?.(job.id) || [];
       return {
         status: 200,
         code: "RESERVATION_EVIDENCE_OK",
         data: {
           job_id: job.id,
           state: job.state,
-          school_reservation: schoolRes
+          user_intent_state: job.user_intent_state,
+          external_execution_state: job.external_execution_state,
+          school_cancellation_state: job.school_cancellation_state,
+          display_status: job.display_status,
+          status_label: job.status_label,
+          billing_state: job.billing_state,
+          school_reservation: schoolRes,
+          attempts
         }
       };
     }
@@ -2180,18 +2232,17 @@ export function createCampusCloudApp(options = {}) {
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
             await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
-              job.state = "CANCELLED";
-              job.state_version += 1;
+              store._applyRevocationToJob?.(job, "客户端同步停止任务委托", new Date(nowMs).toISOString());
             });
           }
           const plan = store.reservationPlans.get(cancelId);
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
+            plan.user_intent_state = "STOP_REQUESTED";
             for (const j of store.reservationJobs.values()) {
               if (j.plan_id === plan.id && j.state !== "CANCELLED") {
                 await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
-                  j.state = "CANCELLED";
-                  j.state_version += 1;
+                  store._applyRevocationToJob?.(j, "客户端同步停止计划委托", new Date(nowMs).toISOString());
                 });
               }
             }
@@ -2199,6 +2250,28 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      const bindingResults = [];
+      for (const bItem of validatedBindingUpserts) {
+        if (bItem.isBindingCurrentlyRevoked || bItem.isConsentCurrentlyWithdrawn) {
+          bindingResults.push({
+            student_no: bItem.studentNo,
+            school_id: bItem.schoolId,
+            binding_id: bItem.reqBindId || null,
+            status: "SKIPPED_REVOKED",
+            reason: "学校绑定或委托授权已处于撤销状态，需重新完成在线授权后方可同步凭据"
+          });
+        } else {
+          bindingResults.push({
+            student_no: bItem.studentNo,
+            school_id: bItem.schoolId,
+            binding_id: bItem.reqBindId || null,
+            status: "APPLIED",
+            reason: null
+          });
+        }
+      }
+
+      const planResults = [];
       if (validatedPlanUpserts.length > 0) {
         const allUserBindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
         const userActiveBindings = allUserBindings.filter(
@@ -2223,6 +2296,13 @@ export function createCampusCloudApp(options = {}) {
             activeBinding.status !== "DELEGATED_ACTIVE" ||
             Number(activeBinding.auth_version || 1) !== serverAuthVersion
           ) {
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: rpBindId || null,
+              status: "NEEDS_RECONFIRMATION",
+              reason: "缺少当前有效学校绑定或存在多绑定未指定具体绑定，需重新确认授权"
+            });
             continue;
           }
           const targetSchoolId = activeBinding.school_id || DEFAULT_SCHOOL_ID;
@@ -2246,16 +2326,33 @@ export function createCampusCloudApp(options = {}) {
             Number(activeConsent.auth_version || 1) !== serverAuthVersion ||
             (activeBinding.consent_id && activeBinding.consent_id !== activeConsent.id)
           ) {
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: activeBinding.id,
+              status: "NEEDS_RECONFIRMATION",
+              reason: "委托同意记录已撤回或与当前授权版本不一致，需重新确认授权"
+            });
             continue;
           }
 
           const alreadyActive = Array.from(store.reservationJobs.values()).some(
             (j) =>
               j.cloud_user_id === auth.cloudUserId &&
+              j.school_binding_id === activeBinding.id &&
               j.booking_local_date === targetDate &&
-              !["CANCELLED", "FAILED", "EXPIRED", "REVOKED"].includes(j.state)
+              !["CANCELLED", "FAILED", "EXPIRED", "REVOKED", "SCHOOL_CANCELLED"].includes(j.state)
           );
-          if (alreadyActive) continue;
+          if (alreadyActive) {
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: activeBinding.id,
+              status: "ALREADY_ACTIVE",
+              reason: null
+            });
+            continue;
+          }
           const areaName = String(rpItem?.area_name || rpItem?.area_code || "五层中区").trim();
           const seats = Array.isArray(rpItem?.candidate_seats)
             ? rpItem.candidate_seats.map((s) => String(s).trim()).filter(Boolean)
@@ -2266,7 +2363,7 @@ export function createCampusCloudApp(options = {}) {
             repeatDays
           );
           try {
-            reservationEngine.createPlanAndJob(
+            const created = reservationEngine.createPlanAndJob(
               auth.cloudUserId,
               {
                 school_binding_id: activeBinding.id,
@@ -2278,6 +2375,7 @@ export function createCampusCloudApp(options = {}) {
                 preferred_seat_ids: seats,
                 target_local_date: targetDate,
                 target_local_time: targetTime,
+                slot_window: rpItem?.slot_window || undefined,
                 repeat_days: repeatDays,
                 remaining_days: remainingDays,
                 allow_alternative_seat: rpItem?.allow_alternative_seat === true,
@@ -2285,16 +2383,61 @@ export function createCampusCloudApp(options = {}) {
               },
               nowMs
             );
-          } catch {
-            // Ignore expired window or validation errors during background snapshot sync
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: activeBinding.id,
+              plan_id: created.plan_id,
+              job_id: created.job_id,
+              status: "CREATED",
+              reason: null
+            });
+          } catch (createErr) {
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: activeBinding.id,
+              status: "SKIPPED_WINDOW_CLOSED",
+              reason: createErr?.message || "预约时间窗口已关闭或参数不合法"
+            });
           }
         }
       }
+
+      body._computedSyncReport = {
+        auth_version: serverAuthVersion,
+        binding_results: bindingResults,
+        plan_results: planResults
+      };
 
       await syncUserToSso(auth.cloudUserId);
     }
 
     const snapshot = await buildUserSyncSnapshot(auth.cloudUserId);
+    const serverNeedsReconfirmPlans = (snapshot.reservation_plans || []).filter(
+      (p) => p.user_intent_state === "NEEDS_RECONFIRMATION"
+    );
+    const bindingResults = body?._computedSyncReport?.binding_results || [];
+    const planResults = body?._computedSyncReport?.plan_results || [];
+    const skippedBindings = bindingResults.filter((r) => r.status !== "APPLIED");
+    const skippedPlans = planResults.filter(
+      (r) => r.status !== "CREATED" && r.status !== "ALREADY_ACTIVE"
+    );
+    const skippedCount = skippedBindings.length + skippedPlans.length;
+    const reconfirmCount =
+      serverNeedsReconfirmPlans.length +
+      planResults.filter((r) => r.status === "NEEDS_RECONFIRMATION").length;
+    snapshot.sync_report = {
+      auth_version: snapshot.auth_version,
+      binding_results: bindingResults,
+      plan_results: planResults,
+      skipped_count: skippedCount,
+      plans_needing_reconfirmation_count: reconfirmCount,
+      summary_message:
+        reconfirmCount > 0 || skippedCount > 0
+          ? `余额已更新，${reconfirmCount || skippedCount} 项预约计划或绑定需要重新确认授权`
+          : "云端数据已完整同步"
+    };
     return {
       status: 200,
       code: "SYNC_SNAPSHOT_OK",

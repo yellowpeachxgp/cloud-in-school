@@ -1608,6 +1608,66 @@ export class CloudDatabaseStore {
     }
   }
 
+  syncJobDisplayStatus(job) {
+    if (!job) return null;
+    job.display_status = this.computeJobDisplayStatus(job);
+    job.status_label = this.computeJobStatusLabel(job);
+    return job;
+  }
+
+  createReservationAttempt(payload = {}) {
+    const id = payload.id || crypto.randomUUID();
+    const ts = payload.dispatch_intent_at || new Date().toISOString();
+    const attempt = {
+      id,
+      job_id: payload.job_id,
+      plan_id: payload.plan_id,
+      cloud_user_id: payload.cloud_user_id,
+      school_id: payload.school_id || DEFAULT_SCHOOL_ID,
+      student_no: String(payload.student_no || "").trim(),
+      binding_id: payload.binding_id,
+      consent_id: payload.consent_id,
+      auth_version: Number(payload.auth_version || 1),
+      target_local_date: payload.target_local_date || "",
+      slot_window: payload.slot_window || "",
+      candidate_seat_id: String(payload.candidate_seat_id || "primary"),
+      candidate_seat_name: String(payload.candidate_seat_name || ""),
+      candidate_region_name: String(payload.candidate_region_name || ""),
+      external_execution_state: payload.external_execution_state || "DISPATCH_INTENT",
+      user_intent_state_at_dispatch: payload.user_intent_state_at_dispatch || "ACTIVE",
+      user_intent_state_at_completion: payload.user_intent_state_at_completion || null,
+      dispatch_intent_at: ts,
+      completed_at: payload.completed_at || null,
+      external_booking_id: payload.external_booking_id || null,
+      raw_response_code: payload.raw_response_code || null,
+      raw_response_msg: payload.raw_response_msg || null,
+      readback_verified: Boolean(payload.readback_verified),
+      readback_evidence: payload.readback_evidence || null,
+      billing_order_id: payload.billing_order_id || null,
+      billing_state: payload.billing_state || "NOT_BILLED",
+      created_at: ts,
+      updated_at: ts
+    };
+    this.reservationAttempts.set(id, attempt);
+    this.indexReservationAttempt(id, attempt);
+    this.indexUserScoped("reservationAttempts", id, attempt.cloud_user_id);
+    return attempt;
+  }
+
+  updateReservationAttempt(attemptId, patch = {}) {
+    const attempt = this.reservationAttempts.get(attemptId);
+    if (!attempt) return null;
+    Object.assign(attempt, patch, {
+      updated_at: new Date().toISOString()
+    });
+    return attempt;
+  }
+
+  latestAttemptForJob(jobId) {
+    const list = this.attemptsForJob(jobId);
+    return list.length > 0 ? list[list.length - 1] : null;
+  }
+
   _applyRevocationToJob(j, reason, ts) {
     const execState = j.external_execution_state || "NOT_DISPATCHED";
     const isInFlightOrDispatched =
