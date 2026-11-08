@@ -1034,19 +1034,21 @@ export class HautLibraryProvider {
         prewarmed.end_full &&
         (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
       ) {
-        // Canary gate probe at 07:00:00..07:00:03 so a slightly lagging wslib clock never locks cand[0] for 3 seconds
-        if (isExactOpeningBurst) {
+        // Read-only gate check at 07:00:00..07:00:03 via GET /seatbook/layout/query (never writes or books any seat)
+        if (isExactOpeningBurst && prewarmed.region_id) {
           for (let probeIdx = 0; probeIdx < 12; probeIdx++) {
             if (probeIdx > 0) {
               await new Promise((resolve) => setTimeout(resolve, 110));
             }
-            const canarySeatId = 999901 + probeIdx;
             const probeRes = await this.wslibGetJson(
-              `/seatbook/user/addbooking?channel=1003&seatid=${canarySeatId}&starttime=${encodeURIComponent(
+              `/seatbook/layout/query?starttime=${encodeURIComponent(
                 prewarmed.start_full
-              )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
+              )}&endtime=${encodeURIComponent(
+                prewarmed.end_full
+              )}&regionid=${encodeURIComponent(prewarmed.region_id)}`,
               rawToken
             ).catch(() => null);
+            if (!probeRes) break;
             const probeRawMsg = String(probeRes?.raw_msg || probeRes?.msg || "").trim();
             const probeMsg = translateWslibDiagnosticMessage(probeRawMsg);
             if (!isWslibNotYetOpenMessage(probeRawMsg) && !isWslibNotYetOpenMessage(probeMsg)) {
@@ -1090,14 +1092,31 @@ export class HautLibraryProvider {
                 hasLockedCandidate = true;
                 continue;
               }
-              const addRes = await this.wslibGetJson(
-                `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                  cand.id
-                )}&starttime=${encodeURIComponent(
-                  prewarmed.start_full
-                )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
-                rawToken
-              );
+              let addRes;
+              try {
+                addRes = await this.wslibGetJson(
+                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+                    cand.id
+                  )}&starttime=${encodeURIComponent(
+                    prewarmed.start_full
+                  )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
+                  rawToken
+                );
+              } catch (addErr) {
+                if (addErr?.code === "SCHOOL_AUTH_EXPIRED") throw addErr;
+                // Readback before trying next candidate seat in case the write succeeded before network error
+                const readbackAfterErr = await this.fetchCurrentActiveBooking(rawToken).catch(() => null);
+                if (readbackAfterErr && readbackAfterErr.bookingId) {
+                  return {
+                    outcome: "SUBMITTED",
+                    externalBookingId: readbackAfterErr.bookingId,
+                    seatAlias: readbackAfterErr.seatName || cand.seat_name,
+                    regionAlias: readbackAfterErr.regionName || prewarmed.region_name,
+                    rawToken
+                  };
+                }
+                throw addErr;
+              }
               const rawErrText = String(addRes?.raw_msg || addRes?.msg || "").trim();
               lastMsg = translateWslibDiagnosticMessage(rawErrText);
               if (addRes?.code === 200) {
@@ -1261,14 +1280,30 @@ export class HautLibraryProvider {
               }
 
               for (const seat of orderedCandidates.slice(0, 5)) {
-                const addRes = await this.wslibGetJson(
-                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                    seat.id
-                  )}&starttime=${encodeURIComponent(
-                    seatSnap.start_full
-                  )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
-                  rawToken
-                );
+                let addRes;
+                try {
+                  addRes = await this.wslibGetJson(
+                    `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
+                      seat.id
+                    )}&starttime=${encodeURIComponent(
+                      seatSnap.start_full
+                    )}&endtime=${encodeURIComponent(seatSnap.end_full)}`,
+                    rawToken
+                  );
+                } catch (addErr) {
+                  if (addErr?.code === "SCHOOL_AUTH_EXPIRED") throw addErr;
+                  const readbackAfterErr = await this.fetchCurrentActiveBooking(rawToken).catch(() => null);
+                  if (readbackAfterErr && readbackAfterErr.bookingId) {
+                    return {
+                      outcome: "SUBMITTED",
+                      externalBookingId: readbackAfterErr.bookingId,
+                      seatAlias: readbackAfterErr.seatName || seat.seat_name,
+                      regionAlias: readbackAfterErr.regionName || region.region_name,
+                      rawToken
+                    };
+                  }
+                  throw addErr;
+                }
                 lastMsg = String(addRes?.msg || "").trim();
                 if (addRes?.code === 200) {
                   const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
