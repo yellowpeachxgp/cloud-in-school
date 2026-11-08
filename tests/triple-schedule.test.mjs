@@ -1065,3 +1065,88 @@ test("High-Risk Regression: Same binding_id/consent_id snapshot omitting auth_ve
   assert.equal(execOldJob.job.state, "CANCELLED", "Queued job from old auth_version must be cancelled");
   assert.equal(execOldJob.event.status, "ABORTED_REVOKED", "Schedule event must be ABORTED_REVOKED");
 });
+
+
+test("P1 Race Regression: Concurrent revocation during in-flight query blocks addbooking write and preserves CANCELLED state (never overwritten with RESULT_UNKNOWN)", async () => {
+  const { createCampusCloudApp } = await import("../apps/api/src/app.mjs");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders: userHeaders } = setupBoundUser(app, Date.now());
+  const fakeJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIyMzEwNDAxMDA4ODgifQ.signature_long_enough_for_live_cred_check";
+
+  const cRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: userHeaders,
+    body: { school_id: "haut" }
+  });
+  const consentId = cRes.body.data.id;
+
+  const bInit = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: userHeaders,
+    body: { school_id: "haut", student_no: "231040100888", consent_id: consentId }
+  });
+  const bindId = bInit.body.data.id;
+
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${bindId}/complete`,
+    headers: userHeaders,
+    body: {
+      consent_id: consentId,
+      delegated_secret: JSON.stringify({ student_no: "231040100888", raw_token: fakeJwt })
+    }
+  });
+
+  const targetDate = "2026-11-10";
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: userHeaders,
+    body: {
+      school_binding_id: bindId,
+      consent_id: consentId,
+      target_local_date: targetDate,
+      target_local_time: "07:00:00",
+      area_name: "四层西书库北区",
+      candidate_seats: ["05桌 A座"]
+    }
+  });
+  assert.equal(planRes.status, 201);
+  const jobId = planRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+  job.prewarmed_targets = {
+    region_id: 13,
+    region_name: "四层西书库北区",
+    start_full: "2026-11-10 07:30:00",
+    end_full: "2026-11-10 22:00:00",
+    candidate_seats: [
+      { id: 618, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" }
+    ]
+  };
+
+  let addbookingCalled = 0;
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      // Simulate user revoking authorization while the read-only gate query is in flight!
+      await app.inject({
+        method: "DELETE",
+        url: `/api/v1/me/consents/${consentId}`,
+        headers: userHeaders
+      });
+      return { code: 200, msg: "成功", seatList: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      addbookingCalled += 1;
+      return { code: 200, bookingid: 9999999, msg: "成功" };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const fireMs = Date.parse("2026-11-10T07:00:01+08:00");
+  const fireRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireMs);
+  assert.equal(addbookingCalled, 0, "Concurrent revocation during query must block addbooking write");
+  assert.equal(fireRes.job.state, "CANCELLED", "Cancelled job state must never be overwritten with RESULT_UNKNOWN");
+  assert.equal(fireRes.event.status, "ABORTED_REVOKED", "Event status must be ABORTED_REVOKED");
+});

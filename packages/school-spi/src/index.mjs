@@ -1074,7 +1074,8 @@ export class HautLibraryProvider {
     regionName,
     candidateSeats,
     wantedSeats,
-    rawToken
+    rawToken,
+    assertStillAuthorized = null
   }) {
     const verifyReadback = async (specificSeat, expectedBookingId = null) => {
       let bookings;
@@ -1104,6 +1105,9 @@ export class HautLibraryProvider {
       return { status: unrelated ? "UNRELATED_FOUND" : "EMPTY", matched: null, unrelated };
     };
 
+    if (typeof assertStillAuthorized === "function") {
+      assertStillAuthorized();
+    }
     let addRes;
     try {
       addRes = await this.wslibGetJson(
@@ -1115,6 +1119,7 @@ export class HautLibraryProvider {
         rawToken
       );
     } catch (addErr) {
+      if (addErr?.code === "CONSENT_WITHDRAWN") throw addErr;
       // Ambiguous write failure: verify via readback once, and ALWAYS stop retrying if not confirmed!
       const rb = await verifyReadback(cand, null);
       if (rb.status === "MATCHED" && rb.matched) {
@@ -1437,7 +1442,8 @@ export class HautLibraryProvider {
     schoolIntegration,
     decryptedSecret = null,
     nowInstant,
-    allowDateFallbackToToday = false
+    allowDateFallbackToToday = false,
+    assertStillAuthorized = null
   }) {
     if (job.school_id !== this.schoolId) {
       throw new ContractError("FORBIDDEN", "Cross-school provider mismatch");
@@ -1456,6 +1462,9 @@ export class HautLibraryProvider {
       );
     }
 
+    if (typeof assertStillAuthorized === "function") {
+      assertStillAuthorized();
+    }
     if (this.mockBackend) {
       return this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
     }
@@ -1564,6 +1573,7 @@ export class HautLibraryProvider {
             }
           }
 
+          if (typeof assertStillAuthorized === "function") assertStillAuthorized();
           let needWaitOpening = false;
           let hasLockedCandidate = false;
           for (const cand of prewarmed.candidate_seats) {
@@ -1584,7 +1594,8 @@ export class HautLibraryProvider {
               regionName: prewarmed.region_name || preferredArea,
               candidateSeats: prewarmed.candidate_seats,
               wantedSeats,
-              rawToken
+              rawToken,
+              assertStillAuthorized
             });
             if (step.action === "RETURN_FINAL") {
               return step.result;
@@ -1751,6 +1762,7 @@ export class HautLibraryProvider {
                 }
               }
 
+              if (typeof assertStillAuthorized === "function") assertStillAuthorized();
               for (const seat of orderedCandidates.slice(0, 5)) {
                 if (permanentlyOccupiedInWave.has(seat.id)) continue;
                 if ((seatLockedInWave.get(seat.id) || 0) > Date.now()) {
@@ -1773,7 +1785,8 @@ export class HautLibraryProvider {
                   regionName: region.region_name,
                   candidateSeats: orderedCandidates,
                   wantedSeats,
-                  rawToken
+                  rawToken,
+                  assertStillAuthorized
                 });
                 if (step.action === "RETURN_FINAL") {
                   return step.result;
@@ -1801,6 +1814,7 @@ export class HautLibraryProvider {
             }
           }
         } catch (err) {
+          if (err?.code === "CONSENT_WITHDRAWN") throw err;
           if (err?.code === "SCHOOL_AUTH_EXPIRED") {
             try {
               const freshAuth = await this.authenticateHautSession(

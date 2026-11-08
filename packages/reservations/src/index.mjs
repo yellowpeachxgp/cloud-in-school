@@ -406,6 +406,13 @@ export class TripleScheduleEngine {
     if (!job || job.state_version !== expectedVersion) {
       return false;
     }
+    if (
+      ["CANCELLED", "REVOKED"].includes(job.state) &&
+      nextState !== "CANCELLED" &&
+      nextState !== "REVOKED"
+    ) {
+      return false;
+    }
     job.state = nextState;
     job.state_version += 1;
     Object.assign(job, patch);
@@ -516,15 +523,19 @@ export class TripleScheduleEngine {
 
   _abortJobForStaleAuthorization(job, plan, event, nowMs = Date.now()) {
     const ts = new Date(nowMs).toISOString();
-    event.status = "ABORTED_REVOKED";
-    event.actual_at = ts;
+    if (event) {
+      event.status = "ABORTED_REVOKED";
+      event.actual_at = ts;
+    }
     if (plan) {
       plan.enabled = false;
     }
-    this.casJobState(job.id, job.state_version, "CANCELLED", {
-      last_error_code: "CONSENT_WITHDRAWN",
-      last_diagnostic_message: "任务所属授权版本或同意记录已失效，已终止旧授权任务"
-    });
+    if (job.state !== "CANCELLED" && job.state !== "REVOKED") {
+      this.casJobState(job.id, job.state_version, "CANCELLED", {
+        last_error_code: "CONSENT_WITHDRAWN",
+        last_diagnostic_message: "任务所属授权版本或同意记录已失效，已终止旧授权任务"
+      });
+    }
     for (const ev of this.store.eventsForJob(job.id)) {
       if (ev.status === "ARMED") {
         ev.status = "ABORTED_REVOKED";
@@ -749,6 +760,19 @@ export class TripleScheduleEngine {
         if (!locked) {
           return { job, event };
         }
+        const executingStateVersion = job.state_version;
+        const assertStillAuthorized = () => {
+          if (
+            !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+            job.state !== "EXECUTING" ||
+            job.state_version !== executingStateVersion
+          ) {
+            throw new ContractError(
+              "CONSENT_WITHDRAWN",
+              "Authorization or job was revoked before external booking write"
+            );
+          }
+        };
 
         const schoolIntegration = this.store.schoolIntegrations.get(job.school_id);
         let submitRes;
@@ -760,14 +784,33 @@ export class TripleScheduleEngine {
             schoolIntegration,
             decryptedSecret,
             nowInstant: new Date(nowMs),
-            allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday)
+            allowDateFallbackToToday: Boolean(options.allowDateFallbackToToday),
+            assertStillAuthorized
           });
         } catch (err) {
+          if (
+            err?.code === "CONSENT_WITHDRAWN" ||
+            !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+            job.state !== "EXECUTING" ||
+            job.state_version !== executingStateVersion
+          ) {
+            return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+          }
           submitRes = {
             outcome: "FAILED",
             errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
             diagnosticMessage: err?.message || "学校选座接口请求异常"
           };
+        }
+
+        // If authorization or job was revoked/cancelled while executeMockOrAuthorizedCreate was in flight,
+        // abort immediately and never overwrite CANCELLED with RESULT_UNKNOWN or FAILED!
+        if (
+          !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+          job.state !== "EXECUTING" ||
+          job.state_version !== executingStateVersion
+        ) {
+          return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
         }
 
         if (submitRes.rawToken) {
@@ -783,7 +826,7 @@ export class TripleScheduleEngine {
           job.pending_external_booking_id = submitRes.externalBookingId || null;
           event.status = "RESULT_UNKNOWN";
           event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
+          this.casJobState(jobId, executingStateVersion, "RESULT_UNKNOWN", {
             last_error_code: "BOOKING_RESULT_UNKNOWN",
             last_diagnostic_message: submitRes.diagnosticMessage || null
           });
@@ -793,7 +836,7 @@ export class TripleScheduleEngine {
         if (submitRes.outcome === "FAILED") {
           event.status = "FAILED";
           event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "FAILED", {
+          this.casJobState(jobId, executingStateVersion, "FAILED", {
             last_error_code: submitRes.errorCode || "SCHOOL_REJECTED",
             last_diagnostic_message: submitRes.diagnosticMessage || null
           });
@@ -819,11 +862,17 @@ export class TripleScheduleEngine {
         } catch {
           verifyRes = { verified: false, officialStatus: "READBACK_ERROR" };
         }
+        if (
+          ["CANCELLED", "REVOKED"].includes(job.state) ||
+          job.state_version !== executingStateVersion
+        ) {
+          return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+        }
         if (!verifyRes.verified) {
           if (verifyRes.officialStatus === "MISMATCHED_TARGET_SEAT_OR_DATE") {
             event.status = "FAILED";
             event.actual_at = new Date(nowMs).toISOString();
-            this.casJobState(jobId, job.state_version, "FAILED", {
+            this.casJobState(jobId, executingStateVersion, "FAILED", {
               last_error_code: "SCHOOL_REJECTED",
               last_diagnostic_message: "回查到的有效预约与目标候选座位或日期不匹配"
             });
@@ -833,7 +882,7 @@ export class TripleScheduleEngine {
           job.pending_external_booking_id = submitRes.externalBookingId;
           event.status = "RESULT_UNKNOWN";
           event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "RESULT_UNKNOWN", {
+          this.casJobState(jobId, executingStateVersion, "RESULT_UNKNOWN", {
             last_error_code: "BOOKING_RESULT_UNKNOWN"
           });
           return { job, event };
