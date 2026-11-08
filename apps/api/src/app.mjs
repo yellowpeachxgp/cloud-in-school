@@ -354,6 +354,8 @@ export function createCampusCloudApp(options = {}) {
         student_no: b.student_no || b.student_no_masked || "",
         student_no_masked: b.student_no_masked,
         status: b.status,
+        consent_id: b.consent_id || null,
+        auth_version: Number(b.auth_version || user?.auth_version || 1),
         created_at: b.created_at
       }));
     const consents = store.recordsForUser("consents", cloudUserId).filter((c) => !c.withdrawn_at);
@@ -405,6 +407,7 @@ export function createCampusCloudApp(options = {}) {
         group: wallet.group || user.group || "默认分组",
         aff_code: wallet.aff_code || user.aff_code || ""
       },
+      auth_version: Number(user?.auth_version || 1),
       school_bindings: bindings,
       consents,
       reservation_plans: plans,
