@@ -33,6 +33,7 @@ const HAUT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8";
 export function translateWslibDiagnosticMessage(rawMsg) {
   const text = String(rawMsg || "").trim();
   if (!text) return "";
+  if (/seat\.10042/i.test(text)) return "只能预约1天之内的时间(含当天)";
   if (/seat\.10056/i.test(text)) return "预约开始时间须大于当前时间";
   if (/seat\.10057/i.test(text)) return "只能预约1天之内的时间(含当天)";
   if (/seat\.10058/i.test(text)) return "预约时间不在自习室开放时段内";
@@ -43,12 +44,27 @@ export function translateWslibDiagnosticMessage(rawMsg) {
 
 export function isWslibNotYetOpenMessage(rawMsg) {
   const text = String(rawMsg || "").trim();
-  return /未到|未开放|不在.*时间|只能预约|尚未开放|seat\.10057|seat\.10058|seat\.10079/i.test(text);
+  return /未到|未开放|不在.*时间|只能预约1天|尚未开放|seat\.10042|seat\.10057|seat\.10058|seat\.10079/i.test(text);
+}
+
+export function isWslibSeatLockedMessage(rawMsg, code = null) {
+  if (Number(code) === 1122) return true;
+  const text = String(rawMsg || "").trim();
+  return /本座位已锁定|已锁定.*稍后再试|seat\.10062/i.test(text);
+}
+
+export function isWslibSeatOccupiedByOthersMessage(rawMsg, code = null) {
+  const text = String(rawMsg || "").trim();
+  return (
+    (Number(code) === 404 && /该座位|此座位/.test(text)) ||
+    /该座位已有预约|此座位已有预约|该座位已被预约|座位已被占用/i.test(text)
+  );
 }
 
 export function isWslibAlreadyBookedMessage(rawMsg) {
   const text = String(rawMsg || "").trim();
-  return /已有.*预约|不能重复|已预约|只能预约一个座位|seat\.10060|seat\.10061|seat\.10079/i.test(text);
+  if (isWslibSeatOccupiedByOthersMessage(text)) return false;
+  return /您已有.*预约|不能重复|已有一个.*预约|只能预约一个座位|当前已有预约|seat\.10060|seat\.10061/i.test(text);
 }
 
 export function validateAllowedSchoolUrl(urlString, allowedHosts) {
@@ -995,14 +1011,21 @@ export class HautLibraryProvider {
         plan.candidate_seats ||
         plan.preferences_json?.preferred_seat_ids ||
         []
-      ).map((s) => String(s).trim());
-      const allowAlt = plan.preferences_json?.allow_alternative_seat !== false;
+      ).map((s) => String(s).trim()).filter(Boolean);
+      const prewarmed = job.prewarmed_targets;
+      const hasExplicitCandidateSeats =
+        wantedSeats.length > 0 ||
+        (Array.isArray(prewarmed?.candidate_seats) && prewarmed.candidate_seats.length > 0);
+      // Never silently book an unrequested random seat (e.g. 01桌 B座) when the user explicitly chose candidate seats
+      const allowAlt =
+        !hasExplicitCandidateSeats && plan.preferences_json?.allow_alternative_seat === true;
 
       let lastMsg = "";
-      const prewarmed = job.prewarmed_targets;
       const isMorningOpeningWindow = fireLocalTime >= "07:00:00" && fireLocalTime < "07:25:00";
+      const isExactOpeningBurst = fireLocalTime >= "07:00:00" && fireLocalTime <= "07:00:03";
 
-      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, fire addbooking directly at 0ms!
+      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, protect against pre-opening 3s Redis seat lock
+      // and retry only the user-selected candidate seats in strict priority order.
       if (
         prewarmed &&
         Array.isArray(prewarmed.candidate_seats) &&
@@ -1011,14 +1034,62 @@ export class HautLibraryProvider {
         prewarmed.end_full &&
         (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
       ) {
-        const fastWaveDelaysMs = [0, 180, 220, 250, 280, 320, 380, 450, 520, 600, 700, 800];
+        // Canary gate probe at 07:00:00..07:00:03 so a slightly lagging wslib clock never locks cand[0] for 3 seconds
+        if (isExactOpeningBurst) {
+          for (let probeIdx = 0; probeIdx < 12; probeIdx++) {
+            if (probeIdx > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 110));
+            }
+            const canarySeatId = 999901 + probeIdx;
+            const probeRes = await this.wslibGetJson(
+              `/seatbook/user/addbooking?channel=1003&seatid=${canarySeatId}&starttime=${encodeURIComponent(
+                prewarmed.start_full
+              )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
+              rawToken
+            ).catch(() => null);
+            const probeRawMsg = String(probeRes?.raw_msg || probeRes?.msg || "").trim();
+            const probeMsg = translateWslibDiagnosticMessage(probeRawMsg);
+            if (!isWslibNotYetOpenMessage(probeRawMsg) && !isWslibNotYetOpenMessage(probeMsg)) {
+              break;
+            }
+          }
+        }
+
+        const seatLockedUntilMs = new Map();
+        const permanentlyOccupiedIds = new Set();
+        const fastWaveDelaysMs = [0, 180, 220, 250, 280, 320, 380, 450, 520, 600, 700, 800, 900, 1000, 1000, 1000];
         for (let fastAttempt = 0; fastAttempt < fastWaveDelaysMs.length; fastAttempt++) {
-          if (fastWaveDelaysMs[fastAttempt] > 0) {
-            await new Promise((resolve) => setTimeout(resolve, fastWaveDelaysMs[fastAttempt]));
+          if (fastAttempt > 0) {
+            const nowMs = Date.now();
+            const unlockedRemaining = prewarmed.candidate_seats.filter(
+              (c) => !permanentlyOccupiedIds.has(c.id) && (seatLockedUntilMs.get(c.id) || 0) <= nowMs
+            );
+            let waitMs = fastWaveDelaysMs[fastAttempt];
+            if (unlockedRemaining.length === 0) {
+              const lockDeadlines = prewarmed.candidate_seats
+                .filter((c) => !permanentlyOccupiedIds.has(c.id))
+                .map((c) => seatLockedUntilMs.get(c.id) || 0)
+                .filter((t) => t > nowMs);
+              if (lockDeadlines.length > 0) {
+                const earliestUnlock = Math.min(...lockDeadlines);
+                waitMs = Math.min(Math.max(earliestUnlock - nowMs + 40, 150), 1200);
+              }
+            }
+            if (waitMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, waitMs));
+            }
           }
           try {
             let needWaitOpening = false;
+            let hasLockedCandidate = false;
             for (const cand of prewarmed.candidate_seats) {
+              if (permanentlyOccupiedIds.has(cand.id)) {
+                continue;
+              }
+              if ((seatLockedUntilMs.get(cand.id) || 0) > Date.now()) {
+                hasLockedCandidate = true;
+                continue;
+              }
               const addRes = await this.wslibGetJson(
                 `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
                   cand.id
@@ -1040,6 +1111,10 @@ export class HautLibraryProvider {
                   rawToken
                 };
               }
+              if (isWslibSeatOccupiedByOthersMessage(rawErrText, addRes?.code) || isWslibSeatOccupiedByOthersMessage(lastMsg, addRes?.code)) {
+                permanentlyOccupiedIds.add(cand.id);
+                continue;
+              }
               if (isWslibAlreadyBookedMessage(rawErrText) || isWslibAlreadyBookedMessage(lastMsg)) {
                 const existing = await this.fetchCurrentActiveBooking(rawToken);
                 if (existing) {
@@ -1053,46 +1128,26 @@ export class HautLibraryProvider {
                 }
               }
               if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(lastMsg)) {
+                // wslib places a 3.0s Redis lock on any seatid hit before opening; record it and break immediately
+                // so we never domino-lock cand[1] and cand[2] while the gate is still closed!
+                seatLockedUntilMs.set(cand.id, Date.now() + 3050);
                 needWaitOpening = true;
                 break;
               }
-            }
-            if (!needWaitOpening && allowAlt && prewarmed.region_id) {
-              const qJson = await this.wslibGetJson(
-                `/seatbook/layout/query?starttime=${encodeURIComponent(
-                  prewarmed.start_full
-                )}&endtime=${encodeURIComponent(
-                  prewarmed.end_full
-                )}&regionid=${encodeURIComponent(prewarmed.region_id)}`,
-                rawToken
-              );
-              const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
-              const freeSeats = rawSeats.filter((s) => s?.id && Number(s.seatStatus ?? 1) === 2);
-              for (const freeSeat of freeSeats.slice(0, 4)) {
-                const addRes = await this.wslibGetJson(
-                  `/seatbook/user/addbooking?channel=1003&seatid=${encodeURIComponent(
-                    freeSeat.id
-                  )}&starttime=${encodeURIComponent(
-                    prewarmed.start_full
-                  )}&endtime=${encodeURIComponent(prewarmed.end_full)}`,
-                  rawToken
-                );
-                lastMsg = String(addRes?.msg || "").trim();
-                if (addRes?.code === 200) {
-                  const bookedId = addRes?.bookingid ? String(addRes.bookingid) : null;
-                  const confirmed = await this.fetchCurrentActiveBooking(rawToken);
-                  return {
-                    outcome: "SUBMITTED",
-                    externalBookingId: confirmed?.bookingId || bookedId || String(freeSeat.id),
-                    seatAlias:
-                      confirmed?.seatName || cleanSpiText(freeSeat.seatName, String(freeSeat.id)),
-                    regionAlias: confirmed?.regionName || prewarmed.region_name,
-                    rawToken
-                  };
+              if (isWslibSeatLockedMessage(rawErrText, addRes?.code) || isWslibSeatLockedMessage(lastMsg, addRes?.code)) {
+                if ((seatLockedUntilMs.get(cand.id) || 0) <= Date.now()) {
+                  seatLockedUntilMs.set(cand.id, Date.now() + 1050);
                 }
+                hasLockedCandidate = true;
+                continue;
               }
             }
-            if (!needWaitOpening) break;
+            if (permanentlyOccupiedIds.size >= prewarmed.candidate_seats.length) {
+              break;
+            }
+            if (!needWaitOpening && !hasLockedCandidate) {
+              break;
+            }
           } catch (err) {
             if (err?.code === "SCHOOL_AUTH_EXPIRED") {
               const freshAuth = await this.authenticateHautSession(

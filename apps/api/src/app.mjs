@@ -1848,7 +1848,7 @@ export function createCampusCloudApp(options = {}) {
                   target_local_time: targetTime,
                   repeat_days: repeatDays,
                   remaining_days: remainingDays,
-                  allow_alternative_seat: rpItem?.allow_alternative_seat !== false,
+                  allow_alternative_seat: rpItem?.allow_alternative_seat === true,
                   replace_existing: false
                 },
                 nowMs
