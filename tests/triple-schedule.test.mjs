@@ -774,9 +774,10 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
     "Ordinary snapshot sync must never resurrect a revoked school binding"
   );
 
-  // 3. When user withdraws consent, and THEN explicitly re-grants consent + reauthorizes (or creates new binding),
-  // subsequent snapshot sync MUST update credentials AND create reservation jobs (historical withdrawn/revoked records must not veto new generation)!
-  const activeConsentId = goodSync.body.data.consents?.find((c) => !c.withdrawn_at)?.id ||
+  // 3. Stale pre-revocation snapshot must be REJECTED (409 CONFLICT) after reauthorization,
+  // whereas a current-generation snapshot (with matching binding_id & consent_id) succeeds!
+  const activeConsentId =
+    goodSync.body.data.consents?.find((c) => !c.withdrawn_at)?.id ||
     Array.from(app.store.consents.values()).find((c) => !c.withdrawn_at)?.id;
   if (activeConsentId) {
     const withdrawRes = await app.inject({
@@ -816,19 +817,24 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
     body: { school_id: "haut" }
   });
   assert.equal(newConsentRes.status, 201);
+  const newConsentId = newConsentRes.body.data.id;
 
   const reauthRes = await app.inject({
     method: "POST",
     url: `/api/v1/school-bindings/${createdBindingId}/reauthorize`,
     headers: userHeaders,
     body: {
+      consent_id: newConsentId,
       delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_reauth" })
     }
   });
   assert.equal(reauthRes.status, 200);
 
   const futureDate = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const syncAfterReconsent = await app.inject({
+
+  // Replay of a STALE pre-revocation snapshot (unversioned or referencing old consentId) MUST be rejected with 409 CONFLICT
+  // and must NOT overwrite pwd_reauth or create a reservation job!
+  const staleSnapshotReplay = await app.inject({
     method: "POST",
     url: "/api/v1/sync/snapshot",
     headers: userHeaders,
@@ -837,7 +843,7 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
         {
           school_id: "haut",
           student_no: "231040100111",
-          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_synced_after_reconsent" })
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_stale_old" })
         }
       ],
       reservation_plan_upserts: [
@@ -850,11 +856,46 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
       ]
     }
   });
-  assert.equal(syncAfterReconsent.status, 200);
-  const activeAfterReconsent = syncAfterReconsent.body.data.school_bindings.filter(
-    (b) => b.status === "DELEGATED_ACTIVE" && !b.revoked_at
+  assert.equal(staleSnapshotReplay.status, 409, "Stale pre-revocation snapshot must be rejected with 409 CONFLICT");
+  const bindAfterStale = app.store.schoolBindings.get(createdBindingId);
+  const decAfterStale = app.reservationEngine._decryptBindingCredential(
+    { id: "diag-stale", school_id: "haut", school_binding_id: createdBindingId },
+    bindAfterStale,
+    Date.now()
   );
-  assert.equal(activeAfterReconsent.length, 1, "Active binding must remain active after re-consent sync");
+  assert.ok(decAfterStale.includes("pwd_reauth"), "Stale snapshot must not overwrite reauthorized credential");
+
+  // Current-generation snapshot carrying matching binding_id, consent_id, and auth_version succeeds!
+  const syncAfterReconsent = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      auth_version: reauthRes.body.data.auth_version,
+      school_binding_upserts: [
+        {
+          binding_id: createdBindingId,
+          consent_id: newConsentId,
+          auth_version: reauthRes.body.data.auth_version,
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_synced_after_reconsent" })
+        }
+      ],
+      reservation_plan_upserts: [
+        {
+          school_binding_id: createdBindingId,
+          consent_id: newConsentId,
+          auth_version: reauthRes.body.data.auth_version,
+          target_local_date: futureDate,
+          target_local_time: "07:00:00",
+          area_name: "四层西书库北区",
+          candidate_seats: ["05桌 A座"]
+        }
+      ]
+    }
+  });
+  assert.equal(syncAfterReconsent.status, 200);
   const updatedBindObj = app.store.schoolBindings.get(createdBindingId);
   const decryptedAfterSync = app.reservationEngine._decryptBindingCredential(
     { id: "diag-job", school_id: "haut", school_binding_id: createdBindingId },
@@ -863,83 +904,56 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
   );
   assert.ok(
     decryptedAfterSync.includes("pwd_synced_after_reconsent"),
-    "Snapshot sync after explicit re-consent & reauthorize must update credential"
+    "Current-generation snapshot sync must update credential"
   );
   assert.equal(
     syncAfterReconsent.body.data.reservation_jobs.length,
     1,
-    "Snapshot sync after explicit re-consent & reauthorize must create reservation job"
+    "Current-generation snapshot sync must create reservation job"
   );
 
-  // 4. Also test withdraw consent -> new POST /api/v1/me/consents + new POST /api/v1/school-bindings + /complete -> sync
-  const c2Id = newConsentRes.body.data.id;
-  const withdraw2 = await app.inject({
-    method: "DELETE",
-    url: `/api/v1/me/consents/${c2Id}`,
-    headers: userHeaders
-  });
-  assert.equal(withdraw2.status, 200);
-
-  const c3Res = await app.inject({
-    method: "POST",
-    url: "/api/v1/me/consents",
-    headers: userHeaders,
-    body: { school_id: "haut" }
-  });
-  assert.equal(c3Res.status, 201);
-
-  const newBindInit = await app.inject({
+  // 4. Multi-binding cascade revocation: revoking one binding must also cancel plans & jobs of all sibling bindings for the same student_no!
+  const sibBindInit = await app.inject({
     method: "POST",
     url: "/api/v1/school-bindings",
     headers: userHeaders,
-    body: { school_id: "haut", student_no: "231040100111" }
+    body: { school_id: "haut", student_no: "231040100111", consent_id: newConsentId }
   });
-  assert.equal(newBindInit.status, 201);
-  const b2Id = newBindInit.body.data.id;
-
-  const newBindComp = await app.inject({
+  const sibBindId = sibBindInit.body.data.id;
+  await app.inject({
     method: "POST",
-    url: `/api/v1/school-bindings/${b2Id}/complete`,
+    url: `/api/v1/school-bindings/${sibBindId}/complete`,
     headers: userHeaders,
     body: {
-      delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_b2_init" })
+      consent_id: newConsentId,
+      delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_sib" })
     }
   });
-  assert.equal(newBindComp.status, 200);
-
-  const futureDate2 = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const syncAfterNewBind = await app.inject({
+  const futureDateSib = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const sibPlanRes = await app.inject({
     method: "POST",
-    url: "/api/v1/sync/snapshot",
+    url: "/api/v1/reservation-plans",
     headers: userHeaders,
     body: {
-      school_binding_upserts: [
-        {
-          school_id: "haut",
-          student_no: "231040100111",
-          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_b2_synced" })
-        }
-      ],
-      reservation_plan_upserts: [
-        {
-          target_local_date: futureDate2,
-          target_local_time: "07:00:00",
-          area_name: "四层西书库北区",
-          candidate_seats: ["06桌 F座"]
-        }
-      ]
+      school_binding_id: sibBindId,
+      consent_id: newConsentId,
+      target_local_date: futureDateSib,
+      target_local_time: "07:00:00",
+      area_name: "四层西书库北区",
+      candidate_seats: ["08桌 A座"]
     }
   });
-  assert.equal(syncAfterNewBind.status, 200);
-  const b2Obj = app.store.schoolBindings.get(b2Id);
-  const decB2 = app.reservationEngine._decryptBindingCredential(
-    { id: "diag-job-2", school_id: "haut", school_binding_id: b2Id },
-    b2Obj,
-    Date.now()
-  );
-  assert.ok(decB2.includes("pwd_b2_synced"), "Sync must update newly created binding after prior withdrawal");
-  assert.ok(
-    syncAfterNewBind.body.data.reservation_jobs.some((j) => j.booking_local_date === futureDate2 && j.state !== "CANCELLED"),
-    "Sync must create reservation job for newly created binding after prior withdrawal"
-  );
+  assert.equal(sibPlanRes.status, 201);
+  const sibJobId = sibPlanRes.body.data.job_id;
+  const sibPlanId = sibPlanRes.body.data.plan_id;
+
+  // Revoke createdBindingId (binding 1); sibling binding 2 plan and job must ALSO be cancelled in the same transaction!
+  const revokePrimaryRes = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/school-bindings/${createdBindingId}`,
+    headers: userHeaders
+  });
+  assert.equal(revokePrimaryRes.status, 200);
+  assert.equal(app.store.reservationPlans.get(sibPlanId).enabled, false, "Sibling binding plan must be disabled on revoke");
+  assert.equal(app.store.reservationJobs.get(sibJobId).state, "CANCELLED", "Sibling binding job must be cancelled on revoke");
 });

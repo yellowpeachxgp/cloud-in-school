@@ -1383,6 +1383,12 @@ export class CloudDatabaseStore {
   haltAllUserPlansAndBindings(cloudUserId, reason = "CONSENT_WITHDRAWN", nowMs = Date.now()) {
     const ts = new Date(nowMs).toISOString();
     const cancelledJobIds = [];
+    const cancelledJobIdSet = new Set();
+
+    const user = this.users.get(cloudUserId);
+    if (user) {
+      user.auth_version = Number(user.auth_version || 1) + 1;
+    }
 
     for (const b of this.schoolBindings.values()) {
       if (b.cloud_user_id === cloudUserId && !b.revoked_at) {
@@ -1415,6 +1421,14 @@ export class CloudDatabaseStore {
         j.state_version += 1;
         j.last_error_code = reason;
         cancelledJobIds.push(j.id);
+        cancelledJobIdSet.add(j.id);
+      }
+    }
+
+    for (const ev of this.scheduleEvents.values()) {
+      if (cancelledJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
+        ev.status = "ABORTED_REVOKED";
+        ev.actual_at = ts;
       }
     }
 
@@ -1422,7 +1436,7 @@ export class CloudDatabaseStore {
       actor_kind: "USER",
       actor_ref: cloudUserId,
       action: "HALT_ALL_PLANS_AND_BINDINGS",
-      resource_kind: "cloud_user",
+      resource_kind: "user",
       resource_ref: cloudUserId,
       outcome: reason,
       detail: { cancelled_job_ids: cancelledJobIds }
@@ -1438,15 +1452,20 @@ export class CloudDatabaseStore {
     }
     const ts = new Date(nowMs).toISOString();
     const targetStudentNo = String(binding.student_no || "").trim();
+    const affectedBindingIds = new Set([bindingId]);
+
     for (const b of this.schoolBindings.values()) {
       if (
         b.cloud_user_id === cloudUserId &&
         b.school_id === binding.school_id &&
-        (b.id === bindingId || (targetStudentNo && String(b.student_no || "").trim() === targetStudentNo)) &&
-        !b.revoked_at
+        (b.id === bindingId ||
+          (targetStudentNo && String(b.student_no || "").trim() === targetStudentNo))
       ) {
-        b.revoked_at = ts;
-        b.status = "REVOKED";
+        affectedBindingIds.add(b.id);
+        if (!b.revoked_at) {
+          b.revoked_at = ts;
+          b.status = "REVOKED";
+        }
         if (b.credential_ref && this.encryptedCredentials.has(b.credential_ref)) {
           this.encryptedCredentials.get(b.credential_ref).revoked_at = ts;
         }
@@ -1454,22 +1473,39 @@ export class CloudDatabaseStore {
     }
     binding.revoked_at = ts;
     binding.status = "REVOKED";
+    if (binding.credential_ref && this.encryptedCredentials.has(binding.credential_ref)) {
+      this.encryptedCredentials.get(binding.credential_ref).revoked_at = ts;
+    }
+
+    const user = this.users.get(cloudUserId);
+    if (user) {
+      user.auth_version = Number(user.auth_version || 1) + 1;
+    }
 
     const cancelledJobIds = [];
+    const cancelledJobIdSet = new Set();
     for (const p of this.reservationPlans.values()) {
-      if (p.school_binding_id === bindingId) {
+      if (p.cloud_user_id === cloudUserId && affectedBindingIds.has(p.school_binding_id)) {
         p.enabled = false;
       }
     }
     for (const j of this.reservationJobs.values()) {
       if (
-        j.school_binding_id === bindingId &&
+        j.cloud_user_id === cloudUserId &&
+        affectedBindingIds.has(j.school_binding_id) &&
         !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
         j.state = "CANCELLED";
         j.state_version += 1;
         j.last_error_code = reason;
         cancelledJobIds.push(j.id);
+        cancelledJobIdSet.add(j.id);
+      }
+    }
+    for (const ev of this.scheduleEvents.values()) {
+      if (cancelledJobIdSet.has(ev.job_id) && ev.status === "ARMED") {
+        ev.status = "ABORTED_REVOKED";
+        ev.actual_at = ts;
       }
     }
 
@@ -1480,9 +1516,12 @@ export class CloudDatabaseStore {
       resource_kind: "school_binding",
       resource_ref: bindingId,
       outcome: reason,
-      detail: { cancelled_job_ids: cancelledJobIds }
+      detail: {
+        affected_binding_ids: Array.from(affectedBindingIds),
+        cancelled_job_ids: cancelledJobIds
+      }
     });
 
-    return { binding, cancelledJobIds };
+    return { binding, cancelledJobIds, affectedBindingIds: Array.from(affectedBindingIds) };
   }
 }

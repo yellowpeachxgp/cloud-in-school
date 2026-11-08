@@ -160,6 +160,19 @@ export class TripleScheduleEngine {
     if (!consent || consent.cloud_user_id !== cloudUserId || consent.withdrawn_at) {
       throw new ContractError("CONSENT_WITHDRAWN", "Active consent record is required");
     }
+    if ((consent.school_id || binding.school_id) !== binding.school_id) {
+      throw new ContractError("FORBIDDEN", "Consent school_id does not match binding school_id");
+    }
+    if (binding.consent_id && binding.consent_id !== consent.id) {
+      throw new ContractError("CONFLICT", "Consent does not correspond to the target school binding");
+    }
+    if (
+      binding.auth_version !== undefined &&
+      consent.auth_version !== undefined &&
+      Number(binding.auth_version) !== Number(consent.auth_version)
+    ) {
+      throw new ContractError("CONFLICT", "Binding and consent authorization versions do not match");
+    }
 
     // Conflict check: same user + binding + date active job
     const duplicateActive = this.store.recordsForUser("reservationJobs", cloudUserId).find(
