@@ -853,6 +853,21 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("NOT_FOUND", "School binding not found");
       }
       const secretPayload = body?.delegated_secret || body?.session_token || "delegated_session_v1";
+      if (typeof secretPayload === "string" && secretPayload.trim().startsWith("{")) {
+        try {
+          const parsedSec = JSON.parse(secretPayload.trim());
+          const secSno = String(parsedSec.student_no || parsedSec.studentId || "").trim();
+          const bindSno = String(binding.student_no || "").trim();
+          if (secSno && bindSno && secSno !== bindSno) {
+            throw new ContractError(
+              "FORBIDDEN",
+              "delegated_secret student_no does not match binding student_no"
+            );
+          }
+        } catch (e) {
+          if (e instanceof ContractError) throw e;
+        }
+      }
       const encrypted = kmsVault.encryptSecret({
         bindingId: binding.id,
         schoolId: binding.school_id,
@@ -1692,48 +1707,66 @@ export function createCampusCloudApp(options = {}) {
           const studentNo = String(bItem?.student_no || "").trim();
           if (!studentNo) continue;
           const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
-          let existingBinding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-            (b) => b.school_id === schoolId && !b.revoked_at
-          );
-          if (!existingBinding) {
+          // Strictly match only bindings for the exact same (cloudUserId, schoolId, studentNo);
+          // never overwrite a binding belonging to a different student_no!
+          const sameStudentBindings = store
+            .recordsForUser("schoolBindings", auth.cloudUserId)
+            .filter(
+              (b) =>
+                b.school_id === schoolId &&
+                !b.revoked_at &&
+                String(b.student_no || "").trim() === studentNo
+            );
+          if (sameStudentBindings.length === 0) {
             const bindingId = crypto.randomUUID();
-            existingBinding = {
+            const createdBind = {
               id: bindingId,
               cloud_user_id: auth.cloudUserId,
               school_id: schoolId,
               student_no: studentNo,
-              student_no_masked: studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
+              student_no_masked:
+                studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
               status: "DELEGATED_ACTIVE",
               credential_ref: null,
               credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
               created_at: new Date(nowMs).toISOString(),
               revoked_at: null
             };
-            store.schoolBindings.set(bindingId, existingBinding);
-            store.indexUserScoped?.("schoolBindings", bindingId, existingBinding.cloud_user_id);
+            store.schoolBindings.set(bindingId, createdBind);
+            store.indexUserScoped?.("schoolBindings", bindingId, createdBind.cloud_user_id);
+            sameStudentBindings.push(createdBind);
           } else {
-            existingBinding.student_no = studentNo;
-            existingBinding.student_no_masked = studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
-            existingBinding.status = "DELEGATED_ACTIVE";
+            for (const targetBind of sameStudentBindings) {
+              targetBind.status = "DELEGATED_ACTIVE";
+            }
           }
           if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-            const allActiveBindings = store
-              .recordsForUser("schoolBindings", auth.cloudUserId)
-              .filter((b) => b.school_id === schoolId && !b.revoked_at);
-            for (const targetBind of allActiveBindings) {
+            const secretText = String(bItem.delegated_secret).trim();
+            if (secretText.startsWith("{")) {
+              try {
+                const parsedSecret = JSON.parse(secretText);
+                const secretSno = String(parsedSecret.student_no || parsedSecret.studentId || "").trim();
+                if (secretSno && secretSno !== studentNo) {
+                  throw new ContractError(
+                    "FORBIDDEN",
+                    "delegated_secret student_no does not match school_binding_upserts student_no"
+                  );
+                }
+              } catch (e) {
+                if (e instanceof ContractError) throw e;
+              }
+            }
+            for (const targetBind of sameStudentBindings) {
               const encrypted = kmsVault.encryptSecret({
                 bindingId: targetBind.id,
                 schoolId,
                 credentialKind: "DELEGATED_SESSION_BUNDLE",
-                plaintext: String(bItem.delegated_secret).trim(),
+                plaintext: secretText,
                 expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
               });
               store.encryptedCredentials.set(encrypted.id, encrypted);
               targetBind.credential_ref = encrypted.id;
               targetBind.credential_expires_at = encrypted.expires_at;
-              targetBind.student_no = studentNo;
-              targetBind.student_no_masked =
-                studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***";
               targetBind.status = "DELEGATED_ACTIVE";
             }
           }
@@ -1816,9 +1849,14 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (Array.isArray(body.reservation_plan_upserts)) {
-        const activeBinding = Array.from(store.schoolBindings.values()).find(
-          (b) => b.cloud_user_id === auth.cloudUserId && !b.revoked_at
+        const userActiveBindings = store
+          .recordsForUser("schoolBindings", auth.cloudUserId)
+          .filter((b) => !b.revoked_at);
+        const distinctStudentNos = new Set(
+          userActiveBindings.map((b) => String(b.student_no || "").trim()).filter(Boolean)
         );
+        const activeBinding =
+          distinctStudentNos.size <= 1 ? userActiveBindings[userActiveBindings.length - 1] || null : null;
         let activeConsent = Array.from(store.consents.values()).find(
           (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
         );

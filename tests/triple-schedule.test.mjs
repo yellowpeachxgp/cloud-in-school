@@ -510,3 +510,94 @@ test("HautLibraryProvider: Stops immediately on readback failure (never writes c
   });
   assert.equal(verifyWrongDate.verified, false, "verifyBookingAuthoritative must reject wrong date 2026-11-07");
 });
+
+
+test("Security & Verification: Multi-binding student_no isolation, time-slot window check, and missing-region rejection", async () => {
+  const { HautLibraryProvider, isBookingMatchingTarget } = await import("../packages/school-spi/src/index.mjs");
+  const provider = new HautLibraryProvider();
+
+  // 1. Same date & same seat, but different time slot (14:00-18:00 vs 07:30-22:00) must be rejected
+  assert.equal(
+    isBookingMatchingTarget(
+      {
+        bookingId: "9140001",
+        seatId: 618,
+        seatName: "四层西书库北区 05桌 A座",
+        regionName: "四层西书库北区",
+        buildingLayerRegionId: 13,
+        startDate: "2026-11-08 14:00:00",
+        endDate: "2026-11-08 18:00:00"
+      },
+      {
+        targetDates: ["2026-11-08"],
+        expectedStartFull: "2026-11-08 07:30:00",
+        expectedEndFull: "2026-11-08 22:00:00",
+        regionId: 13,
+        regionName: "四层西书库北区",
+        specificSeat: { id: 618, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" }
+      }
+    ),
+    false,
+    "Same date and seat with different time slot must be rejected"
+  );
+
+  // 2. Missing region info on readback with same-named seat must be rejected
+  assert.equal(
+    isBookingMatchingTarget(
+      {
+        bookingId: "9140002",
+        seatId: null,
+        seatName: "05桌 A座",
+        regionName: "",
+        buildingLayerRegionId: null,
+        startDate: "2026-11-08 07:30:00",
+        endDate: "2026-11-08 22:00:00"
+      },
+      {
+        targetDates: ["2026-11-08"],
+        expectedStartFull: "2026-11-08 07:30:00",
+        expectedEndFull: "2026-11-08 22:00:00",
+        regionId: 13,
+        regionName: "四层西书库北区",
+        wantedSeatNames: ["05桌 A座"]
+      }
+    ),
+    false,
+    "Missing region info on readback must be rejected"
+  );
+
+  // 3. Different region prefix in seatName when regionName is missing must be rejected
+  assert.equal(
+    isBookingMatchingTarget(
+      {
+        bookingId: "9140003",
+        seatId: null,
+        seatName: "三层西书库北区 05桌 A座",
+        regionName: "",
+        buildingLayerRegionId: null,
+        startDate: "2026-11-08 07:30:00",
+        endDate: "2026-11-08 22:00:00"
+      },
+      {
+        targetDates: ["2026-11-08"],
+        expectedStartFull: "2026-11-08 07:30:00",
+        expectedEndFull: "2026-11-08 22:00:00",
+        regionId: 13,
+        regionName: "四层西书库北区",
+        wantedSeatNames: ["05桌 A座"]
+      }
+    ),
+    false,
+    "Seat from 3rd floor must never match 4th floor target when regionName is missing"
+  );
+
+  // 4. Credential student_no mismatch with binding must fail closed
+  assert.throws(
+    () =>
+      provider.parseCredentialBundle(
+        JSON.stringify({ student_no: "231040100999", password: "secret" }),
+        { id: "bind-1", student_no: "231040100428" }
+      ),
+    /student_no mismatch/i
+  );
+});

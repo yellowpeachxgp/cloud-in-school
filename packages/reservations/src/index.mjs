@@ -393,44 +393,23 @@ export class TripleScheduleEngine {
     return true;
   }
 
-  _decryptSingleBinding(jobId, schoolId, binding, nowMs = Date.now()) {
-    if (!binding?.credential_ref) return null;
+  _decryptBindingCredential(job, binding, nowMs = Date.now()) {
+    if (!binding || binding.id !== job.school_binding_id || !binding.credential_ref) return null;
     const credRecord = this.store.encryptedCredentials.get(binding.credential_ref);
-    if (!credRecord || credRecord.revoked_at) return null;
+    if (!credRecord || credRecord.revoked_at || credRecord.binding_id !== binding.id) return null;
     const permit = this.kmsVault.issueAccessPermit({
-      taskId: jobId,
-      schoolId,
+      taskId: job.id,
+      schoolId: job.school_id,
       bindingId: binding.id,
       credentialRef: binding.credential_ref,
       ttlSeconds: 15,
       nowMs
     });
-    return this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
-  }
-
-  _decryptBindingCredential(job, binding, nowMs = Date.now()) {
-    const primarySecret = this._decryptSingleBinding(job.id, job.school_id, binding, nowMs);
+    const plaintext = this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
     if (typeof this.schoolProvider?.parseCredentialBundle === "function") {
-      const primaryBundle = this.schoolProvider.parseCredentialBundle(primarySecret, binding);
-      if (!primaryBundle.isLiveCredential && job.cloud_user_id) {
-        const userBindings = this.store
-          .recordsForUser("schoolBindings", job.cloud_user_id)
-          .filter((b) => b.school_id === job.school_id && !b.revoked_at && b.id !== binding?.id);
-        for (let i = userBindings.length - 1; i >= 0; i--) {
-          const altBind = userBindings[i];
-          try {
-            const altSecret = this._decryptSingleBinding(job.id, job.school_id, altBind, nowMs);
-            const altBundle = this.schoolProvider.parseCredentialBundle(altSecret, altBind);
-            if (altBundle.isLiveCredential) {
-              return altSecret;
-            }
-          } catch {
-            // Ignore failed sibling binding
-          }
-        }
-      }
+      this.schoolProvider.parseCredentialBundle(plaintext, binding);
     }
-    return primarySecret;
+    return plaintext;
   }
 
   _updateBindingCredentialTokens(binding, authResult, oldSecret, nowMs = Date.now()) {
@@ -736,7 +715,9 @@ export class TripleScheduleEngine {
             rawToken: submitRes.rawToken || null,
             expectedExternalBookingId: submitRes.externalBookingId,
             expectedSeatAlias: submitRes.seatAlias || null,
-            expectedRegionAlias: submitRes.regionAlias || null
+            expectedRegionAlias: submitRes.regionAlias || null,
+            expectedStartFull: submitRes.startFull || null,
+            expectedEndFull: submitRes.endFull || null
           });
         } catch {
           verifyRes = { verified: false, officialStatus: "READBACK_ERROR" };

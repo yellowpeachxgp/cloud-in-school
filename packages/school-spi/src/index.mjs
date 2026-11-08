@@ -64,13 +64,9 @@ export function isWslibSeatOccupiedByOthersMessage(rawMsg, code = null) {
 export function normalizeSeatComparisonToken(rawSeat, regionName = "") {
   let text = cleanSpiText(rawSeat, "");
   if (!text) return "";
-  const cleanReg = cleanSpiText(regionName, "").replace(/^[1-9]F_[A-Z]+$/i, "").trim();
+  const cleanReg = cleanSpiText(regionName, "").trim();
   if (cleanReg && text.startsWith(cleanReg)) {
     text = text.slice(cleanReg.length).trim();
-  }
-  const parts = text.split(/\s+/);
-  if (parts.length >= 2 && /(层|楼|区|书库|自习|阅览)/.test(parts[0])) {
-    text = parts.slice(1).join("");
   }
   return text
     .replace(/号座?$/g, "")
@@ -79,10 +75,20 @@ export function normalizeSeatComparisonToken(rawSeat, regionName = "") {
     .toUpperCase();
 }
 
+export function extractDateAndTimeHm(rawDateTime) {
+  const text = String(rawDateTime || "").trim();
+  const m = text.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?::\d{2})?$/);
+  if (!m) return null;
+  return { date: m[1], hm: m[2] };
+}
+
 export function isBookingMatchingTarget(
   booking,
   {
     targetDates = [],
+    expectedStartFull = null,
+    expectedEndFull = null,
+    expectedSlotWindow = null,
     regionId = null,
     regionName = "",
     candidateSeats = [],
@@ -100,49 +106,79 @@ export function isBookingMatchingTarget(
     return false;
   }
 
+  // 1. Strict date AND time-slot window check
+  const actStart = extractDateAndTimeHm(booking.startDate);
+  const actEnd = extractDateAndTimeHm(booking.endDate);
+  if (!actStart || !actEnd || actStart.date !== actEnd.date) {
+    return false;
+  }
   const validDates = (targetDates || []).map((d) => String(d || "").trim()).filter(Boolean);
-  if (validDates.length > 0) {
-    const startStr = String(booking.startDate || booking.endDate || "").trim();
-    if (!startStr || !validDates.some((d) => startStr.startsWith(d))) {
+  if (validDates.length > 0 && !validDates.includes(actStart.date)) {
+    return false;
+  }
+  if (expectedStartFull) {
+    const expStart = extractDateAndTimeHm(expectedStartFull);
+    if (!expStart || actStart.date !== expStart.date || actStart.hm !== expStart.hm) {
       return false;
     }
   }
+  if (expectedEndFull) {
+    const expEnd = extractDateAndTimeHm(expectedEndFull);
+    if (!expEnd || actEnd.date !== expEnd.date || actEnd.hm !== expEnd.hm) {
+      return false;
+    }
+  }
+  if (expectedSlotWindow && !expectedStartFull && !expectedEndFull) {
+    const swMatch = String(expectedSlotWindow)
+      .trim()
+      .match(/^(\d{2}:\d{2})(?::\d{2})?\s*-\s*(\d{2}:\d{2})(?::\d{2})?$/);
+    if (swMatch) {
+      if (actStart.hm !== swMatch[1] || actEnd.hm !== swMatch[2]) {
+        return false;
+      }
+    }
+  }
 
-  const cleanWantedRegion = cleanSpiText(regionName, "")
-    .replace(/^[1-9]F_[A-Z]+$/i, "")
-    .trim();
-  if (
-    regionId !== null &&
-    regionId !== undefined &&
+  // 2. Strict positive region verification (missing region info must never pass)
+  const cleanWantedRegion = cleanSpiText(regionName, "").trim();
+  const bookReg = cleanSpiText(booking.regionName, "");
+  const bookSeat = cleanSpiText(booking.seatName, "");
+  const hasBookingRegionId =
     booking.buildingLayerRegionId !== null &&
-    booking.buildingLayerRegionId !== undefined
-  ) {
+    booking.buildingLayerRegionId !== undefined &&
+    String(booking.buildingLayerRegionId).trim() !== "";
+
+  if (regionId !== null && regionId !== undefined && hasBookingRegionId) {
     if (Number(booking.buildingLayerRegionId) !== Number(regionId)) {
       return false;
     }
   }
+
+  const hasValidRegionIdMatch =
+    regionId !== null &&
+    regionId !== undefined &&
+    hasBookingRegionId &&
+    Number(booking.buildingLayerRegionId) === Number(regionId);
+
   if (cleanWantedRegion) {
-    const bookReg = cleanSpiText(booking.regionName, "");
-    const bookSeat = cleanSpiText(booking.seatName, "");
     if (bookReg) {
-      if (
-        bookReg !== cleanWantedRegion &&
-        !bookReg.includes(cleanWantedRegion) &&
-        !cleanWantedRegion.includes(bookReg)
-      ) {
+      if (bookReg !== cleanWantedRegion) {
         return false;
       }
-    } else if (
-      regionId === null ||
-      regionId === undefined ||
-      booking.buildingLayerRegionId === null ||
-      booking.buildingLayerRegionId === undefined
-    ) {
-      if (!bookSeat.includes(cleanWantedRegion)) {
+    } else if (!hasValidRegionIdMatch || !bookSeat.startsWith(cleanWantedRegion)) {
+      if (!bookSeat.startsWith(cleanWantedRegion)) {
         return false;
       }
     }
+  } else if (regionId !== null && regionId !== undefined) {
+    if (!hasValidRegionIdMatch) {
+      return false;
+    }
+  } else if (!bookReg && !hasBookingRegionId) {
+    return false;
   }
+
+  const effectiveRegionForNorm = cleanWantedRegion || bookReg;
 
   const matchesSeatSpec = (spec) => {
     if (!spec) return false;
@@ -156,17 +192,14 @@ export function isBookingMatchingTarget(
       if (hasBothIds && Number(booking.seatId) !== Number(specId)) {
         return false;
       }
-      const normBook = normalizeSeatComparisonToken(
-        booking.seatName,
-        booking.regionName || cleanWantedRegion
-      );
+      const normBook = normalizeSeatComparisonToken(booking.seatName, effectiveRegionForNorm);
       const normSpecFull = normalizeSeatComparisonToken(
         spec.seat_name || spec.seatName || "",
-        cleanWantedRegion
+        effectiveRegionForNorm
       );
       const normSpecShort = normalizeSeatComparisonToken(
         spec.short_name || spec.shortName || "",
-        cleanWantedRegion
+        effectiveRegionForNorm
       );
       if (normBook && (normSpecFull || normSpecShort)) {
         if (normBook !== normSpecFull && normBook !== normSpecShort) {
@@ -181,11 +214,8 @@ export function isBookingMatchingTarget(
     if (/^\d+$/.test(rawStr) && booking.seatId !== null && booking.seatId !== undefined) {
       if (String(booking.seatId) === rawStr) return true;
     }
-    const normBook = normalizeSeatComparisonToken(
-      booking.seatName,
-      booking.regionName || cleanWantedRegion
-    );
-    const normWanted = normalizeSeatComparisonToken(rawStr, cleanWantedRegion);
+    const normBook = normalizeSeatComparisonToken(booking.seatName, effectiveRegionForNorm);
+    const normWanted = normalizeSeatComparisonToken(rawStr, effectiveRegionForNorm);
     return Boolean(normBook && normWanted && normBook === normWanted);
   };
 
@@ -431,7 +461,14 @@ export class HautLibraryProvider {
         const rawToken = this.normalizeRawToken(parsed.raw_token || parsed.rawToken || parsed.token);
         const casTgc = String(parsed.cas_tgc || parsed.casTgcCookie || "").trim();
         const casJsessionId = String(parsed.cas_jsessionid || parsed.casJsessionId || "").trim();
-        const studentNo = String(parsed.student_no || parsed.studentId || fallbackStudentNo).trim();
+        const explicitStudentNo = String(parsed.student_no || parsed.studentId || "").trim();
+        if (explicitStudentNo && fallbackStudentNo && explicitStudentNo !== fallbackStudentNo) {
+          throw new ContractError(
+            "SCHOOL_AUTH_EXPIRED",
+            "Credential student_no mismatch with school binding"
+          );
+        }
+        const studentNo = explicitStudentNo || fallbackStudentNo;
         const password = String(parsed.password || parsed.passwordPlain || "").trim();
         const isLive = Boolean(rawToken.length > 32 || casTgc.length > 10 || (studentNo && password));
         return {
@@ -442,7 +479,8 @@ export class HautLibraryProvider {
           password,
           isLiveCredential: isLive
         };
-      } catch {
+      } catch (err) {
+        if (err instanceof ContractError) throw err;
         // Fallback to raw token handling
       }
     }
@@ -503,6 +541,13 @@ export class HautLibraryProvider {
     if (bundle.raw_token) {
       const userInfo = await this.validateWslibTokenOnline(bundle.raw_token);
       if (userInfo) {
+        const expectedSno = String(binding?.student_no || bundle.student_no || "").trim();
+        if (expectedSno && userInfo.userNo && String(userInfo.userNo).trim() !== expectedSno) {
+          throw new ContractError(
+            "SCHOOL_AUTH_EXPIRED",
+            "Authenticated userNo does not match school binding student_no"
+          );
+        }
         return {
           rawToken: bundle.raw_token,
           casTgc: bundle.cas_tgc || "",
@@ -1004,6 +1049,8 @@ export class HautLibraryProvider {
       const matched = bookings.find((b) =>
         isBookingMatchingTarget(b, {
           targetDates: [targetDate],
+          expectedStartFull: startFull,
+          expectedEndFull: endFull,
           regionId,
           regionName,
           candidateSeats,
@@ -1040,6 +1087,8 @@ export class HautLibraryProvider {
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
+            startFull,
+            endFull,
             rawToken
           }
         };
@@ -1066,6 +1115,8 @@ export class HautLibraryProvider {
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
+            startFull,
+            endFull,
             rawToken
           }
         };
@@ -1095,6 +1146,8 @@ export class HautLibraryProvider {
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName || cand.seat_name,
             regionAlias: rb.matched.regionName || regionName,
+            startFull,
+            endFull,
             rawToken
           }
         };
@@ -1150,6 +1203,8 @@ export class HautLibraryProvider {
             externalBookingId: rb.matched.bookingId,
             seatAlias: rb.matched.seatName,
             regionAlias: rb.matched.regionName || regionName,
+            startFull,
+            endFull,
             rawToken
           }
         };
@@ -1524,6 +1579,9 @@ export class HautLibraryProvider {
         const matchingExisting = existingBookings.find((b) =>
           isBookingMatchingTarget(b, {
             targetDates: datesToTry,
+            expectedStartFull: prewarmed?.start_full || null,
+            expectedEndFull: prewarmed?.end_full || null,
+            expectedSlotWindow: !prewarmed?.start_full ? plan?.slot_window || null : null,
             regionId: prewarmed?.region_id ?? null,
             regionName: prewarmed?.region_name || preferredArea,
             candidateSeats: prewarmed?.candidate_seats || [],
@@ -1731,7 +1789,9 @@ export class HautLibraryProvider {
     rawToken = null,
     expectedExternalBookingId,
     expectedSeatAlias = null,
-    expectedRegionAlias = null
+    expectedRegionAlias = null,
+    expectedStartFull = null,
+    expectedEndFull = null
   }) {
     if (this.mockBackend) {
       return this.mockBackend.handleVerifyReservation({ job, binding, expectedExternalBookingId });
@@ -1769,9 +1829,14 @@ export class HautLibraryProvider {
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
         const bookings = await this.fetchActiveBookings(tokenToUse);
+        const effStartFull = expectedStartFull || job?.prewarmed_targets?.start_full || null;
+        const effEndFull = expectedEndFull || job?.prewarmed_targets?.end_full || null;
         const matched = bookings.find((b) =>
           isBookingMatchingTarget(b, {
             targetDates: job?.booking_local_date ? [job.booking_local_date] : [],
+            expectedStartFull: effStartFull,
+            expectedEndFull: effEndFull,
+            expectedSlotWindow: !effStartFull && !effEndFull ? plan?.slot_window || null : null,
             regionId: job?.prewarmed_targets?.region_id ?? null,
             regionName: preferredArea,
             candidateSeats,
