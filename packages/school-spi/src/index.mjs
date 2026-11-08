@@ -82,6 +82,42 @@ export function extractDateAndTimeHm(rawDateTime) {
   return { date: m[1], hm: m[2] };
 }
 
+export function resolvePlanTimeWindow(
+  targetDate,
+  plan,
+  fallbackStartFull = null,
+  fallbackEndFull = null
+) {
+  const dateStr =
+    String(targetDate || "").trim() ||
+    (fallbackStartFull ? String(fallbackStartFull).trim().slice(0, 10) : "");
+  const rawSlotWindow = cleanSpiText(
+    plan?.slot_window || plan?.preferences_json?.slot_window || "",
+    ""
+  );
+  const swMatch = rawSlotWindow.match(
+    /^(\d{2}:\d{2})(?::(\d{2}))?\s*-\s*(\d{2}:\d{2})(?::(\d{2}))?$/
+  );
+  if (swMatch && dateStr) {
+    const startHm = swMatch[1];
+    const startSec = swMatch[2] || "00";
+    const endHm = swMatch[3];
+    const endSec = swMatch[4] || "00";
+    return {
+      startFull: `${dateStr} ${startHm}:${startSec}`,
+      endFull: `${dateStr} ${endHm}:${endSec}`,
+      slotWindow: `${startHm}-${endHm}`,
+      hasExplicitSlotWindow: true
+    };
+  }
+  return {
+    startFull: fallbackStartFull || (dateStr ? `${dateStr} 07:30:00` : null),
+    endFull: fallbackEndFull || (dateStr ? `${dateStr} 22:00:00` : null),
+    slotWindow: rawSlotWindow || null,
+    hasExplicitSlotWindow: false
+  };
+}
+
 export function isBookingMatchingTarget(
   booking,
   {
@@ -128,7 +164,7 @@ export function isBookingMatchingTarget(
       return false;
     }
   }
-  if (expectedSlotWindow && !expectedStartFull && !expectedEndFull) {
+  if (expectedSlotWindow) {
     const swMatch = String(expectedSlotWindow)
       .trim()
       .match(/^(\d{2}:\d{2})(?::\d{2})?\s*-\s*(\d{2}:\d{2})(?::\d{2})?$/);
@@ -1032,6 +1068,7 @@ export class HautLibraryProvider {
     cand,
     startFull,
     endFull,
+    expectedSlotWindow = null,
     targetDate,
     regionId,
     regionName,
@@ -1051,6 +1088,7 @@ export class HautLibraryProvider {
           targetDates: [targetDate],
           expectedStartFull: startFull,
           expectedEndFull: endFull,
+          expectedSlotWindow,
           regionId,
           regionName,
           candidateSeats,
@@ -1377,14 +1415,15 @@ export class HautLibraryProvider {
     const closeTime = cleanSpiText(primaryRegion.close_time, "22:00") || "22:00";
     const openFull = `${targetDate} ${openTime.split(":").length === 2 ? `${openTime}:00` : openTime}`;
     const closeFull = `${targetDate} ${closeTime.split(":").length === 2 ? `${closeTime}:00` : closeTime}`;
+    const resolvedPrewarmWin = resolvePlanTimeWindow(targetDate, plan, openFull, closeFull);
 
     const prewarmed = {
       region_id: primaryRegion.id,
       region_name: primaryRegion.region_name,
       open_time: openTime,
       close_time: closeTime,
-      start_full: openFull,
-      end_full: closeFull,
+      start_full: resolvedPrewarmWin.startFull,
+      end_full: resolvedPrewarmWin.endFull,
       candidate_seats: matchedCandidateSeats,
       prewarmed_at: new Date().toISOString()
     };
@@ -1492,6 +1531,12 @@ export class HautLibraryProvider {
 
         const targetDateForPrewarmed =
           String(prewarmed.start_full).slice(0, 10) || job.booking_local_date;
+        const wave0Win = resolvePlanTimeWindow(
+          targetDateForPrewarmed,
+          plan,
+          prewarmed.start_full,
+          prewarmed.end_full
+        );
         const seatLockedUntilMs = new Map();
         const permanentlyOccupiedIds = new Set();
         const fastWaveDelaysMs = [
@@ -1531,8 +1576,9 @@ export class HautLibraryProvider {
             }
             const step = await this.submitCandidateSeatAndVerify({
               cand,
-              startFull: prewarmed.start_full,
-              endFull: prewarmed.end_full,
+              startFull: wave0Win.startFull,
+              endFull: wave0Win.endFull,
+              expectedSlotWindow: wave0Win.slotWindow,
               targetDate: targetDateForPrewarmed,
               regionId: prewarmed.region_id,
               regionName: prewarmed.region_name || preferredArea,
@@ -1576,12 +1622,18 @@ export class HautLibraryProvider {
       // strictly verify target date, region, and candidate seat before treating as SUBMITTED.
       try {
         const existingBookings = await this.fetchActiveBookings(rawToken);
+        const preWaveWin = resolvePlanTimeWindow(
+          datesToTry[0],
+          plan,
+          prewarmed?.start_full || null,
+          prewarmed?.end_full || null
+        );
         const matchingExisting = existingBookings.find((b) =>
           isBookingMatchingTarget(b, {
             targetDates: datesToTry,
-            expectedStartFull: prewarmed?.start_full || null,
-            expectedEndFull: prewarmed?.end_full || null,
-            expectedSlotWindow: !prewarmed?.start_full ? plan?.slot_window || null : null,
+            expectedStartFull: preWaveWin.startFull,
+            expectedEndFull: preWaveWin.endFull,
+            expectedSlotWindow: preWaveWin.slotWindow,
             regionId: prewarmed?.region_id ?? null,
             regionName: prewarmed?.region_name || preferredArea,
             candidateSeats: prewarmed?.candidate_seats || [],
@@ -1705,10 +1757,17 @@ export class HautLibraryProvider {
                   hasLockedWave = true;
                   continue;
                 }
+                const discWin = resolvePlanTimeWindow(
+                  targetDate,
+                  plan,
+                  seatSnap.start_full,
+                  seatSnap.end_full
+                );
                 const step = await this.submitCandidateSeatAndVerify({
                   cand: seat,
-                  startFull: seatSnap.start_full,
-                  endFull: seatSnap.end_full,
+                  startFull: discWin.startFull,
+                  endFull: discWin.endFull,
+                  expectedSlotWindow: discWin.slotWindow,
                   targetDate,
                   regionId: region.id,
                   regionName: region.region_name,
@@ -1829,14 +1888,21 @@ export class HautLibraryProvider {
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
         const bookings = await this.fetchActiveBookings(tokenToUse);
-        const effStartFull = expectedStartFull || job?.prewarmed_targets?.start_full || null;
-        const effEndFull = expectedEndFull || job?.prewarmed_targets?.end_full || null;
+        const verifyDate =
+          job?.booking_local_date ||
+          (expectedStartFull ? String(expectedStartFull).trim().slice(0, 10) : "");
+        const verifyWin = resolvePlanTimeWindow(
+          verifyDate,
+          plan,
+          expectedStartFull || job?.prewarmed_targets?.start_full || null,
+          expectedEndFull || job?.prewarmed_targets?.end_full || null
+        );
         const matched = bookings.find((b) =>
           isBookingMatchingTarget(b, {
             targetDates: job?.booking_local_date ? [job.booking_local_date] : [],
-            expectedStartFull: effStartFull,
-            expectedEndFull: effEndFull,
-            expectedSlotWindow: !effStartFull && !effEndFull ? plan?.slot_window || null : null,
+            expectedStartFull: verifyWin.startFull,
+            expectedEndFull: verifyWin.endFull,
+            expectedSlotWindow: verifyWin.slotWindow,
             regionId: job?.prewarmed_targets?.region_id ?? null,
             regionName: preferredArea,
             candidateSeats,

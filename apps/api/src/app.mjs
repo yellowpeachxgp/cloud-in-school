@@ -852,6 +852,9 @@ export function createCampusCloudApp(options = {}) {
       if (!binding || binding.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "School binding not found");
       }
+      if (binding.revoked_at || binding.status === "REVOKED") {
+        throw new ContractError("CONSENT_WITHDRAWN", "Revoked school binding cannot be completed");
+      }
       const secretPayload = body?.delegated_secret || body?.session_token || "delegated_session_v1";
       if (typeof secretPayload === "string" && secretPayload.trim().startsWith("{")) {
         try {
@@ -905,6 +908,23 @@ export function createCampusCloudApp(options = {}) {
       const binding = store.schoolBindings.get(params.bindingId);
       if (!binding || binding.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "School binding not found");
+      }
+      const reauthSecret = body?.delegated_secret || "reauthorized_session_v1";
+      if (typeof reauthSecret === "string" && reauthSecret.trim().startsWith("{")) {
+        let parsedReauth;
+        try {
+          parsedReauth = JSON.parse(reauthSecret.trim());
+        } catch {
+          throw new ContractError("BAD_REQUEST", "Malformed delegated_secret JSON");
+        }
+        const secSno = String(parsedReauth?.student_no || parsedReauth?.studentId || "").trim();
+        const bindSno = String(binding.student_no || "").trim();
+        if (secSno && bindSno && secSno !== bindSno) {
+          throw new ContractError(
+            "FORBIDDEN",
+            "delegated_secret student_no does not match binding student_no"
+          );
+        }
       }
       if (binding.credential_ref && store.encryptedCredentials.has(binding.credential_ref)) {
         store.encryptedCredentials.get(binding.credential_ref).revoked_at = new Date(nowMs).toISOString();
@@ -1702,90 +1722,122 @@ export function createCampusCloudApp(options = {}) {
 
   register("POST", "/api/v1/sync/snapshot", "pushUserSyncSnapshot", "bearer", async ({ auth, body, nowMs }) => {
     if (body && typeof body === "object") {
+      // Phase 1: Full pre-validation of all binding upserts BEFORE any state mutation
+      const validatedBindingUpserts = [];
       if (Array.isArray(body.school_binding_upserts)) {
         for (const bItem of body.school_binding_upserts) {
           const studentNo = String(bItem?.student_no || "").trim();
           if (!studentNo) continue;
           const schoolId = bItem?.school_id || DEFAULT_SCHOOL_ID;
-          // Strictly match only bindings for the exact same (cloudUserId, schoolId, studentNo);
-          // never overwrite a binding belonging to a different student_no!
-          const sameStudentBindings = store
-            .recordsForUser("schoolBindings", auth.cloudUserId)
-            .filter(
-              (b) =>
-                b.school_id === schoolId &&
-                !b.revoked_at &&
-                String(b.student_no || "").trim() === studentNo
-            );
-          if (sameStudentBindings.length === 0) {
-            const bindingId = crypto.randomUUID();
-            const createdBind = {
-              id: bindingId,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              student_no: studentNo,
-              student_no_masked:
-                studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
-              status: "DELEGATED_ACTIVE",
-              credential_ref: null,
-              credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
-              created_at: new Date(nowMs).toISOString(),
-              revoked_at: null
-            };
-            store.schoolBindings.set(bindingId, createdBind);
-            store.indexUserScoped?.("schoolBindings", bindingId, createdBind.cloud_user_id);
-            sameStudentBindings.push(createdBind);
-          } else {
-            for (const targetBind of sameStudentBindings) {
-              targetBind.status = "DELEGATED_ACTIVE";
-            }
+          if (!store.schoolIntegrations.has(schoolId)) {
+            throw new ContractError("NOT_FOUND", `Unsupported school_id: ${schoolId}`);
           }
+          let cleanSecretText = null;
           if (bItem?.delegated_secret && String(bItem.delegated_secret).trim()) {
-            const secretText = String(bItem.delegated_secret).trim();
-            if (secretText.startsWith("{")) {
+            cleanSecretText = String(bItem.delegated_secret).trim();
+            if (cleanSecretText.startsWith("{")) {
+              let parsedSecret;
               try {
-                const parsedSecret = JSON.parse(secretText);
-                const secretSno = String(parsedSecret.student_no || parsedSecret.studentId || "").trim();
-                if (secretSno && secretSno !== studentNo) {
-                  throw new ContractError(
-                    "FORBIDDEN",
-                    "delegated_secret student_no does not match school_binding_upserts student_no"
-                  );
-                }
-              } catch (e) {
-                if (e instanceof ContractError) throw e;
+                parsedSecret = JSON.parse(cleanSecretText);
+              } catch {
+                throw new ContractError("BAD_REQUEST", "Malformed delegated_secret JSON");
+              }
+              const secretSno = String(
+                parsedSecret?.student_no || parsedSecret?.studentId || parsedSecret?.userNo || ""
+              ).trim();
+              if (secretSno && secretSno !== studentNo) {
+                throw new ContractError(
+                  "FORBIDDEN",
+                  "delegated_secret student_no does not match school_binding_upserts student_no"
+                );
               }
             }
-            for (const targetBind of sameStudentBindings) {
-              const encrypted = kmsVault.encryptSecret({
-                bindingId: targetBind.id,
-                schoolId,
-                credentialKind: "DELEGATED_SESSION_BUNDLE",
-                plaintext: secretText,
-                expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-              });
-              store.encryptedCredentials.set(encrypted.id, encrypted);
-              targetBind.credential_ref = encrypted.id;
-              targetBind.credential_expires_at = encrypted.expires_at;
-              targetBind.status = "DELEGATED_ACTIVE";
+            if (typeof schoolProvider?.parseCredentialBundle === "function") {
+              schoolProvider.parseCredentialBundle(cleanSecretText, { student_no: studentNo });
             }
           }
-          const hasActiveConsent = store.recordsForUser("consents", auth.cloudUserId).some(
-            (c) => !c.withdrawn_at
+          validatedBindingUpserts.push({ studentNo, schoolId, cleanSecretText });
+        }
+      }
+
+      // Phase 2: Atomic state mutation (never resurrect revoked bindings or withdrawn consents)
+      for (const { studentNo, schoolId, cleanSecretText } of validatedBindingUpserts) {
+        const allBindingsForStudent = store
+          .recordsForUser("schoolBindings", auth.cloudUserId)
+          .filter(
+            (b) =>
+              b.school_id === schoolId &&
+              String(b.student_no || "").trim() === studentNo
           );
-          if (!hasActiveConsent) {
-            const cid = crypto.randomUUID();
-            store.indexUserScoped?.("consents", cid, auth.cloudUserId);
-            store.consents.set(cid, {
-              id: cid,
-              cloud_user_id: auth.cloudUserId,
-              school_id: schoolId,
-              scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-              policy_version: "policy-2026-11-v4",
-              granted_at: new Date(nowMs).toISOString(),
-              withdrawn_at: null
-            });
+        const hasRevokedBinding = allBindingsForStudent.some(
+          (b) => Boolean(b.revoked_at) || b.status === "REVOKED"
+        );
+        const userConsentsForSchool = store
+          .recordsForUser("consents", auth.cloudUserId)
+          .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId);
+        const hasWithdrawnConsent = userConsentsForSchool.some((c) => Boolean(c.withdrawn_at));
+
+        // Revoked bindings and withdrawn consents cannot be resurrected via ordinary snapshot sync
+        if (hasRevokedBinding || hasWithdrawnConsent) {
+          continue;
+        }
+
+        const sameStudentBindings = allBindingsForStudent.filter(
+          (b) => !b.revoked_at && b.status !== "REVOKED"
+        );
+        if (sameStudentBindings.length === 0) {
+          const bindingId = crypto.randomUUID();
+          const createdBind = {
+            id: bindingId,
+            cloud_user_id: auth.cloudUserId,
+            school_id: schoolId,
+            student_no: studentNo,
+            student_no_masked:
+              studentNo.length >= 4 ? `${studentNo.slice(0, 2)}***${studentNo.slice(-2)}` : "***",
+            status: "DELEGATED_ACTIVE",
+            credential_ref: null,
+            credential_expires_at: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+            created_at: new Date(nowMs).toISOString(),
+            revoked_at: null
+          };
+          store.schoolBindings.set(bindingId, createdBind);
+          store.indexUserScoped?.("schoolBindings", bindingId, createdBind.cloud_user_id);
+          sameStudentBindings.push(createdBind);
+        } else {
+          for (const targetBind of sameStudentBindings) {
+            targetBind.status = "DELEGATED_ACTIVE";
           }
+        }
+
+        if (cleanSecretText) {
+          for (const targetBind of sameStudentBindings) {
+            const encrypted = kmsVault.encryptSecret({
+              bindingId: targetBind.id,
+              schoolId,
+              credentialKind: "DELEGATED_SESSION_BUNDLE",
+              plaintext: cleanSecretText,
+              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+            });
+            store.encryptedCredentials.set(encrypted.id, encrypted);
+            targetBind.credential_ref = encrypted.id;
+            targetBind.credential_expires_at = encrypted.expires_at;
+            targetBind.status = "DELEGATED_ACTIVE";
+          }
+        }
+
+        const hasActiveConsent = userConsentsForSchool.some((c) => !c.withdrawn_at);
+        if (!hasActiveConsent && !hasWithdrawnConsent) {
+          const cid = crypto.randomUUID();
+          store.indexUserScoped?.("consents", cid, auth.cloudUserId);
+          store.consents.set(cid, {
+            id: cid,
+            cloud_user_id: auth.cloudUserId,
+            school_id: schoolId,
+            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+            policy_version: "policy-2026-11-v4",
+            granted_at: new Date(nowMs).toISOString(),
+            withdrawn_at: null
+          });
         }
       }
 
@@ -1849,30 +1901,29 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (Array.isArray(body.reservation_plan_upserts)) {
-        const userActiveBindings = store
-          .recordsForUser("schoolBindings", auth.cloudUserId)
-          .filter((b) => !b.revoked_at);
+        const allUserBindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
+        const revokedStudentNos = new Set(
+          allUserBindings
+            .filter((b) => Boolean(b.revoked_at) || b.status === "REVOKED")
+            .map((b) => String(b.student_no || "").trim())
+            .filter(Boolean)
+        );
+        const userActiveBindings = allUserBindings.filter(
+          (b) =>
+            !b.revoked_at &&
+            b.status === "DELEGATED_ACTIVE" &&
+            !revokedStudentNos.has(String(b.student_no || "").trim())
+        );
         const distinctStudentNos = new Set(
           userActiveBindings.map((b) => String(b.student_no || "").trim()).filter(Boolean)
         );
         const activeBinding =
           distinctStudentNos.size <= 1 ? userActiveBindings[userActiveBindings.length - 1] || null : null;
-        let activeConsent = Array.from(store.consents.values()).find(
-          (c) => c.cloud_user_id === auth.cloudUserId && !c.withdrawn_at
-        );
-        if (activeBinding && !activeConsent) {
-          const cid = crypto.randomUUID();
-          activeConsent = {
-            id: cid,
-            cloud_user_id: auth.cloudUserId,
-            school_id: activeBinding.school_id || DEFAULT_SCHOOL_ID,
-            scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
-            policy_version: "policy-2026-11-v4",
-            granted_at: new Date(nowMs).toISOString(),
-            withdrawn_at: null
-          };
-          store.consents.set(cid, activeConsent);
-        }
+        const userConsents = store.recordsForUser("consents", auth.cloudUserId);
+        const hasWithdrawnConsent = userConsents.some((c) => Boolean(c.withdrawn_at));
+        const activeConsent = !hasWithdrawnConsent
+          ? userConsents.find((c) => !c.withdrawn_at) || null
+          : null;
         if (activeBinding && activeConsent) {
           for (const rpItem of body.reservation_plan_upserts) {
             const targetDate = String(rpItem?.target_local_date || "").trim();

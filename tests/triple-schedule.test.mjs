@@ -601,3 +601,176 @@ test("Security & Verification: Multi-binding student_no isolation, time-slot win
     /student_no mismatch/i
   );
 });
+
+
+test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours (07:30-22:00), atomic sync pre-validation, and non-resurrection of revoked binding/consent", async () => {
+  const { HautLibraryProvider } = await import("../packages/school-spi/src/index.mjs");
+  const { createCampusCloudApp } = await import("../apps/api/src/app.mjs");
+  const provider = new HautLibraryProvider();
+  const fakeJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIyMzEwNDAxMDA0MjgifQ.signature_long_enough_for_live_cred_check";
+
+  // 1. Plan slot_window is 14:00-18:00 while prewarmed_targets has school open hours 07:30-22:00;
+  // full-day booking 07:30-22:00 must be rejected by both executeMockOrAuthorizedCreate and verifyBookingAuthoritative!
+  const binding = {
+    id: "bind-slot-14-18",
+    school_id: "haut",
+    status: "DELEGATED_ACTIVE",
+    student_no: "231040100428"
+  };
+  const plan1418 = {
+    id: "plan-slot-14-18",
+    area_name: "四层西书库北区",
+    slot_window: "14:00-18:00",
+    candidate_seats: ["05桌 A座"],
+    preferences_json: {
+      preferred_area_ids: ["四层西书库北区"],
+      preferred_seat_ids: ["05桌 A座"],
+      allow_alternative_seat: false
+    }
+  };
+  const job1418 = {
+    id: "job-slot-14-18",
+    school_id: "haut",
+    booking_local_date: "2026-11-08",
+    prewarmed_targets: {
+      region_id: 13,
+      region_name: "四层西书库北区",
+      start_full: "2026-11-08 07:30:00",
+      end_full: "2026-11-08 22:00:00",
+      candidate_seats: [
+        { id: 618, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" }
+      ]
+    }
+  };
+
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      return { code: 200, bookingid: 9140999, msg: "成功" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: {
+          id: 9140999,
+          seatId: 618,
+          seatName: "四层西书库北区 05桌 A座",
+          regionName: "四层西书库北区",
+          buildingLayerRegionId: 13,
+          startDate: "2026-11-08 07:30:00",
+          endDate: "2026-11-08 22:00:00",
+          bookingStatus: "1"
+        }
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const execFullDay = await provider.executeMockOrAuthorizedCreate({
+    job: job1418,
+    plan: plan1418,
+    binding,
+    schoolIntegration: { enabled: true, kill_switch: false },
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    nowInstant: new Date("2026-11-08T00:05:00.000Z")
+  });
+  assert.notEqual(
+    execFullDay.outcome,
+    "SUBMITTED",
+    "Full-day 07:30-22:00 booking must not be accepted when plan.slot_window is 14:00-18:00"
+  );
+
+  const verifyFullDay = await provider.verifyBookingAuthoritative({
+    job: job1418,
+    plan: plan1418,
+    binding,
+    decryptedSecret: JSON.stringify({ raw_token: fakeJwt }),
+    rawToken: fakeJwt,
+    expectedExternalBookingId: "9140999"
+  });
+  assert.equal(
+    verifyFullDay.verified,
+    false,
+    "verifyBookingAuthoritative must reject 07:30-22:00 booking when plan.slot_window is 14:00-18:00"
+  );
+
+  // 2. Atomic sync pre-validation & non-resurrection of revoked binding / withdrawn consent
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders: userHeaders } = setupBoundUser(app, Date.now());
+
+  // Mismatched student_no in delegated_secret returns 403 AND creates zero bindings!
+  const badSync = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100999", password: "pwd" })
+        }
+      ]
+    }
+  });
+  assert.equal(badSync.status, 403);
+  const bindingsAfterBadSync = await app.inject({
+    method: "GET",
+    url: "/api/v1/school-bindings",
+    headers: userHeaders
+  });
+  assert.equal(
+    bindingsAfterBadSync.body.data.bindings.length,
+    0,
+    "Failed 403 sync must not leave behind a newly created active binding"
+  );
+
+  // Valid sync creates binding & consent; then revoking binding prevents resurrection by ordinary sync
+  const goodSync = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd" })
+        }
+      ]
+    }
+  });
+  assert.equal(goodSync.status, 200);
+  const createdBindingId = goodSync.body.data.school_bindings[0].id;
+
+  const revokeRes = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/school-bindings/${createdBindingId}`,
+    headers: userHeaders
+  });
+  assert.equal(revokeRes.status, 200);
+
+  // Subsequent ordinary sync must NOT resurrect the revoked binding or create a new active binding for 231040100111
+  const resyncAfterRevoke = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd2" })
+        }
+      ]
+    }
+  });
+  assert.equal(resyncAfterRevoke.status, 200);
+  const activeBindingsAfterResync = resyncAfterRevoke.body.data.school_bindings.filter(
+    (b) => b.status === "DELEGATED_ACTIVE" && !b.revoked_at
+  );
+  assert.equal(
+    activeBindingsAfterResync.length,
+    0,
+    "Ordinary snapshot sync must never resurrect a revoked school binding"
+  );
+});

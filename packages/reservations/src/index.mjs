@@ -238,7 +238,7 @@ export class TripleScheduleEngine {
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
       area_name: payload.area_name || "4楼北自习区",
       candidate_seats: payload.candidate_seats || payload.preferred_seat_ids || ["4N-001"],
-      slot_window: payload.slot_window || "08:00-22:00",
+      slot_window: payload.slot_window || "07:30-22:00",
       preferences_json: {
         preferred_area_ids: payload.preferred_area_ids || (payload.area_code ? [payload.area_code] : ["area-haut-north-4f"]),
         preferred_seat_ids: payload.preferred_seat_ids || payload.candidate_seats || ["N4-088"],
