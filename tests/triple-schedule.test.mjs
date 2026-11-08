@@ -870,4 +870,76 @@ test("P2 Regression: Plan slot_window (14:00-18:00) overrides school open hours 
     1,
     "Snapshot sync after explicit re-consent & reauthorize must create reservation job"
   );
+
+  // 4. Also test withdraw consent -> new POST /api/v1/me/consents + new POST /api/v1/school-bindings + /complete -> sync
+  const c2Id = newConsentRes.body.data.id;
+  const withdraw2 = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/me/consents/${c2Id}`,
+    headers: userHeaders
+  });
+  assert.equal(withdraw2.status, 200);
+
+  const c3Res = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: userHeaders,
+    body: { school_id: "haut" }
+  });
+  assert.equal(c3Res.status, 201);
+
+  const newBindInit = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: userHeaders,
+    body: { school_id: "haut", student_no: "231040100111" }
+  });
+  assert.equal(newBindInit.status, 201);
+  const b2Id = newBindInit.body.data.id;
+
+  const newBindComp = await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b2Id}/complete`,
+    headers: userHeaders,
+    body: {
+      delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_b2_init" })
+    }
+  });
+  assert.equal(newBindComp.status, 200);
+
+  const futureDate2 = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const syncAfterNewBind = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: userHeaders,
+    body: {
+      school_binding_upserts: [
+        {
+          school_id: "haut",
+          student_no: "231040100111",
+          delegated_secret: JSON.stringify({ student_no: "231040100111", password: "pwd_b2_synced" })
+        }
+      ],
+      reservation_plan_upserts: [
+        {
+          target_local_date: futureDate2,
+          target_local_time: "07:00:00",
+          area_name: "四层西书库北区",
+          candidate_seats: ["06桌 F座"]
+        }
+      ]
+    }
+  });
+  assert.equal(syncAfterNewBind.status, 200);
+  const b2Obj = app.store.schoolBindings.get(b2Id);
+  const decB2 = app.reservationEngine._decryptBindingCredential(
+    { id: "diag-job-2", school_id: "haut", school_binding_id: b2Id },
+    b2Obj,
+    Date.now()
+  );
+  assert.ok(decB2.includes("pwd_b2_synced"), "Sync must update newly created binding after prior withdrawal");
+  assert.ok(
+    syncAfterNewBind.body.data.reservation_jobs.some((j) => j.booking_local_date === futureDate2 && j.state !== "CANCELLED"),
+    "Sync must create reservation job for newly created binding after prior withdrawal"
+  );
 });
