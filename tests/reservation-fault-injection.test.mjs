@@ -80,6 +80,13 @@ test("Fault Injection 1 (Cloud P1 Fix): Revocation AFTER addbooking is dispatche
   const jobId = planRes.body.data.job_id;
   const job = app.store.reservationJobs.get(jobId);
   job.prewarmed_targets = {
+    binding_id: bindingId,
+    student_no: "2026990101",
+    auth_version: 1,
+    plan_generation: 1,
+    target_local_date: "2026-11-10",
+    slot_window: "08:00-22:00",
+    expires_at: "2026-11-10T07:30:00+08:00",
     region_id: 23,
     region_name: "五层中区",
     open_time: "07:30",
@@ -446,6 +453,13 @@ test("Fault Injection 6 (P1 Durable Pre-Write Flush): DISPATCH_INTENT is synchro
   const jobId = planRes.body.data.job_id;
   const job = app.store.reservationJobs.get(jobId);
   job.prewarmed_targets = {
+    binding_id: bindingId,
+    student_no: "2026990101",
+    auth_version: 1,
+    plan_generation: 1,
+    target_local_date: "2026-11-13",
+    slot_window: "08:00-22:00",
+    expires_at: "2026-11-13T07:30:00+08:00",
     region_id: 23,
     region_name: "五层中区",
     open_time: "07:30",
@@ -534,6 +548,13 @@ test("Fault Injection 6 (P1 Durable Pre-Write Flush): DISPATCH_INTENT is synchro
   const jobId2 = planRes2.body.data.job_id;
   const job2 = app.store.reservationJobs.get(jobId2);
   job2.prewarmed_targets = {
+    binding_id: bindingId,
+    student_no: "2026990101",
+    auth_version: 1,
+    plan_generation: 1,
+    target_local_date: "2026-11-14",
+    slot_window: "08:00-22:00",
+    expires_at: "2026-11-14T07:30:00+08:00",
     region_id: 23,
     region_name: "五层中区",
     open_time: "07:30",
@@ -753,6 +774,12 @@ test("Fault Injection 9 (Morning 07:00:00 Root-Cause Regression): Wave 0 refresh
   const jobId = planRes.body.data.job_id;
   const job = app.store.reservationJobs.get(jobId);
   job.prewarmed_targets = {
+    binding_id: bindingId,
+    student_no: "2026990101",
+    auth_version: 1,
+    plan_generation: 1,
+    target_local_date: "2026-11-16",
+    expires_at: "2026-11-16T07:30:00+08:00",
     region_id: 13,
     region_name: "四层西书库北区",
     open_time: "07:30",
@@ -985,4 +1012,151 @@ test("Fault Injection 10 (Section 3.2 & 3.3 Gate): Explicit 08:00-22:00 slot_win
   const fireBlockedRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
   assert.equal(writeAttemptedWithoutSnapshotPath, false, "Must fail-closed before addbooking when requireDurableSnapshot=true and snapshotPath is missing");
   assert.equal(fireBlockedRes.job.last_error_code, "STORAGE_PERSISTENCE_FAILED");
+});
+
+test("Fault Injection 11 (Prewarm Missing Metadata & Date Mismatch, Legacy Auth Non-Guessing & Abnormal Cancel Readback)", async () => {
+  const tokenNowMs = Date.parse("2026-11-16T06:10:00+08:00");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { cloudUserId, authHeaders, bindingId, consentId } = await setupBoundUser(app, tokenNowMs);
+
+  // 1. Create a plan for 2026-11-16 at 07:00:00, and inject a legacy/stale prewarmed_targets with 2026-11-15 start_full & missing metadata
+  const createRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_fi11_prewarm"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      preferred_area_ids: ["四层西书库北区"],
+      preferred_seat_ids: ["05桌 A座"],
+      target_local_date: "2026-11-16",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00"
+    },
+    nowMs: tokenNowMs
+  });
+  assert.equal(createRes.status, 201);
+  const jobId = createRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+
+  // Inject legacy prewarmed_targets missing target_local_date/binding_id/expires_at and carrying 2026-11-15 date!
+  job.prewarmed_targets = {
+    region_id: 13,
+    region_name: "四层西书库北区",
+    start_full: "2026-11-15 08:00:00",
+    end_full: "2026-11-15 22:00:00",
+    candidate_seats: [{ id: 601, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" }]
+  };
+
+  let addBookingUrls = [];
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/building")) {
+      return { code: 200, builderInfo: [{ id: "1", buildingName: "莲花街图书馆" }] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/region")) {
+      return {
+        code: 200,
+        regionList: [
+          {
+            id: 13,
+            regionName: "四层西书库北区",
+            openDate: "07:30",
+            closeDate: "22:00",
+            num: 100,
+            cannum: 80,
+            isOpen: 1
+          }
+        ]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      return {
+        code: 200,
+        layout: { regionName: "四层西书库北区" },
+        seatList: [{ id: 601, seatName: "四层西书库北区 05桌 A座", seatStatus: 2 }]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      addBookingUrls.push(decodeURIComponent(pathAndQuery));
+      return { code: 200, bookingid: "bk_1116_ok", data: { id: "bk_1116_ok" } };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      if (addBookingUrls.length === 0) {
+        return { code: 200, data: null };
+      }
+      return {
+        code: 200,
+        data: {
+          id: "bk_1116_ok",
+          seatId: 601,
+          seatName: "四层西书库北区 05桌 A座",
+          regionName: "四层西书库北区",
+          startDate: "2026-11-16 08:00:00",
+          endDate: "2026-11-16 22:00:00",
+          bookingStatus: 1
+        }
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 1, rows: [] };
+    }
+    return { code: 200 };
+  };
+
+  const fireRes = await app.reservationEngine.runScheduleEvent(
+    jobId,
+    "FIRE",
+    Date.parse("2026-11-16T07:00:00+08:00")
+  );
+  assert.equal(fireRes.job.state, "CONFIRMED");
+  assert.equal(addBookingUrls.length, 1);
+  assert.ok(
+    addBookingUrls[0].includes("starttime=2026-11-16 08:00:00"),
+    `Expected 2026-11-16 in addbooking URL, got: ${addBookingUrls[0]}`
+  );
+
+  // 2. Abnormal cancellation readback: if bookinglist throws error or returns non-cancelled status, must return CANCEL_RESULT_UNKNOWN
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) {
+      return { code: 200, msg: "操作已受理" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return { code: 200, data: null };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 0, rows: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "bk_1116_ok", bookingStatus: "0", bookingStatusName: "处理中" }]
+      };
+    }
+    return { code: 200 };
+  };
+  const cancelRes = await app.reservationEngine.cancelConfirmedOrActiveJob(jobId);
+  assert.equal(cancelRes.job.school_cancellation_state, "CANCEL_RESULT_UNKNOWN");
+  assert.equal(cancelRes.live_cancel.cancelled, false);
+
+  // 3. Legacy plan missing auth_version must NOT infer current auth in migrateAndRecoverState
+  const legacyPlanId = "plan_legacy_no_ver";
+  app.store.reservationPlans.set(legacyPlanId, {
+    id: legacyPlanId,
+    cloud_user_id: cloudUserId,
+    school_id: "haut",
+    school_binding_id: bindingId,
+    consent_id: consentId,
+    // auth_version is intentionally missing!
+    enabled: true,
+    target_local_date: "2026-11-18",
+    target_local_time: "07:00:00"
+  });
+  app.store.migrateAndRecoverState();
+  const migratedLegacyPlan = app.store.reservationPlans.get(legacyPlanId);
+  assert.equal(migratedLegacyPlan.user_intent_state, "NEEDS_RECONFIRMATION");
+  assert.equal(migratedLegacyPlan.enabled, false);
 });

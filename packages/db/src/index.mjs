@@ -1457,33 +1457,6 @@ export class CloudDatabaseStore {
     const ts = new Date(nowMs).toISOString();
     let mutated = false;
 
-    // 0. Normalize legacy active consents & bindings missing auth_version or consent_id
-    for (const c of this.consents.values()) {
-      if (!c.withdrawn_at && c.auth_version === undefined) {
-        const uVer = Number(this.users.get(c.cloud_user_id)?.auth_version || 1);
-        c.auth_version = uVer;
-        mutated = true;
-      }
-    }
-    for (const b of this.schoolBindings.values()) {
-      if (!b.revoked_at && b.status !== "REVOKED") {
-        const uVer = Number(this.users.get(b.cloud_user_id)?.auth_version || 1);
-        if (b.auth_version === undefined) {
-          b.auth_version = uVer;
-          mutated = true;
-        }
-        if (!b.consent_id) {
-          const activeConsents = this.recordsForUser("consents", b.cloud_user_id).filter(
-            (c) => (c.school_id || DEFAULT_SCHOOL_ID) === b.school_id && !c.withdrawn_at
-          );
-          if (activeConsents.length > 0) {
-            b.consent_id = activeConsents[activeConsents.length - 1].id;
-            mutated = true;
-          }
-        }
-      }
-    }
-
     // 1. Recover in-flight attempts that crashed in DISPATCH_INTENT / DISPATCHED -> RESULT_UNKNOWN (never blind-retry!)
     for (const att of this.reservationAttempts.values()) {
       if (att.status === "DISPATCH_INTENT" || att.status === "DISPATCHED") {
@@ -1494,21 +1467,34 @@ export class CloudDatabaseStore {
     }
 
     // 2. Migrate legacy plans lacking verifiable authorization provenance -> NEEDS_RECONFIRMATION
+    // Strictly forbid guessing auth_version or consent_id from current user/binding/consent state!
     for (const p of this.reservationPlans.values()) {
       const user = this.users.get(p.cloud_user_id);
       const userAuthVer = Number(user?.auth_version || 1);
       const bind = p.school_binding_id ? this.schoolBindings.get(p.school_binding_id) : null;
       const consent = p.consent_id ? this.consents.get(p.consent_id) : null;
       const hasVerifiableOrigin =
+        Boolean(p.school_binding_id) &&
         Boolean(bind) &&
+        !bind.revoked_at &&
+        bind.status === "DELEGATED_ACTIVE" &&
         bind.cloud_user_id === p.cloud_user_id &&
         Boolean(String(bind.student_no || "").trim()) &&
+        Boolean(p.consent_id) &&
         Boolean(consent) &&
+        !consent.withdrawn_at &&
         consent.cloud_user_id === p.cloud_user_id &&
-        (p.auth_version !== undefined || userAuthVer === 1);
+        (!bind.consent_id || bind.consent_id === consent.id) &&
+        Number.isInteger(Number(p.auth_version)) &&
+        Number(p.auth_version) > 0 &&
+        Number(p.auth_version) === userAuthVer &&
+        Number.isInteger(Number(bind.auth_version)) &&
+        Number(bind.auth_version) === Number(p.auth_version) &&
+        Number.isInteger(Number(consent.auth_version)) &&
+        Number(consent.auth_version) === Number(p.auth_version);
 
       if (!hasVerifiableOrigin) {
-        if (p.user_intent_state !== "NEEDS_RECONFIRMATION") {
+        if (p.user_intent_state !== "NEEDS_RECONFIRMATION" || p.enabled !== false) {
           p.enabled = false;
           p.user_intent_state = "NEEDS_RECONFIRMATION";
           p.migration_status = "NEEDS_RECONFIRMATION";
@@ -1516,9 +1502,6 @@ export class CloudDatabaseStore {
         }
       } else if (!p.user_intent_state) {
         p.user_intent_state = p.enabled === false ? "STOP_REQUESTED" : "ACTIVE";
-        if (p.auth_version === undefined) {
-          p.auth_version = Number(bind.auth_version || consent.auth_version || userAuthVer || 1);
-        }
         mutated = true;
       }
     }

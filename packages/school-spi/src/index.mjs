@@ -1036,23 +1036,32 @@ export class HautLibraryProvider {
     const results = [];
     const seenIds = new Set();
     const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
-    if (!curJson || (typeof curJson.code === "number" && curJson.code !== 200)) {
+    if (
+      !curJson ||
+      (typeof curJson.code === "number" && curJson.code !== 200) ||
+      (requireCompleteList && typeof curJson.code !== "number" && curJson.data === undefined && curJson.booking === undefined)
+    ) {
       throw new Error(curJson?.msg || "Failed to read current booking");
     }
     const data = curJson?.data || curJson?.booking || null;
-    if (data && data.id && ["1", "2", "3", "4"].includes(String(data.bookingStatus))) {
-      const bId = String(data.id);
-      seenIds.add(bId);
-      results.push({
-        bookingId: bId,
-        seatId: data.seatId ? Number(data.seatId) : null,
-        seatName: String(data.seatName || "").trim(),
-        regionName: String(data.regionName || "").trim(),
-        buildingLayerRegionId: data.buildingLayerRegionId ? Number(data.buildingLayerRegionId) : null,
-        startDate: String(data.startDate || "").trim(),
-        endDate: String(data.endDate || "").trim(),
-        bookingStatus: Number(data.bookingStatus)
-      });
+    if (data && data.id) {
+      const curSt = String(data.bookingStatus ?? "").trim();
+      const curStName = String(data.bookingStatusName || data.statusName || "").trim();
+      const isCurCancelled = ["5", "6", "7", "8", "9"].includes(curSt) || /取消|签退|释放|结束/.test(curStName);
+      if (["1", "2", "3", "4"].includes(curSt) || (requireCompleteList && !isCurCancelled)) {
+        const bId = String(data.id);
+        seenIds.add(bId);
+        results.push({
+          bookingId: bId,
+          seatId: data.seatId ? Number(data.seatId) : null,
+          seatName: String(data.seatName || "").trim(),
+          regionName: String(data.regionName || "").trim(),
+          buildingLayerRegionId: data.buildingLayerRegionId ? Number(data.buildingLayerRegionId) : null,
+          startDate: String(data.startDate || "").trim(),
+          endDate: String(data.endDate || "").trim(),
+          bookingStatus: Number(data.bookingStatus || 1)
+        });
+      }
     }
     if (!requireCompleteList && results.length > 0) {
       return results;
@@ -1061,7 +1070,11 @@ export class HautLibraryProvider {
       "/seatbook/user/mybookingInProgress?bookingstatus=0&pageSize=50&pageNum=1",
       rawToken
     );
-    if (!inProgJson || (typeof inProgJson.code === "number" && inProgJson.code !== 200)) {
+    if (
+      !inProgJson ||
+      (typeof inProgJson.code === "number" && inProgJson.code !== 200) ||
+      (requireCompleteList && typeof inProgJson.code !== "number" && !Array.isArray(inProgJson?.rows) && !Array.isArray(inProgJson?.data?.rows))
+    ) {
       throw new Error(inProgJson?.msg || "Failed to read in-progress bookings");
     }
     const rawRows = inProgJson?.rows ?? inProgJson?.data?.rows;
@@ -1070,11 +1083,20 @@ export class HautLibraryProvider {
     }
     const rows = Array.isArray(rawRows) ? rawRows : [];
     const declaredTotal = Number(inProgJson?.total ?? inProgJson?.data?.total ?? rows.length);
-    if (requireCompleteList && Number.isFinite(declaredTotal) && declaredTotal > rows.length) {
+    if (requireCompleteList && (!Number.isFinite(declaredTotal) || declaredTotal > rows.length || declaredTotal < 0)) {
       throw new Error("In-progress booking list is paginated/incomplete");
     }
     for (const row of rows) {
-      if (row && row.id && ["1", "2", "3", "4"].includes(String(row.bookingStatus))) {
+      if (!row || !row.id) {
+        if (requireCompleteList) {
+          throw new Error("In-progress booking list contains malformed row without id");
+        }
+        continue;
+      }
+      const rowSt = String(row.bookingStatus ?? "").trim();
+      const rowStName = String(row.bookingStatusName || row.statusName || "").trim();
+      const isRowCancelled = ["5", "6", "7", "8", "9"].includes(rowSt) || /取消|签退|释放|结束/.test(rowStName);
+      if (["1", "2", "3", "4"].includes(rowSt) || (requireCompleteList && !isRowCancelled)) {
         const bId = String(row.id);
         if (seenIds.has(bId)) continue;
         seenIds.add(bId);
@@ -1086,7 +1108,7 @@ export class HautLibraryProvider {
           buildingLayerRegionId: row.buildingLayerRegionId ? Number(row.buildingLayerRegionId) : null,
           startDate: String(row.startDate || "").trim(),
           endDate: String(row.endDate || "").trim(),
-          bookingStatus: Number(row.bookingStatus)
+          bookingStatus: Number(row.bookingStatus || 1)
         });
       }
     }
@@ -1590,26 +1612,65 @@ export class HautLibraryProvider {
 
       // Check exact booking record status in mybookingInProgress / bookinglist if available
       let exactRecordCancelled = false;
-      const historyJson = await this.wslibGetJson(
-        "/seatbook/user/my/bookinglist?pageSize=20&pageNum=1",
-        rawToken
-      ).catch(() => null);
-      if (historyJson && historyJson.code === 200 && Array.isArray(historyJson.rows)) {
-        const matchedRow = historyJson.rows.find((r) => r && String(r.id) === targetBookingId);
-        if (matchedRow) {
-          const st = String(matchedRow.bookingStatus ?? "").trim();
-          const stName = String(matchedRow.bookingStatusName || matchedRow.statusName || "").trim();
-          if (["1", "2", "3", "4"].includes(st)) {
-            return {
-              cancelled: false,
-              outcome: "CANCEL_RESULT_UNKNOWN",
-              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-              bookingId: targetBookingId,
-              message: "预约记录表显示该预约号仍处于生效状态，退座结果待核对"
-            };
-          }
-          if (["5", "6", "7", "8", "9"].includes(st) || /取消|签退|释放|结束/.test(stName)) {
-            exactRecordCancelled = true;
+      let historyReadError = false;
+      let historyJson = null;
+      try {
+        historyJson = await this.wslibGetJson(
+          "/seatbook/user/my/bookinglist?pageSize=20&pageNum=1",
+          rawToken
+        );
+      } catch {
+        historyReadError = true;
+      }
+
+      if (historyReadError || (historyJson && typeof historyJson.code === "number" && historyJson.code !== 200)) {
+        return {
+          cancelled: false,
+          outcome: "CANCEL_RESULT_UNKNOWN",
+          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+          bookingId: targetBookingId,
+          message: "预约历史列表回查异常，退座结果待核对"
+        };
+      }
+
+      if (historyJson && historyJson.code === 200) {
+        const histRows = historyJson.rows ?? historyJson.data?.rows;
+        if (histRows !== undefined && !Array.isArray(histRows)) {
+          return {
+            cancelled: false,
+            outcome: "CANCEL_RESULT_UNKNOWN",
+            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+            bookingId: targetBookingId,
+            message: "预约历史列表结构不完整，退座结果待核对"
+          };
+        }
+        if (Array.isArray(histRows)) {
+          const matchedRow = histRows.find((r) => r && String(r.id) === targetBookingId);
+          if (matchedRow) {
+            const st = String(matchedRow.bookingStatus ?? "").trim();
+            const stName = String(matchedRow.bookingStatusName || matchedRow.statusName || "").trim();
+            if (["5", "6", "7", "8", "9"].includes(st) || /取消|签退|释放|结束/.test(stName)) {
+              exactRecordCancelled = true;
+            } else {
+              return {
+                cancelled: false,
+                outcome: "CANCEL_RESULT_UNKNOWN",
+                school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+                bookingId: targetBookingId,
+                message: "预约记录表未确认该预约号已取消，退座结果待核对"
+              };
+            }
+          } else {
+            const histTotal = Number(historyJson.total ?? historyJson.data?.total ?? histRows.length);
+            if (!Number.isFinite(histTotal) || histTotal > histRows.length) {
+              return {
+                cancelled: false,
+                outcome: "CANCEL_RESULT_UNKNOWN",
+                school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+                bookingId: targetBookingId,
+                message: "预约历史列表分页不完整且未找到目标预约号，退座结果待核对"
+              };
+            }
           }
         }
       }
@@ -1833,22 +1894,45 @@ export class HautLibraryProvider {
         .filter(Boolean);
       const rawPrewarmed = job.prewarmed_targets;
       const nowEpochMs = nowInstant instanceof Date ? nowInstant.getTime() : Date.now();
+      const expectedBindId = String(binding.id || "").trim();
+      const expectedStudentNo = String(binding.student_no || "").trim();
+      const expectedAuthVer = Number(job.auth_version ?? plan?.auth_version ?? binding.auth_version ?? 1);
+      const expectedPlanGen = Number(plan?.generation ?? job.generation ?? 1);
+      const expectedTargetDate = String(datesToTry[0] || "").trim();
+      const expectedSlotWindow =
+        plan?.has_explicit_slot_window && plan?.slot_window ? String(plan.slot_window).trim() : null;
       const isPrewarmedValid = Boolean(
         rawPrewarmed &&
           Array.isArray(rawPrewarmed.candidate_seats) &&
           rawPrewarmed.candidate_seats.length > 0 &&
-          (!rawPrewarmed.binding_id || rawPrewarmed.binding_id === binding.id) &&
-          (!rawPrewarmed.student_no ||
-            !binding.student_no ||
-            String(rawPrewarmed.student_no).trim() === String(binding.student_no).trim()) &&
-          (!rawPrewarmed.auth_version ||
-            Number(rawPrewarmed.auth_version) ===
-              Number(job.auth_version ?? plan?.auth_version ?? binding.auth_version ?? 1)) &&
-          (!rawPrewarmed.plan_generation ||
-            Number(rawPrewarmed.plan_generation) === Number(plan?.generation ?? job.generation ?? 1)) &&
-          (!rawPrewarmed.target_local_date || rawPrewarmed.target_local_date === datesToTry[0]) &&
-          (!rawPrewarmed.expires_at || Date.parse(rawPrewarmed.expires_at) >= nowEpochMs)
+          typeof rawPrewarmed.binding_id === "string" &&
+          rawPrewarmed.binding_id.trim().length > 0 &&
+          rawPrewarmed.binding_id.trim() === expectedBindId &&
+          typeof rawPrewarmed.student_no === "string" &&
+          rawPrewarmed.student_no.trim().length > 0 &&
+          (!expectedStudentNo || rawPrewarmed.student_no.trim() === expectedStudentNo) &&
+          Number.isInteger(Number(rawPrewarmed.auth_version)) &&
+          Number(rawPrewarmed.auth_version) > 0 &&
+          Number(rawPrewarmed.auth_version) === expectedAuthVer &&
+          Number.isInteger(Number(rawPrewarmed.plan_generation)) &&
+          Number(rawPrewarmed.plan_generation) > 0 &&
+          Number(rawPrewarmed.plan_generation) === expectedPlanGen &&
+          typeof rawPrewarmed.target_local_date === "string" &&
+          rawPrewarmed.target_local_date.trim() === expectedTargetDate &&
+          typeof rawPrewarmed.start_full === "string" &&
+          rawPrewarmed.start_full.startsWith(`${expectedTargetDate} `) &&
+          typeof rawPrewarmed.end_full === "string" &&
+          rawPrewarmed.end_full.startsWith(`${expectedTargetDate} `) &&
+          (!expectedSlotWindow ||
+            (typeof rawPrewarmed.slot_window === "string" &&
+              rawPrewarmed.slot_window.trim() === expectedSlotWindow)) &&
+          typeof rawPrewarmed.expires_at === "string" &&
+          Number.isFinite(Date.parse(rawPrewarmed.expires_at)) &&
+          Date.parse(rawPrewarmed.expires_at) >= nowEpochMs
       );
+      if (!isPrewarmedValid && job.prewarmed_targets) {
+        job.prewarmed_targets = null;
+      }
       const prewarmed = isPrewarmedValid ? rawPrewarmed : null;
       const hasExplicitCandidateSeats =
         wantedSeats.length > 0 ||
@@ -1860,7 +1944,7 @@ export class HautLibraryProvider {
       const isMorningOpeningWindow = fireLocalTime >= "07:00:00" && fireLocalTime < "07:25:00";
       const isExactOpeningBurst = fireLocalTime >= "07:00:00" && fireLocalTime <= "07:00:03";
 
-      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist and pass scope/TTL validation,
+      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist and pass strict scope/date/TTL validation,
       // use read-only gate check and submit strictly in candidate order; stop immediately on any unknown write result or readback failure.
       if (
         prewarmed &&
@@ -1868,7 +1952,8 @@ export class HautLibraryProvider {
         prewarmed.candidate_seats.length > 0 &&
         prewarmed.start_full &&
         prewarmed.end_full &&
-        (isMorningOpeningWindow || prewarmed.start_full.startsWith(datesToTry[0]))
+        prewarmed.start_full.startsWith(`${expectedTargetDate} `) &&
+        prewarmed.end_full.startsWith(`${expectedTargetDate} `)
       ) {
         if (isExactOpeningBurst && prewarmed.region_id) {
           for (let probeIdx = 0; probeIdx < 12; probeIdx++) {
@@ -1892,8 +1977,7 @@ export class HautLibraryProvider {
           }
         }
 
-        const targetDateForPrewarmed =
-          String(prewarmed.start_full).slice(0, 10) || job.booking_local_date;
+        const targetDateForPrewarmed = expectedTargetDate;
         const wave0Win = resolvePlanTimeWindow(
           targetDateForPrewarmed,
           plan,

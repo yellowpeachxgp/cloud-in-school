@@ -2090,7 +2090,8 @@ export function createCampusCloudApp(options = {}) {
             targetDate,
             targetTime,
             rpBindId: rpBindId || null,
-            rpConsentId: rpConsentId || null
+            rpConsentId: rpConsentId || null,
+            rpAuthVer: rpAuthVer !== null && rpAuthVer !== undefined ? Number(rpAuthVer) : null
           });
         }
       }
@@ -2286,44 +2287,39 @@ export function createCampusCloudApp(options = {}) {
         const defaultActiveBinding =
           distinctStudentNos.size <= 1 ? userActiveBindings[userActiveBindings.length - 1] || null : null;
 
-        for (const { rpItem, targetDate, targetTime, rpBindId, rpConsentId } of validatedPlanUpserts) {
-          const activeBinding = rpBindId
-            ? store.schoolBindings.get(rpBindId)
-            : defaultActiveBinding;
+        for (const { rpItem, targetDate, targetTime, rpBindId, rpConsentId, rpAuthVer } of validatedPlanUpserts) {
+          if (!rpBindId || !rpConsentId || rpAuthVer === null || rpAuthVer !== serverAuthVersion) {
+            planResults.push({
+              target_local_date: targetDate,
+              target_local_time: targetTime,
+              binding_id: rpBindId || null,
+              status: "NEEDS_RECONFIRMATION",
+              reason: "预约计划缺少显式绑定的 school_binding_id、consent_id 或 auth_version，拒绝猜测当前授权，需重新确认授权"
+            });
+            continue;
+          }
+          const activeBinding = store.schoolBindings.get(rpBindId);
           if (
             !activeBinding ||
             activeBinding.revoked_at ||
             activeBinding.status !== "DELEGATED_ACTIVE" ||
-            Number(activeBinding.auth_version || 1) !== serverAuthVersion
+            Number(activeBinding.auth_version || 0) !== serverAuthVersion
           ) {
             planResults.push({
               target_local_date: targetDate,
               target_local_time: targetTime,
               binding_id: rpBindId || null,
               status: "NEEDS_RECONFIRMATION",
-              reason: "缺少当前有效学校绑定或存在多绑定未指定具体绑定，需重新确认授权"
+              reason: "缺少当前有效学校绑定或绑定授权版本不匹配，需重新确认授权"
             });
             continue;
           }
-          const targetSchoolId = activeBinding.school_id || DEFAULT_SCHOOL_ID;
-          const activeConsent = rpConsentId
-            ? store.consents.get(rpConsentId)
-            : activeBinding.consent_id
-              ? store.consents.get(activeBinding.consent_id)
-              : store
-                  .recordsForUser("consents", auth.cloudUserId)
-                  .filter(
-                    (c) =>
-                      (c.school_id || DEFAULT_SCHOOL_ID) === targetSchoolId &&
-                      !c.withdrawn_at &&
-                      Number(c.auth_version || 1) === serverAuthVersion
-                  )
-                  .slice(-1)[0] || null;
+          const activeConsent = store.consents.get(rpConsentId);
 
           if (
             !activeConsent ||
             activeConsent.withdrawn_at ||
-            Number(activeConsent.auth_version || 1) !== serverAuthVersion ||
+            Number(activeConsent.auth_version || 0) !== serverAuthVersion ||
             (activeBinding.consent_id && activeBinding.consent_id !== activeConsent.id)
           ) {
             planResults.push({
@@ -2912,7 +2908,96 @@ export function createCampusCloudApp(options = {}) {
       .slice(0, 3);
   }
 
-  registerExtension("GET", "/api/v1/moments/snapshot", "getMomentsSnapshot", "public", async ({ query }) => {
+  function tryExtractOptionalViewerUserId(headers, nowMs, method = "GET") {
+    try {
+      return extractBearer(headers, nowMs, method)?.cloudUserId || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function isPrivateMomentsComment(c) {
+    return Boolean(
+      c?.is_private_to_initiator ||
+        String(c?.content || "").trim().startsWith("【私密联系发起人】")
+    );
+  }
+
+  function projectMomentsPostForViewer(post, allPosts, viewerUserId = null) {
+    if (!post) return null;
+    const isOwner = Boolean(
+      viewerUserId && post.owner_cloud_user_id && post.owner_cloud_user_id === viewerUserId
+    );
+    const isBlocked = Boolean(
+      viewerUserId &&
+        Array.isArray(post.blocked_user_ids) &&
+        post.blocked_user_ids.includes(viewerUserId)
+    );
+    const hasApprovedRequest =
+      !isBlocked &&
+      Boolean(
+        viewerUserId &&
+          Array.isArray(post.contact_requests) &&
+          post.contact_requests.some(
+            (r) => r.sender_user_id === viewerUserId && r.status === "APPROVED"
+          )
+      );
+
+    const sanitized = { ...post };
+    delete sanitized.contact_requests;
+    delete sanitized.blocked_user_ids;
+
+    if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
+      if (!isOwner && !hasApprovedRequest) {
+        sanitized.contact = "需发起联系/认领申请后查看";
+        sanitized.has_protected_contact = true;
+      } else {
+        sanitized.has_protected_contact = false;
+      }
+    }
+
+    const rawComments = Array.isArray(post.comments) ? post.comments : [];
+    sanitized.comments = rawComments
+      .filter((c) => {
+        if (!c) return false;
+        if (!isPrivateMomentsComment(c)) return true;
+        const isCommentAuthor = Boolean(
+          viewerUserId && c.author_user_id && c.author_user_id === viewerUserId
+        );
+        return isOwner || isCommentAuthor;
+      })
+      .map((c) => {
+        const isCommentAuthor = Boolean(
+          viewerUserId && c.author_user_id && c.author_user_id === viewerUserId
+        );
+        const canSeeHint = isOwner || isCommentAuthor || !isPrivateMomentsComment(c);
+        const projectedComment = {
+          id: c.id,
+          author_name: c.author_name,
+          content: c.content,
+          contact_hint: canSeeHint ? String(c.contact_hint || "") : "",
+          is_private_to_initiator: isPrivateMomentsComment(c),
+          created_at: c.created_at
+        };
+        return projectedComment;
+      });
+
+    return {
+      ...sanitized,
+      contact_requests_count: Array.isArray(post.contact_requests) ? post.contact_requests.length : 0,
+      matched_clues: computePostMatches(post, allPosts || []).map((m) => ({
+        id: m.post.id,
+        type: m.post.type,
+        title: m.post.title,
+        location: m.post.location,
+        contact: m.post.contact_visibility === "ON_REQUEST" ? "需申请查看" : m.post.contact,
+        match_score: m.match_score
+      }))
+    };
+  }
+
+  registerExtension("GET", "/api/v1/moments/snapshot", "getMomentsSnapshot", "public", async ({ query, headers, nowMs }) => {
+    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "GET");
     const ms = store.momentsState || { posts: [], book_listings: [], anti_lost_tags: [], isbn_catalog: [] };
     const typeFilter = (query.get("type") || "").trim().toUpperCase();
     const campusFilter = (query.get("campus") || "").trim();
@@ -2929,27 +3014,9 @@ export function createCampusCloudApp(options = {}) {
         (p.title + " " + p.category + " " + p.location + " " + p.description).toLowerCase().includes(kw)
       );
     }
-    const enrichedPosts = posts.map((p) => {
-      const sanitized = { ...p };
-      delete sanitized.contact_requests;
-      delete sanitized.blocked_user_ids;
-      if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
-        sanitized.contact = "需发起联系/认领申请后查看";
-        sanitized.has_protected_contact = true;
-      }
-      return {
-        ...sanitized,
-        contact_requests_count: Array.isArray(p.contact_requests) ? p.contact_requests.length : 0,
-        matched_clues: computePostMatches(p, ms.posts || []).map((m) => ({
-          id: m.post.id,
-          type: m.post.type,
-          title: m.post.title,
-          location: m.post.location,
-          contact: m.post.contact_visibility === "ON_REQUEST" ? "需申请查看" : m.post.contact,
-          match_score: m.match_score
-        }))
-      };
-    });
+    const enrichedPosts = posts.map((p) =>
+      projectMomentsPostForViewer(p, ms.posts || [], viewerUserId)
+    );
     return {
       status: 200,
       code: "MOMENTS_SNAPSHOT_OK",
@@ -2964,12 +3031,44 @@ export function createCampusCloudApp(options = {}) {
     };
   });
 
-  registerExtension("POST", "/api/v1/moments/posts", "createMomentsPost", "public", async ({ body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/posts", "createMomentsPost", "public", async ({ body, headers, nowMs }) => {
+    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
     const title = String(body?.title || "").trim().slice(0, 64);
     if (!title) throw new ContractError("BAD_REQUEST", "请填写物品名称或标题");
+
+    if (
+      body?.owner_cloud_user_id !== undefined &&
+      body?.owner_cloud_user_id !== null &&
+      String(body.owner_cloud_user_id).trim() !== ""
+    ) {
+      if (!viewerUserId || String(body.owner_cloud_user_id).trim() !== viewerUserId) {
+        throw new ContractError(
+          "FORBIDDEN",
+          "帖子所有者必须由当前登录认证身份决定，禁止匿名或跨账号指定 owner_cloud_user_id"
+        );
+      }
+    }
+
+    const contactVisibility =
+      String(body?.contact_visibility || "PUBLIC").toUpperCase() === "ON_REQUEST"
+        ? "ON_REQUEST"
+        : "PUBLIC";
+    if (contactVisibility === "ON_REQUEST" && !viewerUserId) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        "启用受保护联系方式（仅认领申请通过后可见）需先登录云端账号"
+      );
+    }
+
+    const requestedId = body?.id ? String(body.id).trim().slice(0, 40) : "";
+    const existingPosts = store.momentsState.posts || [];
+    if (requestedId && existingPosts.some((p) => p.id === requestedId)) {
+      throw new ContractError("CONFLICT", "该帖子 ID 已存在，禁止覆盖已有失物招领帖或联系申请");
+    }
+
     const nowIso = new Date(nowMs).toISOString();
     const newPost = {
-      id: body?.id ? String(body.id).trim().slice(0, 40) : ("mp_" + crypto.randomUUID().slice(0, 10)),
+      id: requestedId || ("mp_" + crypto.randomUUID().slice(0, 10)),
       type: String(body?.type || "LOST").toUpperCase() === "FOUND" ? "FOUND" : "LOST",
       title,
       category: String(body?.category || "其他物品").trim().slice(0, 24),
@@ -2981,8 +3080,8 @@ export function createCampusCloudApp(options = {}) {
       status: "OPEN",
       author_name: String(body?.author_name || "河工大同学").trim().slice(0, 24),
       author_student_no_masked: String(body?.author_student_no_masked || "").trim().slice(0, 16),
-      owner_cloud_user_id: body?.owner_cloud_user_id ? String(body.owner_cloud_user_id).trim() : null,
-      contact_visibility: String(body?.contact_visibility || "PUBLIC").toUpperCase() === "ON_REQUEST" ? "ON_REQUEST" : "PUBLIC",
+      owner_cloud_user_id: viewerUserId || null,
+      contact_visibility: contactVisibility,
       likes_count: 0,
       favorites_count: 0,
       comments: [],
@@ -2992,27 +3091,41 @@ export function createCampusCloudApp(options = {}) {
       created_at: nowIso,
       updated_at: nowIso
     };
-    store.momentsState.posts = [
-      newPost,
-      ...(store.momentsState.posts || []).filter((p) => p.id !== newPost.id)
-    ].slice(0, 200);
+    store.momentsState.posts = [newPost, ...existingPosts].slice(0, 200);
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 201, code: "MOMENTS_POST_CREATED", data: newPost };
+    return {
+      status: 201,
+      code: "MOMENTS_POST_CREATED",
+      data: projectMomentsPostForViewer(newPost, store.momentsState.posts, viewerUserId)
+    };
   });
 
-  registerExtension("POST", "/api/v1/moments/posts/{postId}/comments", "addMomentsPostComment", "public", async ({ params, body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/posts/{postId}/comments", "addMomentsPostComment", "public", async ({ params, body, headers, nowMs }) => {
+    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
     const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
     if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+    if (viewerUserId && Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(viewerUserId)) {
+      throw new ContractError("FORBIDDEN", "发起人已屏蔽来自当前账号的留言或联系请求");
+    }
     const content = String(body?.content || "").trim().slice(0, 240);
     if (!content) throw new ContractError("BAD_REQUEST", "留言内容不能为空");
+    const isPrivate =
+      Boolean(body?.is_private_to_initiator) || content.startsWith("【私密联系发起人】");
+    if (isPrivate && !viewerUserId) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        "发送仅发起人可见的私密认领留言需先登录云端账号，或使用 /contact-requests 接口"
+      );
+    }
     const nowIso = new Date(nowMs).toISOString();
     const comment = {
       id: "mc_" + crypto.randomUUID().slice(0, 8),
+      author_user_id: viewerUserId || null,
       author_name: String(body?.author_name || "热心同学").trim().slice(0, 24),
       content,
       contact_hint: String(body?.contact_hint || "").trim().slice(0, 48),
-      is_private_to_initiator: Boolean(body?.is_private_to_initiator),
+      is_private_to_initiator: isPrivate,
       created_at: nowIso
     };
     if (!Array.isArray(post.comments)) post.comments = [];
@@ -3020,7 +3133,11 @@ export function createCampusCloudApp(options = {}) {
     post.updated_at = nowIso;
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 201, code: "MOMENTS_COMMENT_ADDED", data: post };
+    return {
+      status: 201,
+      code: "MOMENTS_COMMENT_ADDED",
+      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId)
+    };
   });
 
   registerExtension(
@@ -3107,13 +3224,15 @@ export function createCampusCloudApp(options = {}) {
       if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
       const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
       const isOwner = Boolean(post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId);
+      const isSenderBlocked =
+        Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(auth.cloudUserId);
       const visibleReqs = isOwner
         ? allReqs
         : allReqs
             .filter((r) => r.sender_user_id === auth.cloudUserId)
             .map((r) => ({
               ...r,
-              initiator_contact: r.status === "APPROVED" ? post.contact : null
+              initiator_contact: !isSenderBlocked && r.status === "APPROVED" ? post.contact : null
             }));
       return {
         status: 200,
@@ -3147,6 +3266,9 @@ export function createCampusCloudApp(options = {}) {
       const nowIso = new Date(nowMs).toISOString();
       if (action === "APPROVE") {
         if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可同意公开联系方式");
+        if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
+          throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
+        }
         reqItem.status = "APPROVED";
         if (body?.reply_message) {
           reqItem.reply_message = String(body.reply_message).trim().slice(0, 240);
@@ -3156,10 +3278,16 @@ export function createCampusCloudApp(options = {}) {
         reqItem.status = "REJECTED";
       } else if (action === "BLOCK") {
         if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可屏蔽申请人");
-        reqItem.status = "BLOCKED";
         if (!Array.isArray(post.blocked_user_ids)) post.blocked_user_ids = [];
         if (!post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           post.blocked_user_ids.push(reqItem.sender_user_id);
+        }
+        // Revoke ALL existing requests (including previously APPROVED ones) from this blocked user!
+        for (const r of allReqs) {
+          if (r.sender_user_id === reqItem.sender_user_id) {
+            r.status = "BLOCKED";
+            r.updated_at = nowIso;
+          }
         }
       } else if (action === "REPORT") {
         post.reports_count = Number(post.reports_count || 0) + 1;
@@ -3179,24 +3307,37 @@ export function createCampusCloudApp(options = {}) {
       post.updated_at = nowIso;
       store.momentsState.updated_at = nowIso;
       store.saveSnapshot();
+      const isSenderBlocked =
+        Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id);
       return {
         status: 200,
         code: "CONTACT_REQUEST_UPDATED",
         data: {
           ...reqItem,
-          initiator_contact: reqItem.status === "APPROVED" ? post.contact : null
+          initiator_contact: !isSenderBlocked && reqItem.status === "APPROVED" ? post.contact : null
         }
       };
     }
   );
 
-  registerExtension("POST", "/api/v1/moments/posts/{postId}/action", "mutateMomentsPost", "public", async ({ params, body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/posts/{postId}/action", "mutateMomentsPost", "public", async ({ params, body, headers, nowMs }) => {
+    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
     const posts = store.momentsState.posts || [];
     const idx = posts.findIndex((p) => p.id === params.postId);
     if (idx < 0) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
     const act = String(body?.action || "").toUpperCase();
     const post = posts[idx];
     const nowIso = new Date(nowMs).toISOString();
+
+    if (act === "DELETE" || act === "RESOLVE" || act === "REOPEN") {
+      if (!viewerUserId) {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "修改或删除失物招领帖需先登录云端账号");
+      }
+      if (!post.owner_cloud_user_id || post.owner_cloud_user_id !== viewerUserId) {
+        throw new ContractError("FORBIDDEN", "仅帖子发起人本人可执行结案、重开或删除操作");
+      }
+    }
+
     if (act === "DELETE") {
       posts.splice(idx, 1);
       store.momentsState.updated_at = nowIso;
@@ -3207,10 +3348,28 @@ export function createCampusCloudApp(options = {}) {
     else if (act === "REOPEN") post.status = "OPEN";
     else if (act === "LIKE") post.likes_count = Number(post.likes_count || 0) + 1;
     else if (act === "FAVORITE") post.favorites_count = Number(post.favorites_count || 0) + 1;
+    else if (act === "REPORT") {
+      post.reports_count = Number(post.reports_count || 0) + 1;
+      store.recordAudit({
+        actor_kind: viewerUserId ? "USER" : "ANONYMOUS",
+        actor_ref: viewerUserId || "anonymous",
+        action: "REPORT_MOMENTS_POST",
+        resource_kind: "moments_post",
+        resource_ref: post.id,
+        outcome: "REPORTED",
+        detail: { reason: String(body?.reason || "用户举报不良或虚假失物招领信息").slice(0, 160) }
+      });
+    } else {
+      throw new ContractError("BAD_REQUEST", "不支持的帖子操作类型");
+    }
     post.updated_at = nowIso;
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 200, code: "MOMENTS_POST_UPDATED", data: post };
+    return {
+      status: 200,
+      code: "MOMENTS_POST_UPDATED",
+      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId)
+    };
   });
 
   registerExtension("POST", "/api/v1/moments/books", "createMomentsBookListing", "public", async ({ body, nowMs }) => {

@@ -208,10 +208,23 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   const finderToken = app.identity.issueDeviceSession(finder, "dev_finder").access_token;
   const bystanderToken = app.identity.issueDeviceSession(bystander, "dev_bystander").access_token;
 
-  // Owner creates a LOST post with ON_REQUEST contact visibility
+  // P1 #2: Anonymous request attempting to specify owner_cloud_user_id MUST be rejected (403)
+  const spoofOwnerRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    body: {
+      type: "LOST",
+      title: "伪造所有者的帖子",
+      owner_cloud_user_id: owner.id
+    }
+  });
+  assert.equal(spoofOwnerRes.status, 403);
+
+  // Authenticated Owner creates a LOST post with ON_REQUEST contact visibility
   const createPostRes = await app.inject({
     method: "POST",
     url: "/api/v1/moments/posts",
+    headers: { Authorization: `Bearer ${ownerToken}` },
     body: {
       type: "LOST",
       title: "遗失深蓝色校园一卡通",
@@ -220,14 +233,27 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
       location: "31号楼201",
       description: "卡套背面贴有贴纸",
       contact: "微信: secret_wx_001",
-      contact_visibility: "ON_REQUEST",
-      owner_cloud_user_id: owner.id
+      contact_visibility: "ON_REQUEST"
     }
   });
   assert.equal(createPostRes.status, 201);
   const postId = createPostRes.body.data.id;
 
-  // Public snapshot masks ON_REQUEST contact
+  // P1 #2: Attempting to overwrite an existing post ID MUST be rejected (409 CONFLICT)
+  const overwritePostRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    headers: { Authorization: `Bearer ${bystanderToken}` },
+    body: {
+      id: postId,
+      type: "FOUND",
+      title: "恶意覆盖原帖",
+      contact: "attacker_contact"
+    }
+  });
+  assert.equal(overwritePostRes.status, 409);
+
+  // Public snapshot masks ON_REQUEST contact and strips internal arrays
   const snapRes = await app.inject({
     method: "GET",
     url: "/api/v1/moments/snapshot"
@@ -235,6 +261,8 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   const publicPost = snapRes.body.data.posts.find((p) => p.id === postId);
   assert.equal(publicPost.contact, "需发起联系/认领申请后查看");
   assert.equal(publicPost.has_protected_contact, true);
+  assert.equal(publicPost.contact_requests, undefined);
+  assert.equal(publicPost.blocked_user_ids, undefined);
 
   // Finder submits an idempotent contact request
   const req1 = await app.inject({
@@ -251,6 +279,63 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   });
   assert.equal(req1.status, 201);
   const requestId = req1.body.data.id;
+
+  // P1 #1: Public LIKE / COMMENT responses MUST use safe projection and NEVER leak contact_requests, blocked_user_ids, or protected contact!
+  const likeRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/action`,
+    body: { action: "LIKE" }
+  });
+  assert.equal(likeRes.status, 200);
+  assert.equal(likeRes.body.data.contact, "需发起联系/认领申请后查看");
+  assert.equal(likeRes.body.data.contact_requests, undefined);
+  assert.equal(likeRes.body.data.blocked_user_ids, undefined);
+
+  // Finder posts a private comment -> visible to Owner & Finder, hidden from Bystander and anonymous snapshot
+  const privCommentRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/comments`,
+    headers: { Authorization: `Bearer ${finderToken}` },
+    body: {
+      content: "【私密联系发起人】卡号后四位是 8821",
+      contact_hint: "13800001111",
+      is_private_to_initiator: true
+    }
+  });
+  assert.equal(privCommentRes.status, 201);
+
+  const bystanderCommentRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/comments`,
+    body: {
+      content: "帮顶，祝早日找回",
+      contact_hint: ""
+    }
+  });
+  assert.equal(bystanderCommentRes.status, 201);
+  assert.equal(bystanderCommentRes.body.data.contact, "需发起联系/认领申请后查看");
+  assert.equal(bystanderCommentRes.body.data.contact_requests, undefined);
+  // Anonymous caller must NOT see Finder's private comment!
+  assert.equal(bystanderCommentRes.body.data.comments.length, 1);
+  assert.equal(bystanderCommentRes.body.data.comments[0].content, "帮顶，祝早日找回");
+
+  // Owner CAN see both comments including the private comment and contact_hint
+  const ownerSnap = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${ownerToken}` }
+  });
+  const ownerPostView = ownerSnap.body.data.posts.find((p) => p.id === postId);
+  assert.equal(ownerPostView.comments.length, 2);
+
+  // P1 #2: Non-owner cannot DELETE or RESOLVE the post
+  const unauthDelete = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/action`,
+    headers: { Authorization: `Bearer ${bystanderToken}` },
+    body: { action: "DELETE" }
+  });
+  assert.equal(unauthDelete.status, 403);
 
   // Duplicate idempotency key returns 200 without creating a second request
   const reqDup = await app.inject({
@@ -295,4 +380,44 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   assert.equal(approveRes.status, 200);
   assert.equal(approveRes.body.data.status, "APPROVED");
   assert.equal(approveRes.body.data.initiator_contact, "微信: secret_wx_001");
+
+  // Finder submits a second request, then Owner BLOCKs Finder -> ALL requests (including the previously APPROVED one) become BLOCKED and initiator_contact is revoked!
+  const req2 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests`,
+    headers: {
+      Authorization: `Bearer ${finderToken}`,
+      "Idempotency-Key": "idem-contact-002"
+    },
+    body: {
+      message: "第二条请求",
+      contact_info: "QQ: 123456789"
+    }
+  });
+  assert.equal(req2.status, 201);
+  const req2Id = req2.body.data.id;
+
+  const blockRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests/${req2Id}/action`,
+    headers: { Authorization: `Bearer ${ownerToken}` },
+    body: { action: "BLOCK" }
+  });
+  assert.equal(blockRes.status, 200);
+
+  const finderListAfterBlock = await app.inject({
+    method: "GET",
+    url: `/api/v1/moments/posts/${postId}/contact-requests`,
+    headers: { Authorization: `Bearer ${finderToken}` }
+  });
+  assert.ok(finderListAfterBlock.body.data.requests.every((r) => r.status === "BLOCKED"));
+  assert.ok(finderListAfterBlock.body.data.requests.every((r) => r.initiator_contact === null));
+
+  const finderSnapAfterBlock = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${finderToken}` }
+  });
+  const finderPostViewAfterBlock = finderSnapAfterBlock.body.data.posts.find((p) => p.id === postId);
+  assert.equal(finderPostViewAfterBlock.contact, "需发起联系/认领申请后查看");
 });

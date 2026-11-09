@@ -313,7 +313,11 @@ export class TripleScheduleEngine {
       policy_version: payload.accepted_policy_version || rules.rule_version,
       price_version: payload.accepted_price_version || "price-library-cloud-2026-11-v1",
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
-      area_name: payload.area_name || "4楼北自习区",
+      area_name:
+        payload.area_name ||
+        (Array.isArray(payload.preferred_area_ids) && payload.preferred_area_ids[0]) ||
+        payload.area_code ||
+        "4楼北自习区",
       candidate_seats: payload.candidate_seats || payload.preferred_seat_ids || ["4N-001"],
       slot_window: explicitSlotWindow || "07:30-22:00",
       has_explicit_slot_window: Boolean(explicitSlotWindow),
@@ -1793,6 +1797,8 @@ export class TripleScheduleEngine {
     if (finishedJob?.prewarmed_targets && typeof finishedJob.prewarmed_targets === "object") {
       rolledPrewarmed = {
         ...finishedJob.prewarmed_targets,
+        target_local_date: nextDate,
+        plan_generation: nextGen,
         start_full:
           typeof finishedJob.prewarmed_targets.start_full === "string"
             ? finishedJob.prewarmed_targets.start_full.replace(/^\d{4}-\d{2}-\d{2}/, nextDate)

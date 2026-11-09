@@ -393,7 +393,15 @@ test("HautLibraryProvider: Stops immediately on readback failure (never writes c
     id: "job-live-test-001",
     school_id: "haut",
     booking_local_date: "2026-11-08",
+    auth_version: 1,
+    generation: 1,
     prewarmed_targets: {
+      binding_id: "bind-live-test-001",
+      student_no: "231040100428",
+      auth_version: 1,
+      plan_generation: 1,
+      target_local_date: "2026-11-08",
+      expires_at: "2026-11-08T09:00:00+08:00",
       region_id: 13,
       region_name: "四层西书库北区",
       start_full: "2026-11-08 07:30:00",
@@ -1117,6 +1125,12 @@ test("P1 Race Regression: Concurrent revocation during in-flight query blocks ad
   const jobId = planRes.body.data.job_id;
   const job = app.store.reservationJobs.get(jobId);
   job.prewarmed_targets = {
+    binding_id: bindId,
+    student_no: "231040100888",
+    auth_version: 1,
+    plan_generation: 1,
+    target_local_date: targetDate,
+    expires_at: "2026-11-10T09:00:00+08:00",
     region_id: 13,
     region_name: "四层西书库北区",
     start_full: "2026-11-10 07:30:00",
