@@ -175,3 +175,124 @@ test("Unit: Database Migrations have paired Up and Down SQL files and support ro
     assert.ok(m.downSql && m.downSql.length > 50);
   }
 });
+
+test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (#9)", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+
+  // 1. Verify #16 Computer Service Club structured venue
+  const content = app.store.getCampusContent("haut");
+  const compClub = content.clubs.find((c) => c.id === "club_partner_computer_service");
+  assert.ok(compClub);
+  assert.equal(compClub.activity_venue, "莲花街校区 学生宿舍F01 W111");
+  assert.equal(compClub.building_name, "学生宿舍F01");
+  assert.equal(compClub.room_number, "W111");
+
+  // 2. Create two users (owner & finder) and test #9 Lost & Found Contact Request MVP
+  const owner = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.xyz",
+    subject: "sub_owner_01",
+    displayName: "失主小张"
+  });
+  const finder = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.xyz",
+    subject: "sub_finder_02",
+    displayName: "拾得者小李"
+  });
+  const bystander = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.xyz",
+    subject: "sub_bystander_03",
+    displayName: "路人小王"
+  });
+
+  const ownerToken = app.identity.issueDeviceSession(owner, "dev_owner").access_token;
+  const finderToken = app.identity.issueDeviceSession(finder, "dev_finder").access_token;
+  const bystanderToken = app.identity.issueDeviceSession(bystander, "dev_bystander").access_token;
+
+  // Owner creates a LOST post with ON_REQUEST contact visibility
+  const createPostRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    body: {
+      type: "LOST",
+      title: "遗失深蓝色校园一卡通",
+      category: "校园卡/证件",
+      campus: "莲花街校区",
+      location: "31号楼201",
+      description: "卡套背面贴有贴纸",
+      contact: "微信: secret_wx_001",
+      contact_visibility: "ON_REQUEST",
+      owner_cloud_user_id: owner.id
+    }
+  });
+  assert.equal(createPostRes.status, 201);
+  const postId = createPostRes.body.data.id;
+
+  // Public snapshot masks ON_REQUEST contact
+  const snapRes = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot"
+  });
+  const publicPost = snapRes.body.data.posts.find((p) => p.id === postId);
+  assert.equal(publicPost.contact, "需发起联系/认领申请后查看");
+  assert.equal(publicPost.has_protected_contact, true);
+
+  // Finder submits an idempotent contact request
+  const req1 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests`,
+    headers: {
+      Authorization: `Bearer ${finderToken}`,
+      "Idempotency-Key": "idem-contact-001"
+    },
+    body: {
+      message: "我捡到了这张校园卡，放在31号楼一楼值班室了",
+      contact_info: "QQ: 123456789"
+    }
+  });
+  assert.equal(req1.status, 201);
+  const requestId = req1.body.data.id;
+
+  // Duplicate idempotency key returns 200 without creating a second request
+  const reqDup = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests`,
+    headers: {
+      Authorization: `Bearer ${finderToken}`,
+      "Idempotency-Key": "idem-contact-001"
+    },
+    body: {
+      message: "我捡到了这张校园卡，放在31号楼一楼值班室了",
+      contact_info: "QQ: 123456789"
+    }
+  });
+  assert.equal(reqDup.status, 200);
+  assert.equal(reqDup.body.code, "CONTACT_REQUEST_DUPLICATE");
+
+  // Bystander cannot see Finder's contact request
+  const bystanderList = await app.inject({
+    method: "GET",
+    url: `/api/v1/moments/posts/${postId}/contact-requests`,
+    headers: { Authorization: `Bearer ${bystanderToken}` }
+  });
+  assert.equal(bystanderList.body.data.requests.length, 0);
+
+  // Bystander cannot approve Finder's request
+  const bystanderAct = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests/${requestId}/action`,
+    headers: { Authorization: `Bearer ${bystanderToken}` },
+    body: { action: "APPROVE" }
+  });
+  assert.equal(bystanderAct.status, 403);
+
+  // Owner approves Finder's request -> Finder can now see initiator_contact
+  const approveRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${postId}/contact-requests/${requestId}/action`,
+    headers: { Authorization: `Bearer ${ownerToken}` },
+    body: { action: "APPROVE", reply_message: "太感谢了，我马上过去拿！" }
+  });
+  assert.equal(approveRes.status, 200);
+  assert.equal(approveRes.body.data.status, "APPROVED");
+  assert.equal(approveRes.body.data.initiator_contact, "微信: secret_wx_001");
+});

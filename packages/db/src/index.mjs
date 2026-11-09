@@ -459,7 +459,10 @@ export function createDefaultHautCampusContent() {
         category: "TECH_INNOVATION",
         category_label: "科技创新",
         affiliated_unit: "信息科学与工程学院",
-        activity_venue: "莲花街校区 8号教学楼",
+        activity_venue: "莲花街校区 学生宿舍F01 W111",
+        campus_name: "莲花街校区",
+        building_name: "学生宿舍F01",
+        room_number: "W111",
         summary: "开展校园电脑义务义诊、系统重装、软硬件维护与计算机技术科普交流。",
         qq_group_number: "1043885481",
         highlights: ["合作社团", "电脑义诊", "技术互助"],
@@ -905,6 +908,16 @@ export class CloudDatabaseStore {
     if (!Array.isArray(raw.competitions) || raw.competitions.length === 0) {
       raw.competitions = createDefaultHautCompetitions();
       raw.version = Math.max(Number(raw.version || 2), 3);
+    }
+    if (Array.isArray(raw.clubs)) {
+      for (const cl of raw.clubs) {
+        if (cl.id === "club_partner_computer_service" && cl.activity_venue === "莲花街校区 8号教学楼") {
+          cl.activity_venue = "莲花街校区 学生宿舍F01 W111";
+          cl.campus_name = "莲花街校区";
+          cl.building_name = "学生宿舍F01";
+          cl.room_number = "W111";
+        }
+      }
     }
     const sortFn = (a, b) => {
       const pinDiff = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);

@@ -2929,17 +2929,27 @@ export function createCampusCloudApp(options = {}) {
         (p.title + " " + p.category + " " + p.location + " " + p.description).toLowerCase().includes(kw)
       );
     }
-    const enrichedPosts = posts.map((p) => ({
-      ...p,
-      matched_clues: computePostMatches(p, ms.posts || []).map((m) => ({
-        id: m.post.id,
-        type: m.post.type,
-        title: m.post.title,
-        location: m.post.location,
-        contact: m.post.contact,
-        match_score: m.match_score
-      }))
-    }));
+    const enrichedPosts = posts.map((p) => {
+      const sanitized = { ...p };
+      delete sanitized.contact_requests;
+      delete sanitized.blocked_user_ids;
+      if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
+        sanitized.contact = "需发起联系/认领申请后查看";
+        sanitized.has_protected_contact = true;
+      }
+      return {
+        ...sanitized,
+        contact_requests_count: Array.isArray(p.contact_requests) ? p.contact_requests.length : 0,
+        matched_clues: computePostMatches(p, ms.posts || []).map((m) => ({
+          id: m.post.id,
+          type: m.post.type,
+          title: m.post.title,
+          location: m.post.location,
+          contact: m.post.contact_visibility === "ON_REQUEST" ? "需申请查看" : m.post.contact,
+          match_score: m.match_score
+        }))
+      };
+    });
     return {
       status: 200,
       code: "MOMENTS_SNAPSHOT_OK",
@@ -2971,9 +2981,14 @@ export function createCampusCloudApp(options = {}) {
       status: "OPEN",
       author_name: String(body?.author_name || "河工大同学").trim().slice(0, 24),
       author_student_no_masked: String(body?.author_student_no_masked || "").trim().slice(0, 16),
+      owner_cloud_user_id: body?.owner_cloud_user_id ? String(body.owner_cloud_user_id).trim() : null,
+      contact_visibility: String(body?.contact_visibility || "PUBLIC").toUpperCase() === "ON_REQUEST" ? "ON_REQUEST" : "PUBLIC",
       likes_count: 0,
       favorites_count: 0,
       comments: [],
+      contact_requests: [],
+      blocked_user_ids: [],
+      reports_count: 0,
       created_at: nowIso,
       updated_at: nowIso
     };
@@ -2997,6 +3012,7 @@ export function createCampusCloudApp(options = {}) {
       author_name: String(body?.author_name || "热心同学").trim().slice(0, 24),
       content,
       contact_hint: String(body?.contact_hint || "").trim().slice(0, 48),
+      is_private_to_initiator: Boolean(body?.is_private_to_initiator),
       created_at: nowIso
     };
     if (!Array.isArray(post.comments)) post.comments = [];
@@ -3006,6 +3022,173 @@ export function createCampusCloudApp(options = {}) {
     store.saveSnapshot();
     return { status: 201, code: "MOMENTS_COMMENT_ADDED", data: post };
   });
+
+  registerExtension(
+    "POST",
+    "/api/v1/moments/posts/{postId}/contact-requests",
+    "createMomentsContactRequest",
+    "bearer",
+    async ({ auth, params, body, headers, nowMs }) => {
+      const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
+      if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+      if (post.status === "RESOLVED" || post.status === "CLOSED") {
+        throw new ContractError("CONFLICT", "该失物招领帖已结案或关闭联系");
+      }
+      if (!Array.isArray(post.blocked_user_ids)) post.blocked_user_ids = [];
+      if (post.blocked_user_ids.includes(auth.cloudUserId)) {
+        throw new ContractError("FORBIDDEN", "发起人已拒绝或屏蔽来自当前账号的联系申请");
+      }
+      const message = String(body?.message || "").trim();
+      if (!message || message.length > 240) {
+        throw new ContractError("BAD_REQUEST", "联系/认领说明长度需在 1–240 字之间");
+      }
+      const contactInfo = String(body?.contact_info || body?.contact_hint || "").trim().slice(0, 64);
+      const idempotencyKey = String(
+        headers?.["idempotency-key"] || headers?.["Idempotency-Key"] || body?.client_request_id || ""
+      ).trim();
+
+      if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
+      if (idempotencyKey) {
+        const dup = post.contact_requests.find(
+          (r) => r.sender_user_id === auth.cloudUserId && r.idempotency_key === idempotencyKey
+        );
+        if (dup) {
+          return { status: 200, code: "CONTACT_REQUEST_DUPLICATE", data: dup };
+        }
+      }
+
+      const recentBySender = post.contact_requests.filter(
+        (r) =>
+          r.sender_user_id === auth.cloudUserId &&
+          nowMs - new Date(r.created_at).getTime() < 60_000
+      );
+      if (recentBySender.length >= 3) {
+        throw new ContractError("RATE_LIMITED", "发送过于频繁，请稍后再试");
+      }
+
+      const nowIso = new Date(nowMs).toISOString();
+      const senderUser = store.users.get(auth.cloudUserId);
+      const reqItem = {
+        id: "mcr_" + crypto.randomUUID().slice(0, 10),
+        post_id: post.id,
+        sender_user_id: auth.cloudUserId,
+        sender_name: String(body?.sender_name || senderUser?.display_name || "河工大同学").trim().slice(0, 24),
+        message,
+        contact_info: contactInfo,
+        idempotency_key: idempotencyKey || null,
+        status: "PENDING",
+        reply_message: null,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      post.contact_requests.push(reqItem);
+      post.updated_at = nowIso;
+      store.momentsState.updated_at = nowIso;
+      if (post.owner_cloud_user_id && post.owner_cloud_user_id !== auth.cloudUserId) {
+        store.addNotification({
+          cloudUserId: post.owner_cloud_user_id,
+          category: "MOMENTS_CONTACT_REQUEST",
+          title: `收到「${post.title}」的认领/联系申请`,
+          body: `${reqItem.sender_name}：${message}`
+        });
+      }
+      store.saveSnapshot();
+      return { status: 201, code: "CONTACT_REQUEST_CREATED", data: reqItem };
+    }
+  );
+
+  registerExtension(
+    "GET",
+    "/api/v1/moments/posts/{postId}/contact-requests",
+    "listMomentsContactRequests",
+    "bearer",
+    async ({ auth, params }) => {
+      const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
+      if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+      const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
+      const isOwner = Boolean(post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId);
+      const visibleReqs = isOwner
+        ? allReqs
+        : allReqs
+            .filter((r) => r.sender_user_id === auth.cloudUserId)
+            .map((r) => ({
+              ...r,
+              initiator_contact: r.status === "APPROVED" ? post.contact : null
+            }));
+      return {
+        status: 200,
+        code: "CONTACT_REQUESTS_LISTED",
+        data: {
+          post_id: post.id,
+          is_owner: isOwner,
+          requests: visibleReqs
+        }
+      };
+    }
+  );
+
+  registerExtension(
+    "POST",
+    "/api/v1/moments/posts/{postId}/contact-requests/{requestId}/action",
+    "handleMomentsContactRequestAction",
+    "bearer",
+    async ({ auth, params, body, nowMs }) => {
+      const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
+      if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+      const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
+      const reqItem = allReqs.find((r) => r.id === params.requestId);
+      if (!reqItem) throw new ContractError("NOT_FOUND", "未找到该联系申请");
+      const isOwner = Boolean(post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId);
+      const isSender = reqItem.sender_user_id === auth.cloudUserId;
+      if (!isOwner && !isSender) {
+        throw new ContractError("FORBIDDEN", "无权操作他人的失物招领联系申请");
+      }
+      const action = String(body?.action || "").toUpperCase();
+      const nowIso = new Date(nowMs).toISOString();
+      if (action === "APPROVE") {
+        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可同意公开联系方式");
+        reqItem.status = "APPROVED";
+        if (body?.reply_message) {
+          reqItem.reply_message = String(body.reply_message).trim().slice(0, 240);
+        }
+      } else if (action === "REJECT") {
+        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可拒绝联系申请");
+        reqItem.status = "REJECTED";
+      } else if (action === "BLOCK") {
+        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可屏蔽申请人");
+        reqItem.status = "BLOCKED";
+        if (!Array.isArray(post.blocked_user_ids)) post.blocked_user_ids = [];
+        if (!post.blocked_user_ids.includes(reqItem.sender_user_id)) {
+          post.blocked_user_ids.push(reqItem.sender_user_id);
+        }
+      } else if (action === "REPORT") {
+        post.reports_count = Number(post.reports_count || 0) + 1;
+        store.recordAudit({
+          actor_kind: "USER",
+          actor_ref: auth.cloudUserId,
+          action: "REPORT_MOMENTS_CONTACT_REQUEST",
+          resource_kind: "moments_contact_request",
+          resource_ref: reqItem.id,
+          outcome: "REPORTED",
+          detail: { post_id: post.id, reason: String(body?.reason || "用户举报") }
+        });
+      } else {
+        throw new ContractError("BAD_REQUEST", "不支持的操作类型");
+      }
+      reqItem.updated_at = nowIso;
+      post.updated_at = nowIso;
+      store.momentsState.updated_at = nowIso;
+      store.saveSnapshot();
+      return {
+        status: 200,
+        code: "CONTACT_REQUEST_UPDATED",
+        data: {
+          ...reqItem,
+          initiator_contact: reqItem.status === "APPROVED" ? post.contact : null
+        }
+      };
+    }
+  );
 
   registerExtension("POST", "/api/v1/moments/posts/{postId}/action", "mutateMomentsPost", "public", async ({ params, body, nowMs }) => {
     const posts = store.momentsState.posts || [];
