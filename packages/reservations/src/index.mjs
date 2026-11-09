@@ -756,6 +756,16 @@ export class TripleScheduleEngine {
       external_booking_id: externalBookingId,
       evidence_sha256: evidenceSha256,
       official_status: "CONFIRMED",
+      confirmed_official_status: "CONFIRMED",
+      confirmed_booking_evidence: {
+        external_booking_id: externalBookingId,
+        seat_alias: seatAlias,
+        region_alias: regionAlias,
+        evidence_sha256: evidenceSha256,
+        verified_at: ts,
+        start_at: bookingResult?.startFull || bookingResult?.startAt || job.fire_at,
+        end_at: bookingResult?.endFull || bookingResult?.endAt || job.expires_at
+      },
       user_intent_state: intentState,
       school_cancellation_state: "MANUAL_ACTION_REQUIRED",
       verified_at: ts,
@@ -1586,6 +1596,16 @@ export class TripleScheduleEngine {
     });
   }
 
+  _flushStopStateStrict() {
+    if (typeof this.store.flushSnapshotStrictSync === "function") {
+      this.store.flushSnapshotStrictSync();
+    } else if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
+  }
+
   stopPlanAndActiveJobs({
     planId = null,
     jobId = null,
@@ -1606,6 +1626,15 @@ export class TripleScheduleEngine {
       throw new ContractError("NOT_FOUND", "Reservation plan not found");
     }
 
+    const relatedJobs = plan
+      ? Array.from(this.store.reservationJobs.values()).filter((j) => j.plan_id === plan.id)
+      : targetJob
+        ? [targetJob]
+        : [];
+    const hadPendingStopPersistence = Boolean(
+      plan?._stopPersistencePending || relatedJobs.some((j) => j?._stopPersistencePending)
+    );
+
     const ts = new Date(nowMs).toISOString();
     if (plan) {
       plan.enabled = false;
@@ -1614,18 +1643,14 @@ export class TripleScheduleEngine {
         plan.user_intent_state = "STOP_REQUESTED";
       }
       plan.updated_at = ts;
+      plan._stopPersistencePending = true;
     }
-
-    const relatedJobs = plan
-      ? Array.from(this.store.reservationJobs.values()).filter((j) => j.plan_id === plan.id)
-      : targetJob
-        ? [targetJob]
-        : [];
 
     const cancelledJobIds = [];
     const blockingJobs = [];
 
     for (const j of relatedJobs) {
+      j._stopPersistencePending = true;
       for (const ev of this.store.eventsForJob(j.id)) {
         if (ev.status === "ARMED") {
           ev.status = "ABORTED_REVOKED";
@@ -1675,8 +1700,9 @@ export class TripleScheduleEngine {
       }
 
       if (hasDispatchedOrConfirmed) {
+        const wasRevoked = j.user_intent_state === "REVOKED";
         this.store._applyRevocationToJob?.(j, reason, ts);
-        if (j.user_intent_state === "REVOKED") {
+        if (!wasRevoked && j.user_intent_state === "REVOKED") {
           j.user_intent_state = "STOP_REQUESTED";
         }
         j.remaining_days = 0;
@@ -1686,6 +1712,7 @@ export class TripleScheduleEngine {
           booking_local_date: j.booking_local_date,
           state: j.state,
           external_execution_state: j.external_execution_state || "RESULT_UNKNOWN",
+          school_cancellation_state: j.school_cancellation_state || "NOT_REQUESTED",
           external_booking_id: sr?.external_booking_id || j.external_booking_id || null
         });
       } else {
@@ -1701,18 +1728,15 @@ export class TripleScheduleEngine {
       }
     }
 
-    if (typeof this.store.flushSnapshotSync === "function") {
-      this.store.flushSnapshotSync();
-    } else if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
-    }
+    this._flushStopStateStrict();
 
     return {
       plan_id: plan?.id || null,
       plan_enabled: plan ? Boolean(plan.enabled) : false,
       target_job: targetJob || null,
       cancelled_job_ids: cancelledJobIds,
-      blocking_jobs: blockingJobs
+      blocking_jobs: blockingJobs,
+      completed_pending_persistence: hadPendingStopPersistence
     };
   }
 
@@ -1720,16 +1744,25 @@ export class TripleScheduleEngine {
     const preLockJob = this.store.reservationJobs.get(jobId);
     if (!preLockJob) throw new ContractError("NOT_FOUND", "Reservation job not found");
     const preLockSchoolRes = this.store.schoolReservations.get(preLockJob.id);
+    const hadUnknownCancelAtEntry =
+      preLockJob.state === "CANCEL_RESULT_UNKNOWN" ||
+      preLockJob.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+      preLockJob.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+      preLockSchoolRes?.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+      preLockSchoolRes?.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+      preLockSchoolRes?.official_status === "CANCEL_RESULT_UNKNOWN";
     const wasConfirmedAtCancelEntry =
       preLockJob.external_execution_state === "SCHOOL_CONFIRMED" ||
       preLockJob.state === "CONFIRMED" ||
       preLockJob.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
       preLockJob.state === "CANCEL_RESULT_UNKNOWN" ||
+      hadUnknownCancelAtEntry ||
       Boolean(preLockSchoolRes?.external_booking_id) ||
       Boolean(preLockJob.external_booking_id);
 
     // Record stop intent IMMEDIATELY outside withJobLock so any in-flight FIRE sees STOP_REQUESTED
     // before external write, before billing debit, and before multi-day rollover!
+    // Also durably flushes stop intent via flushSnapshotStrictSync (fails closed on I/O error).
     this.stopPlanAndActiveJobs({
       planId: preLockJob.plan_id,
       jobId,
@@ -1745,11 +1778,20 @@ export class TripleScheduleEngine {
       const plan = this.store.reservationPlans.get(job.plan_id);
       const schoolRes = this.store.schoolReservations.get(job.id);
       const ts = new Date(nowMs).toISOString();
+      const hadUnknownCancel =
+        hadUnknownCancelAtEntry ||
+        job.state === "CANCEL_RESULT_UNKNOWN" ||
+        job.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        job.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+        schoolRes?.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        schoolRes?.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+        schoolRes?.official_status === "CANCEL_RESULT_UNKNOWN";
 
       // Re-ensure plan and any newly rolled-over sibling jobs are stopped after lock acquisition
       if (plan) {
         plan.enabled = false;
         plan.remaining_days = 0;
+        plan._stopPersistencePending = true;
         if (plan.user_intent_state === "ACTIVE" || !plan.user_intent_state) {
           plan.user_intent_state = "STOP_REQUESTED";
         }
@@ -1764,6 +1806,7 @@ export class TripleScheduleEngine {
               sib.state = "CANCELLED";
               sib.remaining_days = 0;
               sib.state_version += 1;
+              sib._stopPersistencePending = true;
               this.store.syncJobDisplayStatus?.(sib);
             }
           }
@@ -1777,6 +1820,7 @@ export class TripleScheduleEngine {
       }
 
       if (job.state === "SCHOOL_CANCELLED") {
+        this._flushStopStateStrict();
         return {
           job,
           school_reservation: schoolRes || null,
@@ -1796,6 +1840,7 @@ export class TripleScheduleEngine {
         job.state === "CONFIRMED" ||
         job.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
         job.state === "CANCEL_RESULT_UNKNOWN" ||
+        hadUnknownCancel ||
         Boolean(schoolRes?.external_booking_id) ||
         Boolean(job.external_booking_id) ||
         Boolean(job.pending_external_booking_id);
@@ -1811,10 +1856,9 @@ export class TripleScheduleEngine {
         }
         job.remaining_days = 0;
         job.state_version += 1;
+        job._stopPersistencePending = true;
         this.store.syncJobDisplayStatus?.(job);
-        if (typeof this.store.saveSnapshot === "function") {
-          this.store.saveSnapshot();
-        }
+        this._flushStopStateStrict();
         return {
           job,
           school_reservation: null,
@@ -1833,10 +1877,9 @@ export class TripleScheduleEngine {
         job.state = "RESULT_UNKNOWN";
         job.remaining_days = 0;
         job.state_version += 1;
+        job._stopPersistencePending = true;
         this.store.syncJobDisplayStatus?.(job);
-        if (typeof this.store.saveSnapshot === "function") {
-          this.store.saveSnapshot();
-        }
+        this._flushStopStateStrict();
         return {
           job,
           school_reservation: schoolRes || null,
@@ -1866,15 +1909,13 @@ export class TripleScheduleEngine {
         job.state = exactBookingId ? "DELEGATION_STOPPED_SCHOOL_CONFIRMED" : "RESULT_UNKNOWN";
         job.remaining_days = 0;
         job.state_version += 1;
+        job._stopPersistencePending = true;
         if (schoolRes) {
+          schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
           schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
         }
         this.store.syncJobDisplayStatus?.(job);
-        if (typeof this.store.flushSnapshotSync === "function") {
-          this.store.flushSnapshotSync();
-        } else if (typeof this.store.saveSnapshot === "function") {
-          this.store.saveSnapshot();
-        }
+        this._flushStopStateStrict();
         return {
           job,
           school_reservation: schoolRes || null,
@@ -1892,110 +1933,135 @@ export class TripleScheduleEngine {
 
       // Case 3: Confirmed booking existed before cancel-seat request -> require exact booking ID and check permission policy
 
-    if (!exactBookingId) {
-      job.user_intent_state =
-        job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
-      job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
-      job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
-      job.state_version += 1;
-      this.store.syncJobDisplayStatus?.(job);
-      if (typeof this.store.saveSnapshot === "function") {
-        this.store.saveSnapshot();
-      }
-      return {
-        job,
-        school_reservation: schoolRes || null,
-        live_cancel: {
-          cancelled: false,
-          outcome: "MISSING_EXACT_BOOKING_ID",
-          school_cancellation_state: "MANUAL_ACTION_REQUIRED",
-          message: "缺少精确关联的学校预约 ID，已保留预约证据并标记需人工或用户自行处理"
+      if (!exactBookingId) {
+        job.user_intent_state =
+          job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+        job.school_cancellation_state = hadUnknownCancel
+          ? "CANCEL_RESULT_UNKNOWN"
+          : "MANUAL_ACTION_REQUIRED";
+        job.state = hadUnknownCancel
+          ? "CANCEL_RESULT_UNKNOWN"
+          : "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+        job.state_version += 1;
+        job._stopPersistencePending = true;
+        if (hadUnknownCancel) {
+          this.store._preserveConfirmedEvidenceForUnknownCancel?.(schoolRes, job);
         }
-      };
-    }
-
-    // If binding/credentials were revoked and policy forbids using revoked credentials for school API calls
-    if (!binding || binding.revoked_at || binding.status === "REVOKED" || !binding.credential_ref) {
-      job.user_intent_state = "REVOKED";
-      job.external_execution_state = "SCHOOL_CONFIRMED";
-      job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
-      job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
-      job.state_version += 1;
-      if (schoolRes) {
-        schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
-      }
-      this.store.syncJobDisplayStatus?.(job);
-      if (typeof this.store.saveSnapshot === "function") {
-        this.store.saveSnapshot();
-      }
-      return {
-        job,
-        school_reservation: schoolRes || null,
-        live_cancel: {
-          cancelled: false,
-          outcome: "REVOKED_CREDENTIALS_MANUAL_REQUIRED",
-          school_cancellation_state: "MANUAL_ACTION_REQUIRED",
-          bookingId: exactBookingId,
-          message: "学校绑定凭据已撤销，按权限策略不再代调学校接口，请使用预约号在学校端自行取消"
-        }
-      };
-    }
-
-    job.user_intent_state =
-      job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
-    job.school_cancellation_state = "CANCEL_IN_PROGRESS";
-    this.store.syncJobDisplayStatus?.(job);
-
-    let liveCancelResult = null;
-    if (typeof this.schoolProvider.cancelLiveSeatBooking === "function") {
-      try {
-        const decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
-        liveCancelResult = await this.schoolProvider.cancelLiveSeatBooking({
-          decryptedSecret,
-          binding,
-          externalBookingId: exactBookingId
-        });
-      } catch (err) {
-        liveCancelResult = {
-          cancelled: false,
-          outcome: "CANCEL_RESULT_UNKNOWN",
-          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-          bookingId: exactBookingId,
-          message: err?.message || "学校取消接口调用异常，取消结果待核对"
+        this.store.syncJobDisplayStatus?.(job);
+        this._flushStopStateStrict();
+        return {
+          job,
+          school_reservation: schoolRes || null,
+          live_cancel: {
+            cancelled: false,
+            outcome: hadUnknownCancel ? "CANCEL_RESULT_UNKNOWN" : "MISSING_EXACT_BOOKING_ID",
+            school_cancellation_state: job.school_cancellation_state,
+            message: hadUnknownCancel
+              ? "缺少精确预约编号，保留此前退座待核对状态与原始预约证据"
+              : "缺少精确关联的学校预约 ID，已保留预约证据并标记需人工或用户自行处理"
+          }
         };
       }
-    }
 
-    if (liveCancelResult?.cancelled) {
-      job.school_cancellation_state = "SCHOOL_CANCELLED";
-      job.state = "SCHOOL_CANCELLED";
-      job.state_version += 1;
-      if (schoolRes) {
-        schoolRes.official_status = "SCHOOL_CANCELLED";
-        schoolRes.school_cancellation_state = "SCHOOL_CANCELLED";
+      // If binding/credentials were revoked and policy forbids using revoked credentials for school API calls
+      if (!binding || binding.revoked_at || binding.status === "REVOKED" || !binding.credential_ref) {
+        job.user_intent_state = "REVOKED";
+        job.external_execution_state = "SCHOOL_CONFIRMED";
+        job.school_cancellation_state = hadUnknownCancel
+          ? "CANCEL_RESULT_UNKNOWN"
+          : "MANUAL_ACTION_REQUIRED";
+        job.state = hadUnknownCancel
+          ? "CANCEL_RESULT_UNKNOWN"
+          : "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+        job.state_version += 1;
+        job._stopPersistencePending = true;
+        if (hadUnknownCancel) {
+          this.store._preserveConfirmedEvidenceForUnknownCancel?.(schoolRes, job);
+        } else if (schoolRes) {
+          schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
+          schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        }
+        this.store.syncJobDisplayStatus?.(job);
+        this._flushStopStateStrict();
+        return {
+          job,
+          school_reservation: schoolRes || null,
+          live_cancel: {
+            cancelled: false,
+            outcome: hadUnknownCancel
+              ? "CANCEL_RESULT_UNKNOWN"
+              : "REVOKED_CREDENTIALS_MANUAL_REQUIRED",
+            school_cancellation_state: job.school_cancellation_state,
+            bookingId: exactBookingId,
+            message: hadUnknownCancel
+              ? "学校绑定凭据已撤销，保留此前已发起的退座待核对状态与原始预约证据，请在学校端核实该预约号"
+              : "学校绑定凭据已撤销，按权限策略不再代调学校接口，请使用预约号在学校端自行取消"
+          }
+        };
       }
-    } else if (liveCancelResult?.school_cancellation_state === "MANUAL_ACTION_REQUIRED") {
-      job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
-      job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
-      job.state_version += 1;
-      if (schoolRes) {
-        schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
-      }
-    } else {
-      job.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
-      job.state = "CANCEL_RESULT_UNKNOWN";
-      job.state_version += 1;
-      if (schoolRes) {
-        schoolRes.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
-      }
-    }
 
-    this.store.syncJobDisplayStatus?.(job);
-    if (typeof this.store.flushSnapshotSync === "function") {
-      this.store.flushSnapshotSync();
-    } else if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
-    }
+      job.user_intent_state =
+        job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+      job.school_cancellation_state = "CANCEL_IN_PROGRESS";
+      job._stopPersistencePending = true;
+      if (schoolRes) {
+        schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
+        schoolRes.school_cancellation_state = "CANCEL_IN_PROGRESS";
+      }
+      this.store.syncJobDisplayStatus?.(job);
+      // Persist CANCEL_IN_PROGRESS strictly BEFORE external live seat cancel call (crash-safe & fail-closed)
+      this._flushStopStateStrict();
+
+      let liveCancelResult = null;
+      if (typeof this.schoolProvider.cancelLiveSeatBooking === "function") {
+        try {
+          const decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
+          liveCancelResult = await this.schoolProvider.cancelLiveSeatBooking({
+            decryptedSecret,
+            binding,
+            externalBookingId: exactBookingId
+          });
+        } catch (err) {
+          liveCancelResult = {
+            cancelled: false,
+            outcome: "CANCEL_RESULT_UNKNOWN",
+            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+            bookingId: exactBookingId,
+            message: err?.message || "学校取消接口调用异常，取消结果待核对"
+          };
+        }
+      }
+
+      if (liveCancelResult?.cancelled) {
+        job.school_cancellation_state = "SCHOOL_CANCELLED";
+        job.state = "SCHOOL_CANCELLED";
+        job.state_version += 1;
+        if (schoolRes) {
+          schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
+          schoolRes.official_status = "SCHOOL_CANCELLED";
+          schoolRes.school_cancellation_state = "SCHOOL_CANCELLED";
+        }
+      } else if (
+        !hadUnknownCancel &&
+        liveCancelResult?.school_cancellation_state === "MANUAL_ACTION_REQUIRED"
+      ) {
+        job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+        job.state_version += 1;
+        if (schoolRes) {
+          schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
+          schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        }
+      } else {
+        job.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
+        job.state = "CANCEL_RESULT_UNKNOWN";
+        job.state_version += 1;
+        this.store._preserveConfirmedEvidenceForUnknownCancel?.(schoolRes, job);
+      }
+
+      job._stopPersistencePending = true;
+      this.store.syncJobDisplayStatus?.(job);
+      this._flushStopStateStrict();
       return {
         job,
         school_reservation: schoolRes || null,
@@ -2217,6 +2283,16 @@ export class TripleScheduleEngine {
       external_booking_id: verifyRes.externalBookingId,
       evidence_sha256: verifyRes.evidenceSha256,
       official_status: verifyRes.officialStatus,
+      confirmed_official_status: verifyRes.officialStatus,
+      confirmed_booking_evidence: {
+        external_booking_id: verifyRes.externalBookingId,
+        seat_alias: verifyRes.seatAlias || "N4-088",
+        region_alias: verifyRes.regionAlias || "北四楼自习区",
+        evidence_sha256: verifyRes.evidenceSha256,
+        verified_at: ts,
+        start_at: job.fire_at,
+        end_at: job.expires_at
+      },
       user_intent_state: "ACTIVE",
       school_cancellation_state: "NOT_REQUESTED",
       verified_at: ts,

@@ -45,7 +45,12 @@ export const ERROR_CODES = Object.freeze({
   FORBIDDEN: { status: 403, retryable: false, userAction: "CHECK_PERMISSIONS" },
   NOT_FOUND: { status: 404, retryable: false, userAction: "CHECK_RESOURCE_ID" },
   BAD_REQUEST: { status: 400, retryable: false, userAction: "FIX_REQUEST_FIELDS" },
-  CONFLICT: { status: 409, retryable: false, userAction: "RESOLVE_CONFLICT" }
+  CONFLICT: { status: 409, retryable: false, userAction: "RESOLVE_CONFLICT" },
+  STORAGE_PERSISTENCE_FAILED: {
+    status: 503,
+    retryable: true,
+    userAction: "RETRY_AFTER_STORAGE_RECOVERY"
+  }
 });
 
 export class ContractError extends Error {

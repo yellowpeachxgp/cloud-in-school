@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { HautLibraryProvider } from "../packages/school-spi/src/index.mjs";
 
@@ -1772,5 +1775,390 @@ test("Fault Injection 15 (Out-of-Lock Cancel vs Blocked FIRE & Rolled-Over Child
     assert.equal(app.store.reservationPlans.get(planId).user_intent_state, "STOP_REQUESTED");
     assert.equal(app.store.reservationJobs.get(day2Job.id).state, "CANCELLED");
     assert.ok(cancelOldJobRes.body.data.cancelled_child_job_ids.includes(day2Job.id));
+  }
+});
+
+test("Fault Injection 16 (Cloud #1 — Preserve CANCEL_RESULT_UNKNOWN & Independent Confirmed Evidence Across Stop / Plan Delete / Unbind / Restart)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-cloud-fi16-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const tokenNowMs = Date.parse("2026-11-20T06:00:00+08:00");
+    const fireNowMs = Date.parse("2026-11-20T07:00:02+08:00");
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const { authHeaders, consentId, bindingId, cloudUserId } = await setupBoundUser(app, tokenNowMs);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi16_unknown_cancel" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 2,
+        remaining_days: 2
+      },
+      nowMs: tokenNowMs
+    });
+    const jobId = planRes.body.data.job_id;
+    const job = app.store.reservationJobs.get(jobId);
+    const planId = job.plan_id;
+    job.prewarmed_targets = {
+      binding_id: bindingId,
+      student_no: "2026990101",
+      auth_version: 1,
+      plan_generation: 1,
+      target_local_date: "2026-11-20",
+      slot_window: "08:00-22:00",
+      expires_at: "2026-11-20T07:30:00+08:00",
+      region_id: 23,
+      region_name: "五层中区",
+      open_time: "07:30",
+      close_time: "22:00",
+      start_full: "2026-11-20 08:00:00",
+      end_full: "2026-11-20 22:00:00",
+      candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+    };
+    app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+        return {
+          code: 200,
+          layout: { regionName: "五层中区" },
+          seatList: [{ id: 501, seatName: "五层中区05桌 A座", seatStatus: 2 }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+        return { code: 200, bookingid: "99007788", msg: "预约成功" };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+        return {
+          code: 200,
+          data: {
+            id: "99007788",
+            seatId: 501,
+            seatName: "五层中区05桌 A座",
+            regionName: "五层中区",
+            buildingLayerRegionId: 23,
+            startDate: "2026-11-20 08:00:00",
+            endDate: "2026-11-20 22:00:00",
+            bookingStatus: 1
+          }
+        };
+      }
+      return { code: 200, rows: [], total: 0 };
+    };
+
+    // 1. Confirm seat via offline mocked FIRE
+    const fireRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+    assert.equal(fireRes.job.state, "CONFIRMED");
+    assert.equal(fireRes.job.external_execution_state, "SCHOOL_CONFIRMED");
+    const originalSr = app.store.schoolReservations.get(jobId);
+    assert.ok(originalSr?.external_booking_id);
+    const originalBookingId = originalSr.external_booking_id;
+    const originalSha = originalSr.evidence_sha256;
+
+    // 2. Live school seat cancel times out -> CANCEL_RESULT_UNKNOWN (and verify CANCEL_IN_PROGRESS was flushed before call!)
+    let flushedCancelInProgressBeforeNetwork = false;
+    app.schoolProvider.cancelLiveSeatBooking = async () => {
+      const persistedDuringCall = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+      const diskJob = persistedDuringCall.reservationJobs.find(([id]) => id === jobId)?.[1];
+      flushedCancelInProgressBeforeNetwork =
+        diskJob?.school_cancellation_state === "CANCEL_IN_PROGRESS";
+      throw new Error("Upstream cancelbooking read timeout");
+    };
+    const cancelSeatRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 10_000
+    });
+    assert.equal(cancelSeatRes.status, 200);
+    assert.equal(
+      flushedCancelInProgressBeforeNetwork,
+      true,
+      "CANCEL_IN_PROGRESS must be strictly persisted to disk before external cancel network call"
+    );
+
+    const assertUnknownCancelPreserved = (targetApp, stepLabel) => {
+      const j = targetApp.store.reservationJobs.get(jobId);
+      const sr = targetApp.store.schoolReservations.get(jobId);
+      assert.equal(
+        j.school_cancellation_state,
+        "CANCEL_RESULT_UNKNOWN",
+        `${stepLabel}: school_cancellation_state must stay CANCEL_RESULT_UNKNOWN`
+      );
+      assert.equal(
+        j.state,
+        "CANCEL_RESULT_UNKNOWN",
+        `${stepLabel}: job.state must stay CANCEL_RESULT_UNKNOWN`
+      );
+      assert.equal(
+        j.display_status,
+        "CANCEL_RESULT_UNKNOWN",
+        `${stepLabel}: display_status must NOT become DELEGATION_STOPPED_SCHOOL_CONFIRMED`
+      );
+      assert.equal(
+        j.status_label,
+        "退座结果待核对",
+        `${stepLabel}: status_label must NOT claim seat is still active ("委托已停止，但学校预约已成功")`
+      );
+      assert.equal(
+        j.external_execution_state,
+        "SCHOOL_CONFIRMED",
+        `${stepLabel}: original execution axis must remain SCHOOL_CONFIRMED`
+      );
+      assert.equal(
+        sr?.official_status,
+        "CANCEL_RESULT_UNKNOWN",
+        `${stepLabel}: school_reservation.official_status must reflect unknown cancellation`
+      );
+      assert.equal(
+        sr?.confirmed_official_status,
+        "CONFIRMED",
+        `${stepLabel}: independent original confirmation status must remain preserved`
+      );
+      assert.equal(
+        sr?.confirmed_booking_evidence?.external_booking_id,
+        originalBookingId,
+        `${stepLabel}: independent original booking ID must remain preserved`
+      );
+      assert.equal(
+        sr?.confirmed_booking_evidence?.evidence_sha256,
+        originalSha,
+        `${stepLabel}: independent original evidence_sha256 must remain preserved`
+      );
+    };
+
+    assertUnknownCancelPreserved(app, "after cancel-seat timeout");
+
+    // 3. Repeated job stop (POST /reservation-jobs/{id}/cancel -> 409 blocking_jobs, invokes stopPlanAndActiveJobs)
+    const repeatStopJob = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 15_000
+    });
+    assert.equal(repeatStopJob.status, 409);
+    assertUnknownCancelPreserved(app, "after repeated POST /reservation-jobs/{id}/cancel");
+
+    // 4. Plan deletion / stop (DELETE /reservation-plans/{id})
+    const delPlanRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/reservation-plans/${planId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 20_000
+    });
+    assert.equal(delPlanRes.status, 200);
+    assertUnknownCancelPreserved(app, "after DELETE /reservation-plans/{id}");
+
+    // 5. Client sync snapshot with reservation_cancellations
+    const syncCancelRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/sync/snapshot",
+      headers: authHeaders,
+      body: { reservation_cancellations: [jobId, planId] },
+      nowMs: fireNowMs + 25_000
+    });
+    assert.equal(syncCancelRes.status, 200);
+    assertUnknownCancelPreserved(app, "after sync reservation_cancellations");
+
+    // 6. School binding revocation / unlinking (DELETE /school-bindings/{bindingId})
+    const unbindRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/school-bindings/${bindingId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 30_000
+    });
+    assert.equal(unbindRes.status, 200);
+    assertUnknownCancelPreserved(app, "after DELETE /school-bindings/{id}");
+
+    // 7. Calling cancel-seat AGAIN after credentials were revoked MUST still preserve CANCEL_RESULT_UNKNOWN
+    const cancelAfterUnbind = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 35_000
+    });
+    assert.equal(cancelAfterUnbind.status, 200);
+    assertUnknownCancelPreserved(app, "after cancel-seat with revoked credentials");
+
+    // 8. Consent withdrawal (DELETE /me/consents/{consentId})
+    const withdrawRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/me/consents/${consentId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 40_000
+    });
+    assert.equal(withdrawRes.status, 200);
+    assertUnknownCancelPreserved(app, "after DELETE /me/consents/{id}");
+
+    // 9. Process restart from snapshotPath -> migrateAndRecoverState + GET /evidence + /sync/snapshot
+    const restartedApp = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assertUnknownCancelPreserved(restartedApp, "after process restart from snapshot");
+
+    const restartedUser = restartedApp.store.users.get(cloudUserId);
+    const restartedSession = restartedApp.identity.issueDeviceSession(
+      restartedUser,
+      "Android Restarted",
+      null,
+      restartedUser.auth_version,
+      fireNowMs + 45_000
+    );
+    const restartedHeaders = { authorization: `Bearer ${restartedSession.access_token}` };
+    const evRes = await restartedApp.inject({
+      method: "GET",
+      url: `/api/v1/reservation-jobs/${jobId}/evidence`,
+      headers: restartedHeaders,
+      nowMs: fireNowMs + 46_000
+    });
+    assert.equal(evRes.status, 200);
+    assert.equal(evRes.body.data.display_status, "CANCEL_RESULT_UNKNOWN");
+    assert.equal(evRes.body.data.status_label, "退座结果待核对");
+    assert.equal(evRes.body.data.school_cancellation_state, "CANCEL_RESULT_UNKNOWN");
+    assert.equal(
+      evRes.body.data.school_reservation.confirmed_booking_evidence.external_booking_id,
+      originalBookingId
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("Fault Injection 17 (Cloud #2 — Verifiable Stop Persistence & Fail-Closed on Disk Write Failure, Restart, Retry & FIRE Interleaving)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-cloud-fi17-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  const blockerFile = path.join(tmpDir, "not-a-directory");
+  fs.writeFileSync(blockerFile, "blocker", "utf8");
+  const unwritableSnapshotPath = path.join(blockerFile, "cloud-state.json");
+
+  try {
+    const tokenNowMs = Date.parse("2026-11-20T06:00:00+08:00");
+    const fireNowMs = Date.parse("2026-11-20T07:00:00+08:00");
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi17_strict_stop" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 2,
+        remaining_days: 2
+      },
+      nowMs: tokenNowMs
+    });
+    assert.equal(planRes.status, 201);
+    const jobId = planRes.body.data.job_id;
+    const planId = app.store.reservationJobs.get(jobId).plan_id;
+    app.store.flushSnapshotStrictSync();
+
+    // Inject deterministic disk persistence failure (unwritable path under regular file)
+    app.store.snapshotPath = unwritableSnapshotPath;
+
+    // 1. DELETE /reservation-plans/{planId} MUST fail closed with 503 STORAGE_PERSISTENCE_FAILED (never 200 OK!)
+    const failedPlanStop = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/reservation-plans/${planId}`,
+      headers: authHeaders,
+      nowMs: tokenNowMs + 1_000
+    });
+    assert.equal(failedPlanStop.status, 503);
+    assert.equal(failedPlanStop.body.ok, false);
+    assert.equal(failedPlanStop.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(failedPlanStop.body.error.retryable, true);
+
+    // 2. POST /reservation-jobs/{jobId}/cancel MUST ALSO fail closed with 503 STORAGE_PERSISTENCE_FAILED
+    const failedJobCancel = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel`,
+      headers: authHeaders,
+      nowMs: tokenNowMs + 2_000
+    });
+    assert.equal(failedJobCancel.status, 503);
+    assert.equal(failedJobCancel.body.code, "STORAGE_PERSISTENCE_FAILED");
+
+    // 3. Interleaved FIRE in the live process after stop failed to flush MUST still honor in-memory stop intent (0 writes, 0 debits, 0 rollover!)
+    let externalWriteCalls = 0;
+    app.schoolProvider.executeMockOrAuthorizedCreate = async ({ assertStillAuthorized }) => {
+      assertStillAuthorized();
+      externalWriteCalls += 1;
+      return { outcome: "CONFIRMED" };
+    };
+    const interleavedFire = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+    assert.equal(externalWriteCalls, 0, "FIRE must never dispatch external write after stop intent");
+    assert.notEqual(interleavedFire.job.state, "CONFIRMED");
+    assert.equal(app.store.reservationOrders.size, 0, "Zero wallet debit on stopped job");
+
+    // 4. Disk recovers -> client retries POST /reservation-jobs/{jobId}/cancel -> MUST succeed (200 OK) and verifiably persist!
+    app.store.snapshotPath = snapshotPath;
+    const retryCancelOk = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 3_000
+    });
+    assert.equal(retryCancelOk.status, 200, "Idempotent retry after I/O recovery must complete with 200 OK");
+    assert.equal(retryCancelOk.body.code, "RESERVATION_JOB_CANCELLED");
+
+    // 5. Process restart from persisted snapshot MUST read back disabled plan & CANCELLED job (never ACTIVE/ARMED!)
+    const restartedApp = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const reloadedPlan = restartedApp.store.reservationPlans.get(planId);
+    const reloadedJob = restartedApp.store.reservationJobs.get(jobId);
+    assert.equal(reloadedPlan.enabled, false);
+    assert.equal(reloadedPlan.user_intent_state, "STOP_REQUESTED");
+    assert.equal(reloadedJob.state, "CANCELLED");
+    assert.equal(reloadedJob.user_intent_state, "STOP_REQUESTED");
+    for (const ev of restartedApp.store.eventsForJob(jobId)) {
+      assert.notEqual(ev.status, "ARMED", "No ARMED schedule events may survive persisted stop");
+    }
+
+    // 6. Consent withdrawal & binding revocation ALSO fail closed on disk write failure
+    app.store.snapshotPath = unwritableSnapshotPath;
+    const failedUnbind = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/school-bindings/${bindingId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 4_000
+    });
+    assert.equal(failedUnbind.status, 503);
+    assert.equal(failedUnbind.body.code, "STORAGE_PERSISTENCE_FAILED");
+
+    const failedConsentWithdraw = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/me/consents/${consentId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 5_000
+    });
+    assert.equal(failedConsentWithdraw.status, 503);
+    assert.equal(failedConsentWithdraw.body.code, "STORAGE_PERSISTENCE_FAILED");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

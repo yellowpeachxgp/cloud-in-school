@@ -6,7 +6,8 @@ const host = process.env.HOST || "0.0.0.0";
 const app = createCampusCloudApp({
   storeOptions: {
     snapshotPath:
-      process.env.CLOUD_SNAPSHOT_PATH || "/opt/cloud-in-school/.data/cloud-state.json"
+      process.env.CLOUD_SNAPSHOT_PATH || "/opt/cloud-in-school/.data/cloud-state.json",
+    requireDurableSnapshot: process.env.CLOUD_REQUIRE_DURABLE_SNAPSHOT !== "false"
   }
 });
 const server = app.createHttpServer();

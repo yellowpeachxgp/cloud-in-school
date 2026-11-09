@@ -763,8 +763,13 @@ export class CloudDatabaseStore {
       if (Array.isArray(raw.auditEvents)) {
         this.auditEvents = raw.auditEvents.slice(-500);
       }
-    } catch {
-      // Ignore corrupt snapshot
+    } catch (err) {
+      if (this.requireDurableSnapshot) {
+        throw new ContractError(
+          "STORAGE_PERSISTENCE_FAILED",
+          `Failed to load durable snapshot at ${this.snapshotPath}: ${err?.message || "corrupt snapshot"}`
+        );
+      }
     }
   }
 
@@ -819,15 +824,31 @@ export class CloudDatabaseStore {
       if (strict && this.requireDurableSnapshot) {
         throw new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
-          "Durable snapshotPath is required before external school write (fail-closed)"
+          "Durable snapshotPath is required to persist state mutation (fail-closed)"
         );
+      }
+      if (!this.requireDurableSnapshot) {
+        for (const p of this.reservationPlans.values()) {
+          if (p?._stopPersistencePending) delete p._stopPersistencePending;
+        }
+        for (const j of this.reservationJobs.values()) {
+          if (j?._stopPersistencePending) delete j._stopPersistencePending;
+        }
       }
       return;
     }
     this.pruneAuthEphemera();
+    let tmp = null;
     try {
       const dir = path.dirname(this.snapshotPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const serializeRecord = ([k, v]) => {
+        if (v && typeof v === "object" && "_stopPersistencePending" in v) {
+          const { _stopPersistencePending, ...rest } = v;
+          return [k, rest];
+        }
+        return [k, v];
+      };
       const data = {
         users: Array.from(this.users.entries()),
         userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
@@ -838,8 +859,8 @@ export class CloudDatabaseStore {
         schoolBindings: Array.from(this.schoolBindings.entries()),
         encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
         consents: Array.from(this.consents.entries()),
-        reservationPlans: Array.from(this.reservationPlans.entries()),
-        reservationJobs: Array.from(this.reservationJobs.entries()),
+        reservationPlans: Array.from(this.reservationPlans.entries()).map(serializeRecord),
+        reservationJobs: Array.from(this.reservationJobs.entries()).map(serializeRecord),
         scheduleEvents: Array.from(this.scheduleEvents.entries()),
         schoolReservations: Array.from(this.schoolReservations.entries()),
         reservationAttempts: Array.from(this.reservationAttempts.entries()),
@@ -855,8 +876,10 @@ export class CloudDatabaseStore {
         notifications: Array.from(this.notifications.entries()),
         auditEvents: this.auditEvents.slice(-500)
       };
-      const tmp = `${this.snapshotPath}.tmp.${process.pid}`;
+      this._snapshotTmpSeq = (this._snapshotTmpSeq || 0) + 1;
+      tmp = `${this.snapshotPath}.tmp.${process.pid}.${this._snapshotTmpSeq}`;
       const serialized = JSON.stringify(data);
+      const expectedBytes = Buffer.byteLength(serialized, "utf8");
       const fd = fs.openSync(tmp, "w");
       try {
         fs.writeFileSync(fd, serialized, "utf8");
@@ -865,11 +888,40 @@ export class CloudDatabaseStore {
         fs.closeSync(fd);
       }
       fs.renameSync(tmp, this.snapshotPath);
+      if (strict) {
+        try {
+          const dirFd = fs.openSync(dir, "r");
+          try {
+            fs.fsyncSync(dirFd);
+          } finally {
+            fs.closeSync(dirFd);
+          }
+        } catch {
+          // Directory fsync may not be supported on all virtual filesystems; file fsync + stat check still apply
+        }
+        const st = fs.statSync(this.snapshotPath);
+        if (!st || !st.isFile() || st.size !== expectedBytes) {
+          throw new Error("Persisted snapshot verification failed (missing file or byte-size mismatch)");
+        }
+      }
+      for (const p of this.reservationPlans.values()) {
+        if (p?._stopPersistencePending) delete p._stopPersistencePending;
+      }
+      for (const j of this.reservationJobs.values()) {
+        if (j?._stopPersistencePending) delete j._stopPersistencePending;
+      }
     } catch (err) {
+      if (tmp) {
+        try {
+          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+        } catch {
+          // Best-effort cleanup of temp snapshot file
+        }
+      }
       if (strict) {
         throw new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
-          `Failed to durably persist reservation state before external write: ${err?.message || "I/O error"}`
+          `Failed to durably persist reservation state: ${err?.message || "I/O error"}`
         );
       }
     }
@@ -1609,7 +1661,13 @@ export class CloudDatabaseStore {
       }
       if (!j.external_execution_state) {
         j.external_execution_state =
-          j.state === "CONFIRMED" || sr?.official_status === "CONFIRMED"
+          j.state === "CONFIRMED" ||
+          j.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
+          j.state === "CANCEL_RESULT_UNKNOWN" ||
+          j.state === "SCHOOL_CANCELLED" ||
+          sr?.official_status === "CONFIRMED" ||
+          sr?.confirmed_official_status === "CONFIRMED" ||
+          Boolean(sr?.external_booking_id)
             ? "SCHOOL_CONFIRMED"
             : j.state === "RESULT_UNKNOWN"
               ? "RESULT_UNKNOWN"
@@ -1618,12 +1676,53 @@ export class CloudDatabaseStore {
                 : "NOT_DISPATCHED";
         mutated = true;
       }
-      if (!j.school_cancellation_state) {
-        j.school_cancellation_state =
-          sr?.official_status === "CANCELLED" || sr?.official_status === "SCHOOL_CANCELLED"
-            ? "SCHOOL_CANCELLED"
-            : "NOT_REQUESTED";
+      if (
+        j.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+        sr?.school_cancellation_state === "CANCEL_IN_PROGRESS"
+      ) {
+        j.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
+        j.state = "CANCEL_RESULT_UNKNOWN";
+        this._preserveConfirmedEvidenceForUnknownCancel(sr, j);
         mutated = true;
+      } else if (!j.school_cancellation_state) {
+        j.school_cancellation_state =
+          j.state === "SCHOOL_CANCELLED" ||
+          sr?.official_status === "CANCELLED" ||
+          sr?.official_status === "SCHOOL_CANCELLED" ||
+          sr?.school_cancellation_state === "SCHOOL_CANCELLED"
+            ? "SCHOOL_CANCELLED"
+            : j.state === "CANCEL_RESULT_UNKNOWN" ||
+                sr?.official_status === "CANCEL_RESULT_UNKNOWN" ||
+                sr?.school_cancellation_state === "CANCEL_RESULT_UNKNOWN"
+              ? "CANCEL_RESULT_UNKNOWN"
+              : "NOT_REQUESTED";
+        mutated = true;
+      }
+      if (
+        j.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        j.state === "CANCEL_RESULT_UNKNOWN" ||
+        sr?.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        sr?.official_status === "CANCEL_RESULT_UNKNOWN"
+      ) {
+        if (j.school_cancellation_state !== "SCHOOL_CANCELLED" && j.state !== "SCHOOL_CANCELLED") {
+          if (j.school_cancellation_state !== "CANCEL_RESULT_UNKNOWN") {
+            j.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
+            mutated = true;
+          }
+          if (j.state !== "CANCEL_RESULT_UNKNOWN") {
+            j.state = "CANCEL_RESULT_UNKNOWN";
+            mutated = true;
+          }
+          if (
+            sr &&
+            (sr.official_status !== "CANCEL_RESULT_UNKNOWN" ||
+              sr.school_cancellation_state !== "CANCEL_RESULT_UNKNOWN" ||
+              !sr.confirmed_booking_evidence)
+          ) {
+            this._preserveConfirmedEvidenceForUnknownCancel(sr, j);
+            mutated = true;
+          }
+        }
       }
       for (const att of jobAttempts) {
         if (att.external_execution_state === "DISPATCH_INTENT") {
@@ -1702,10 +1801,14 @@ export class CloudDatabaseStore {
     if (intent === "NEEDS_RECONFIRMATION" && exec === "NOT_DISPATCHED") {
       return "NEEDS_RECONFIRMATION";
     }
-    if (cancel === "SCHOOL_CANCELLED") {
+    if (cancel === "SCHOOL_CANCELLED" || job.state === "SCHOOL_CANCELLED") {
       return "SCHOOL_CANCELLED";
     }
-    if (cancel === "CANCEL_RESULT_UNKNOWN") {
+    if (
+      cancel === "CANCEL_RESULT_UNKNOWN" ||
+      cancel === "CANCEL_IN_PROGRESS" ||
+      job.state === "CANCEL_RESULT_UNKNOWN"
+    ) {
       return "CANCEL_RESULT_UNKNOWN";
     }
     if ((intent === "REVOKED" || intent === "STOP_REQUESTED") && exec === "SCHOOL_CONFIRMED") {
@@ -1815,8 +1918,39 @@ export class CloudDatabaseStore {
     return list.length > 0 ? list[list.length - 1] : null;
   }
 
+  _preserveConfirmedEvidenceForUnknownCancel(sr, job) {
+    if (!sr) return;
+    sr.confirmed_official_status = sr.confirmed_official_status || "CONFIRMED";
+    sr.confirmed_booking_evidence = sr.confirmed_booking_evidence || {
+      external_booking_id: sr.external_booking_id || job?.external_booking_id || null,
+      seat_alias: sr.seat_alias || null,
+      region_alias: sr.region_alias || null,
+      evidence_sha256: sr.evidence_sha256 || null,
+      verified_at: sr.verified_at || null,
+      start_at: sr.start_at || job?.fire_at || null,
+      end_at: sr.end_at || job?.expires_at || null
+    };
+    sr.official_status = "CANCEL_RESULT_UNKNOWN";
+    sr.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
+  }
+
   _applyRevocationToJob(j, reason, ts) {
+    const sr = this.schoolReservations.get(j.id) || null;
     const execState = j.external_execution_state || "NOT_DISPATCHED";
+    const hadConfirmedCancel =
+      j.state === "SCHOOL_CANCELLED" ||
+      j.school_cancellation_state === "SCHOOL_CANCELLED" ||
+      sr?.school_cancellation_state === "SCHOOL_CANCELLED" ||
+      sr?.official_status === "SCHOOL_CANCELLED" ||
+      sr?.official_status === "CANCELLED";
+    const hadUnknownCancel =
+      !hadConfirmedCancel &&
+      (j.state === "CANCEL_RESULT_UNKNOWN" ||
+        j.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        j.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+        sr?.school_cancellation_state === "CANCEL_RESULT_UNKNOWN" ||
+        sr?.school_cancellation_state === "CANCEL_IN_PROGRESS" ||
+        sr?.official_status === "CANCEL_RESULT_UNKNOWN");
     const isInFlightOrDispatched =
       execState === "DISPATCH_INTENT" ||
       execState === "RESULT_UNKNOWN" ||
@@ -1824,15 +1958,34 @@ export class CloudDatabaseStore {
     const isAlreadyConfirmed =
       execState === "SCHOOL_CONFIRMED" ||
       j.state === "CONFIRMED" ||
-      Boolean(this.schoolReservations.get(j.id)?.external_booking_id);
+      j.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
+      hadConfirmedCancel ||
+      hadUnknownCancel ||
+      Boolean(sr?.external_booking_id);
 
     j.user_intent_state = "REVOKED";
     j.last_error_code = reason;
 
     if (isAlreadyConfirmed) {
       j.external_execution_state = "SCHOOL_CONFIRMED";
-      if (j.school_cancellation_state !== "SCHOOL_CANCELLED") {
+      if (hadConfirmedCancel) {
+        j.school_cancellation_state = "SCHOOL_CANCELLED";
+        j.state = "SCHOOL_CANCELLED";
+        if (sr) {
+          sr.confirmed_official_status = sr.confirmed_official_status || "CONFIRMED";
+          sr.school_cancellation_state = "SCHOOL_CANCELLED";
+          sr.official_status = "SCHOOL_CANCELLED";
+        }
+      } else if (hadUnknownCancel) {
+        j.school_cancellation_state = "CANCEL_RESULT_UNKNOWN";
+        j.state = "CANCEL_RESULT_UNKNOWN";
+        this._preserveConfirmedEvidenceForUnknownCancel(sr, j);
+      } else {
         j.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        if (sr) {
+          sr.confirmed_official_status = sr.confirmed_official_status || "CONFIRMED";
+          sr.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        }
       }
       j.display_status = this.computeJobDisplayStatus(j);
       j.status_label = this.computeJobStatusLabel(j);
@@ -1894,6 +2047,7 @@ export class CloudDatabaseStore {
       if (p.cloud_user_id === cloudUserId) {
         p.enabled = false;
         p.user_intent_state = "REVOKED";
+        p._stopPersistencePending = true;
       }
     }
 
@@ -1902,6 +2056,7 @@ export class CloudDatabaseStore {
         j.cloud_user_id === cloudUserId &&
         !["FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
+        j._stopPersistencePending = true;
         const affected = this._applyRevocationToJob(j, reason, ts);
         if (affected) {
           cancelledJobIds.push(j.id);
@@ -1926,6 +2081,8 @@ export class CloudDatabaseStore {
       outcome: reason,
       detail: { cancelled_job_ids: cancelledJobIds }
     });
+
+    this.flushSnapshotStrictSync();
 
     return { cancelledJobIds };
   }
@@ -2036,6 +2193,7 @@ export class CloudDatabaseStore {
       if (p.cloud_user_id === cloudUserId && affectedBindingIds.has(p.school_binding_id)) {
         p.enabled = false;
         p.user_intent_state = "REVOKED";
+        p._stopPersistencePending = true;
       }
     }
     for (const j of this.reservationJobs.values()) {
@@ -2044,6 +2202,7 @@ export class CloudDatabaseStore {
         affectedBindingIds.has(j.school_binding_id) &&
         !["FAILED", "CANCELLED", "EXPIRED", "REVOKED"].includes(j.state)
       ) {
+        j._stopPersistencePending = true;
         const affected = this._applyRevocationToJob(j, reason, ts);
         if (affected) {
           cancelledJobIds.push(j.id);
@@ -2070,6 +2229,8 @@ export class CloudDatabaseStore {
         cancelled_job_ids: cancelledJobIds
       }
     });
+
+    this.flushSnapshotStrictSync();
 
     return { binding, cancelledJobIds, affectedBindingIds: Array.from(affectedBindingIds) };
   }

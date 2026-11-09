@@ -1269,6 +1269,7 @@ export function createCampusCloudApp(options = {}) {
 
       if (
         !hadActiveParentOrChildBeforeStop &&
+        !stopRes.completed_pending_persistence &&
         ["CONFIRMED", "DELEGATION_STOPPED_SCHOOL_CONFIRMED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "CANCELLED", "EXPIRED"].includes(
           job.state
         ) &&
