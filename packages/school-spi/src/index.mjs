@@ -1516,10 +1516,26 @@ export class HautLibraryProvider {
       isWslibSeatOccupiedByOthersMessage(rawErrText, addRes.code) ||
       isWslibSeatOccupiedByOthersMessage(translated, addRes.code)
     ) {
+      if (typeof onAfterExternalWrite === "function") {
+        await onAfterExternalWrite(attemptRecord?.id, {
+          writeDispatched: true,
+          explicitlyRejected: true,
+          rawResponseCode: String(addRes.code),
+          rawResponseMsg: String(rawErrText || translated || "SEAT_OCCUPIED_BY_OTHERS")
+        });
+      }
       return { action: "SEAT_OCCUPIED_BY_OTHERS", lastMsg: translated || rawErrText };
     }
 
     if (isWslibNotYetOpenMessage(rawErrText) || isWslibNotYetOpenMessage(translated)) {
+      if (typeof onAfterExternalWrite === "function") {
+        await onAfterExternalWrite(attemptRecord?.id, {
+          writeDispatched: true,
+          explicitlyRejected: true,
+          rawResponseCode: String(addRes.code),
+          rawResponseMsg: String(rawErrText || translated || "NOT_YET_OPEN")
+        });
+      }
       return { action: "NOT_YET_OPEN", lastMsg: translated || rawErrText };
     }
 
@@ -1527,6 +1543,14 @@ export class HautLibraryProvider {
       isWslibSeatLockedMessage(rawErrText, addRes.code) ||
       isWslibSeatLockedMessage(translated, addRes.code)
     ) {
+      if (typeof onAfterExternalWrite === "function") {
+        await onAfterExternalWrite(attemptRecord?.id, {
+          writeDispatched: true,
+          explicitlyRejected: true,
+          rawResponseCode: String(addRes.code),
+          rawResponseMsg: String(rawErrText || translated || "SEAT_LOCKED")
+        });
+      }
       return { action: "SEAT_LOCKED", lastMsg: translated || rawErrText };
     }
 
@@ -1617,13 +1641,13 @@ export class HautLibraryProvider {
     if (this.mockBackend && typeof this.mockBackend.handleCancelReservation === "function") {
       return this.mockBackend.handleCancelReservation({ binding, externalBookingId: targetBookingId });
     }
-    if (targetBookingId.startsWith("haut_mock_")) {
+    if (this.mockBackend || targetBookingId.startsWith("haut_mock_")) {
       return {
-        cancelled: true,
-        outcome: "SCHOOL_CANCELLED",
-        school_cancellation_state: "SCHOOL_CANCELLED",
+        cancelled: false,
+        outcome: "CANCEL_RESULT_UNKNOWN",
+        school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
         bookingId: targetBookingId,
-        message: "已确认取消学校图书馆座位预约并释放座位"
+        message: "当前未配置权威学校退座回查通道，未确认前不宣称学校座位已取消"
       };
     }
 

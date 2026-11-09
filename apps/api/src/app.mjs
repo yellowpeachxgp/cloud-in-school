@@ -375,6 +375,8 @@ export function createCampusCloudApp(options = {}) {
           repeat_days: Math.max(Number(p.repeat_days || 1), Number(j.repeat_days || 1)),
           remaining_days: Number(j.remaining_days ?? p.remaining_days ?? 1),
           end_local_date: p.end_local_date || j.end_local_date || j.booking_local_date,
+          parent_plan_enabled: Boolean(p.enabled),
+          parent_plan_user_intent_state: p.user_intent_state || "ACTIVE",
           school_reservation: sr,
           attempts
         };
@@ -1162,25 +1164,24 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/reservation-plans/{planId}",
     "cancelReservationPlan",
     "bearer",
-    async ({ auth, params }) => {
-      const plan = store.reservationPlans.get(params.planId);
-      if (!plan || plan.cloud_user_id !== auth.cloudUserId) {
-        throw new ContractError("NOT_FOUND", "Reservation plan not found");
-      }
-      plan.enabled = false;
-      plan.user_intent_state = "STOP_REQUESTED";
-      const ts = new Date().toISOString();
-      for (const j of store.reservationJobs.values()) {
-        if (j.plan_id === plan.id) {
-          store._applyRevocationToJob?.(j, "用户停止预约计划委托", ts);
-          if (j.user_intent_state === "REVOKED") {
-            j.user_intent_state = "STOP_REQUESTED";
-          }
-          store.syncJobDisplayStatus?.(j);
-        }
-      }
+    async ({ auth, params, nowMs }) => {
+      const stopRes = reservationEngine.stopPlanAndActiveJobs({
+        planId: params.planId,
+        cloudUserId: auth.cloudUserId,
+        reason: "用户停止预约计划委托",
+        nowMs
+      });
       await syncUserToSso(auth.cloudUserId);
-      return { status: 200, code: "RESERVATION_PLAN_CANCELLED", data: { plan_id: plan.id, enabled: false } };
+      return {
+        status: 200,
+        code: "RESERVATION_PLAN_CANCELLED",
+        data: {
+          plan_id: stopRes.plan_id,
+          enabled: false,
+          cancelled_job_ids: stopRes.cancelled_job_ids,
+          blocking_jobs: stopRes.blocking_jobs
+        }
+      };
     }
   );
 
@@ -1204,12 +1205,19 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("FORBIDDEN", "Cross-user reservation job access denied");
       }
       store.syncJobDisplayStatus?.(job);
+      const parentPlan = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
       const events = store.eventsForJob(job.id);
       const attempts = store.attemptsForJob?.(job.id) || [];
       return {
         status: 200,
         code: "RESERVATION_JOB_OK",
-        data: { ...job, schedule_events: events, attempts }
+        data: {
+          ...job,
+          parent_plan_enabled: parentPlan ? Boolean(parentPlan.enabled) : false,
+          parent_plan_user_intent_state: parentPlan?.user_intent_state || "ACTIVE",
+          schedule_events: events,
+          attempts
+        }
       };
     }
   );
@@ -1219,52 +1227,65 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/reservation-jobs/{jobId}/cancel",
     "cancelReservationJob",
     "bearer",
-    async ({ auth, params }) => {
+    async ({ auth, params, nowMs }) => {
       const job = store.reservationJobs.get(params.jobId);
       if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
       if (job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("FORBIDDEN", "Cross-user reservation job cancel denied");
       }
+      const hadActiveParentOrChildBeforeStop = (() => {
+        const p = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
+        if (p?.enabled) return true;
+        if (!p) return false;
+        return Array.from(store.reservationJobs.values()).some(
+          (sib) =>
+            sib.plan_id === p.id &&
+            sib.id !== job.id &&
+            !["FAILED", "EXPIRED", "CANCELLED", "SCHOOL_CANCELLED"].includes(sib.state)
+        );
+      })();
+
+      // Always stop parent plan and all undispatched child jobs immediately (even if this jobId is already FAILED/EXPIRED!)
+      const stopRes = reservationEngine.stopPlanAndActiveJobs({
+        planId: job.plan_id,
+        jobId: job.id,
+        cloudUserId: auth.cloudUserId,
+        reason: "用户停止任务委托",
+        nowMs
+      });
+      await syncUserToSso(auth.cloudUserId);
+
+      if (stopRes.blocking_jobs.length > 0) {
+        throw new ContractError(
+          "JOB_ALREADY_TERMINAL",
+          `委托计划已停止续期，但存在已发出或已确认的子任务（${stopRes.blocking_jobs.map((b) => `${b.id}:${b.state}`).join(",")}），请核实状态或显式执行退座`,
+          {
+            stopped_plan_id: stopRes.plan_id,
+            cancelled_job_ids: stopRes.cancelled_job_ids,
+            blocking_jobs: stopRes.blocking_jobs
+          }
+        );
+      }
+
       if (
-        [
-          "CONFIRMED",
-          "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
-          "SCHOOL_CANCELLED",
-          "CANCEL_RESULT_UNKNOWN",
-          "FAILED",
-          "CANCELLED",
-          "EXPIRED"
-        ].includes(job.state)
+        !hadActiveParentOrChildBeforeStop &&
+        ["CONFIRMED", "DELEGATION_STOPPED_SCHOOL_CONFIRMED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "CANCELLED", "EXPIRED"].includes(
+          job.state
+        ) &&
+        stopRes.cancelled_job_ids.length === 0
       ) {
         throw new ContractError("JOB_ALREADY_TERMINAL", `Job is already in terminal state ${job.state}`);
       }
-      const parentPlan = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
-      if (parentPlan) {
-        parentPlan.enabled = false;
-        if (parentPlan.user_intent_state === "ACTIVE" || !parentPlan.user_intent_state) {
-          parentPlan.user_intent_state = "STOP_REQUESTED";
+
+      return {
+        status: 200,
+        code: "RESERVATION_JOB_CANCELLED",
+        data: {
+          ...job,
+          stopped_plan_id: stopRes.plan_id,
+          cancelled_child_job_ids: stopRes.cancelled_job_ids
         }
-      }
-      const ts = new Date().toISOString();
-      if (job.external_execution_state && job.external_execution_state !== "NOT_DISPATCHED") {
-        store._applyRevocationToJob?.(job, "用户停止任务委托", ts);
-        job.user_intent_state = "STOP_REQUESTED";
-        store.syncJobDisplayStatus?.(job);
-      } else {
-        job.user_intent_state = "STOP_REQUESTED";
-        job.external_execution_state = "NOT_DISPATCHED";
-        job.state = "CANCELLED";
-        job.state_version += 1;
-        for (const ev of store.eventsForJob(job.id)) {
-          if (ev.status === "ARMED") {
-            ev.status = "ABORTED_REVOKED";
-            ev.actual_at = ts;
-          }
-        }
-        store.syncJobDisplayStatus?.(job);
-      }
-      await syncUserToSso(auth.cloudUserId);
-      return { status: 200, code: "RESERVATION_JOB_CANCELLED", data: job };
+      };
     }
   );
 
@@ -2268,47 +2289,25 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (Array.isArray(body.reservation_cancellations)) {
-        const stopTs = new Date(nowMs).toISOString();
-        const stopDelegationWithoutAutoLiveCancel = (j) => {
-          if (!j || j.cloud_user_id !== auth.cloudUserId) return;
-          if (["CANCELLED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "EXPIRED"].includes(j.state)) {
-            return;
-          }
-          store._applyRevocationToJob?.(j, "客户端同步停止任务委托", stopTs);
-          if (j.user_intent_state === "REVOKED") {
-            j.user_intent_state = "STOP_REQUESTED";
-          }
-          for (const ev of store.eventsForJob(j.id)) {
-            if (ev.status === "ARMED") {
-              ev.status = "ABORTED_REVOKED";
-              ev.actual_at = stopTs;
-            }
-          }
-          store.syncJobDisplayStatus?.(j);
-        };
         for (const cancelId of body.reservation_cancellations) {
           const job = store.reservationJobs.get(cancelId);
           if (job && job.cloud_user_id === auth.cloudUserId) {
-            const p = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
-            if (p && p.cloud_user_id === auth.cloudUserId) {
-              p.enabled = false;
-              if (p.user_intent_state === "ACTIVE" || !p.user_intent_state) {
-                p.user_intent_state = "STOP_REQUESTED";
-              }
-            }
-            stopDelegationWithoutAutoLiveCancel(job);
+            reservationEngine.stopPlanAndActiveJobs({
+              planId: job.plan_id,
+              jobId: job.id,
+              cloudUserId: auth.cloudUserId,
+              reason: "客户端同步停止任务委托",
+              nowMs
+            });
           }
           const plan = store.reservationPlans.get(cancelId);
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
-            plan.enabled = false;
-            if (plan.user_intent_state === "ACTIVE" || !plan.user_intent_state) {
-              plan.user_intent_state = "STOP_REQUESTED";
-            }
-            for (const j of store.reservationJobs.values()) {
-              if (j.plan_id === plan.id) {
-                stopDelegationWithoutAutoLiveCancel(j);
-              }
-            }
+            reservationEngine.stopPlanAndActiveJobs({
+              planId: plan.id,
+              cloudUserId: auth.cloudUserId,
+              reason: "客户端同步停止预约计划委托",
+              nowMs
+            });
           }
         }
       }
@@ -3919,7 +3918,19 @@ export function createCampusCloudApp(options = {}) {
       }
     }
     const rawStatus = String(body?.status || existing?.status || "NORMAL").toUpperCase();
-    const allowedStatus = ["NORMAL", "LOST", "FOUND_REPORTED"].includes(rawStatus) ? rawStatus : "NORMAL";
+    const allowedStatus = ["NORMAL", "LOST", "FOUND_REPORTED", "DISABLED"].includes(rawStatus)
+      ? rawStatus
+      : "NORMAL";
+    const rawVisibility = String(
+      body?.contact_visibility ?? existing?.contact_visibility ?? "PRIVATE"
+    ).toUpperCase();
+    const contactVisibility =
+      rawVisibility === "PUBLIC_WHEN_LOST" ? "PUBLIC_WHEN_LOST" : "PRIVATE";
+    const ownerDeclaredLost =
+      allowedStatus === "LOST" ||
+      (allowedStatus === "FOUND_REPORTED" && existing?.owner_declared_lost === true);
+    const normalizedOwnerStatus =
+      allowedStatus === "FOUND_REPORTED" && !ownerDeclaredLost ? "NORMAL" : allowedStatus;
     const updatedTag = {
       id: existing?.id || ("tag_" + crypto.randomUUID().slice(0, 8)),
       tag_code: tagCode,
@@ -3929,8 +3940,10 @@ export function createCampusCloudApp(options = {}) {
       campus: String(body?.campus || existing?.campus || "莲花街校区").trim().slice(0, 24),
       owner_name: String(body?.owner_name || existing?.owner_name || "河工大同学").trim().slice(0, 24),
       owner_contact: String(body?.owner_contact || existing?.owner_contact || "").trim().slice(0, 64),
+      contact_visibility: contactVisibility,
+      owner_declared_lost: ownerDeclaredLost,
       return_note: String(body?.return_note || existing?.return_note || "拾到请联系失主或放至就近服务台").trim().slice(0, 160),
-      status: allowedStatus,
+      status: normalizedOwnerStatus,
       reports: Array.isArray(existing?.reports) ? existing.reports : [],
       created_at: existing?.created_at || nowIso,
       updated_at: nowIso
@@ -3953,6 +3966,9 @@ export function createCampusCloudApp(options = {}) {
     const tags = store.momentsState.anti_lost_tags || [];
     const tag = tags.find((t) => t.tag_code.toUpperCase() === cleanCode);
     if (!tag) throw new ContractError("NOT_FOUND", "未找到防丢码 " + cleanCode);
+    if (String(tag.status || "").toUpperCase() === "DISABLED") {
+      throw new ContractError("CONFLICT", "该防丢码已由失主停用，不再接收拾得上报");
+    }
     const foundLocation = String(body?.found_location || "").trim().slice(0, 80);
     if (!foundLocation) throw new ContractError("BAD_REQUEST", "请填写拾得位置或放置地点");
     const nowIso = new Date(nowMs).toISOString();
@@ -3966,7 +3982,12 @@ export function createCampusCloudApp(options = {}) {
     };
     if (!Array.isArray(tag.reports)) tag.reports = [];
     tag.reports = [report, ...tag.reports].slice(0, 30);
-    tag.status = "FOUND_REPORTED";
+    // CRITICAL: Anonymous report-found MUST NEVER escalate a NORMAL/restricted tag into LOST/FOUND_REPORTED!
+    // Only transition LOST -> FOUND_REPORTED when the owner had ALREADY explicitly declared LOST!
+    if (tag.status === "LOST" && tag.owner_declared_lost === true) {
+      tag.status = "FOUND_REPORTED";
+    }
+    tag.last_finder_report_at = nowIso;
     tag.updated_at = nowIso;
     store.momentsState.updated_at = nowIso;
     if (tag.owner_cloud_user_id) {
@@ -3978,17 +3999,12 @@ export function createCampusCloudApp(options = {}) {
       });
     }
     store.saveSnapshot();
-    // Public-safe acknowledgment: NEVER leak owner_contact or historical finder_contact reports[] to anonymous callers!
+    // Public-safe acknowledgment: NEVER leak owner_contact, owner_name, internal status, or historical reports[]!
     return {
       status: 200,
       code: "ANTI_LOST_FOUND_REPORTED",
       data: {
-        id: tag.id,
         tag_code: tag.tag_code,
-        item_name: tag.item_name,
-        category: tag.category,
-        campus: tag.campus,
-        status: tag.status,
         report_id: report.id,
         report_submitted: true,
         updated_at: nowIso
@@ -4246,18 +4262,60 @@ export function createCampusCloudApp(options = {}) {
 
       if (upperMethod === "GET" && pathname.startsWith("/claim/")) {
         const rawCode = decodeURIComponent(pathname.slice("/claim/".length)).trim().toUpperCase();
-        const tag = (store.momentsState?.anti_lost_tags || []).find((t) => t.tag_code.toUpperCase() === rawCode);
-        const itemTitle = tag ? escapeClaimHtml(tag.item_name) : "未登记或已失效的防丢标签";
-        const ownerName = tag ? escapeClaimHtml(tag.owner_name) : "未知失主";
-        const isLostMode = Boolean(tag && (tag.status === "LOST" || tag.status === "FOUND_REPORTED"));
-        const ownerContact = !tag
-          ? "未找到该防丢码登记记录"
-          : isLostMode && tag.owner_contact
-            ? escapeClaimHtml(tag.owner_contact)
-            : "物品当前未开启挂失公开联系，请通过下方表单通知失主";
-        const returnNote = tag
-          ? escapeClaimHtml(tag.return_note)
-          : "该防丢码尚未在云端登记或已被失主移除，无法投递拾得通知。";
+        const foundTag = (store.momentsState?.anti_lost_tags || []).find((t) => t.tag_code.toUpperCase() === rawCode);
+        const isDisabledOrMissing = !foundTag || String(foundTag.status || "").toUpperCase() === "DISABLED";
+        const activeTag = isDisabledOrMissing ? null : foundTag;
+        // Public projection: ONLY expose owner_contact when BOTH owner explicitly set status=LOST (owner_declared_lost === true)
+        // AND owner explicitly opted into contact_visibility === 'PUBLIC_WHEN_LOST'!
+        // Restricted/private/NORMAL/legacy tags NEVER expose owner_contact, even after anonymous report-found!
+        const canPubliclyShowContact = Boolean(
+          activeTag &&
+            activeTag.contact_visibility === "PUBLIC_WHEN_LOST" &&
+            activeTag.owner_declared_lost === true &&
+            (activeTag.status === "LOST" || activeTag.status === "FOUND_REPORTED") &&
+            activeTag.owner_contact
+        );
+        const itemTitle = activeTag ? escapeClaimHtml(activeTag.item_name) : "未登记或已停用的防丢标签";
+        const ownerName = !activeTag
+          ? "未知失主"
+          : canPubliclyShowContact
+            ? escapeClaimHtml(activeTag.owner_name)
+            : "已登记失主";
+        const ownerContact = !activeTag
+          ? "未找到有效的防丢码登记记录"
+          : canPubliclyShowContact
+            ? escapeClaimHtml(activeTag.owner_contact)
+            : "失主联系方式受隐私保护，请通过下方表单留言通知失主";
+        const returnNote = activeTag
+          ? escapeClaimHtml(activeTag.return_note)
+          : "该防丢码尚未在云端登记或已被失主停用，无法投递拾得通知。";
+        const formHtml = activeTag
+          ? [
+              '<form id="f">',
+              '<label>拾得/放置地点 *</label>',
+              '<input id="loc" required placeholder="例如：图书馆一楼服务台 / 一餐厅服务台"/>',
+              '<label>您的称呼或联系方式</label>',
+              '<input id="contact" placeholder="例如：QQ / 微信 / 电话（选填）"/>',
+              '<label>补充留言</label>',
+              '<textarea id="memo" rows="2" placeholder="描述物品当前放置位置"></textarea>',
+              '<button type="submit">通知失主已拾得</button>',
+              '<div id="ok" class="msg">已提交拾得线索，失主打开「日在校园」即可收到提醒，感谢您的热心相助！</div>',
+              '<div id="err" class="err"></div>',
+              '</form>',
+              '<script>',
+              'document.getElementById("f").addEventListener("submit", function(e){',
+              '  e.preventDefault();',
+              '  var okEl = document.getElementById("ok"); var errEl = document.getElementById("err");',
+              '  okEl.style.display = "none"; errEl.style.display = "none";',
+              '  fetch("/api/v1/moments/anti-lost-tags/" + encodeURIComponent(' + JSON.stringify(rawCode) + ') + "/report-found", {',
+              '    method: "POST", headers: {"Content-Type": "application/json"},',
+              '    body: JSON.stringify({found_location: document.getElementById("loc").value, finder_contact: document.getElementById("contact").value, message: document.getElementById("memo").value})',
+              '  }).then(function(r){ return r.json().then(function(j){ if(!r.ok || !j.ok) throw new Error((j.error && j.error.message) || "提交失败，请检查防丢码是否有效"); okEl.style.display = "block"; }); })',
+              '  .catch(function(ex){ errEl.textContent = ex.message || "网络异常，未能提交拾得通知"; errEl.style.display = "block"; });',
+              '});',
+              '</script>'
+            ].join("\n")
+          : "";
         const html = [
           '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>',
           '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>',
@@ -4279,38 +4337,17 @@ export function createCampusCloudApp(options = {}) {
           '<h1>' + itemTitle + '</h1>',
           '<div class="meta">失主：' + ownerName + ' · 联系：' + ownerContact + '</div>',
           '<div class="note">' + returnNote + '</div>',
-          '<form id="f">',
-          '<label>拾得/放置地点 *</label>',
-          '<input id="loc" required placeholder="例如：图书馆一楼服务台 / 一餐厅服务台"/>',
-          '<label>您的称呼或联系方式</label>',
-          '<input id="contact" placeholder="例如：QQ / 微信 / 电话（选填）"/>',
-          '<label>补充留言</label>',
-          '<textarea id="memo" rows="2" placeholder="描述物品当前放置位置"></textarea>',
-          '<button type="submit">通知失主已拾得</button>',
-          '<div id="ok" class="msg">已提交拾得线索，失主打开「日在校园」即可收到提醒，感谢您的热心相助！</div>',
-          '<div id="err" class="err"></div>',
-          '</form></div>',
-          '<script>',
-          'document.getElementById("f").addEventListener("submit", function(e){',
-          '  e.preventDefault();',
-          '  var okEl = document.getElementById("ok"); var errEl = document.getElementById("err");',
-          '  okEl.style.display = "none"; errEl.style.display = "none";',
-          '  fetch("/api/v1/moments/anti-lost-tags/" + encodeURIComponent(' + JSON.stringify(rawCode) + ') + "/report-found", {',
-          '    method: "POST", headers: {"Content-Type": "application/json"},',
-          '    body: JSON.stringify({found_location: document.getElementById("loc").value, finder_contact: document.getElementById("contact").value, message: document.getElementById("memo").value})',
-          '  }).then(function(r){ return r.json().then(function(j){ if(!r.ok || !j.ok) throw new Error((j.error && j.error.message) || "提交失败，请检查防丢码是否有效"); okEl.style.display = "block"; }); })',
-          '  .catch(function(ex){ errEl.textContent = ex.message || "网络异常，未能提交拾得通知"; errEl.style.display = "block"; });',
-          '});',
-          '</script></body></html>'
+          formHtml,
+          '</div></body></html>'
         ].join("\n");
         return {
-          status: tag ? 200 : 404,
+          status: activeTag ? 200 : 404,
           headers: {
             "content-type": "text/html; charset=utf-8",
             "x-request-id": requestId
           },
           rawBody: html,
-          body: okEnvelope(tag ? "CLAIM_PAGE_OK" : "CLAIM_TAG_NOT_FOUND", { tag_code: rawCode }, requestId)
+          body: okEnvelope(activeTag ? "CLAIM_PAGE_OK" : "CLAIM_TAG_NOT_FOUND", { tag_code: rawCode }, requestId)
         };
       }
 

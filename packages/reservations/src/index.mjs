@@ -572,6 +572,8 @@ export class TripleScheduleEngine {
       !job ||
       !plan ||
       !plan.enabled ||
+      (plan.user_intent_state && plan.user_intent_state !== "ACTIVE") ||
+      (job.user_intent_state && job.user_intent_state !== "ACTIVE") ||
       !binding ||
       binding.revoked_at ||
       binding.status === "REVOKED" ||
@@ -1184,6 +1186,7 @@ export class TripleScheduleEngine {
         };
 
         let writeDispatchedInThisRun = false;
+        let hasUnresolvedInFlightWrite = false;
         let activeAttempt = null;
 
         const onBeforeExternalWrite = async (targetInfo = {}) => {
@@ -1232,15 +1235,21 @@ export class TripleScheduleEngine {
             throw persistErr;
           }
           writeDispatchedInThisRun = true;
+          hasUnresolvedInFlightWrite = true;
           activeAttempt = attempt;
           return attempt;
         };
 
         const onAfterExternalWrite = async (attemptId, outcomeInfo = {}) => {
-          writeDispatchedInThisRun = true;
+          if (outcomeInfo.writeDispatched !== false) {
+            writeDispatchedInThisRun = true;
+          }
+          if (outcomeInfo.explicitlyRejected === true || outcomeInfo.writeDispatched === false) {
+            hasUnresolvedInFlightWrite = false;
+          }
           const idToUpdate = attemptId || activeAttempt?.id;
           if (idToUpdate) {
-            this.store.updateReservationAttempt?.(idToUpdate, {
+            const patch = {
               raw_response_code: outcomeInfo.rawResponseCode ?? null,
               raw_response_msg: outcomeInfo.rawResponseMsg ?? null,
               external_booking_id: outcomeInfo.externalBookingId ?? null,
@@ -1249,7 +1258,12 @@ export class TripleScheduleEngine {
               candidate_region_name:
                 outcomeInfo.regionAlias || activeAttempt?.candidate_region_name || "",
               user_intent_state_at_completion: job.user_intent_state || "ACTIVE"
-            });
+            };
+            if (outcomeInfo.explicitlyRejected === true) {
+              patch.external_execution_state = "SCHOOL_REJECTED";
+              patch.completed_at = new Date(nowMs).toISOString();
+            }
+            this.store.updateReservationAttempt?.(idToUpdate, patch);
           }
           if (outcomeInfo.externalBookingId) {
             job.pending_external_booking_id = outcomeInfo.externalBookingId;
@@ -1285,12 +1299,26 @@ export class TripleScheduleEngine {
           ) {
             return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
           }
-          submitRes = {
-            outcome: writeDispatchedInThisRun ? "TIMEOUT_AMBIGUOUS" : "FAILED",
-            writeDispatched: writeDispatchedInThisRun,
-            errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
-            diagnosticMessage: err?.message || "学校选座接口请求异常"
-          };
+          if (
+            writeDispatchedInThisRun &&
+            !hasUnresolvedInFlightWrite &&
+            (err?.code === "CONSENT_WITHDRAWN" || !isStillAuthorized())
+          ) {
+            submitRes = {
+              outcome: "FAILED",
+              writeDispatched: true,
+              revokedDuringFlight: true,
+              errorCode: "SCHOOL_REJECTED",
+              diagnosticMessage: "委托已停止且此前尝试的座位已被学校明确拒绝，未发起后续候选写入"
+            };
+          } else {
+            submitRes = {
+              outcome: hasUnresolvedInFlightWrite ? "TIMEOUT_AMBIGUOUS" : "FAILED",
+              writeDispatched: writeDispatchedInThisRun,
+              errorCode: err?.code || "SCHOOL_EXECUTION_ERROR",
+              diagnosticMessage: err?.message || "学校选座接口请求异常"
+            };
+          }
         }
 
         const wasDispatched = Boolean(writeDispatchedInThisRun || submitRes?.writeDispatched);
@@ -1558,89 +1586,311 @@ export class TripleScheduleEngine {
     });
   }
 
-  async cancelConfirmedOrActiveJob(jobId, nowMs = Date.now()) {
-    return this.withJobLock(jobId, async () => {
-      const job = this.store.reservationJobs.get(jobId);
-    if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
-    const binding = this.store.schoolBindings.get(job.school_binding_id);
-    const plan = this.store.reservationPlans.get(job.plan_id);
-    const schoolRes = this.store.schoolReservations.get(job.id);
-    const ts = new Date(nowMs).toISOString();
+  stopPlanAndActiveJobs({
+    planId = null,
+    jobId = null,
+    cloudUserId = null,
+    reason = "用户停止预约计划委托",
+    nowMs = Date.now()
+  } = {}) {
+    const targetJob = jobId ? this.store.reservationJobs.get(jobId) : null;
+    if (jobId && !targetJob) {
+      throw new ContractError("NOT_FOUND", "Reservation job not found");
+    }
+    if (targetJob && cloudUserId && targetJob.cloud_user_id !== cloudUserId) {
+      throw new ContractError("FORBIDDEN", "Cross-user reservation job cancel denied");
+    }
+    const resolvedPlanId = planId || targetJob?.plan_id || null;
+    const plan = resolvedPlanId ? this.store.reservationPlans.get(resolvedPlanId) : null;
+    if (planId && (!plan || (cloudUserId && plan.cloud_user_id !== cloudUserId))) {
+      throw new ContractError("NOT_FOUND", "Reservation plan not found");
+    }
 
+    const ts = new Date(nowMs).toISOString();
     if (plan) {
       plan.enabled = false;
-      if (plan.user_intent_state === "ACTIVE") {
+      plan.remaining_days = 0;
+      if (plan.user_intent_state !== "REVOKED") {
         plan.user_intent_state = "STOP_REQUESTED";
       }
-    }
-    for (const ev of this.store.eventsForJob(job.id)) {
-      if (ev.status === "ARMED") {
-        ev.status = "ABORTED_REVOKED";
-        ev.actual_at = ts;
-      }
+      plan.updated_at = ts;
     }
 
-    const hasExternalDispatch =
-      (job.external_execution_state &&
-        job.external_execution_state !== "NOT_DISPATCHED" &&
-        job.external_execution_state !== "SCHOOL_REJECTED") ||
-      job.state === "CONFIRMED" ||
-      job.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
-      Boolean(schoolRes?.external_booking_id) ||
-      Boolean(job.external_booking_id) ||
-      Boolean(job.pending_external_booking_id);
+    const relatedJobs = plan
+      ? Array.from(this.store.reservationJobs.values()).filter((j) => j.plan_id === plan.id)
+      : targetJob
+        ? [targetJob]
+        : [];
 
-    // Case 1: Never dispatched to school -> purely stop delegation
-    if (!hasExternalDispatch) {
-      job.user_intent_state =
-        job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
-      job.external_execution_state =
-        job.external_execution_state === "SCHOOL_REJECTED" ? "SCHOOL_REJECTED" : "NOT_DISPATCHED";
-      job.state = "CANCELLED";
-      job.state_version += 1;
-      this.store.syncJobDisplayStatus?.(job);
-      if (typeof this.store.saveSnapshot === "function") {
-        this.store.saveSnapshot();
-      }
-      return {
-        job,
-        school_reservation: null,
-        live_cancel: null
-      };
-    }
+    const cancelledJobIds = [];
+    const blockingJobs = [];
 
-    // Case 2: External booking is in RESULT_UNKNOWN or DISPATCH_INTENT -> do not pretend cancelled
-    if (
-      job.external_execution_state === "RESULT_UNKNOWN" ||
-      job.external_execution_state === "DISPATCH_INTENT"
-    ) {
-      job.user_intent_state =
-        job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
-      job.external_execution_state = "RESULT_UNKNOWN";
-      job.state = "RESULT_UNKNOWN";
-      job.state_version += 1;
-      this.store.syncJobDisplayStatus?.(job);
-      if (typeof this.store.saveSnapshot === "function") {
-        this.store.saveSnapshot();
-      }
-      return {
-        job,
-        school_reservation: schoolRes || null,
-        live_cancel: {
-          cancelled: false,
-          outcome: "RESULT_UNKNOWN",
-          message: "委托已停止，但此前已发出的预约请求结果待核对，未确认前无法宣称学校端已取消"
+    for (const j of relatedJobs) {
+      for (const ev of this.store.eventsForJob(j.id)) {
+        if (ev.status === "ARMED") {
+          ev.status = "ABORTED_REVOKED";
+          ev.actual_at = ts;
         }
-      };
+      }
+
+      if (["FAILED", "EXPIRED", "CANCELLED", "SCHOOL_CANCELLED"].includes(j.state)) {
+        j.remaining_days = 0;
+        if (j.user_intent_state !== "REVOKED") {
+          j.user_intent_state = "STOP_REQUESTED";
+        }
+        this.store.syncJobDisplayStatus?.(j);
+        continue;
+      }
+
+      const sr = this.store.schoolReservations.get(j.id) || null;
+      const hasDispatchedOrConfirmed =
+        (j.external_execution_state &&
+          j.external_execution_state !== "NOT_DISPATCHED" &&
+          j.external_execution_state !== "SCHOOL_REJECTED") ||
+        [
+          "CONFIRMED",
+          "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+          "CANCEL_RESULT_UNKNOWN",
+          "RESULT_UNKNOWN"
+        ].includes(j.state) ||
+        Boolean(sr?.external_booking_id) ||
+        Boolean(j.external_booking_id) ||
+        Boolean(j.pending_external_booking_id);
+
+      if (j.state === "EXECUTING") {
+        // Out-of-lock immediate stop intent: FIRE will observe user_intent_state !== 'ACTIVE' at the next check!
+        if (j.user_intent_state !== "REVOKED") {
+          j.user_intent_state = "STOP_REQUESTED";
+        }
+        j.remaining_days = 0;
+        this.store.syncJobDisplayStatus?.(j);
+        blockingJobs.push({
+          id: j.id,
+          booking_local_date: j.booking_local_date,
+          state: j.state,
+          external_execution_state: j.external_execution_state || "NOT_DISPATCHED",
+          external_booking_id: sr?.external_booking_id || j.external_booking_id || null
+        });
+        continue;
+      }
+
+      if (hasDispatchedOrConfirmed) {
+        this.store._applyRevocationToJob?.(j, reason, ts);
+        if (j.user_intent_state === "REVOKED") {
+          j.user_intent_state = "STOP_REQUESTED";
+        }
+        j.remaining_days = 0;
+        this.store.syncJobDisplayStatus?.(j);
+        blockingJobs.push({
+          id: j.id,
+          booking_local_date: j.booking_local_date,
+          state: j.state,
+          external_execution_state: j.external_execution_state || "RESULT_UNKNOWN",
+          external_booking_id: sr?.external_booking_id || j.external_booking_id || null
+        });
+      } else {
+        j.user_intent_state = j.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+        j.external_execution_state =
+          j.external_execution_state === "SCHOOL_REJECTED" ? "SCHOOL_REJECTED" : "NOT_DISPATCHED";
+        j.state = "CANCELLED";
+        j.remaining_days = 0;
+        j.state_version += 1;
+        j.last_diagnostic_message = reason;
+        this.store.syncJobDisplayStatus?.(j);
+        cancelledJobIds.push(j.id);
+      }
     }
 
-    // Case 3: Confirmed booking exists -> require exact booking ID and check permission policy
-    const exactBookingId = String(
-      schoolRes?.external_booking_id ||
-        job.external_booking_id ||
-        job.pending_external_booking_id ||
-        ""
-    ).trim();
+    if (typeof this.store.flushSnapshotSync === "function") {
+      this.store.flushSnapshotSync();
+    } else if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
+
+    return {
+      plan_id: plan?.id || null,
+      plan_enabled: plan ? Boolean(plan.enabled) : false,
+      target_job: targetJob || null,
+      cancelled_job_ids: cancelledJobIds,
+      blocking_jobs: blockingJobs
+    };
+  }
+
+  async cancelConfirmedOrActiveJob(jobId, nowMs = Date.now()) {
+    const preLockJob = this.store.reservationJobs.get(jobId);
+    if (!preLockJob) throw new ContractError("NOT_FOUND", "Reservation job not found");
+    const preLockSchoolRes = this.store.schoolReservations.get(preLockJob.id);
+    const wasConfirmedAtCancelEntry =
+      preLockJob.external_execution_state === "SCHOOL_CONFIRMED" ||
+      preLockJob.state === "CONFIRMED" ||
+      preLockJob.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
+      preLockJob.state === "CANCEL_RESULT_UNKNOWN" ||
+      Boolean(preLockSchoolRes?.external_booking_id) ||
+      Boolean(preLockJob.external_booking_id);
+
+    // Record stop intent IMMEDIATELY outside withJobLock so any in-flight FIRE sees STOP_REQUESTED
+    // before external write, before billing debit, and before multi-day rollover!
+    this.stopPlanAndActiveJobs({
+      planId: preLockJob.plan_id,
+      jobId,
+      cloudUserId: preLockJob.cloud_user_id,
+      reason: "用户请求取消或停止预约任务",
+      nowMs
+    });
+
+    return this.withJobLock(jobId, async () => {
+      const job = this.store.reservationJobs.get(jobId);
+      if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
+      const binding = this.store.schoolBindings.get(job.school_binding_id);
+      const plan = this.store.reservationPlans.get(job.plan_id);
+      const schoolRes = this.store.schoolReservations.get(job.id);
+      const ts = new Date(nowMs).toISOString();
+
+      // Re-ensure plan and any newly rolled-over sibling jobs are stopped after lock acquisition
+      if (plan) {
+        plan.enabled = false;
+        plan.remaining_days = 0;
+        if (plan.user_intent_state === "ACTIVE" || !plan.user_intent_state) {
+          plan.user_intent_state = "STOP_REQUESTED";
+        }
+        for (const sib of this.store.reservationJobs.values()) {
+          if (sib.plan_id === plan.id && sib.id !== job.id) {
+            if (
+              (!sib.external_execution_state || sib.external_execution_state === "NOT_DISPATCHED") &&
+              !["CONFIRMED", "DELEGATION_STOPPED_SCHOOL_CONFIRMED", "RESULT_UNKNOWN", "CANCEL_RESULT_UNKNOWN", "SCHOOL_CANCELLED", "FAILED", "EXPIRED", "CANCELLED"].includes(sib.state)
+            ) {
+              sib.user_intent_state = "STOP_REQUESTED";
+              sib.external_execution_state = "NOT_DISPATCHED";
+              sib.state = "CANCELLED";
+              sib.remaining_days = 0;
+              sib.state_version += 1;
+              this.store.syncJobDisplayStatus?.(sib);
+            }
+          }
+        }
+      }
+      for (const ev of this.store.eventsForJob(job.id)) {
+        if (ev.status === "ARMED") {
+          ev.status = "ABORTED_REVOKED";
+          ev.actual_at = ts;
+        }
+      }
+
+      if (job.state === "SCHOOL_CANCELLED") {
+        return {
+          job,
+          school_reservation: schoolRes || null,
+          live_cancel: {
+            cancelled: true,
+            outcome: "SCHOOL_CANCELLED",
+            school_cancellation_state: "SCHOOL_CANCELLED",
+            bookingId: schoolRes?.external_booking_id || job.external_booking_id || null
+          }
+        };
+      }
+
+      const hasExternalDispatch =
+        (job.external_execution_state &&
+          job.external_execution_state !== "NOT_DISPATCHED" &&
+          job.external_execution_state !== "SCHOOL_REJECTED") ||
+        job.state === "CONFIRMED" ||
+        job.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED" ||
+        job.state === "CANCEL_RESULT_UNKNOWN" ||
+        Boolean(schoolRes?.external_booking_id) ||
+        Boolean(job.external_booking_id) ||
+        Boolean(job.pending_external_booking_id);
+
+      // Case 1: Never dispatched (or explicitly rejected by school before/during stop) -> purely stop delegation
+      if (!hasExternalDispatch) {
+        job.user_intent_state =
+          job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+        job.external_execution_state =
+          job.external_execution_state === "SCHOOL_REJECTED" ? "SCHOOL_REJECTED" : "NOT_DISPATCHED";
+        if (!["FAILED", "EXPIRED"].includes(job.state)) {
+          job.state = "CANCELLED";
+        }
+        job.remaining_days = 0;
+        job.state_version += 1;
+        this.store.syncJobDisplayStatus?.(job);
+        if (typeof this.store.saveSnapshot === "function") {
+          this.store.saveSnapshot();
+        }
+        return {
+          job,
+          school_reservation: null,
+          live_cancel: null
+        };
+      }
+
+      // Case 2: External booking is in RESULT_UNKNOWN or DISPATCH_INTENT -> do not pretend cancelled
+      if (
+        job.external_execution_state === "RESULT_UNKNOWN" ||
+        job.external_execution_state === "DISPATCH_INTENT"
+      ) {
+        job.user_intent_state =
+          job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+        job.external_execution_state = "RESULT_UNKNOWN";
+        job.state = "RESULT_UNKNOWN";
+        job.remaining_days = 0;
+        job.state_version += 1;
+        this.store.syncJobDisplayStatus?.(job);
+        if (typeof this.store.saveSnapshot === "function") {
+          this.store.saveSnapshot();
+        }
+        return {
+          job,
+          school_reservation: schoolRes || null,
+          live_cancel: {
+            cancelled: false,
+            outcome: "RESULT_UNKNOWN",
+            message: "委托已停止，但此前已发出的预约请求结果待核对，未确认前无法宣称学校端已取消"
+          }
+        };
+      }
+
+      // Case 2.5: Cancel was requested while FIRE was in flight (not yet confirmed at entry), and FIRE's in-flight write succeeded!
+      // Preserve DELEGATION_STOPPED_SCHOOL_CONFIRMED & booking evidence without faking school seat cancellation or charging/rolling over!
+      const exactBookingId = String(
+        schoolRes?.external_booking_id ||
+          job.external_booking_id ||
+          job.pending_external_booking_id ||
+          ""
+      ).trim();
+
+      if (!wasConfirmedAtCancelEntry) {
+        job.user_intent_state =
+          job.user_intent_state === "REVOKED" ? "REVOKED" : "STOP_REQUESTED";
+        job.external_execution_state = exactBookingId ? "SCHOOL_CONFIRMED" : "RESULT_UNKNOWN";
+        job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        job.billing_state = "HELD_PENDING_REVIEW";
+        job.state = exactBookingId ? "DELEGATION_STOPPED_SCHOOL_CONFIRMED" : "RESULT_UNKNOWN";
+        job.remaining_days = 0;
+        job.state_version += 1;
+        if (schoolRes) {
+          schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+        }
+        this.store.syncJobDisplayStatus?.(job);
+        if (typeof this.store.flushSnapshotSync === "function") {
+          this.store.flushSnapshotSync();
+        } else if (typeof this.store.saveSnapshot === "function") {
+          this.store.saveSnapshot();
+        }
+        return {
+          job,
+          school_reservation: schoolRes || null,
+          live_cancel: {
+            cancelled: false,
+            outcome: exactBookingId ? "CONFIRMED_DURING_IN_FLIGHT_STOP" : "RESULT_UNKNOWN",
+            school_cancellation_state: "MANUAL_ACTION_REQUIRED",
+            bookingId: exactBookingId || null,
+            message: exactBookingId
+              ? `委托已停止（未扣费、未续期），但此前已发出的抢座请求已在学校端成功锁定座位（预约号：${exactBookingId}），如需退座请显式发起学校退座`
+              : "委托已停止，但缺少精确预约编号，请核实学校端记录"
+          }
+        };
+      }
+
+      // Case 3: Confirmed booking existed before cancel-seat request -> require exact booking ID and check permission policy
 
     if (!exactBookingId) {
       job.user_intent_state =
@@ -2026,6 +2276,21 @@ export class TripleScheduleEngine {
     }
 
     // Create Order + Outbox Event & execute Post-Confirmation Idempotent Debit Saga
+    if (
+      !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+      (job.user_intent_state && job.user_intent_state !== "ACTIVE") ||
+      (plan && (!plan.enabled || (plan.user_intent_state && plan.user_intent_state !== "ACTIVE")))
+    ) {
+      return this.recordConfirmedBookingAfterRevocation(
+        job,
+        plan,
+        binding,
+        verifyRes,
+        attemptRecord,
+        event,
+        nowMs
+      );
+    }
     const order = await this.financeService.createAndSettleOrderForConfirmedJob({
       job,
       plan,

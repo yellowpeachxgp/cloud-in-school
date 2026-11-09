@@ -1502,3 +1502,275 @@ test("Fault Injection 14 (Restart State Preservation, Paginated Cancel on mybook
   assert.equal(pagedCancelRes.cancelled, true);
   assert.equal(pagedCancelRes.outcome, "SCHOOL_CANCELLED");
 });
+
+test("Fault Injection 15 (Out-of-Lock Cancel vs Blocked FIRE & Rolled-Over Child Jobs): cancelConfirmedOrActiveJob records immediate stop intent while FIRE holds withJobLock, blocking write/debit/rollover and never faking SCHOOL_CANCELLED; cancelling old FAILED/EXPIRED job stops parent plan & rolled-over child jobs", async () => {
+  const tokenNowMs = Date.parse("2026-11-20T06:00:00+08:00");
+  const fireNowMs = Date.parse("2026-11-20T07:00:01+08:00");
+
+  // --- Scenario A: FIRE blocked BEFORE external write (during /seatbook/region/query) when cancelConfirmedOrActiveJob is called ---
+  {
+    const app = createCampusCloudApp({ requireAdminAccess: false });
+    const { authHeaders, consentId, bindingId, cloudUserId } = await setupBoundUser(app, tokenNowMs);
+    app.financeBridge.setSandboxBalance(cloudUserId, 50_000);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi15_prewrite_cancel" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 5,
+        remaining_days: 5
+      },
+      nowMs: tokenNowMs
+    });
+    assert.equal(planRes.status, 201);
+    const jobId = planRes.body.data.job_id;
+    const planId = app.store.reservationJobs.get(jobId).plan_id;
+
+    let releaseDiscoveryBarrier;
+    const discoveryBarrier = new Promise((r) => {
+      releaseDiscoveryBarrier = r;
+    });
+    let notifyDiscoveryEntered;
+    const discoveryEntered = new Promise((r) => {
+      notifyDiscoveryEntered = r;
+    });
+    let addBookingCount = 0;
+
+    app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/building")) {
+        notifyDiscoveryEntered();
+        await discoveryBarrier;
+        return {
+          code: 200,
+          data: [{ id: 1, buildingName: "莲花街图书馆" }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+        return {
+          code: 200,
+          layout: { regionName: "五层中区" },
+          seatList: [{ id: 501, seatName: "五层中区05桌 A座", seatStatus: 2 }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+        addBookingCount += 1;
+        return { code: 200, bookingid: "bk_should_not_happen" };
+      }
+      return { code: 200, data: null, total: 0, rows: [] };
+    };
+
+    const firePromise = app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+    await discoveryEntered;
+
+    // Issue cancel-seat WHILE FIRE holds withJobLock(jobId)!
+    const cancelPromise = app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 500
+    });
+
+    // Stop intent MUST already be set BEFORE discoveryBarrier is released!
+    assert.equal(app.store.reservationPlans.get(planId).enabled, false);
+    assert.equal(app.store.reservationJobs.get(jobId).user_intent_state, "STOP_REQUESTED");
+
+    releaseDiscoveryBarrier();
+    const [, cancelHttpRes] = await Promise.all([firePromise, cancelPromise]);
+    assert.equal(cancelHttpRes.status, 200);
+    assert.equal(addBookingCount, 0, "Cancel before external write must prevent addbooking");
+    assert.equal(app.store.reservationJobs.get(jobId).state, "CANCELLED");
+    assert.equal(app.store.recordsForUser("reservationOrders", cloudUserId).length, 0, "Zero debit allowed");
+    assert.equal(app.store.recordsForUser("reservationJobs", cloudUserId).length, 1, "Zero rollover allowed");
+    assert.equal(app.financeBridge.getSandboxBalance(cloudUserId), 50_000);
+  }
+
+  // --- Scenario B: FIRE blocked DURING external addbooking write, which returns success AFTER cancelConfirmedOrActiveJob was issued ---
+  {
+    const app = createCampusCloudApp({ requireAdminAccess: false });
+    const { authHeaders, consentId, bindingId, cloudUserId } = await setupBoundUser(app, tokenNowMs);
+    app.financeBridge.setSandboxBalance(cloudUserId, 50_000);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi15_inflight_success_interleave" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 5,
+        remaining_days: 5
+      },
+      nowMs: tokenNowMs
+    });
+    const jobId = planRes.body.data.job_id;
+    const jobObj = app.store.reservationJobs.get(jobId);
+    const planId = jobObj.plan_id;
+    jobObj.prewarmed_targets = {
+      binding_id: bindingId,
+      student_no: "2026990101",
+      auth_version: 1,
+      plan_generation: 1,
+      target_local_date: "2026-11-20",
+      slot_window: "08:00-22:00",
+      expires_at: "2026-11-20T07:30:00+08:00",
+      region_id: 23,
+      region_name: "五层中区",
+      open_time: "07:30",
+      close_time: "22:00",
+      start_full: "2026-11-20 08:00:00",
+      end_full: "2026-11-20 22:00:00",
+      candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+    };
+
+    let releaseWriteBarrier;
+    const writeBarrier = new Promise((r) => {
+      releaseWriteBarrier = r;
+    });
+    let notifyWriteEntered;
+    const writeEntered = new Promise((r) => {
+      notifyWriteEntered = r;
+    });
+    let cancelEndpointCalled = 0;
+
+    app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+        return {
+          code: 200,
+          layout: { regionName: "五层中区" },
+          seatList: [{ id: 501, seatName: "五层中区05桌 A座", seatStatus: 2 }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+        notifyWriteEntered();
+        await writeBarrier;
+        return { code: 200, bookingid: "bk_interleaved_7788", msg: "预约成功" };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/cancel")) {
+        cancelEndpointCalled += 1;
+        return { code: 500, msg: "should not auto-cancel during in-flight stop" };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+        return {
+          code: 200,
+          data: {
+            id: "bk_interleaved_7788",
+            seatName: "五层中区05桌 A座",
+            regionName: "五层中区",
+            startTime: "2026-11-20 08:00:00",
+            endTime: "2026-11-20 22:00:00",
+            bookingStatus: 1,
+            bookingStatusName: "预约成功"
+          }
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+        return { code: 200, total: 0, rows: [] };
+      }
+      return { code: 200, total: 0, rows: [] };
+    };
+
+    const firePromise = app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+    await writeEntered;
+
+    const cancelPromise = app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 600
+    });
+
+    assert.equal(app.store.reservationPlans.get(planId).enabled, false);
+    assert.equal(app.store.reservationJobs.get(jobId).user_intent_state, "STOP_REQUESTED");
+
+    releaseWriteBarrier();
+    const [, cancelHttpRes] = await Promise.all([firePromise, cancelPromise]);
+    assert.equal(cancelHttpRes.status, 200);
+
+    const finalJob = app.store.reservationJobs.get(jobId);
+    const savedSr = app.store.schoolReservations.get(jobId);
+    assert.equal(finalJob.state, "DELEGATION_STOPPED_SCHOOL_CONFIRMED");
+    assert.equal(finalJob.external_execution_state, "SCHOOL_CONFIRMED");
+    assert.equal(finalJob.school_cancellation_state, "MANUAL_ACTION_REQUIRED");
+    assert.equal(finalJob.billing_state, "HELD_PENDING_REVIEW");
+    assert.equal(savedSr?.external_booking_id, "bk_interleaved_7788");
+    assert.equal(cancelHttpRes.body.data.live_cancel.cancelled, false, "Must NEVER fake SCHOOL_CANCELLED");
+    assert.equal(cancelEndpointCalled, 0);
+    assert.equal(app.store.recordsForUser("reservationOrders", cloudUserId).length, 0, "Must NEVER debit after stop intent");
+    assert.equal(app.store.recordsForUser("reservationJobs", cloudUserId).length, 1, "Must NEVER roll over next day job");
+    assert.equal(app.financeBridge.getSandboxBalance(cloudUserId), 50_000);
+  }
+
+  // --- Scenario C: Multi-day plan where Day-1 job FAILED and rolled over Day-2 ARMED job; cancelling via Day-1 jobId stops parent plan AND Day-2 job ---
+  {
+    const app = createCampusCloudApp({ requireAdminAccess: false });
+    const { authHeaders, consentId, bindingId, cloudUserId } = await setupBoundUser(app, tokenNowMs);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi15_rollover_stop" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 3,
+        remaining_days: 3
+      },
+      nowMs: tokenNowMs
+    });
+    const day1JobId = planRes.body.data.job_id;
+    const planId = app.store.reservationJobs.get(day1JobId).plan_id;
+
+    // Force Day-1 job to FAIL (no buildings/regions available) so multi-day rollover creates Day-2 ARMED child job
+    app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/building")) {
+        return { code: 200, data: [] };
+      }
+      return { code: 200, total: 0, rows: [] };
+    };
+
+    const day1Fire = await app.reservationEngine.runScheduleEvent(day1JobId, "FIRE", fireNowMs);
+    assert.equal(day1Fire.job.state, "FAILED");
+    const allJobsAfterDay1 = app.store.recordsForUser("reservationJobs", cloudUserId);
+    assert.equal(allJobsAfterDay1.length, 2, "Day-2 job should have rolled over");
+    const day2Job = allJobsAfterDay1.find((j) => j.id !== day1JobId);
+    assert.equal(day2Job.booking_local_date, "2026-11-21");
+    assert.equal(app.store.reservationPlans.get(planId).enabled, true);
+
+    // Client still holding old day1JobId sends cancel -> MUST disable parent plan AND cancel day2Job!
+    const cancelOldJobRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${day1JobId}/cancel`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 5_000
+    });
+    assert.equal(cancelOldJobRes.status, 200);
+    assert.equal(app.store.reservationPlans.get(planId).enabled, false);
+    assert.equal(app.store.reservationPlans.get(planId).user_intent_state, "STOP_REQUESTED");
+    assert.equal(app.store.reservationJobs.get(day2Job.id).state, "CANCELLED");
+    assert.ok(cancelOldJobRes.body.data.cancelled_child_job_ids.includes(day2Job.id));
+  }
+});

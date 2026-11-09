@@ -167,13 +167,25 @@ test("Unit: Parcel Hub OTP/Verification SMS Filtering, Pickup Code Extraction & 
   assert.equal(p2.status, "READY_FOR_PICKUP");
 });
 
-test("Unit: Database Migrations have paired Up and Down SQL files and support rollback", () => {
+test("Unit: Database Migrations have paired Up and Down SQL files, forward 0004 cloud_users status upgrade, and non-destructive rollback", () => {
   const migrations = listMigrations();
-  assert.ok(migrations.length >= 2);
+  assert.ok(migrations.length >= 4);
   for (const m of migrations) {
-    assert.ok(m.upSql.length > 100);
-    assert.ok(m.downSql && m.downSql.length > 50);
+    assert.ok(m.upSql.length > 100, `Expected upSql > 100 chars for ${m.version}`);
+    assert.ok(m.downSql && m.downSql.length > 50, `Expected downSql > 50 chars for ${m.version}`);
   }
+  const m0004 = migrations.find((m) => m.version === "0004_cloud_users_status_check_forward");
+  assert.ok(m0004, "Expected forward migration 0004_cloud_users_status_check_forward");
+  // Must alter existing cloud_users CHECK constraint in-place without dropping/truncating cloud_users
+  assert.ok(!/DROP\s+TABLE\s+.*cloud_users/i.test(m0004.upSql));
+  assert.ok(!/TRUNCATE\s+.*cloud_users/i.test(m0004.upSql));
+  assert.ok(m0004.upSql.includes("ALTER TABLE cloud_users"));
+  assert.ok(m0004.upSql.includes("'DELETED'"));
+  assert.ok(m0004.upSql.includes("pg_constraint"));
+  // Down migration must normalize DELETED rows back to DELETION_REQUESTED before restoring 3-value check so existing data survives rollback
+  assert.ok(m0004.downSql.includes("UPDATE cloud_users"));
+  assert.ok(m0004.downSql.includes("SET status = 'DELETION_REQUESTED'"));
+  assert.ok(!/DROP\s+TABLE\s+.*cloud_users/i.test(m0004.downSql));
 });
 
 test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (#9)", async () => {
@@ -1011,6 +1023,102 @@ test("Unit: Moments Books & Anti-Lost Tags enforce Bearer auth, block cross-user
   assert.equal(reportFoundRes.body.data.reports, undefined);
   assert.equal(reportFoundRes.body.data.report_submitted, true);
 
+  // 3b. CRITICAL REGRESSION (#2): Re-fetching /claim/HAUT-TAG-A1B2C3 AFTER anonymous report-found MUST STILL hide restricted owner_contact & owner_name!
+  const claimPageAfterReport = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-A1B2C3" });
+  assert.equal(claimPageAfterReport.status, 200);
+  assert.ok(
+    !String(claimPageAfterReport.rawBody).includes("13911112222"),
+    "Anonymous report-found on NORMAL/private tag must NEVER cause /claim page to leak owner_contact!"
+  );
+  const userASnapAfterReport = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${tokenA}` }
+  });
+  assert.equal(userASnapAfterReport.body.data.anti_lost_tags[0].status, "NORMAL");
+  assert.equal(userASnapAfterReport.body.data.anti_lost_tags[0].reports.length, 1);
+
+  // 3c. Private LOST tag (default contact_visibility=PRIVATE) STILL hides owner_contact on /claim even when status=LOST + report-found;
+  //     ONLY explicit LOST + contact_visibility=PUBLIC_WHEN_LOST discloses owner_contact;
+  //     DISABLED tag rejects report-found (409) and returns 404 on /claim without leaking PII;
+  //     Legacy FOUND_REPORTED record without owner_declared_lost / PUBLIC_WHEN_LOST is sanitized on migrateAndRecoverState & hidden on /claim!
+  await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: {
+      tag_code: "HAUT-TAG-PRIVLOST",
+      item_name: "私密挂失钥匙串",
+      owner_contact: "wx_private_lost_only",
+      status: "LOST",
+      contact_visibility: "PRIVATE"
+    }
+  });
+  await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags/HAUT-TAG-PRIVLOST/report-found",
+    body: { found_location: "一餐厅门口" }
+  });
+  const claimPrivLost = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-PRIVLOST" });
+  assert.equal(claimPrivLost.status, 200);
+  assert.ok(!String(claimPrivLost.rawBody).includes("wx_private_lost_only"));
+
+  await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: {
+      tag_code: "HAUT-TAG-PUBLOST",
+      item_name: "公开挂失雨伞",
+      owner_contact: "qq_public_when_lost_888",
+      status: "LOST",
+      contact_visibility: "PUBLIC_WHEN_LOST"
+    }
+  });
+  const claimPubLost = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-PUBLOST" });
+  assert.equal(claimPubLost.status, 200);
+  assert.ok(String(claimPubLost.rawBody).includes("qq_public_when_lost_888"));
+
+  await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: {
+      tag_code: "HAUT-TAG-DISABLED",
+      item_name: "已停用旧挂牌",
+      owner_contact: "secret_disabled_phone_999",
+      status: "DISABLED"
+    }
+  });
+  const reportDisabledRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags/HAUT-TAG-DISABLED/report-found",
+    body: { found_location: "操场看台" }
+  });
+  assert.equal(reportDisabledRes.status, 409);
+  const claimDisabled = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-DISABLED" });
+  assert.equal(claimDisabled.status, 404);
+  assert.ok(!String(claimDisabled.rawBody).includes("secret_disabled_phone_999"));
+  assert.ok(!String(claimDisabled.rawBody).includes("已停用旧挂牌"));
+
+  // Legacy unmigrated FOUND_REPORTED record injected directly into store
+  app.store.momentsState.anti_lost_tags.push({
+    id: "tag_legacy_01",
+    tag_code: "HAUT-TAG-LEGACY01",
+    owner_cloud_user_id: userA.id,
+    item_name: "历史旧版防丢贴",
+    owner_name: "旧版同学",
+    owner_contact: "legacy_secret_wx_777",
+    return_note: "放至值班室",
+    status: "FOUND_REPORTED"
+  });
+  const claimLegacyBeforeMigrate = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-LEGACY01" });
+  assert.ok(!String(claimLegacyBeforeMigrate.rawBody).includes("legacy_secret_wx_777"));
+  app.store.migrateAndRecoverState();
+  const migratedLegacyTag = app.store.momentsState.anti_lost_tags.find((t) => t.tag_code === "HAUT-TAG-LEGACY01");
+  assert.equal(migratedLegacyTag.contact_visibility, "PRIVATE");
+  assert.equal(migratedLegacyTag.status, "NORMAL");
+
   // 4. POST /api/v1/me/data-delete purges user A's posts, books, and anti-lost tags completely!
   await app.inject({
     method: "POST",
@@ -1026,7 +1134,7 @@ test("Unit: Moments Books & Anti-Lost Tags enforce Bearer auth, block cross-user
   assert.equal(deleteAccountRes.status, 202);
   assert.equal(deleteAccountRes.body.data.moments_purged.removed_posts, 1);
   assert.equal(deleteAccountRes.body.data.moments_purged.removed_books, 1);
-  assert.equal(deleteAccountRes.body.data.moments_purged.removed_tags, 1);
+  assert.equal(deleteAccountRes.body.data.moments_purged.removed_tags, 5);
 
   const snapAfterDelete = await app.inject({ method: "GET", url: "/api/v1/moments/snapshot" });
   assert.ok(!JSON.stringify(snapAfterDelete.body).includes("wx_delete_me"));

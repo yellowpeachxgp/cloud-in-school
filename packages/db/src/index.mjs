@@ -1670,6 +1670,23 @@ export class CloudDatabaseStore {
         }
       }
     }
+    if (this.momentsState && Array.isArray(this.momentsState.anti_lost_tags)) {
+      for (const tag of this.momentsState.anti_lost_tags) {
+        if (!tag || typeof tag !== "object") continue;
+        if (tag.contact_visibility !== "PUBLIC_WHEN_LOST" && tag.contact_visibility !== "PRIVATE") {
+          tag.contact_visibility = "PRIVATE";
+          mutated = true;
+        }
+        if (typeof tag.owner_declared_lost !== "boolean") {
+          tag.owner_declared_lost = tag.status === "LOST";
+          mutated = true;
+        }
+        if (tag.status === "FOUND_REPORTED" && tag.owner_declared_lost !== true) {
+          tag.status = "NORMAL";
+          mutated = true;
+        }
+      }
+    }
 
     if (mutated) {
       this.saveSnapshot();
