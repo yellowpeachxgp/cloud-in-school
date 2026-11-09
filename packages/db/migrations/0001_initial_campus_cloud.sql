@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS cloud_users (
   display_name TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ,
-  status TEXT NOT NULL CHECK (status IN ('ACTIVE','DISABLED','DELETION_REQUESTED'))
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE','DISABLED','DELETION_REQUESTED','DELETED'))
 );
 
 CREATE TABLE IF NOT EXISTS user_identities (

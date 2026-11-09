@@ -1,8 +1,8 @@
 -- Migration 0003: Three-Axis Reservation State Model, Authorization Provenance & Persistent Execution Attempts
 BEGIN;
 
-ALTER TABLE school_bindings ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE delegation_consents ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE school_account_bindings ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE consent_records ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 1;
 
 ALTER TABLE reservation_plans ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE reservation_plans ADD COLUMN IF NOT EXISTS user_intent_state TEXT NOT NULL DEFAULT 'ACTIVE'

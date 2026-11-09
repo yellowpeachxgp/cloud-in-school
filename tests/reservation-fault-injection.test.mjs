@@ -1356,3 +1356,149 @@ test("Fault Injection 13 (P2 Cancellation Terminal Whitelist): Intermediate '取
     assert.equal(resAuthoritativeOk.school_cancellation_state, "SCHOOL_CANCELLED");
   }
 });
+
+test("Fault Injection 14 (Restart State Preservation, Paginated Cancel on mybookinghis, PATCH Lock & Sync Stop-Without-Live-Cancel)", async () => {
+  const tokenNowMs = Date.parse("2026-11-18T06:00:00+08:00");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: { ...authHeaders, "idempotency-key": "idem_fi14_plan" },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-18",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "五层中区",
+      candidate_seats: ["05桌 A座"]
+    },
+    nowMs: tokenNowMs
+  });
+  assert.equal(planRes.status, 201);
+  const planId = planRes.body.data.plan_id;
+  const jobId = planRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+
+  // 1. PATCH /reservation-plans MUST reject (409) when job is in RESULT_UNKNOWN
+  job.state = "RESULT_UNKNOWN";
+  job.external_execution_state = "RESULT_UNKNOWN";
+  job.attempt_count = 1;
+  const patchWhileUnknown = await app.inject({
+    method: "PATCH",
+    url: `/api/v1/reservation-plans/${planId}`,
+    headers: authHeaders,
+    body: { area_name: "四层北区", candidate_seats: ["09桌 B座"] },
+    nowMs: tokenNowMs + 500
+  });
+  assert.equal(patchWhileUnknown.status, 409);
+
+  // 2. execute-now on RESULT_UNKNOWN job MUST NOT clobber RESULT_UNKNOWN via PRECHECK/FINAL_CHECK!
+  app.schoolProvider.wslibGetJson = async () => {
+    throw new Error("Transient network timeout during readback");
+  };
+  const execUnknownRes = await app.inject({
+    method: "POST",
+    url: `/api/v1/reservation-jobs/${jobId}/execute-now`,
+    headers: authHeaders,
+    body: {},
+    nowMs: Date.parse("2026-11-18T07:02:00+08:00")
+  });
+  assert.equal(execUnknownRes.status, 200);
+  assert.equal(app.store.reservationJobs.get(jobId).state, "RESULT_UNKNOWN");
+
+  // 3. Offline sync push of reservation_cancellations on an already-CONFIRMED job MUST mark DELEGATION_STOPPED_SCHOOL_CONFIRMED (NOT auto-cancel live school seat!)
+  let schoolCancelCalled = false;
+  app.schoolProvider.cancelLiveSeatBooking = async () => {
+    schoolCancelCalled = true;
+    return { cancelled: true, outcome: "SCHOOL_CANCELLED", school_cancellation_state: "SCHOOL_CANCELLED" };
+  };
+  job.state = "CONFIRMED";
+  job.external_execution_state = "SCHOOL_CONFIRMED";
+  job.user_intent_state = "ACTIVE";
+  job.external_booking_id = "88112233";
+  app.store.schoolReservations.set(jobId, {
+    id: "sr_fi14",
+    job_id: jobId,
+    school_id: "haut",
+    external_booking_id: "88112233",
+    official_status: "CONFIRMED",
+    seat_alias: "05桌 A座",
+    region_alias: "五层中区",
+    evidence_sha256: "deadbeef88112233"
+  });
+
+  const syncStopRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/sync/snapshot",
+    headers: authHeaders,
+    body: { reservation_cancellations: [jobId] },
+    nowMs: Date.parse("2026-11-18T07:05:00+08:00")
+  });
+  assert.equal(syncStopRes.status, 200);
+  assert.equal(schoolCancelCalled, false, "Sync queue-stop must NEVER auto-cancel a confirmed school seat");
+  assert.equal(job.user_intent_state, "STOP_REQUESTED");
+  assert.equal(job.display_status, "DELEGATION_STOPPED_SCHOOL_CONFIRMED");
+
+  // 4. Restart recovery (migrateAndRecoverState) after consent withdrawal MUST preserve DELEGATION_STOPPED_SCHOOL_CONFIRMED!
+  await app.inject({
+    method: "DELETE",
+    url: `/api/v1/me/consents/${consentId}`,
+    headers: authHeaders,
+    nowMs: Date.parse("2026-11-18T07:06:00+08:00")
+  });
+  job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+  job.external_execution_state = "SCHOOL_CONFIRMED";
+  app.store.migrateAndRecoverState(Date.parse("2026-11-18T07:07:00+08:00"));
+  assert.equal(job.state, "DELEGATION_STOPPED_SCHOOL_CONFIRMED");
+  assert.equal(job.external_execution_state, "SCHOOL_CONFIRMED");
+  assert.equal(app.store.reservationPlans.get(planId).user_intent_state, "REVOKED");
+
+  // 5. cancelLiveSeatBooking bounded pagination on /seatbook/user/mybookinghis (total=45, target on page 2) + 401 re-auth
+  const provider = new HautLibraryProvider({});
+  let reauthed = false;
+  provider.authenticateHautSession = async () => {
+    reauthed = true;
+    return { rawToken: "tok_fresh_cancel_reauth_0123456789" };
+  };
+  const page1Rows = Array.from({ length: 20 }, (_, i) => ({
+    id: String(70000001 + i),
+    bookingStatus: 6,
+    bookingStatusName: "已签退"
+  }));
+  const page2Rows = [
+    ...Array.from({ length: 10 }, (_, i) => ({
+      id: String(70000021 + i),
+      bookingStatus: 6,
+      bookingStatusName: "已签退"
+    })),
+    { id: "88112233", bookingStatus: 5, bookingStatusName: "已取消" }
+  ];
+  provider.wslibGetJson = async (pathAndQuery, tok) => {
+    if (tok === "tok_expired_cancel_000") {
+      const err = new Error("Token 401 expired");
+      err.code = "SCHOOL_AUTH_EXPIRED";
+      throw err;
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 0, rows: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/mybookinghis")) {
+      if (pathAndQuery.includes("pageNum=1")) return { code: 200, total: 45, rows: page1Rows };
+      if (pathAndQuery.includes("pageNum=2")) return { code: 200, total: 45, rows: page2Rows };
+    }
+    return { code: 404 };
+  };
+  const pagedCancelRes = await provider.cancelLiveSeatBooking({
+    decryptedSecret: JSON.stringify({ student_no: "2026990101", raw_token: "tok_expired_cancel_000" }),
+    binding: { student_no: "2026990101" },
+    externalBookingId: "88112233"
+  });
+  assert.equal(reauthed, true);
+  assert.equal(pagedCancelRes.cancelled, true);
+  assert.equal(pagedCancelRes.outcome, "SCHOOL_CANCELLED");
+});

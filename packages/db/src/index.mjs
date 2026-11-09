@@ -911,7 +911,10 @@ export class CloudDatabaseStore {
     }
     if (Array.isArray(raw.clubs)) {
       for (const cl of raw.clubs) {
-        if (cl.id === "club_partner_computer_service" && cl.activity_venue === "莲花街校区 8号教学楼") {
+        if (
+          cl.id === "club_partner_computer_service" &&
+          (!cl.activity_venue || /8号(教学)?楼/.test(String(cl.activity_venue)))
+        ) {
           cl.activity_venue = "莲花街校区 学生宿舍F01 W111";
           cl.campus_name = "莲花街校区";
           cl.building_name = "学生宿舍F01";
@@ -919,6 +922,14 @@ export class CloudDatabaseStore {
         }
       }
     }
+    const officialChannels = raw.official_channels && typeof raw.official_channels === "object"
+      ? raw.official_channels
+      : {
+          user_feedback_qq_group: "",
+          user_feedback_channel_url: "https://github.com/yellowpeachxgp/day-in-school/issues",
+          wechat_official_account_name: "",
+          wechat_official_account_status: "PENDING"
+        };
     const sortFn = (a, b) => {
       const pinDiff = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       if (pinDiff !== 0) return pinDiff;
@@ -948,6 +959,7 @@ export class CloudDatabaseStore {
         tag: "云端同步",
         action_url: ""
       },
+      official_channels: officialChannels,
       channels,
       clubs,
       competitions
@@ -1494,7 +1506,12 @@ export class CloudDatabaseStore {
         Number(consent.auth_version) === Number(p.auth_version);
 
       if (!hasVerifiableOrigin) {
-        if (p.user_intent_state !== "NEEDS_RECONFIRMATION" || p.enabled !== false) {
+        if (p.user_intent_state === "REVOKED" || p.user_intent_state === "STOP_REQUESTED") {
+          if (p.enabled !== false) {
+            p.enabled = false;
+            mutated = true;
+          }
+        } else if (p.user_intent_state !== "NEEDS_RECONFIRMATION" || p.enabled !== false) {
           p.enabled = false;
           p.user_intent_state = "NEEDS_RECONFIRMATION";
           p.migration_status = "NEEDS_RECONFIRMATION";
@@ -1536,15 +1553,35 @@ export class CloudDatabaseStore {
         mutated = true;
       }
 
+      const settledOrProtectedStates = [
+        "CONFIRMED",
+        "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+        "SCHOOL_CANCELLED",
+        "CANCEL_RESULT_UNKNOWN",
+        "FAILED",
+        "CANCELLED",
+        "EXPIRED"
+      ];
+
       if (p?.user_intent_state === "NEEDS_RECONFIRMATION") {
-        if (hadDispatchedAttempt && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+        if (
+          hadDispatchedAttempt &&
+          !settledOrProtectedStates.includes(j.state) &&
+          j.user_intent_state !== "REVOKED" &&
+          j.user_intent_state !== "STOP_REQUESTED"
+        ) {
           j.state = "RESULT_UNKNOWN";
           j.user_intent_state = "NEEDS_RECONFIRMATION";
           j.external_execution_state = "RESULT_UNKNOWN";
           j.display_status = "RESULT_UNKNOWN";
           j.status_label = "结果待核对";
           mutated = true;
-        } else if (!hadDispatchedAttempt && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED", "NEEDS_RECONFIRMATION"].includes(j.state)) {
+        } else if (
+          !hadDispatchedAttempt &&
+          ![...settledOrProtectedStates, "NEEDS_RECONFIRMATION"].includes(j.state) &&
+          j.user_intent_state !== "REVOKED" &&
+          j.user_intent_state !== "STOP_REQUESTED"
+        ) {
           j.state = "NEEDS_RECONFIRMATION";
           j.user_intent_state = "NEEDS_RECONFIRMATION";
           j.external_execution_state = "NOT_DISPATCHED";
@@ -1874,6 +1911,69 @@ export class CloudDatabaseStore {
     });
 
     return { cancelledJobIds };
+  }
+
+  purgeUserMomentsData(cloudUserId, nowMs = Date.now()) {
+    if (!cloudUserId || !this.momentsState) {
+      return { removed_posts: 0, removed_books: 0, removed_tags: 0, scrubbed_comments: 0, scrubbed_requests: 0 };
+    }
+    const nowIso = new Date(nowMs).toISOString();
+    let removedPosts = 0;
+    let removedBooks = 0;
+    let removedTags = 0;
+    let scrubbedComments = 0;
+    let scrubbedRequests = 0;
+
+    if (Array.isArray(this.momentsState.posts)) {
+      const beforePosts = this.momentsState.posts.length;
+      this.momentsState.posts = this.momentsState.posts.filter(
+        (p) => p && p.owner_cloud_user_id !== cloudUserId
+      );
+      removedPosts = beforePosts - this.momentsState.posts.length;
+
+      for (const p of this.momentsState.posts) {
+        if (Array.isArray(p.comments)) {
+          const prevLen = p.comments.length;
+          p.comments = p.comments.filter((c) => c && c.author_user_id !== cloudUserId);
+          scrubbedComments += prevLen - p.comments.length;
+        }
+        if (Array.isArray(p.contact_requests)) {
+          const prevReqLen = p.contact_requests.length;
+          p.contact_requests = p.contact_requests.filter(
+            (r) => r && r.sender_user_id !== cloudUserId
+          );
+          scrubbedRequests += prevReqLen - p.contact_requests.length;
+        }
+      }
+    }
+
+    if (Array.isArray(this.momentsState.book_listings)) {
+      const beforeBooks = this.momentsState.book_listings.length;
+      this.momentsState.book_listings = this.momentsState.book_listings.filter(
+        (b) => b && b.owner_cloud_user_id !== cloudUserId
+      );
+      removedBooks = beforeBooks - this.momentsState.book_listings.length;
+    }
+
+    if (Array.isArray(this.momentsState.anti_lost_tags)) {
+      const beforeTags = this.momentsState.anti_lost_tags.length;
+      this.momentsState.anti_lost_tags = this.momentsState.anti_lost_tags.filter(
+        (t) => t && t.owner_cloud_user_id !== cloudUserId
+      );
+      removedTags = beforeTags - this.momentsState.anti_lost_tags.length;
+    }
+
+    if (removedPosts || removedBooks || removedTags || scrubbedComments || scrubbedRequests) {
+      this.momentsState.updated_at = nowIso;
+      this.saveSnapshot();
+    }
+    return {
+      removed_posts: removedPosts,
+      removed_books: removedBooks,
+      removed_tags: removedTags,
+      scrubbed_comments: scrubbedComments,
+      scrubbed_requests: scrubbedRequests
+    };
   }
 
   revokeSchoolBindingCascade(cloudUserId, bindingId, reason = "BINDING_REVOKED", nowMs = Date.now()) {

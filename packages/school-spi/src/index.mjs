@@ -1634,22 +1634,41 @@ export class HautLibraryProvider {
       rawToken = auth.rawToken;
     }
 
+    const callWslibWithReauth = async (pathAndQuery) => {
+      try {
+        return await this.wslibGetJson(pathAndQuery, rawToken);
+      } catch (err) {
+        if (err?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(err?.message || ""))) {
+          const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+          rawToken = reauth.rawToken;
+          return await this.wslibGetJson(pathAndQuery, rawToken);
+        }
+        throw err;
+      }
+    };
+
     let cancelJson = null;
     let cancelHttpFailed = false;
     try {
-      cancelJson = await this.wslibGetJson(
-        `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
-        rawToken
+      cancelJson = await callWslibWithReauth(
+        `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`
       );
+      if (cancelJson?.code === 401) {
+        const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+        rawToken = reauth.rawToken;
+        cancelJson = await this.wslibGetJson(
+          `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
+          rawToken
+        );
+      }
     } catch {
       cancelHttpFailed = true;
     }
 
     let signOffJson = null;
     if (cancelHttpFailed || cancelJson?.code !== 200) {
-      signOffJson = await this.wslibGetJson(
-        `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`,
-        rawToken
+      signOffJson = await callWslibWithReauth(
+        `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`
       ).catch(() => null);
       if (signOffJson?.code === 200) {
         cancelJson = signOffJson;
@@ -1658,20 +1677,32 @@ export class HautLibraryProvider {
     }
 
     const isPlainObj = (v) => Boolean(v && typeof v === "object" && !Array.isArray(v));
-    const cancelApiSucceeded = Boolean(
-      !cancelHttpFailed && isPlainObj(cancelJson) && cancelJson.code === 200
-    );
-
     // Authoritative verification by exact targetBookingId:
     // 1) Require complete, well-formed (code === 200) active booking list (crrentbooking + mybookingInProgress)
-    // 2) Require well-formed (code === 200 + rows array) history readback AND explicit cancelled evidence
-    //    for targetBookingId; malformed/incomplete responses or missing cancellation evidence MUST return CANCEL_RESULT_UNKNOWN!
+    // 2)Bounded history pagination (pageSize=20, maxPages=5) across /seatbook/user/mybookinghis (with /my/bookinglist fallback):
+    //    - Distinguish positive terminal evidence (5=已取消, 6=已签退) from list-completeness check so total > 20 on page 1 never rejects confirmed cancellations;
+    //    - Never treat first-page absence as cancelled unless already positively confirmed in mybookingInProgress with zero history contradictions!
     try {
       const cancelledIdsFromActiveReadback = new Set();
-      const activeList = await this.fetchActiveBookings(rawToken, {
-        requireCompleteList: true,
-        cancelledBookingIdsOut: cancelledIdsFromActiveReadback
-      });
+      let activeList;
+      try {
+        activeList = await this.fetchActiveBookings(rawToken, {
+          requireCompleteList: true,
+          cancelledBookingIdsOut: cancelledIdsFromActiveReadback
+        });
+      } catch (activeErr) {
+        if (activeErr?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(activeErr?.message || ""))) {
+          const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+          rawToken = reauth.rawToken;
+          cancelledIdsFromActiveReadback.clear();
+          activeList = await this.fetchActiveBookings(rawToken, {
+            requireCompleteList: true,
+            cancelledBookingIdsOut: cancelledIdsFromActiveReadback
+          });
+        } else {
+          throw activeErr;
+        }
+      }
       const stillActive = activeList.some((b) => String(b.bookingId) === targetBookingId);
       if (stillActive) {
         return {
@@ -1684,84 +1715,179 @@ export class HautLibraryProvider {
       }
 
       let exactRecordCancelled = cancelledIdsFromActiveReadback.has(targetBookingId);
-      let historyReadError = false;
-      let historyJson = null;
-      try {
-        historyJson = await this.wslibGetJson(
-          "/seatbook/user/my/bookinglist?pageSize=20&pageNum=1",
-          rawToken
-        );
-      } catch {
-        historyReadError = true;
-      }
+      const pageSize = 20;
+      const maxPages = 5;
+      const seenHistoryIds = new Set();
+      let fetchedHistoryRows = 0;
+      let declaredHistoryTotal = null;
+      let historyEndpoint = "/seatbook/user/mybookinghis";
 
-      if (historyReadError || !isPlainObj(historyJson) || historyJson.code !== 200) {
-        return {
-          cancelled: false,
-          outcome: "CANCEL_RESULT_UNKNOWN",
-          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-          bookingId: targetBookingId,
-          message: "预约历史列表回查异常或返回格式错误，退座结果待核对"
-        };
-      }
+      const fetchHistoryPageJson = async (pageNum) => {
+        const querySuffix = `?bookingstatus=0&pageSize=${pageSize}&pageNum=${pageNum}`;
+        try {
+          const primaryRes = await callWslibWithReauth(`${historyEndpoint}${querySuffix}`);
+          if (
+            isPlainObj(primaryRes) &&
+            primaryRes.code === 200 &&
+            (Array.isArray(primaryRes.rows) || Array.isArray(primaryRes.data?.rows))
+          ) {
+            return primaryRes;
+          }
+          if (historyEndpoint === "/seatbook/user/mybookinghis") {
+            const legacyRes = await callWslibWithReauth(
+              `/seatbook/user/my/bookinglist?pageSize=${pageSize}&pageNum=${pageNum}`
+            );
+            if (isPlainObj(legacyRes)) {
+              historyEndpoint = "/seatbook/user/my/bookinglist";
+              return legacyRes;
+            }
+          }
+          return primaryRes;
+        } catch {
+          if (historyEndpoint === "/seatbook/user/mybookinghis") {
+            const legacyRes = await callWslibWithReauth(
+              `/seatbook/user/my/bookinglist?pageSize=${pageSize}&pageNum=${pageNum}`
+            );
+            historyEndpoint = "/seatbook/user/my/bookinglist";
+            return legacyRes;
+          }
+          throw new Error("History endpoint read failed");
+        }
+      };
 
-      const histRows = historyJson.rows !== undefined ? historyJson.rows : historyJson.data?.rows;
-      if (!Array.isArray(histRows)) {
-        return {
-          cancelled: false,
-          outcome: "CANCEL_RESULT_UNKNOWN",
-          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-          bookingId: targetBookingId,
-          message: "预约历史列表缺少 rows 数组，退座结果待核对"
-        };
-      }
-
-      for (const r of histRows) {
-        if (!isPlainObj(r) || !String(r.id ?? "").trim()) {
+      for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
+        let historyJson = null;
+        try {
+          historyJson = await fetchHistoryPageJson(pageNum);
+        } catch {
           return {
             cancelled: false,
             outcome: "CANCEL_RESULT_UNKNOWN",
             school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
             bookingId: targetBookingId,
-            message: "预约历史列表包含格式残缺的记录项，退座结果待核对"
+            message: "预约历史列表回查异常，退座结果待核对"
           };
         }
-      }
 
-      const matchedRows = histRows.filter((r) => String(r.id).trim() === targetBookingId);
-      if (matchedRows.length > 0) {
-        if (matchedRows.every((r) => isConfirmedSchoolCancelTerminalRecord(r))) {
-          exactRecordCancelled = true;
-        } else {
+        if (!isPlainObj(historyJson) || historyJson.code !== 200) {
           return {
             cancelled: false,
             outcome: "CANCEL_RESULT_UNKNOWN",
             school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
             bookingId: targetBookingId,
-            message: "预约记录表状态处于处理中、违约、未知或字段矛盾，退座结果待核对"
+            message: "预约历史列表返回格式错误，退座结果待核对"
           };
         }
-      } else {
+
+        const histRows = historyJson.rows !== undefined ? historyJson.rows : historyJson.data?.rows;
+        if (!Array.isArray(histRows)) {
+          return {
+            cancelled: false,
+            outcome: "CANCEL_RESULT_UNKNOWN",
+            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+            bookingId: targetBookingId,
+            message: "预约历史列表缺少 rows 数组，退座结果待核对"
+          };
+        }
+
         const rawHistTotal =
           historyJson.total !== undefined ? historyJson.total : historyJson.data?.total;
         if (rawHistTotal !== undefined && rawHistTotal !== null) {
-          const histTotal = Number(rawHistTotal);
+          const parsedTotal = Number(rawHistTotal);
           if (
             typeof rawHistTotal === "boolean" ||
             String(rawHistTotal).trim() === "" ||
-            !Number.isFinite(histTotal) ||
-            !Number.isInteger(histTotal) ||
-            histTotal < 0 ||
-            histTotal > histRows.length
+            !Number.isFinite(parsedTotal) ||
+            !Number.isInteger(parsedTotal) ||
+            parsedTotal < 0
           ) {
             return {
               cancelled: false,
               outcome: "CANCEL_RESULT_UNKNOWN",
               school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
               bookingId: targetBookingId,
-              message: "预约历史列表分页不完整或计数格式异常，退座结果待核对"
+              message: "预约历史列表计数格式异常，退座结果待核对"
             };
           }
+          if (declaredHistoryTotal === null) {
+            declaredHistoryTotal = parsedTotal;
+          } else if (declaredHistoryTotal !== parsedTotal) {
+            return {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              bookingId: targetBookingId,
+              message: "预约历史分页期间总条数变化，退座结果待核对"
+            };
+          }
+          if (parsedTotal > fetchedHistoryRows && histRows.length === 0) {
+            return {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              bookingId: targetBookingId,
+              message: "预约历史分页提前返回空页，退座结果待核对"
+            };
+          }
+        }
+
+        let foundOnThisPage = false;
+        for (const r of histRows) {
+          const rId = isPlainObj(r) ? String(r.id ?? "").trim() : "";
+          if (!rId) {
+            return {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              bookingId: targetBookingId,
+              message: "预约历史列表包含格式残缺的记录项，退座结果待核对"
+            };
+          }
+          if (seenHistoryIds.has(rId)) {
+            return {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              bookingId: targetBookingId,
+              message: "预约历史列表包含重复预约号记录，退座结果待核对"
+            };
+          }
+          seenHistoryIds.add(rId);
+          if (rId === targetBookingId) {
+            if (!isConfirmedSchoolCancelTerminalRecord(r)) {
+              return {
+                cancelled: false,
+                outcome: "CANCEL_RESULT_UNKNOWN",
+                school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+                bookingId: targetBookingId,
+                message: "预约记录表状态处于处理中、违约、未知或字段矛盾，退座结果待核对"
+              };
+            }
+            exactRecordCancelled = true;
+            foundOnThisPage = true;
+          }
+        }
+
+        fetchedHistoryRows += histRows.length;
+        if (declaredHistoryTotal !== null && fetchedHistoryRows > declaredHistoryTotal) {
+          return {
+            cancelled: false,
+            outcome: "CANCEL_RESULT_UNKNOWN",
+            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+            bookingId: targetBookingId,
+            message: "预约历史列表记录数超出总条数，退座结果待核对"
+          };
+        }
+
+        if (foundOnThisPage || exactRecordCancelled) {
+          break;
+        }
+        if (
+          histRows.length === 0 ||
+          (declaredHistoryTotal !== null && fetchedHistoryRows >= declaredHistoryTotal) ||
+          (declaredHistoryTotal === null && histRows.length < pageSize)
+        ) {
+          break;
         }
       }
 
@@ -2496,7 +2622,18 @@ export class HautLibraryProvider {
         if (attempt > 0) {
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
-        const bookings = await this.fetchActiveBookings(tokenToUse);
+        let bookings;
+        try {
+          bookings = await this.fetchActiveBookings(tokenToUse);
+        } catch (err) {
+          if (err?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(err?.message || ""))) {
+            const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+            tokenToUse = reauth.rawToken;
+            bookings = await this.fetchActiveBookings(tokenToUse);
+          } else {
+            throw err;
+          }
+        }
         const verifyDate =
           job?.booking_local_date ||
           (expectedStartFull ? String(expectedStartFull).trim().slice(0, 10) : "");

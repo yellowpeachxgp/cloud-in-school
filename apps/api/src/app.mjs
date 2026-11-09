@@ -712,6 +712,10 @@ export function createCampusCloudApp(options = {}) {
     const bindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
     const plans = store.recordsForUser("reservationPlans", auth.cloudUserId);
     const parcels = parcelHub.listUserParcels(auth.cloudUserId);
+    const ms = store.momentsState || { posts: [], book_listings: [], anti_lost_tags: [] };
+    const momentsPosts = (ms.posts || []).filter((p) => p?.owner_cloud_user_id === auth.cloudUserId);
+    const momentsBooks = (ms.book_listings || []).filter((b) => b?.owner_cloud_user_id === auth.cloudUserId);
+    const momentsTags = (ms.anti_lost_tags || []).filter((t) => t?.owner_cloud_user_id === auth.cloudUserId);
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
@@ -719,13 +723,17 @@ export function createCampusCloudApp(options = {}) {
         user,
         school_bindings: bindings,
         reservation_plans: plans,
-        parcels
+        parcels,
+        moments_posts: momentsPosts,
+        moments_books: momentsBooks,
+        moments_anti_lost_tags: momentsTags
       })
     };
   });
 
   register("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
+    const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
     identity.revokeAllUserSessions(auth.cloudUserId, true, nowMs);
     const user = store.users.get(auth.cloudUserId);
     if (user) user.status = "DELETED";
@@ -735,7 +743,8 @@ export function createCampusCloudApp(options = {}) {
       data: {
         cloud_user_id: auth.cloudUserId,
         status: "DELETED",
-        cancelled_job_ids: cascade.cancelledJobIds
+        cancelled_job_ids: cascade.cancelledJobIds,
+        moments_purged: momentsPurged
       }
     };
   });
@@ -1085,12 +1094,31 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
       const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
+      const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
+      if (nextSeats || nextAreas || body?.slot_window !== undefined) {
+        const hasInFlightOrAmbiguousJob = Array.from(store.reservationJobs.values()).some(
+          (j) =>
+            j.plan_id === plan.id &&
+            ([
+              "EXECUTING",
+              "RESULT_UNKNOWN",
+              "DELEGATION_STOPPED_RESULT_UNKNOWN",
+              "CANCEL_RESULT_UNKNOWN"
+            ].includes(j.state) ||
+              ["DISPATCH_INTENT", "RESULT_UNKNOWN"].includes(j.external_execution_state))
+        );
+        if (hasInFlightOrAmbiguousJob) {
+          throw new ContractError(
+            "CONFLICT",
+            "当前计划存在执行中或结果待核对的任务，禁止在核实前原地修改目标区域或候选座位"
+          );
+        }
+      }
       if (Array.isArray(nextSeats) && nextSeats.length > 0) {
         const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
         plan.candidate_seats = cleanSeats;
         plan.preferences_json.preferred_seat_ids = cleanSeats;
       }
-      const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
       if (Array.isArray(nextAreas) && nextAreas.length > 0) {
         const cleanArea = String(nextAreas[0]).trim();
         plan.area_name = cleanArea;
@@ -1099,7 +1127,10 @@ export function createCampusCloudApp(options = {}) {
       }
       if (nextSeats || nextAreas) {
         for (const j of store.reservationJobs.values()) {
-          if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+          if (
+            j.plan_id === plan.id &&
+            ["ARMED", "PRECHECK_OK", "FINAL_CHECK_OK", "NEEDS_RECONFIRMATION"].includes(j.state)
+          ) {
             j.prewarmed_targets = null;
           }
         }
@@ -1199,12 +1230,20 @@ export function createCampusCloudApp(options = {}) {
           "CONFIRMED",
           "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
           "SCHOOL_CANCELLED",
+          "CANCEL_RESULT_UNKNOWN",
           "FAILED",
           "CANCELLED",
           "EXPIRED"
         ].includes(job.state)
       ) {
         throw new ContractError("JOB_ALREADY_TERMINAL", `Job is already in terminal state ${job.state}`);
+      }
+      const parentPlan = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
+      if (parentPlan) {
+        parentPlan.enabled = false;
+        if (parentPlan.user_intent_state === "ACTIVE" || !parentPlan.user_intent_state) {
+          parentPlan.user_intent_state = "STOP_REQUESTED";
+        }
       }
       const ts = new Date().toISOString();
       if (job.external_execution_state && job.external_execution_state !== "NOT_DISPATCHED") {
@@ -2229,22 +2268,45 @@ export function createCampusCloudApp(options = {}) {
       }
 
       if (Array.isArray(body.reservation_cancellations)) {
+        const stopTs = new Date(nowMs).toISOString();
+        const stopDelegationWithoutAutoLiveCancel = (j) => {
+          if (!j || j.cloud_user_id !== auth.cloudUserId) return;
+          if (["CANCELLED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "EXPIRED"].includes(j.state)) {
+            return;
+          }
+          store._applyRevocationToJob?.(j, "客户端同步停止任务委托", stopTs);
+          if (j.user_intent_state === "REVOKED") {
+            j.user_intent_state = "STOP_REQUESTED";
+          }
+          for (const ev of store.eventsForJob(j.id)) {
+            if (ev.status === "ARMED") {
+              ev.status = "ABORTED_REVOKED";
+              ev.actual_at = stopTs;
+            }
+          }
+          store.syncJobDisplayStatus?.(j);
+        };
         for (const cancelId of body.reservation_cancellations) {
           const job = store.reservationJobs.get(cancelId);
-          if (job && job.cloud_user_id === auth.cloudUserId && job.state !== "CANCELLED") {
-            await reservationEngine.cancelConfirmedOrActiveJob(job.id, nowMs).catch(() => {
-              store._applyRevocationToJob?.(job, "客户端同步停止任务委托", new Date(nowMs).toISOString());
-            });
+          if (job && job.cloud_user_id === auth.cloudUserId) {
+            const p = job.plan_id ? store.reservationPlans.get(job.plan_id) : null;
+            if (p && p.cloud_user_id === auth.cloudUserId) {
+              p.enabled = false;
+              if (p.user_intent_state === "ACTIVE" || !p.user_intent_state) {
+                p.user_intent_state = "STOP_REQUESTED";
+              }
+            }
+            stopDelegationWithoutAutoLiveCancel(job);
           }
           const plan = store.reservationPlans.get(cancelId);
           if (plan && plan.cloud_user_id === auth.cloudUserId) {
             plan.enabled = false;
-            plan.user_intent_state = "STOP_REQUESTED";
+            if (plan.user_intent_state === "ACTIVE" || !plan.user_intent_state) {
+              plan.user_intent_state = "STOP_REQUESTED";
+            }
             for (const j of store.reservationJobs.values()) {
-              if (j.plan_id === plan.id && j.state !== "CANCELLED") {
-                await reservationEngine.cancelConfirmedOrActiveJob(j.id, nowMs).catch(() => {
-                  store._applyRevocationToJob?.(j, "客户端同步停止计划委托", new Date(nowMs).toISOString());
-                });
+              if (j.plan_id === plan.id) {
+                stopDelegationWithoutAutoLiveCancel(j);
               }
             }
           }
@@ -2502,7 +2564,16 @@ export function createCampusCloudApp(options = {}) {
       if (!job || job.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation job not found");
       }
-      if (job.state === "CONFIRMED") {
+      if (
+        [
+          "CONFIRMED",
+          "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+          "SCHOOL_CANCELLED",
+          "CANCEL_RESULT_UNKNOWN",
+          "CANCELLED",
+          "EXPIRED"
+        ].includes(job.state)
+      ) {
         const schoolReservation = store.schoolReservations.get(job.id) || null;
         return {
           status: 200,
@@ -2510,11 +2581,17 @@ export function createCampusCloudApp(options = {}) {
           data: { job, schoolReservation }
         };
       }
-      const effectiveFireMs = Math.max(nowMs, new Date(job.fire_at).getTime());
-      await reservationEngine.runScheduleEvent(jobId, "PRECHECK", effectiveFireMs);
-      await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", effectiveFireMs);
-      const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", effectiveFireMs, {
-        allowDateFallbackToToday: true
+      const isAlreadyDispatchedOrUnknown =
+        job.state === "RESULT_UNKNOWN" ||
+        job.external_execution_state === "RESULT_UNKNOWN" ||
+        job.external_execution_state === "DISPATCH_INTENT" ||
+        Number(job.attempt_count || 0) >= 1;
+      if (!isAlreadyDispatchedOrUnknown) {
+        await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
+        await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", nowMs);
+      }
+      const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", nowMs, {
+        allowDateFallbackToToday: false
       });
       await syncUserToSso(auth.cloudUserId);
       return {
@@ -2567,6 +2644,8 @@ export function createCampusCloudApp(options = {}) {
         isLiveCredential: true
       });
 
+      const userRecord = store.users.get(auth.cloudUserId);
+      const currentAuthVersion = Number(userRecord?.auth_version || 1);
       const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
       let binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
         (b) => b.school_id === schoolId && !b.revoked_at
@@ -2582,8 +2661,10 @@ export function createCampusCloudApp(options = {}) {
           user_name: authRes.userInfo?.userName || "",
           department: authRes.userInfo?.department || "",
           status: "DELEGATED_ACTIVE",
+          auth_version: currentAuthVersion,
           credential_ref: null,
           credential_expires_at: null,
+          verified_at: new Date(nowMs).toISOString(),
           created_at: new Date(nowMs).toISOString(),
           revoked_at: null
         };
@@ -2595,6 +2676,8 @@ export function createCampusCloudApp(options = {}) {
         binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
         binding.department = authRes.userInfo?.department || binding.department || "";
         binding.status = "DELEGATED_ACTIVE";
+        binding.auth_version = currentAuthVersion;
+        binding.verified_at = new Date(nowMs).toISOString();
       }
 
       const credBundleJson = JSON.stringify({
@@ -2618,7 +2701,7 @@ export function createCampusCloudApp(options = {}) {
       binding.credential_expires_at = encrypted.expires_at;
 
       let consent = store.recordsForUser("consents", auth.cloudUserId).find(
-        (c) => !c.withdrawn_at
+        (c) => !c.withdrawn_at && Number(c.auth_version || 1) === currentAuthVersion
       );
       if (!consent) {
         const cid = crypto.randomUUID();
@@ -2628,12 +2711,14 @@ export function createCampusCloudApp(options = {}) {
           school_id: schoolId,
           scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
           policy_version: "policy-2026-11-v4",
+          auth_version: currentAuthVersion,
           granted_at: new Date(nowMs).toISOString(),
           withdrawn_at: null
         };
         store.consents.set(cid, consent);
         store.indexUserScoped?.("consents", cid, consent.cloud_user_id);
       }
+      binding.consent_id = consent.id;
 
       await syncUserToSso(auth.cloudUserId);
       return {
@@ -2991,11 +3076,15 @@ export function createCampusCloudApp(options = {}) {
       );
 
     const sanitized = { ...post };
+    delete sanitized.owner_cloud_user_id;
     delete sanitized.contact_requests;
     delete sanitized.blocked_user_ids;
     delete sanitized.legacy_claim_token_sha256;
     delete sanitized.legacy_verified_sso_issuer;
     delete sanitized.legacy_verified_sso_subject;
+    if (!isViewerAdmin) {
+      delete sanitized.reports_count;
+    }
 
     if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
       if (!isOwner && !(isViewerAdmin && isLegacyUnowned) && !hasApprovedRequest) {
@@ -3006,10 +3095,12 @@ export function createCampusCloudApp(options = {}) {
       }
     }
 
+    const blockedSet = new Set(Array.isArray(post.blocked_user_ids) ? post.blocked_user_ids : []);
     const rawComments = Array.isArray(post.comments) ? post.comments : [];
     sanitized.comments = rawComments
       .filter((c) => {
-        if (!c) return false;
+        if (!c || c.hidden_by_block) return false;
+        if (c.author_user_id && blockedSet.has(c.author_user_id)) return false;
         if (!isPrivateMomentsComment(c)) return true;
         const isCommentAuthor = Boolean(
           viewerUserId && c.author_user_id && c.author_user_id === viewerUserId
@@ -3052,6 +3143,53 @@ export function createCampusCloudApp(options = {}) {
     };
   }
 
+  function projectMomentsBookForViewer(book, viewerUserId = null, isViewerAdmin = false) {
+    if (!book) return null;
+    const isOwner = Boolean(
+      viewerUserId && book.owner_cloud_user_id && book.owner_cloud_user_id === viewerUserId
+    );
+    const isLegacyUnowned = !book.owner_cloud_user_id;
+    const sanitized = { ...book };
+    delete sanitized.owner_cloud_user_id;
+    return {
+      ...sanitized,
+      is_owner: isOwner,
+      can_manage: Boolean(isOwner || isViewerAdmin),
+      is_legacy_unowned: isLegacyUnowned
+    };
+  }
+
+  function projectAntiLostTagForOwnerOrAdmin(tag, viewerUserId = null, isViewerAdmin = false) {
+    if (!tag) return null;
+    const isOwner = Boolean(
+      viewerUserId && tag.owner_cloud_user_id && tag.owner_cloud_user_id === viewerUserId
+    );
+    if (!isOwner && !isViewerAdmin) return null;
+    const sanitized = { ...tag };
+    delete sanitized.owner_cloud_user_id;
+    return {
+      ...sanitized,
+      is_owner: isOwner,
+      can_manage: true
+    };
+  }
+
+  function projectContactRequestForViewer(reqItem, post, { canSeeInitiatorContact = false, canSeeSenderContact = true } = {}) {
+    if (!reqItem) return null;
+    return {
+      id: reqItem.id,
+      post_id: reqItem.post_id,
+      sender_name: reqItem.sender_name,
+      message: reqItem.message,
+      contact_info: canSeeSenderContact ? String(reqItem.contact_info || "") : "",
+      status: reqItem.status,
+      reply_message: reqItem.reply_message || null,
+      initiator_contact: canSeeInitiatorContact ? post?.contact || null : null,
+      created_at: reqItem.created_at,
+      updated_at: reqItem.updated_at
+    };
+  }
+
   registerExtension("GET", "/api/v1/moments/snapshot", "getMomentsSnapshot", "public", async ({ query, headers, nowMs }) => {
     const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
       headers,
@@ -3077,6 +3215,15 @@ export function createCampusCloudApp(options = {}) {
     const enrichedPosts = posts.map((p) =>
       projectMomentsPostForViewer(p, ms.posts || [], viewerUserId, isViewerAdmin)
     );
+    const projectedBooks = (Array.isArray(ms.book_listings) ? ms.book_listings : [])
+      .map((b) => projectMomentsBookForViewer(b, viewerUserId, isViewerAdmin))
+      .filter(Boolean);
+    // Anti-lost tags contain private owner_contact & finder_contact — return ONLY tags owned by viewer (or admin)!
+    const visibleAntiLostTags = viewerUserId
+      ? (Array.isArray(ms.anti_lost_tags) ? ms.anti_lost_tags : [])
+          .map((t) => projectAntiLostTagForOwnerOrAdmin(t, viewerUserId, isViewerAdmin))
+          .filter(Boolean)
+      : [];
     return {
       status: 200,
       code: "MOMENTS_SNAPSHOT_OK",
@@ -3084,8 +3231,8 @@ export function createCampusCloudApp(options = {}) {
         school_id: "haut",
         updated_at: ms.updated_at || new Date().toISOString(),
         posts: enrichedPosts,
-        book_listings: Array.isArray(ms.book_listings) ? ms.book_listings : [],
-        anti_lost_tags: Array.isArray(ms.anti_lost_tags) ? ms.anti_lost_tags : [],
+        book_listings: projectedBooks,
+        anti_lost_tags: visibleAntiLostTags,
         isbn_catalog: Array.isArray(ms.isbn_catalog) ? ms.isbn_catalog : []
       }
     };
@@ -3239,7 +3386,14 @@ export function createCampusCloudApp(options = {}) {
           (r) => r.sender_user_id === auth.cloudUserId && r.idempotency_key === idempotencyKey
         );
         if (dup) {
-          return { status: 200, code: "CONTACT_REQUEST_DUPLICATE", data: dup };
+          return {
+            status: 200,
+            code: "CONTACT_REQUEST_DUPLICATE",
+            data: projectContactRequestForViewer(dup, post, {
+              canSeeInitiatorContact: dup.status === "APPROVED",
+              canSeeSenderContact: true
+            })
+          };
         }
       }
 
@@ -3279,7 +3433,14 @@ export function createCampusCloudApp(options = {}) {
         });
       }
       store.saveSnapshot();
-      return { status: 201, code: "CONTACT_REQUEST_CREATED", data: reqItem };
+      return {
+        status: 201,
+        code: "CONTACT_REQUEST_CREATED",
+        data: projectContactRequestForViewer(reqItem, post, {
+          canSeeInitiatorContact: false,
+          canSeeSenderContact: true
+        })
+      };
     }
   );
 
@@ -3298,13 +3459,20 @@ export function createCampusCloudApp(options = {}) {
       const isSenderBlocked =
         Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(auth.cloudUserId);
       const visibleReqs = canManageRequests
-        ? allReqs
+        ? allReqs.map((r) =>
+            projectContactRequestForViewer(r, post, {
+              canSeeInitiatorContact: false,
+              canSeeSenderContact: true
+            })
+          )
         : allReqs
             .filter((r) => r.sender_user_id === auth.cloudUserId)
-            .map((r) => ({
-              ...r,
-              initiator_contact: !isSenderBlocked && r.status === "APPROVED" ? post.contact : null
-            }));
+            .map((r) =>
+              projectContactRequestForViewer(r, post, {
+                canSeeInitiatorContact: !isSenderBlocked && r.status === "APPROVED",
+                canSeeSenderContact: true
+              })
+            );
       return {
         status: 200,
         code: "CONTACT_REQUESTS_LISTED",
@@ -3379,11 +3547,18 @@ export function createCampusCloudApp(options = {}) {
         if (!post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           post.blocked_user_ids.push(reqItem.sender_user_id);
         }
-        // Revoke ALL existing requests (including previously APPROVED ones) from this blocked user!
+        // Revoke ALL existing requests (including previously APPROVED ones) & hide comments from this blocked user!
         for (const r of allReqs) {
           if (r.sender_user_id === reqItem.sender_user_id) {
             r.status = "BLOCKED";
             r.updated_at = nowIso;
+          }
+        }
+        if (Array.isArray(post.comments)) {
+          for (const c of post.comments) {
+            if (c && c.author_user_id === reqItem.sender_user_id) {
+              c.hidden_by_block = true;
+            }
           }
         }
         if (isAdmin && !isOwner) {
@@ -3417,13 +3592,16 @@ export function createCampusCloudApp(options = {}) {
       store.saveSnapshot();
       const isSenderBlocked =
         Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id);
+      const canViewerSeeInitiatorContact =
+        !isSenderBlocked && reqItem.status === "APPROVED" && (isSender || canManageRequests);
+      const canViewerSeeSenderContact = Boolean(isSender || canManageRequests);
       return {
         status: 200,
         code: "CONTACT_REQUEST_UPDATED",
-        data: {
-          ...reqItem,
-          initiator_contact: !isSenderBlocked && reqItem.status === "APPROVED" ? post.contact : null
-        }
+        data: projectContactRequestForViewer(reqItem, post, {
+          canSeeInitiatorContact: canViewerSeeInitiatorContact,
+          canSeeSenderContact: canViewerSeeSenderContact
+        })
       };
     }
   );
@@ -3610,12 +3788,28 @@ export function createCampusCloudApp(options = {}) {
     };
   });
 
-  registerExtension("POST", "/api/v1/moments/books", "createMomentsBookListing", "public", async ({ body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/books", "createMomentsBookListing", "public", async ({ body, headers, nowMs }) => {
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
+    if (!viewerUserId) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        "发布闲置教材需先登录云端账号，以便后续下架或删除管理"
+      );
+    }
     const title = String(body?.title || "").trim().slice(0, 80);
     if (!title) throw new ContractError("BAD_REQUEST", "请填写教材名称");
+    const requestedId = body?.id ? String(body.id).trim().slice(0, 40) : "";
+    const existingBooks = store.momentsState.book_listings || [];
+    if (requestedId && existingBooks.some((b) => b.id === requestedId)) {
+      throw new ContractError("CONFLICT", "该教材挂单 ID 已存在，禁止覆盖已有教材信息");
+    }
     const nowIso = new Date(nowMs).toISOString();
     const book = {
-      id: body?.id ? String(body.id).trim().slice(0, 40) : ("mb_" + crypto.randomUUID().slice(0, 10)),
+      id: requestedId || ("mb_" + crypto.randomUUID().slice(0, 10)),
       title,
       isbn: String(body?.isbn || "").trim().slice(0, 24),
       author_publisher: String(body?.author_publisher || "高校教材").trim().slice(0, 64),
@@ -3628,25 +3822,43 @@ export function createCampusCloudApp(options = {}) {
       delivery_mode: String(body?.delivery_mode || "校内自提").trim().slice(0, 40),
       contact: String(body?.contact || "").trim().slice(0, 64),
       seller_name: String(body?.seller_name || "河工大同学").trim().slice(0, 24),
+      owner_cloud_user_id: viewerUserId,
       status: "AVAILABLE",
       likes_count: 0,
       created_at: nowIso
     };
-    store.momentsState.book_listings = [
-      book,
-      ...(store.momentsState.book_listings || []).filter((b) => b.id !== book.id)
-    ].slice(0, 200);
+    store.momentsState.book_listings = [book, ...existingBooks].slice(0, 200);
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 201, code: "MOMENTS_BOOK_CREATED", data: book };
+    return {
+      status: 201,
+      code: "MOMENTS_BOOK_CREATED",
+      data: projectMomentsBookForViewer(book, viewerUserId, isViewerAdmin)
+    };
   });
 
-  registerExtension("POST", "/api/v1/moments/books/{bookId}/action", "mutateMomentsBookListing", "public", async ({ params, body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/books/{bookId}/action", "mutateMomentsBookListing", "public", async ({ params, body, headers, nowMs }) => {
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
     const books = store.momentsState.book_listings || [];
     const idx = books.findIndex((b) => b.id === params.bookId);
     if (idx < 0) throw new ContractError("NOT_FOUND", "未找到该教材挂单");
     const act = String(body?.action || "").toUpperCase();
     const book = books[idx];
+    const isOwner = Boolean(
+      viewerUserId && book.owner_cloud_user_id && book.owner_cloud_user_id === viewerUserId
+    );
+    if (act === "DELETE" || act === "MARK_SOLD" || act === "MARK_AVAILABLE") {
+      if (!viewerUserId) {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "修改或删除教材挂单需先登录云端账号");
+      }
+      if (!isOwner && !isViewerAdmin) {
+        throw new ContractError("FORBIDDEN", "仅卖家本人或平台管理员可修改或删除该教材挂单");
+      }
+    }
     const nowIso = new Date(nowMs).toISOString();
     if (act === "DELETE") {
       books.splice(idx, 1);
@@ -3657,24 +3869,39 @@ export function createCampusCloudApp(options = {}) {
     if (act === "MARK_SOLD") book.status = "SOLD";
     else if (act === "MARK_AVAILABLE") book.status = "AVAILABLE";
     else if (act === "LIKE") book.likes_count = Number(book.likes_count || 0) + 1;
+    else throw new ContractError("BAD_REQUEST", "不支持的教材操作类型");
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 200, code: "MOMENTS_BOOK_UPDATED", data: book };
+    return {
+      status: 200,
+      code: "MOMENTS_BOOK_UPDATED",
+      data: projectMomentsBookForViewer(book, viewerUserId, isViewerAdmin)
+    };
   });
 
   registerExtension("GET", "/api/v1/moments/isbn-resolve", "resolveMomentsIsbn", "public", async ({ query }) => {
     const q = (query.get("isbn") || query.get("keyword") || "").replace(/[^0-9a-zA-Z\u4e00-\u9fa5]/g, "").toLowerCase();
     const catalog = store.momentsState?.isbn_catalog || [];
-    const matched = catalog.find(
-      (c) =>
-        String(c.isbn || "").toLowerCase().includes(q) ||
-        String(c.title || "").toLowerCase().includes(q) ||
-        String(c.course_name || "").toLowerCase().includes(q)
-    ) || null;
+    const matched = q
+      ? catalog.find(
+          (c) =>
+            String(c.isbn || "").toLowerCase().includes(q) ||
+            String(c.title || "").toLowerCase().includes(q) ||
+            String(c.course_name || "").toLowerCase().includes(q)
+        ) || null
+      : null;
     return { status: 200, code: "MOMENTS_ISBN_RESOLVED", data: { matched, catalog } };
   });
 
-  registerExtension("POST", "/api/v1/moments/anti-lost-tags", "upsertAntiLostTag", "public", async ({ body, nowMs }) => {
+  registerExtension("POST", "/api/v1/moments/anti-lost-tags", "upsertAntiLostTag", "public", async ({ body, headers, nowMs }) => {
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
+    if (!viewerUserId) {
+      throw new ContractError("CLOUD_AUTH_REQUIRED", "创建或更新随身防丢码需先登录云端账号");
+    }
     const itemName = String(body?.item_name || "").trim().slice(0, 48);
     if (!itemName) throw new ContractError("BAD_REQUEST", "请填写随身物品名称");
     const nowIso = new Date(nowMs).toISOString();
@@ -3684,16 +3911,26 @@ export function createCampusCloudApp(options = {}) {
       : ("HAUT-TAG-" + crypto.randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase());
     const tags = store.momentsState.anti_lost_tags || [];
     const existing = tags.find((t) => t.tag_code === tagCode);
+    if (existing) {
+      const canMutateExisting =
+        isViewerAdmin || (existing.owner_cloud_user_id && existing.owner_cloud_user_id === viewerUserId);
+      if (!canMutateExisting) {
+        throw new ContractError("CONFLICT", "该防丢码编号已被绑定，禁止覆盖他人防丢码");
+      }
+    }
+    const rawStatus = String(body?.status || existing?.status || "NORMAL").toUpperCase();
+    const allowedStatus = ["NORMAL", "LOST", "FOUND_REPORTED"].includes(rawStatus) ? rawStatus : "NORMAL";
     const updatedTag = {
       id: existing?.id || ("tag_" + crypto.randomUUID().slice(0, 8)),
       tag_code: tagCode,
+      owner_cloud_user_id: existing?.owner_cloud_user_id || viewerUserId,
       item_name: itemName,
       category: String(body?.category || existing?.category || "随身物品").trim().slice(0, 24),
       campus: String(body?.campus || existing?.campus || "莲花街校区").trim().slice(0, 24),
       owner_name: String(body?.owner_name || existing?.owner_name || "河工大同学").trim().slice(0, 24),
       owner_contact: String(body?.owner_contact || existing?.owner_contact || "").trim().slice(0, 64),
       return_note: String(body?.return_note || existing?.return_note || "拾到请联系失主或放至就近服务台").trim().slice(0, 160),
-      status: String(body?.status || existing?.status || "NORMAL").toUpperCase(),
+      status: allowedStatus,
       reports: Array.isArray(existing?.reports) ? existing.reports : [],
       created_at: existing?.created_at || nowIso,
       updated_at: nowIso
@@ -3704,7 +3941,11 @@ export function createCampusCloudApp(options = {}) {
     ].slice(0, 120);
     store.momentsState.updated_at = nowIso;
     store.saveSnapshot();
-    return { status: 200, code: "ANTI_LOST_TAG_UPSERTED", data: updatedTag };
+    return {
+      status: 200,
+      code: "ANTI_LOST_TAG_UPSERTED",
+      data: projectAntiLostTagForOwnerOrAdmin(updatedTag, viewerUserId, isViewerAdmin)
+    };
   });
 
   registerExtension("POST", "/api/v1/moments/anti-lost-tags/{tagCode}/report-found", "reportAntiLostTagFound", "public", async ({ params, body, nowMs }) => {
@@ -3724,12 +3965,35 @@ export function createCampusCloudApp(options = {}) {
       created_at: nowIso
     };
     if (!Array.isArray(tag.reports)) tag.reports = [];
-    tag.reports.unshift(report);
+    tag.reports = [report, ...tag.reports].slice(0, 30);
     tag.status = "FOUND_REPORTED";
     tag.updated_at = nowIso;
     store.momentsState.updated_at = nowIso;
+    if (tag.owner_cloud_user_id) {
+      store.addNotification({
+        cloudUserId: tag.owner_cloud_user_id,
+        category: "ANTI_LOST_TAG_FOUND",
+        title: `防丢码「${tag.item_name}」收到拾得线索`,
+        body: `放置位置：${foundLocation}${report.message ? " · " + report.message : ""}`
+      });
+    }
     store.saveSnapshot();
-    return { status: 200, code: "ANTI_LOST_FOUND_REPORTED", data: tag };
+    // Public-safe acknowledgment: NEVER leak owner_contact or historical finder_contact reports[] to anonymous callers!
+    return {
+      status: 200,
+      code: "ANTI_LOST_FOUND_REPORTED",
+      data: {
+        id: tag.id,
+        tag_code: tag.tag_code,
+        item_name: tag.item_name,
+        category: tag.category,
+        campus: tag.campus,
+        status: tag.status,
+        report_id: report.id,
+        report_submitted: true,
+        updated_at: nowIso
+      }
+    };
   });
 
   async function inject({
@@ -3983,10 +4247,17 @@ export function createCampusCloudApp(options = {}) {
       if (upperMethod === "GET" && pathname.startsWith("/claim/")) {
         const rawCode = decodeURIComponent(pathname.slice("/claim/".length)).trim().toUpperCase();
         const tag = (store.momentsState?.anti_lost_tags || []).find((t) => t.tag_code.toUpperCase() === rawCode);
-        const itemTitle = tag ? escapeClaimHtml(tag.item_name) : "校园随身物品防丢标签";
-        const ownerName = tag ? escapeClaimHtml(tag.owner_name) : "河工大同学";
-        const ownerContact = tag ? escapeClaimHtml(tag.owner_contact) : "请通过下方表单留言";
-        const returnNote = tag ? escapeClaimHtml(tag.return_note) : "若您拾到此物品，请在下方填写拾得地点与联系方式，失主将立即收到通知。";
+        const itemTitle = tag ? escapeClaimHtml(tag.item_name) : "未登记或已失效的防丢标签";
+        const ownerName = tag ? escapeClaimHtml(tag.owner_name) : "未知失主";
+        const isLostMode = Boolean(tag && (tag.status === "LOST" || tag.status === "FOUND_REPORTED"));
+        const ownerContact = !tag
+          ? "未找到该防丢码登记记录"
+          : isLostMode && tag.owner_contact
+            ? escapeClaimHtml(tag.owner_contact)
+            : "物品当前未开启挂失公开联系，请通过下方表单通知失主";
+        const returnNote = tag
+          ? escapeClaimHtml(tag.return_note)
+          : "该防丢码尚未在云端登记或已被失主移除，无法投递拾得通知。";
         const html = [
           '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>',
           '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>',
@@ -4000,8 +4271,9 @@ export function createCampusCloudApp(options = {}) {
           '.note{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px;font-size:14px;line-height:1.5;margin-bottom:16px;}',
           'label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;}',
           'input,textarea{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:10px;font-size:14px;}',
-          'button{width:100%;margin-top:14px;background:#0284c7;color:#fff;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:600;cursor:pointer;}',
+          'button{width:100%;margin-top:14px;background:#053968;color:#fff;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:600;cursor:pointer;}',
           '.msg{margin-top:12px;font-size:13px;color:#059669;font-weight:600;display:none;}',
+          '.err{margin-top:12px;font-size:13px;color:#dc2626;font-weight:600;display:none;}',
           '</style></head><body><div class="card">',
           '<span class="badge">日在校园 · 防丢码 ' + escapeClaimHtml(rawCode) + '</span>',
           '<h1>' + itemTitle + '</h1>',
@@ -4009,32 +4281,36 @@ export function createCampusCloudApp(options = {}) {
           '<div class="note">' + returnNote + '</div>',
           '<form id="f">',
           '<label>拾得/放置地点 *</label>',
-          '<input id="loc" required placeholder="例如：图书馆一楼服务台 / 二餐厅一楼窗口"/>',
+          '<input id="loc" required placeholder="例如：图书馆一楼服务台 / 一餐厅服务台"/>',
           '<label>您的称呼或联系方式</label>',
           '<input id="contact" placeholder="例如：QQ / 微信 / 电话（选填）"/>',
           '<label>补充留言</label>',
           '<textarea id="memo" rows="2" placeholder="描述物品当前放置位置"></textarea>',
           '<button type="submit">通知失主已拾得</button>',
           '<div id="ok" class="msg">已提交拾得线索，失主打开「日在校园」即可收到提醒，感谢您的热心相助！</div>',
+          '<div id="err" class="err"></div>',
           '</form></div>',
           '<script>',
           'document.getElementById("f").addEventListener("submit", function(e){',
           '  e.preventDefault();',
+          '  var okEl = document.getElementById("ok"); var errEl = document.getElementById("err");',
+          '  okEl.style.display = "none"; errEl.style.display = "none";',
           '  fetch("/api/v1/moments/anti-lost-tags/" + encodeURIComponent(' + JSON.stringify(rawCode) + ') + "/report-found", {',
           '    method: "POST", headers: {"Content-Type": "application/json"},',
           '    body: JSON.stringify({found_location: document.getElementById("loc").value, finder_contact: document.getElementById("contact").value, message: document.getElementById("memo").value})',
-          '  }).then(function(){ document.getElementById("ok").style.display = "block"; });',
+          '  }).then(function(r){ return r.json().then(function(j){ if(!r.ok || !j.ok) throw new Error((j.error && j.error.message) || "提交失败，请检查防丢码是否有效"); okEl.style.display = "block"; }); })',
+          '  .catch(function(ex){ errEl.textContent = ex.message || "网络异常，未能提交拾得通知"; errEl.style.display = "block"; });',
           '});',
           '</script></body></html>'
         ].join("\n");
         return {
-          status: 200,
+          status: tag ? 200 : 404,
           headers: {
             "content-type": "text/html; charset=utf-8",
             "x-request-id": requestId
           },
           rawBody: html,
-          body: okEnvelope("CLAIM_PAGE_OK", { tag_code: rawCode }, requestId)
+          body: okEnvelope(tag ? "CLAIM_PAGE_OK" : "CLAIM_TAG_NOT_FOUND", { tag_code: rawCode }, requestId)
         };
       }
 

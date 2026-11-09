@@ -12,6 +12,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 function sha256Hex(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
@@ -34,15 +35,31 @@ export function inspectAndSanitizeMomentsSnapshotObject(rawStateObj) {
   const report = {
     total_posts: 0,
     legacy_unowned_posts: [],
+    legacy_unowned_books_count: 0,
+    legacy_unowned_tags_count: 0,
     legacy_private_prefix_comments_unflagged: [],
     mutated_comments_count: 0
   };
 
-  if (!moments || !Array.isArray(moments.posts)) {
+  if (!moments || typeof moments !== "object") {
     return { sanitizedState: cloned, report, mutated: false };
   }
 
   let mutated = false;
+  if (Array.isArray(moments.book_listings)) {
+    report.legacy_unowned_books_count = moments.book_listings.filter(
+      (b) => b && !b.owner_cloud_user_id
+    ).length;
+  }
+  if (Array.isArray(moments.anti_lost_tags)) {
+    report.legacy_unowned_tags_count = moments.anti_lost_tags.filter(
+      (t) => t && !t.owner_cloud_user_id
+    ).length;
+  }
+
+  if (!Array.isArray(moments.posts)) {
+    return { sanitizedState: cloned, report, mutated };
+  }
   report.total_posts = moments.posts.length;
 
   for (const post of moments.posts) {
@@ -274,7 +291,15 @@ function parseArgs(argv) {
   return out;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const invokedEntryHref = (() => {
+  try {
+    return process.argv[1] ? pathToFileURL(fs.realpathSync(process.argv[1])).href : "";
+  } catch {
+    return process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+  }
+})();
+
+if (import.meta.url === invokedEntryHref) {
   const args = parseArgs(process.argv);
   if (!args.statePath) {
     console.error("Missing required --state <path/to/cloud-state.json>");

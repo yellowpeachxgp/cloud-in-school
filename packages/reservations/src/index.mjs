@@ -857,8 +857,10 @@ export class TripleScheduleEngine {
           "CONFIRMED",
           "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
           "SCHOOL_CANCELLED",
+          "CANCEL_RESULT_UNKNOWN",
           "FAILED",
           "CANCELLED",
+          "EXPIRED",
           "REVOKED"
         ].includes(job.state)
       ) {
@@ -875,22 +877,42 @@ export class TripleScheduleEngine {
         job.external_execution_state === "DISPATCH_INTENT" ||
         job.attempt_count >= 1;
 
+      if (kind !== "FIRE" && isUnknownPostDispatch) {
+        // Never allow PRECHECK or FINAL_CHECK to overwrite an already-dispatched or RESULT_UNKNOWN job!
+        if (event.status === "ARMED") {
+          event.status = "SKIPPED_ALREADY_DISPATCHED";
+        }
+        return {
+          job,
+          event,
+          schoolReservation: this.store.schoolReservations.get(job.id) || null
+        };
+      }
+
       if (kind === "FIRE" && isUnknownPostDispatch) {
         // Never blind-retry an already-dispatched or RESULT_UNKNOWN job!
+        const hasUsableEscrowCredential = Boolean(
+          binding && !binding.revoked_at && binding.status !== "REVOKED" && binding.credential_ref
+        );
+        const canReconcileStoppedJob =
+          hasUsableEscrowCredential &&
+          (options.allowPostRevokeReadback === true || job.user_intent_state === "STOP_REQUESTED");
         if (
           (!this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
             (job.user_intent_state && job.user_intent_state !== "ACTIVE")) &&
-          options.allowPostRevokeReadback !== true
+          !canReconcileStoppedJob
         ) {
-          this.store._applyRevocationToJob?.(
-            job,
-            "委托已停止，已发出的请求结果待核对",
-            new Date(nowMs).toISOString()
-          );
-          if (typeof this.store.flushSnapshotSync === "function") {
-            this.store.flushSnapshotSync();
-          } else if (typeof this.store.saveSnapshot === "function") {
-            this.store.saveSnapshot();
+          if (job.user_intent_state !== "REVOKED" && job.user_intent_state !== "STOP_REQUESTED") {
+            this.store._applyRevocationToJob?.(
+              job,
+              "委托已停止，已发出的请求结果待核对",
+              new Date(nowMs).toISOString()
+            );
+            if (typeof this.store.flushSnapshotSync === "function") {
+              this.store.flushSnapshotSync();
+            } else if (typeof this.store.saveSnapshot === "function") {
+              this.store.saveSnapshot();
+            }
           }
           return {
             job,
@@ -1537,7 +1559,8 @@ export class TripleScheduleEngine {
   }
 
   async cancelConfirmedOrActiveJob(jobId, nowMs = Date.now()) {
-    const job = this.store.reservationJobs.get(jobId);
+    return this.withJobLock(jobId, async () => {
+      const job = this.store.reservationJobs.get(jobId);
     if (!job) throw new ContractError("NOT_FOUND", "Reservation job not found");
     const binding = this.store.schoolBindings.get(job.school_binding_id);
     const plan = this.store.reservationPlans.get(job.plan_id);
@@ -1723,11 +1746,12 @@ export class TripleScheduleEngine {
     } else if (typeof this.store.saveSnapshot === "function") {
       this.store.saveSnapshot();
     }
-    return {
-      job,
-      school_reservation: schoolRes || null,
-      live_cancel: liveCancelResult
-    };
+      return {
+        job,
+        school_reservation: schoolRes || null,
+        live_cancel: liveCancelResult
+      };
+    });
   }
 
   rolloverMultiDayPlanIfEligible(plan, finishedJob, outcomeSummary, nowMs = Date.now()) {

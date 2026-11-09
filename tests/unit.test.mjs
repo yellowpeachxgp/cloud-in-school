@@ -892,3 +892,144 @@ test("Unit: Audit & Sanitize Moments State CLI rejects same-path/symlink/hardlin
   assert.equal(rollbackRes.action, "ROLLBACK_COMPLETED");
   assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes);
 });
+
+test("Unit: Moments Books & Anti-Lost Tags enforce Bearer auth, block cross-user IDOR/PII leaks, harden /claim page, and purge on data-delete", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const userA = app.store.findOrCreateCloudUser({
+    issuer: "https://auth.yellowpeachxgp.com",
+    subject: "sub_book_tag_a",
+    username: "user_a",
+    displayName: "同学甲"
+  });
+  const userB = app.store.findOrCreateCloudUser({
+    issuer: "https://auth.yellowpeachxgp.com",
+    subject: "sub_book_tag_b",
+    username: "user_b",
+    displayName: "同学乙"
+  });
+  const tokenA = app.identity.issueDeviceSession(userA, "dev_a").access_token;
+  const tokenB = app.identity.issueDeviceSession(userB, "dev_b").access_token;
+
+  // 1. Anonymous textbook creation rejected (401); cross-user ID overwrite rejected (409); bystander delete rejected (403)
+  const anonBookRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/books",
+    body: { title: "高等数学", contact: "13800001111" }
+  });
+  assert.equal(anonBookRes.status, 401);
+
+  const bookCreateRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/books",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: { id: "mb_test_001", title: "数据结构", contact: "wx_seller_a", price_yuan: 18 }
+  });
+  assert.equal(bookCreateRes.status, 201);
+  assert.equal(bookCreateRes.body.data.owner_cloud_user_id, undefined);
+  assert.equal(bookCreateRes.body.data.is_owner, true);
+
+  const overwriteBookRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/books",
+    headers: { Authorization: `Bearer ${tokenB}` },
+    body: { id: "mb_test_001", title: "篡改教材", contact: "attacker_wx" }
+  });
+  assert.equal(overwriteBookRes.status, 409);
+
+  const bystanderDeleteBook = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/books/mb_test_001/action",
+    headers: { Authorization: `Bearer ${tokenB}` },
+    body: { action: "DELETE" }
+  });
+  assert.equal(bystanderDeleteBook.status, 403);
+
+  // 2. Anti-lost tags: anonymous upsert rejected (401); cross-user hijack rejected (409); /snapshot hides tags from guests & user B!
+  const anonTagRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    body: { tag_code: "HAUT-TAG-A1B2C3", item_name: "蓝牙耳机", owner_contact: "13911112222" }
+  });
+  assert.equal(anonTagRes.status, 401);
+
+  const tagCreateRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: {
+      tag_code: "HAUT-TAG-A1B2C3",
+      item_name: "银色保温杯",
+      owner_contact: "13911112222",
+      status: "NORMAL"
+    }
+  });
+  assert.equal(tagCreateRes.status, 200);
+
+  const hijackTagRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags",
+    headers: { Authorization: `Bearer ${tokenB}` },
+    body: {
+      tag_code: "HAUT-TAG-A1B2C3",
+      item_name: "被篡改物品",
+      owner_contact: "attacker_phone"
+    }
+  });
+  assert.equal(hijackTagRes.status, 409);
+
+  const guestSnap = await app.inject({ method: "GET", url: "/api/v1/moments/snapshot" });
+  assert.equal(guestSnap.body.data.anti_lost_tags.length, 0);
+
+  const userBSnap = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${tokenB}` }
+  });
+  assert.equal(userBSnap.body.data.anti_lost_tags.length, 0);
+
+  const userASnap = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${tokenA}` }
+  });
+  assert.equal(userASnap.body.data.anti_lost_tags.length, 1);
+
+  // 3. /claim/{tagCode} hides owner_contact when NORMAL, has no "二餐厅" placeholder (#5), and /report-found returns public ack without leaking PII
+  const claimPageNormal = await app.inject({ method: "GET", url: "/claim/HAUT-TAG-A1B2C3" });
+  assert.equal(claimPageNormal.status, 200);
+  assert.ok(!String(claimPageNormal.rawBody).includes("13911112222"));
+  assert.ok(!String(claimPageNormal.rawBody).includes("二餐厅"));
+  assert.ok(String(claimPageNormal.rawBody).includes("!r.ok"));
+
+  const reportFoundRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/anti-lost-tags/HAUT-TAG-A1B2C3/report-found",
+    body: { found_location: "图书馆一楼服务台", finder_contact: "13700009999", message: "放在值班台" }
+  });
+  assert.equal(reportFoundRes.status, 200);
+  assert.equal(reportFoundRes.body.data.owner_contact, undefined);
+  assert.equal(reportFoundRes.body.data.reports, undefined);
+  assert.equal(reportFoundRes.body.data.report_submitted, true);
+
+  // 4. POST /api/v1/me/data-delete purges user A's posts, books, and anti-lost tags completely!
+  await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: { type: "LOST", title: "待注销用户的寻物帖", contact: "wx_delete_me" }
+  });
+  const deleteAccountRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/data-delete",
+    headers: { Authorization: `Bearer ${tokenA}` }
+  });
+  assert.equal(deleteAccountRes.status, 202);
+  assert.equal(deleteAccountRes.body.data.moments_purged.removed_posts, 1);
+  assert.equal(deleteAccountRes.body.data.moments_purged.removed_books, 1);
+  assert.equal(deleteAccountRes.body.data.moments_purged.removed_tags, 1);
+
+  const snapAfterDelete = await app.inject({ method: "GET", url: "/api/v1/moments/snapshot" });
+  assert.ok(!JSON.stringify(snapAfterDelete.body).includes("wx_delete_me"));
+  assert.ok(!JSON.stringify(snapAfterDelete.body).includes("wx_seller_a"));
+  assert.ok(!JSON.stringify(snapAfterDelete.body).includes("13911112222"));
+});
