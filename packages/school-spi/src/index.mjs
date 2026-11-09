@@ -1032,24 +1032,39 @@ export class HautLibraryProvider {
     };
   }
 
-  async fetchActiveBookings(rawToken, { requireCompleteList = false } = {}) {
+  async fetchActiveBookings(
+    rawToken,
+    { requireCompleteList = false, cancelledBookingIdsOut = null } = {}
+  ) {
+    const isPlainObj = (v) => Boolean(v && typeof v === "object" && !Array.isArray(v));
     const results = [];
     const seenIds = new Set();
     const curJson = await this.wslibGetJson("/seatbook/user/my/crrentbooking", rawToken);
     if (
-      !curJson ||
-      (typeof curJson.code === "number" && curJson.code !== 200) ||
-      (requireCompleteList && typeof curJson.code !== "number" && curJson.data === undefined && curJson.booking === undefined)
+      !isPlainObj(curJson) ||
+      (requireCompleteList
+        ? curJson.code !== 200 || (!("data" in curJson) && !("booking" in curJson))
+        : typeof curJson.code === "number" && curJson.code !== 200)
     ) {
       throw new Error(curJson?.msg || "Failed to read current booking");
     }
-    const data = curJson?.data || curJson?.booking || null;
-    if (data && data.id) {
+    const rawCurData = curJson.data !== undefined ? curJson.data : curJson.booking;
+    if (requireCompleteList && rawCurData !== null && rawCurData !== undefined) {
+      if (!isPlainObj(rawCurData) || !String(rawCurData.id ?? "").trim()) {
+        throw new Error("Current booking payload is malformed");
+      }
+    }
+    const data = isPlainObj(rawCurData) ? rawCurData : null;
+    if (data && String(data.id ?? "").trim()) {
+      const bId = String(data.id).trim();
       const curSt = String(data.bookingStatus ?? "").trim();
       const curStName = String(data.bookingStatusName || data.statusName || "").trim();
-      const isCurCancelled = ["5", "6", "7", "8", "9"].includes(curSt) || /取消|签退|释放|结束/.test(curStName);
+      const isCurCancelled =
+        ["5", "6", "7", "8", "9"].includes(curSt) || /取消|签退|释放|结束/.test(curStName);
+      if (isCurCancelled && cancelledBookingIdsOut instanceof Set) {
+        cancelledBookingIdsOut.add(bId);
+      }
       if (["1", "2", "3", "4"].includes(curSt) || (requireCompleteList && !isCurCancelled)) {
-        const bId = String(data.id);
         seenIds.add(bId);
         results.push({
           bookingId: bId,
@@ -1071,33 +1086,56 @@ export class HautLibraryProvider {
       rawToken
     );
     if (
-      !inProgJson ||
-      (typeof inProgJson.code === "number" && inProgJson.code !== 200) ||
-      (requireCompleteList && typeof inProgJson.code !== "number" && !Array.isArray(inProgJson?.rows) && !Array.isArray(inProgJson?.data?.rows))
+      !isPlainObj(inProgJson) ||
+      (requireCompleteList
+        ? inProgJson.code !== 200
+        : typeof inProgJson.code === "number" && inProgJson.code !== 200)
     ) {
       throw new Error(inProgJson?.msg || "Failed to read in-progress bookings");
     }
-    const rawRows = inProgJson?.rows ?? inProgJson?.data?.rows;
+    const rawRows = inProgJson.rows !== undefined ? inProgJson.rows : inProgJson.data?.rows;
     if (requireCompleteList && !Array.isArray(rawRows)) {
       throw new Error("In-progress booking list response is missing rows array");
     }
     const rows = Array.isArray(rawRows) ? rawRows : [];
-    const declaredTotal = Number(inProgJson?.total ?? inProgJson?.data?.total ?? rows.length);
-    if (requireCompleteList && (!Number.isFinite(declaredTotal) || declaredTotal > rows.length || declaredTotal < 0)) {
+    const rawDeclaredTotal =
+      inProgJson.total !== undefined ? inProgJson.total : inProgJson.data?.total;
+    if (requireCompleteList) {
+      if (
+        rawDeclaredTotal === undefined ||
+        rawDeclaredTotal === null ||
+        typeof rawDeclaredTotal === "boolean" ||
+        String(rawDeclaredTotal).trim() === ""
+      ) {
+        throw new Error("In-progress booking list response is missing explicit total count");
+      }
+    }
+    const declaredTotal = Number(rawDeclaredTotal ?? rows.length);
+    if (
+      requireCompleteList &&
+      (!Number.isFinite(declaredTotal) ||
+        !Number.isInteger(declaredTotal) ||
+        declaredTotal > rows.length ||
+        declaredTotal < 0)
+    ) {
       throw new Error("In-progress booking list is paginated/incomplete");
     }
     for (const row of rows) {
-      if (!row || !row.id) {
+      if (!isPlainObj(row) || !String(row.id ?? "").trim()) {
         if (requireCompleteList) {
           throw new Error("In-progress booking list contains malformed row without id");
         }
         continue;
       }
+      const bId = String(row.id).trim();
       const rowSt = String(row.bookingStatus ?? "").trim();
       const rowStName = String(row.bookingStatusName || row.statusName || "").trim();
-      const isRowCancelled = ["5", "6", "7", "8", "9"].includes(rowSt) || /取消|签退|释放|结束/.test(rowStName);
+      const isRowCancelled =
+        ["5", "6", "7", "8", "9"].includes(rowSt) || /取消|签退|释放|结束/.test(rowStName);
+      if (isRowCancelled && cancelledBookingIdsOut instanceof Set) {
+        cancelledBookingIdsOut.add(bId);
+      }
       if (["1", "2", "3", "4"].includes(rowSt) || (requireCompleteList && !isRowCancelled)) {
-        const bId = String(row.id);
         if (seenIds.has(bId)) continue;
         seenIds.add(bId);
         results.push({
@@ -1591,14 +1629,21 @@ export class HautLibraryProvider {
       }
     }
 
-    const cancelApiSucceeded = Boolean(!cancelHttpFailed && cancelJson && cancelJson.code === 200);
+    const isPlainObj = (v) => Boolean(v && typeof v === "object" && !Array.isArray(v));
+    const cancelApiSucceeded = Boolean(
+      !cancelHttpFailed && isPlainObj(cancelJson) && cancelJson.code === 200
+    );
 
     // Authoritative verification by exact targetBookingId:
-    // 1) Require complete active booking list (both crrentbooking and non-truncated mybookingInProgress)
-    // 2) Query booking history/status for exact targetBookingId; if cancel & signoff both failed,
-    //    NEVER report SCHOOL_CANCELLED merely because targetBookingId was absent from activeList!
+    // 1) Require complete, well-formed (code === 200) active booking list (crrentbooking + mybookingInProgress)
+    // 2) Require well-formed (code === 200 + rows array) history readback AND explicit cancelled evidence
+    //    for targetBookingId; malformed/incomplete responses or missing cancellation evidence MUST return CANCEL_RESULT_UNKNOWN!
     try {
-      const activeList = await this.fetchActiveBookings(rawToken, { requireCompleteList: true });
+      const cancelledIdsFromActiveReadback = new Set();
+      const activeList = await this.fetchActiveBookings(rawToken, {
+        requireCompleteList: true,
+        cancelledBookingIdsOut: cancelledIdsFromActiveReadback
+      });
       const stillActive = activeList.some((b) => String(b.bookingId) === targetBookingId);
       if (stillActive) {
         return {
@@ -1610,8 +1655,7 @@ export class HautLibraryProvider {
         };
       }
 
-      // Check exact booking record status in mybookingInProgress / bookinglist if available
-      let exactRecordCancelled = false;
+      let exactRecordCancelled = cancelledIdsFromActiveReadback.has(targetBookingId);
       let historyReadError = false;
       let historyJson = null;
       try {
@@ -1623,59 +1667,80 @@ export class HautLibraryProvider {
         historyReadError = true;
       }
 
-      if (historyReadError || (historyJson && typeof historyJson.code === "number" && historyJson.code !== 200)) {
+      if (historyReadError || !isPlainObj(historyJson) || historyJson.code !== 200) {
         return {
           cancelled: false,
           outcome: "CANCEL_RESULT_UNKNOWN",
           school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
           bookingId: targetBookingId,
-          message: "预约历史列表回查异常，退座结果待核对"
+          message: "预约历史列表回查异常或返回格式错误，退座结果待核对"
         };
       }
 
-      if (historyJson && historyJson.code === 200) {
-        const histRows = historyJson.rows ?? historyJson.data?.rows;
-        if (histRows !== undefined && !Array.isArray(histRows)) {
+      const histRows = historyJson.rows !== undefined ? historyJson.rows : historyJson.data?.rows;
+      if (!Array.isArray(histRows)) {
+        return {
+          cancelled: false,
+          outcome: "CANCEL_RESULT_UNKNOWN",
+          school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+          bookingId: targetBookingId,
+          message: "预约历史列表缺少 rows 数组，退座结果待核对"
+        };
+      }
+
+      for (const r of histRows) {
+        if (!isPlainObj(r) || !String(r.id ?? "").trim()) {
           return {
             cancelled: false,
             outcome: "CANCEL_RESULT_UNKNOWN",
             school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
             bookingId: targetBookingId,
-            message: "预约历史列表结构不完整，退座结果待核对"
+            message: "预约历史列表包含格式残缺的记录项，退座结果待核对"
           };
         }
-        if (Array.isArray(histRows)) {
-          const matchedRow = histRows.find((r) => r && String(r.id) === targetBookingId);
-          if (matchedRow) {
-            const st = String(matchedRow.bookingStatus ?? "").trim();
-            const stName = String(matchedRow.bookingStatusName || matchedRow.statusName || "").trim();
-            if (["5", "6", "7", "8", "9"].includes(st) || /取消|签退|释放|结束/.test(stName)) {
-              exactRecordCancelled = true;
-            } else {
-              return {
-                cancelled: false,
-                outcome: "CANCEL_RESULT_UNKNOWN",
-                school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-                bookingId: targetBookingId,
-                message: "预约记录表未确认该预约号已取消，退座结果待核对"
-              };
-            }
-          } else {
-            const histTotal = Number(historyJson.total ?? historyJson.data?.total ?? histRows.length);
-            if (!Number.isFinite(histTotal) || histTotal > histRows.length) {
-              return {
-                cancelled: false,
-                outcome: "CANCEL_RESULT_UNKNOWN",
-                school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-                bookingId: targetBookingId,
-                message: "预约历史列表分页不完整且未找到目标预约号，退座结果待核对"
-              };
-            }
+      }
+
+      const matchedRow = histRows.find((r) => String(r.id).trim() === targetBookingId);
+      if (matchedRow) {
+        const st = String(matchedRow.bookingStatus ?? "").trim();
+        const stName = String(matchedRow.bookingStatusName || matchedRow.statusName || "").trim();
+        if (["5", "6", "7", "8", "9"].includes(st) || /取消|签退|释放|结束/.test(stName)) {
+          exactRecordCancelled = true;
+        } else {
+          return {
+            cancelled: false,
+            outcome: "CANCEL_RESULT_UNKNOWN",
+            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+            bookingId: targetBookingId,
+            message: "预约记录表未确认该预约号已取消，退座结果待核对"
+          };
+        }
+      } else {
+        const rawHistTotal =
+          historyJson.total !== undefined ? historyJson.total : historyJson.data?.total;
+        if (rawHistTotal !== undefined && rawHistTotal !== null) {
+          const histTotal = Number(rawHistTotal);
+          if (
+            typeof rawHistTotal === "boolean" ||
+            String(rawHistTotal).trim() === "" ||
+            !Number.isFinite(histTotal) ||
+            !Number.isInteger(histTotal) ||
+            histTotal < 0 ||
+            histTotal > histRows.length
+          ) {
+            return {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              bookingId: targetBookingId,
+              message: "预约历史列表分页不完整或计数格式异常，退座结果待核对"
+            };
           }
         }
       }
 
-      if (!cancelApiSucceeded && !exactRecordCancelled) {
+      // Require explicit school cancellation evidence (exact cancelled status record in school list/history)!
+      if (!exactRecordCancelled) {
         return {
           cancelled: false,
           outcome: "CANCEL_RESULT_UNKNOWN",
@@ -1684,7 +1749,7 @@ export class HautLibraryProvider {
           message:
             cancelJson?.msg ||
             signOffJson?.msg ||
-            "取消与签退接口均未确认成功，且未能按预约号核实取消状态，退座结果待核对"
+            "未能从学校预约记录中获取该预约号已取消/签退的明确证据，退座结果待核对"
         };
       }
 

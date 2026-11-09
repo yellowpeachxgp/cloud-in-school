@@ -1604,6 +1604,36 @@ export class CloudDatabaseStore {
       }
     }
 
+    // 4. At-rest normalization of historical Moments posts & legacy "【私密联系发起人】" prefix comments
+    if (this.momentsState && Array.isArray(this.momentsState.posts)) {
+      for (const post of this.momentsState.posts) {
+        if (!post || typeof post !== "object") continue;
+        if (!Array.isArray(post.comments)) {
+          post.comments = [];
+          mutated = true;
+        }
+        if (!Array.isArray(post.contact_requests)) {
+          post.contact_requests = [];
+          mutated = true;
+        }
+        if (!Array.isArray(post.blocked_user_ids)) {
+          post.blocked_user_ids = [];
+          mutated = true;
+        }
+        for (const c of post.comments) {
+          if (
+            c &&
+            typeof c === "object" &&
+            String(c.content || "").trim().startsWith("【私密联系发起人】") &&
+            c.is_private_to_initiator !== true
+          ) {
+            c.is_private_to_initiator = true;
+            mutated = true;
+          }
+        }
+      }
+    }
+
     if (mutated) {
       this.saveSnapshot();
     }

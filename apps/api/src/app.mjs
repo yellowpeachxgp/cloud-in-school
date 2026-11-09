@@ -2908,12 +2908,41 @@ export function createCampusCloudApp(options = {}) {
       .slice(0, 3);
   }
 
-  function tryExtractOptionalViewerUserId(headers, nowMs, method = "GET") {
+  function tryExtractOptionalViewerAuth(headers, nowMs, method = "GET") {
     try {
-      return extractBearer(headers, nowMs, method)?.cloudUserId || null;
+      const auth = extractBearer(headers, nowMs, method);
+      if (!auth?.cloudUserId) return { cloudUserId: null, roles: [], isAdmin: false };
+      const roles = Array.isArray(auth.roles) ? auth.roles : store.getUserRoles(auth.cloudUserId);
+      const isAdmin = Boolean(
+        store.hasAdminAccess?.(auth.cloudUserId) ||
+          roles.some((r) => ["ADMIN", "PLATFORM_OWNER", "SUPPORT_OPERATOR"].includes(r))
+      );
+      return { cloudUserId: auth.cloudUserId, roles, isAdmin };
     } catch {
-      return null;
+      return { cloudUserId: null, roles: [], isAdmin: false };
     }
+  }
+
+  function isMomentsAdminAuth(auth) {
+    if (!auth?.cloudUserId) return false;
+    const roles = Array.isArray(auth.roles) ? auth.roles : store.getUserRoles(auth.cloudUserId);
+    return Boolean(
+      store.hasAdminAccess?.(auth.cloudUserId) ||
+        roles.some((r) => ["ADMIN", "PLATFORM_OWNER", "SUPPORT_OPERATOR"].includes(r))
+    );
+  }
+
+  function viewerHasMatchingVerifiedStudentNo(cloudUserId, maskedStudentNo) {
+    if (!cloudUserId || !maskedStudentNo) return false;
+    const m = /^([0-9A-Za-z]{2,})\*+([0-9A-Za-z]{2,})$/.exec(String(maskedStudentNo).trim());
+    if (!m) return false;
+    const [, prefix, suffix] = m;
+    const bindings = store.recordsForUser("schoolBindings", cloudUserId) || [];
+    return bindings.some((b) => {
+      if (!b || b.revoked_at || b.status === "REVOKED") return false;
+      const sno = String(b.student_no || "").trim();
+      return sno.length >= prefix.length + suffix.length && sno.startsWith(prefix) && sno.endsWith(suffix);
+    });
   }
 
   function isPrivateMomentsComment(c) {
@@ -2923,10 +2952,18 @@ export function createCampusCloudApp(options = {}) {
     );
   }
 
-  function projectMomentsPostForViewer(post, allPosts, viewerUserId = null) {
+  function projectMomentsPostForViewer(post, allPosts, viewerUserId = null, isViewerAdmin = false) {
     if (!post) return null;
     const isOwner = Boolean(
       viewerUserId && post.owner_cloud_user_id && post.owner_cloud_user_id === viewerUserId
+    );
+    const isLegacyUnowned = !post.owner_cloud_user_id;
+    const canManage = Boolean(isOwner || isViewerAdmin);
+    const canClaimLegacy = Boolean(
+      isLegacyUnowned &&
+        viewerUserId &&
+        ((post.contact_visibility === "ON_REQUEST" && String(post.contact || "").trim().length >= 4) ||
+          Boolean(String(post.author_student_no_masked || "").trim()))
     );
     const isBlocked = Boolean(
       viewerUserId &&
@@ -2948,7 +2985,7 @@ export function createCampusCloudApp(options = {}) {
     delete sanitized.blocked_user_ids;
 
     if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
-      if (!isOwner && !hasApprovedRequest) {
+      if (!isOwner && !(isViewerAdmin && isLegacyUnowned) && !hasApprovedRequest) {
         sanitized.contact = "需发起联系/认领申请后查看";
         sanitized.has_protected_contact = true;
       } else {
@@ -2964,13 +3001,14 @@ export function createCampusCloudApp(options = {}) {
         const isCommentAuthor = Boolean(
           viewerUserId && c.author_user_id && c.author_user_id === viewerUserId
         );
-        return isOwner || isCommentAuthor;
+        return isOwner || (isViewerAdmin && isLegacyUnowned) || isCommentAuthor;
       })
       .map((c) => {
         const isCommentAuthor = Boolean(
           viewerUserId && c.author_user_id && c.author_user_id === viewerUserId
         );
-        const canSeeHint = isOwner || isCommentAuthor || !isPrivateMomentsComment(c);
+        const canSeeHint =
+          isOwner || (isViewerAdmin && isLegacyUnowned) || isCommentAuthor || !isPrivateMomentsComment(c);
         const projectedComment = {
           id: c.id,
           author_name: c.author_name,
@@ -2984,6 +3022,11 @@ export function createCampusCloudApp(options = {}) {
 
     return {
       ...sanitized,
+      viewer_role: isOwner ? "OWNER" : isViewerAdmin ? "ADMIN" : viewerUserId ? "AUTHENTICATED" : "GUEST",
+      is_owner: isOwner,
+      can_manage: canManage,
+      is_legacy_unowned: isLegacyUnowned,
+      can_claim_legacy: canClaimLegacy,
       contact_requests_count: Array.isArray(post.contact_requests) ? post.contact_requests.length : 0,
       matched_clues: computePostMatches(post, allPosts || []).map((m) => ({
         id: m.post.id,
@@ -2997,7 +3040,11 @@ export function createCampusCloudApp(options = {}) {
   }
 
   registerExtension("GET", "/api/v1/moments/snapshot", "getMomentsSnapshot", "public", async ({ query, headers, nowMs }) => {
-    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "GET");
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "GET"
+    );
     const ms = store.momentsState || { posts: [], book_listings: [], anti_lost_tags: [], isbn_catalog: [] };
     const typeFilter = (query.get("type") || "").trim().toUpperCase();
     const campusFilter = (query.get("campus") || "").trim();
@@ -3015,7 +3062,7 @@ export function createCampusCloudApp(options = {}) {
       );
     }
     const enrichedPosts = posts.map((p) =>
-      projectMomentsPostForViewer(p, ms.posts || [], viewerUserId)
+      projectMomentsPostForViewer(p, ms.posts || [], viewerUserId, isViewerAdmin)
     );
     return {
       status: 200,
@@ -3032,7 +3079,11 @@ export function createCampusCloudApp(options = {}) {
   });
 
   registerExtension("POST", "/api/v1/moments/posts", "createMomentsPost", "public", async ({ body, headers, nowMs }) => {
-    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
     const title = String(body?.title || "").trim().slice(0, 64);
     if (!title) throw new ContractError("BAD_REQUEST", "请填写物品名称或标题");
 
@@ -3049,16 +3100,17 @@ export function createCampusCloudApp(options = {}) {
       }
     }
 
+    if (!viewerUserId) {
+      throw new ContractError(
+        "CLOUD_AUTH_REQUIRED",
+        "发布寻物或招领信息需先登录云端账号，以便后续跨设备结案、删除及处理联系申请"
+      );
+    }
+
     const contactVisibility =
       String(body?.contact_visibility || "PUBLIC").toUpperCase() === "ON_REQUEST"
         ? "ON_REQUEST"
         : "PUBLIC";
-    if (contactVisibility === "ON_REQUEST" && !viewerUserId) {
-      throw new ContractError(
-        "CLOUD_AUTH_REQUIRED",
-        "启用受保护联系方式（仅认领申请通过后可见）需先登录云端账号"
-      );
-    }
 
     const requestedId = body?.id ? String(body.id).trim().slice(0, 40) : "";
     const existingPosts = store.momentsState.posts || [];
@@ -3080,7 +3132,7 @@ export function createCampusCloudApp(options = {}) {
       status: "OPEN",
       author_name: String(body?.author_name || "河工大同学").trim().slice(0, 24),
       author_student_no_masked: String(body?.author_student_no_masked || "").trim().slice(0, 16),
-      owner_cloud_user_id: viewerUserId || null,
+      owner_cloud_user_id: viewerUserId,
       contact_visibility: contactVisibility,
       likes_count: 0,
       favorites_count: 0,
@@ -3097,12 +3149,16 @@ export function createCampusCloudApp(options = {}) {
     return {
       status: 201,
       code: "MOMENTS_POST_CREATED",
-      data: projectMomentsPostForViewer(newPost, store.momentsState.posts, viewerUserId)
+      data: projectMomentsPostForViewer(newPost, store.momentsState.posts, viewerUserId, isViewerAdmin)
     };
   });
 
   registerExtension("POST", "/api/v1/moments/posts/{postId}/comments", "addMomentsPostComment", "public", async ({ params, body, headers, nowMs }) => {
-    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
     const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
     if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
     if (viewerUserId && Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(viewerUserId)) {
@@ -3136,7 +3192,7 @@ export function createCampusCloudApp(options = {}) {
     return {
       status: 201,
       code: "MOMENTS_COMMENT_ADDED",
-      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId)
+      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId, isViewerAdmin)
     };
   });
 
@@ -3224,9 +3280,11 @@ export function createCampusCloudApp(options = {}) {
       if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
       const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
       const isOwner = Boolean(post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId);
+      const isAdmin = isMomentsAdminAuth(auth);
+      const canManageRequests = Boolean(isOwner || (isAdmin && !post.owner_cloud_user_id));
       const isSenderBlocked =
         Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(auth.cloudUserId);
-      const visibleReqs = isOwner
+      const visibleReqs = canManageRequests
         ? allReqs
         : allReqs
             .filter((r) => r.sender_user_id === auth.cloudUserId)
@@ -3240,6 +3298,8 @@ export function createCampusCloudApp(options = {}) {
         data: {
           post_id: post.id,
           is_owner: isOwner,
+          can_manage: canManageRequests,
+          is_legacy_unowned: !post.owner_cloud_user_id,
           requests: visibleReqs
         }
       };
@@ -3258,14 +3318,16 @@ export function createCampusCloudApp(options = {}) {
       const reqItem = allReqs.find((r) => r.id === params.requestId);
       if (!reqItem) throw new ContractError("NOT_FOUND", "未找到该联系申请");
       const isOwner = Boolean(post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId);
+      const isAdmin = isMomentsAdminAuth(auth);
+      const canManageRequests = Boolean(isOwner || (isAdmin && !post.owner_cloud_user_id));
       const isSender = reqItem.sender_user_id === auth.cloudUserId;
-      if (!isOwner && !isSender) {
+      if (!canManageRequests && !isSender && !(isAdmin && ["REJECT", "BLOCK", "REPORT"].includes(String(body?.action || "").toUpperCase()))) {
         throw new ContractError("FORBIDDEN", "无权操作他人的失物招领联系申请");
       }
       const action = String(body?.action || "").toUpperCase();
       const nowIso = new Date(nowMs).toISOString();
       if (action === "APPROVE") {
-        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可同意公开联系方式");
+        if (!canManageRequests) throw new ContractError("FORBIDDEN", "仅发起人（或历史无主帖管理员）可同意公开联系方式");
         if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
         }
@@ -3273,11 +3335,22 @@ export function createCampusCloudApp(options = {}) {
         if (body?.reply_message) {
           reqItem.reply_message = String(body.reply_message).trim().slice(0, 240);
         }
+        if (isAdmin && !isOwner) {
+          store.recordAudit({
+            actor_kind: "ADMIN",
+            actor_ref: auth.cloudUserId,
+            action: "ADMIN_APPROVE_LEGACY_POST_CONTACT_REQUEST",
+            resource_kind: "moments_contact_request",
+            resource_ref: reqItem.id,
+            outcome: "APPROVED",
+            detail: { post_id: post.id }
+          });
+        }
       } else if (action === "REJECT") {
-        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可拒绝联系申请");
+        if (!canManageRequests && !isAdmin) throw new ContractError("FORBIDDEN", "仅发起人或管理员可拒绝联系申请");
         reqItem.status = "REJECTED";
       } else if (action === "BLOCK") {
-        if (!isOwner) throw new ContractError("FORBIDDEN", "仅发起人可屏蔽申请人");
+        if (!canManageRequests && !isAdmin) throw new ContractError("FORBIDDEN", "仅发起人或管理员可屏蔽申请人");
         if (!Array.isArray(post.blocked_user_ids)) post.blocked_user_ids = [];
         if (!post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           post.blocked_user_ids.push(reqItem.sender_user_id);
@@ -3321,7 +3394,11 @@ export function createCampusCloudApp(options = {}) {
   );
 
   registerExtension("POST", "/api/v1/moments/posts/{postId}/action", "mutateMomentsPost", "public", async ({ params, body, headers, nowMs }) => {
-    const viewerUserId = tryExtractOptionalViewerUserId(headers, nowMs, "POST");
+    const { cloudUserId: viewerUserId, isAdmin: isViewerAdmin } = tryExtractOptionalViewerAuth(
+      headers,
+      nowMs,
+      "POST"
+    );
     const posts = store.momentsState.posts || [];
     const idx = posts.findIndex((p) => p.id === params.postId);
     if (idx < 0) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
@@ -3329,12 +3406,95 @@ export function createCampusCloudApp(options = {}) {
     const post = posts[idx];
     const nowIso = new Date(nowMs).toISOString();
 
+    if (act === "CLAIM_OWNERSHIP") {
+      if (!viewerUserId) {
+        throw new ContractError("CLOUD_AUTH_REQUIRED", "认领历史旧帖管理权需先登录云端账号");
+      }
+      if (post.owner_cloud_user_id) {
+        if (post.owner_cloud_user_id === viewerUserId) {
+          return {
+            status: 200,
+            code: "MOMENTS_POST_OWNERSHIP_ALREADY_BOUND",
+            data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId, isViewerAdmin)
+          };
+        }
+        throw new ContractError("CONFLICT", "该帖子已绑定归属账号，禁止重复认领管理权");
+      }
+      const contactProof = String(body?.contact_proof || "").trim();
+      const storedContact = String(post.contact || "").trim();
+      const verifiedProtectedSecretMatch =
+        post.contact_visibility === "ON_REQUEST" &&
+        storedContact.length >= 4 &&
+        contactProof === storedContact;
+      const verifiedMaskedStudentMatch =
+        Boolean(String(post.author_student_no_masked || "").trim()) &&
+        viewerHasMatchingVerifiedStudentNo(viewerUserId, post.author_student_no_masked) &&
+        storedContact.length > 0 &&
+        contactProof === storedContact;
+
+      if (!isViewerAdmin && !verifiedProtectedSecretMatch && !verifiedMaskedStudentMatch) {
+        throw new ContractError(
+          "FORBIDDEN",
+          "该历史匿名旧帖缺少可安全核验的归属特征（受保护联系方式或已绑定学号匹配），为防冒领已交由管理员核查处理"
+        );
+      }
+      const targetOwnerId =
+        isViewerAdmin && body?.target_owner_cloud_user_id
+          ? String(body.target_owner_cloud_user_id).trim()
+          : viewerUserId;
+      post.owner_cloud_user_id = targetOwnerId;
+      post.updated_at = nowIso;
+      store.momentsState.updated_at = nowIso;
+      store.recordAudit({
+        actor_kind: isViewerAdmin ? "ADMIN" : "USER",
+        actor_ref: viewerUserId,
+        action: "CLAIM_LEGACY_MOMENTS_POST",
+        resource_kind: "moments_post",
+        resource_ref: post.id,
+        outcome: "CLAIMED",
+        detail: {
+          assigned_owner_cloud_user_id: targetOwnerId,
+          verification_mode: isViewerAdmin
+            ? "ADMIN_ASSIGN"
+            : verifiedProtectedSecretMatch
+              ? "PROTECTED_CONTACT_PROOF"
+              : "VERIFIED_STUDENT_NO_AND_CONTACT"
+        }
+      });
+      store.saveSnapshot();
+      return {
+        status: 200,
+        code: "MOMENTS_POST_OWNERSHIP_CLAIMED",
+        data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId, isViewerAdmin)
+      };
+    }
+
+    const isOwner = Boolean(
+      viewerUserId && post.owner_cloud_user_id && post.owner_cloud_user_id === viewerUserId
+    );
+
     if (act === "DELETE" || act === "RESOLVE" || act === "REOPEN") {
       if (!viewerUserId) {
         throw new ContractError("CLOUD_AUTH_REQUIRED", "修改或删除失物招领帖需先登录云端账号");
       }
-      if (!post.owner_cloud_user_id || post.owner_cloud_user_id !== viewerUserId) {
-        throw new ContractError("FORBIDDEN", "仅帖子发起人本人可执行结案、重开或删除操作");
+      if (!isOwner && !isViewerAdmin) {
+        throw new ContractError(
+          "FORBIDDEN",
+          post.owner_cloud_user_id
+            ? "仅帖子发起人本人或平台管理员可执行结案、重开或删除操作"
+            : "该历史旧帖尚未绑定发起人账号，请先完成归属核验认领或提交举报由管理员处理"
+        );
+      }
+      if (isViewerAdmin && !isOwner) {
+        store.recordAudit({
+          actor_kind: "ADMIN",
+          actor_ref: viewerUserId,
+          action: `ADMIN_${act}_MOMENTS_POST`,
+          resource_kind: "moments_post",
+          resource_ref: post.id,
+          outcome: "SUCCESS",
+          detail: { was_legacy_unowned: !post.owner_cloud_user_id }
+        });
       }
     }
 
@@ -3368,7 +3528,7 @@ export function createCampusCloudApp(options = {}) {
     return {
       status: 200,
       code: "MOMENTS_POST_UPDATED",
-      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId)
+      data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId, isViewerAdmin)
     };
   });
 

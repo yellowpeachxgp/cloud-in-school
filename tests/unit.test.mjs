@@ -420,4 +420,188 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   });
   const finderPostViewAfterBlock = finderSnapAfterBlock.body.data.posts.find((p) => p.id === postId);
   assert.equal(finderPostViewAfterBlock.contact, "需发起联系/认领申请后查看");
+  assert.equal(finderPostViewAfterBlock.is_owner, false);
+  assert.equal(finderPostViewAfterBlock.can_manage, false);
+
+  // Cross-device owner role: when Owner logs in on a brand-new device, server snapshot & contact-requests
+  // explicitly report is_owner=true / can_manage=true without relying on client-local myPostIds cache!
+  const ownerNewDeviceToken = app.identity.issueDeviceSession(owner, "dev_owner_new_phone").access_token;
+  const ownerNewDeviceSnap = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot",
+    headers: { Authorization: `Bearer ${ownerNewDeviceToken}` }
+  });
+  const ownerPostOnNewDevice = ownerNewDeviceSnap.body.data.posts.find((p) => p.id === postId);
+  assert.equal(ownerPostOnNewDevice.is_owner, true);
+  assert.equal(ownerPostOnNewDevice.can_manage, true);
+  assert.equal(ownerPostOnNewDevice.viewer_role, "OWNER");
+
+  // New posts MUST require authentication (anonymous creation rejected with 401 CLOUD_AUTH_REQUIRED)
+  const anonCreateRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    body: {
+      type: "LOST",
+      title: "匿名无主帖",
+      contact: "13800000000"
+    }
+  });
+  assert.equal(anonCreateRes.status, 401);
+
+  // Legacy unowned post compatibility & governance:
+  // 1) Inject two historical ownerless posts (one public anonymous, one with masked student_no + legacy private-prefix comment)
+  app.store.momentsState.posts.push(
+    {
+      id: "mp_legacy_anon_public",
+      type: "FOUND",
+      title: "历史无主招领水杯",
+      category: "水杯雨伞",
+      campus: "莲花街校区",
+      location: "一餐二楼",
+      description: "历史数据遗留无 owner_cloud_user_id",
+      contact: "QQ: 88886666",
+      contact_visibility: "PUBLIC",
+      author_name: "热心同学",
+      author_student_no_masked: "",
+      owner_cloud_user_id: null,
+      status: "OPEN",
+      comments: [
+        {
+          id: "mc_legacy_priv_1",
+          author_name: "旧版客户端用户",
+          content: "【私密联系发起人】我的手机号是 13912345678",
+          contact_hint: "13912345678",
+          created_at: new Date().toISOString()
+        }
+      ],
+      contact_requests: [
+        {
+          id: "mcr_legacy_req_1",
+          post_id: "mp_legacy_anon_public",
+          sender_user_id: finder.id,
+          sender_name: "拾得者小李",
+          message: "请问还在吗",
+          contact_info: "wx_finder",
+          status: "PENDING",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }
+      ],
+      blocked_user_ids: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    },
+    {
+      id: "mp_legacy_bound_author",
+      type: "LOST",
+      title: "历史可核验失主蓝牙耳机",
+      category: "数码",
+      campus: "莲花街校区",
+      location: "图书馆四楼",
+      description: "含已脱敏学号特征",
+      contact: "wx_owner_bound_01",
+      contact_visibility: "PUBLIC",
+      author_name: "张同学",
+      author_student_no_masked: "20***01",
+      owner_cloud_user_id: null,
+      status: "OPEN",
+      comments: [],
+      contact_requests: [],
+      blocked_user_ids: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }
+  );
+
+  // At-rest migration flags legacy "【私密联系发起人】" comments as is_private_to_initiator = true
+  app.store.migrateAndRecoverState();
+  const migratedLegacyPost = app.store.momentsState.posts.find((p) => p.id === "mp_legacy_anon_public");
+  assert.equal(migratedLegacyPost.comments[0].is_private_to_initiator, true);
+
+  const { inspectAndSanitizeMomentsSnapshotObject } = await import(
+    "../scripts/audit-and-sanitize-moments-state.mjs"
+  );
+  const auditCheck = inspectAndSanitizeMomentsSnapshotObject({
+    momentsState: {
+      posts: [
+        {
+          id: "mp_raw_unmigrated",
+          title: "未迁移旧数据",
+          owner_cloud_user_id: null,
+          comments: [{ id: "c1", content: "【私密联系发起人】私密手机号" }]
+        }
+      ]
+    }
+  });
+  assert.equal(auditCheck.mutated, true);
+  assert.equal(auditCheck.report.legacy_unowned_posts.length, 1);
+  assert.equal(auditCheck.report.mutated_comments_count, 1);
+  assert.equal(auditCheck.sanitizedState.momentsState.posts[0].comments[0].is_private_to_initiator, true);
+
+  // Bystander CANNOT hijack a PUBLIC legacy post merely by copying its public contact!
+  const hijackAttempt = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_anon_public/action",
+    headers: { Authorization: `Bearer ${bystanderToken}` },
+    body: { action: "CLAIM_OWNERSHIP", contact_proof: "QQ: 88886666" }
+  });
+  assert.equal(hijackAttempt.status, 403);
+
+  // Verified original author with bound student_no matching "20***01" + contact_proof CAN claim their legacy post!
+  app.store.schoolBindings.set("bind_owner_claim_1", {
+    id: "bind_owner_claim_1",
+    cloud_user_id: owner.id,
+    school_id: "haut",
+    student_no: "2024990001",
+    status: "DELEGATED_ACTIVE",
+    revoked_at: null
+  });
+  app.store.indexUserScoped("schoolBindings", "bind_owner_claim_1", owner.id);
+
+  const verifiedClaimRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${ownerToken}` },
+    body: { action: "CLAIM_OWNERSHIP", contact_proof: "wx_owner_bound_01" }
+  });
+  assert.equal(verifiedClaimRes.status, 200);
+  assert.equal(verifiedClaimRes.body.data.is_owner, true);
+  assert.equal(verifiedClaimRes.body.data.is_legacy_unowned, false);
+
+  // Admin CAN handle contact requests and resolve/delete unclaimable legacy anonymous posts!
+  const adminUser = app.store.findOrCreateCloudUser({
+    issuer: "https://auth.yellowpeachxgp.com",
+    subject: "sub_moments_admin",
+    username: "moments_admin",
+    displayName: "平台管理员",
+    role: "admin"
+  });
+  const adminToken = app.identity.issueDeviceSession(adminUser, "dev_admin").access_token;
+
+  const adminListLegacyReqs = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/posts/mp_legacy_anon_public/contact-requests",
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(adminListLegacyReqs.status, 200);
+  assert.equal(adminListLegacyReqs.body.data.can_manage, true);
+  assert.equal(adminListLegacyReqs.body.data.requests.length, 1);
+
+  const adminApproveLegacyReq = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_anon_public/contact-requests/mcr_legacy_req_1/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: { action: "APPROVE", reply_message: "管理员核验通过" }
+  });
+  assert.equal(adminApproveLegacyReq.status, 200);
+  assert.equal(adminApproveLegacyReq.body.data.status, "APPROVED");
+
+  const adminResolveLegacy = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_anon_public/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: { action: "RESOLVE" }
+  });
+  assert.equal(adminResolveLegacy.status, 200);
+  assert.equal(adminResolveLegacy.body.data.status, "RESOLVED");
 });

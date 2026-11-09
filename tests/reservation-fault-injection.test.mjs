@@ -1160,3 +1160,151 @@ test("Fault Injection 11 (Prewarm Missing Metadata & Date Mismatch, Legacy Auth 
   assert.equal(migratedLegacyPlan.user_intent_state, "NEEDS_RECONFIRMATION");
   assert.equal(migratedLegacyPlan.enabled, false);
 });
+
+test("Fault Injection 12 (Strict Cancellation Readback Formats): Malformed crrentbooking / mybookingInProgress / bookinglist responses or missing explicit cancelled record MUST return CANCEL_RESULT_UNKNOWN", async () => {
+  const provider = new HautLibraryProvider({});
+  const secret = JSON.stringify({
+    student_no: "2026990101",
+    raw_token: "tok_cancel_strict_format_0123456789_abcdef"
+  });
+  const binding = { student_no: "2026990101" };
+
+  // Case A: crrentbooking omits numeric code: 200 (e.g. { data: null } or { code: "500", data: null })
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 0, rows: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
+      };
+    }
+    return { code: 200 };
+  };
+  const resMissingCurCode = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resMissingCurCode.cancelled, false);
+  assert.equal(resMissingCurCode.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  // Case B: mybookingInProgress omits numeric code: 200 or omits explicit total (e.g. { code: "500", rows: [] } or { code: 200, rows: [] })
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: "500", rows: [], total: 0 };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
+      };
+    }
+    return { code: 200 };
+  };
+  const resStringInProgCode = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resStringInProgCode.cancelled, false);
+  assert.equal(resStringInProgCode.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, rows: [] }; // missing total!
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
+      };
+    }
+    return { code: 200 };
+  };
+  const resMissingTotal = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resMissingTotal.cancelled, false);
+  assert.equal(resMissingTotal.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  // Case C: bookinglist omits rows array ({ code: 200 }) or omits targetBookingId cancelled record ({ code: 200, total: 0, rows: [] })
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 0, rows: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return { code: 200 }; // missing rows!
+    }
+    return { code: 200 };
+  };
+  const resMissingHistRows = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resMissingHistRows.cancelled, false);
+  assert.equal(resMissingHistRows.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "ok" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return { code: 200, total: 0, rows: [] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return { code: 200, total: 0, rows: [] }; // no explicit cancelled record for 99887766!
+    }
+    return { code: 200 };
+  };
+  const resNoExplicitEvidence = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resNoExplicitEvidence.cancelled, false);
+  assert.equal(resNoExplicitEvidence.outcome, "CANCEL_RESULT_UNKNOWN");
+
+  // Case D: Complete, well-formed active lists + explicit cancelled record for 99887766 -> SCHOOL_CANCELLED
+  provider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "取消成功" };
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+      return {
+        code: 200,
+        total: 1,
+        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
+      };
+    }
+    return { code: 200 };
+  };
+  const resAuthoritativeOk = await provider.cancelLiveSeatBooking({
+    decryptedSecret: secret,
+    binding,
+    externalBookingId: "99887766"
+  });
+  assert.equal(resAuthoritativeOk.cancelled, true);
+  assert.equal(resAuthoritativeOk.outcome, "SCHOOL_CANCELLED");
+  assert.equal(resAuthoritativeOk.school_cancellation_state, "SCHOOL_CANCELLED");
+});

@@ -679,12 +679,48 @@ export class TripleScheduleEngine {
     nowMs = Date.now()
   ) {
     const ts = new Date(nowMs).toISOString();
-    const externalBookingId =
+    const externalBookingId = String(
       bookingResult?.externalBookingId ||
-      job.external_booking_id ||
-      job.pending_external_booking_id ||
-      attemptRecord?.external_booking_id ||
-      `haut_confirmed_${job.id.slice(0, 8)}`;
+        job.external_booking_id ||
+        job.pending_external_booking_id ||
+        attemptRecord?.external_booking_id ||
+        ""
+    ).trim();
+    const intentState =
+      job.user_intent_state === "STOP_REQUESTED" ? "STOP_REQUESTED" : "REVOKED";
+    if (!externalBookingId) {
+      if (plan) {
+        plan.enabled = false;
+        plan.user_intent_state = intentState;
+      }
+      job.user_intent_state = intentState;
+      job.external_execution_state = "RESULT_UNKNOWN";
+      job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
+      job.billing_state = "HELD_PENDING_REVIEW";
+      job.last_error_code = "BOOKING_RESULT_UNKNOWN";
+      job.last_diagnostic_message =
+        "委托已停止，但缺少完整的学校预约编号凭据，已转入待核对状态（禁止盲目重试或升级为已确认）";
+      job.state = "RESULT_UNKNOWN";
+      job.state_version += 1;
+      this.store.syncJobDisplayStatus?.(job);
+      if (event) {
+        event.status = "RESULT_UNKNOWN";
+        event.actual_at = ts;
+      }
+      if (typeof this.store.flushSnapshotSync === "function") {
+        this.store.flushSnapshotSync();
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
+      return {
+        job,
+        event,
+        schoolReservation: null,
+        order: null,
+        next_job_id: null,
+        remaining_days: 0
+      };
+    }
     const regionAlias =
       bookingResult?.regionAlias ||
       attemptRecord?.candidate_region_name ||
@@ -695,8 +731,6 @@ export class TripleScheduleEngine {
       attemptRecord?.candidate_seat_name ||
       plan?.candidate_seats?.[0] ||
       "N4-088";
-    const intentState =
-      job.user_intent_state === "STOP_REQUESTED" ? "STOP_REQUESTED" : "REVOKED";
     const evidenceSha256 =
       bookingResult?.evidenceSha256 ||
       crypto
