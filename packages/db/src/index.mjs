@@ -506,6 +506,88 @@ export function listMigrations() {
   });
 }
 
+export function simulateMigration0004OnCatalog(
+  catalog,
+  { direction = "up", currentSchema = "public" } = {}
+) {
+  const m0004 = listMigrations().find(
+    (m) => m.version === "0004_cloud_users_status_check_forward"
+  );
+  if (!m0004) throw new Error("Missing 0004_cloud_users_status_check_forward migration");
+  const sqlText = direction === "down" ? m0004.downSql : m0004.upSql;
+  const regexMatch = sqlText.match(/~\*\s*'(\^CHECK[\s\S]*?\$)'/);
+  if (!regexMatch) {
+    throw new Error(`Migration 0004 (${direction}) missing anchored status-domain regex`);
+  }
+  const unescapedPattern = regexMatch[1].replace(/''/g, "'");
+  const domainDefRegex = new RegExp(unescapedPattern, "i");
+  const targetSchema = currentSchema || "public";
+
+  const nextConstraints = catalog.constraints.map((c) => ({ ...c }));
+  const nextRows = (catalog.rows || []).map((r) => ({ ...r }));
+
+  if (direction === "down") {
+    for (const row of nextRows) {
+      if (
+        row.schema === targetSchema &&
+        row.table === "cloud_users" &&
+        row.status === "DELETED"
+      ) {
+        row.status = "DELETION_REQUESTED";
+      }
+    }
+  }
+
+  const shouldDrop = (con) => {
+    if (con.schema !== targetSchema) return false;
+    if (con.table !== "cloud_users") return false;
+    if (!["r", "p"].includes(con.relkind || "r")) return false;
+    if (con.contype !== "c") return false;
+    if (!Array.isArray(con.columns) || con.columns.length !== 1) return false;
+    if (con.columns[0] !== "status") return false;
+    const def = String(con.definition || "");
+    if (
+      !def.includes("'ACTIVE'") ||
+      !def.includes("'DISABLED'") ||
+      !def.includes("'DELETION_REQUESTED'")
+    ) {
+      return false;
+    }
+    const stripped = def.replace(/::(character varying|varchar|text)/gi, "");
+    return domainDefRegex.test(stripped);
+  };
+
+  const surviving = nextConstraints.filter((c) => !shouldDrop(c));
+  const duplicateName = surviving.find(
+    (c) =>
+      c.schema === targetSchema &&
+      c.table === "cloud_users" &&
+      c.name === "cloud_users_status_check"
+  );
+  if (duplicateName) {
+    throw new Error(
+      `Constraint name collision on ${targetSchema}.cloud_users.cloud_users_status_check`
+    );
+  }
+  surviving.push({
+    schema: targetSchema,
+    table: "cloud_users",
+    relkind: "r",
+    contype: "c",
+    name: "cloud_users_status_check",
+    columns: ["status"],
+    definition:
+      direction === "down"
+        ? "CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'DISABLED'::text, 'DELETION_REQUESTED'::text])))"
+        : "CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'DISABLED'::text, 'DELETION_REQUESTED'::text, 'DELETED'::text])))"
+  });
+
+  return {
+    constraints: surviving,
+    rows: nextRows
+  };
+}
+
 export class CloudDatabaseStore {
   constructor({
     snapshotPath = null,

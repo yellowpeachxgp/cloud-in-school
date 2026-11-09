@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { computeS256Challenge } from "../packages/identity/src/index.mjs";
 import { resolvePickupCode, PROVIDER_AUTHORITY_MATRIX } from "../packages/parcel-hub/src/index.mjs";
-import { listMigrations } from "../packages/db/src/index.mjs";
+import { listMigrations, simulateMigration0004OnCatalog } from "../packages/db/src/index.mjs";
 
 test("Unit: OIDC BFF + PKCE S256 + Single-Use App Ticket + Refresh Family Rotation (AUTH-001..020)", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
@@ -179,13 +179,173 @@ test("Unit: Database Migrations have paired Up and Down SQL files, forward 0004 
   // Must alter existing cloud_users CHECK constraint in-place without dropping/truncating cloud_users
   assert.ok(!/DROP\s+TABLE\s+.*cloud_users/i.test(m0004.upSql));
   assert.ok(!/TRUNCATE\s+.*cloud_users/i.test(m0004.upSql));
-  assert.ok(m0004.upSql.includes("ALTER TABLE cloud_users"));
+  assert.ok(!/ILIKE\s+'%status%'/i.test(m0004.upSql), "Must NOT use broad ILIKE '%status%' drop");
+  assert.ok(!/ILIKE\s+'%status%'/i.test(m0004.downSql), "Down migration must NOT use broad ILIKE '%status%' drop");
+  assert.ok(m0004.upSql.includes("nsp.nspname = v_schema"));
+  assert.ok(m0004.upSql.includes("cardinality(con.conkey) = 1"));
+  assert.ok(m0004.upSql.includes("att.attname = 'status'"));
   assert.ok(m0004.upSql.includes("'DELETED'"));
   assert.ok(m0004.upSql.includes("pg_constraint"));
   // Down migration must normalize DELETED rows back to DELETION_REQUESTED before restoring 3-value check so existing data survives rollback
-  assert.ok(m0004.downSql.includes("UPDATE cloud_users"));
-  assert.ok(m0004.downSql.includes("SET status = 'DELETION_REQUESTED'"));
+  assert.ok(m0004.downSql.includes("SET status = ''DELETION_REQUESTED'' WHERE status = ''DELETED''"));
+  assert.ok(m0004.downSql.includes("nsp.nspname = v_schema"));
+  assert.ok(m0004.downSql.includes("cardinality(con.conkey) = 1"));
   assert.ok(!/DROP\s+TABLE\s+.*cloud_users/i.test(m0004.downSql));
+
+  // Verify compound CHECK, non-domain status CHECK, custom constraint names (= ANY / IN / OR), multi-schema isolation, idempotent UP, and DOWN rollback!
+  const initialCatalog = {
+    constraints: [
+      {
+        schema: "public",
+        table: "cloud_users",
+        relkind: "r",
+        contype: "c",
+        name: "chk_custom_user_status_v1",
+        columns: ["status"],
+        definition:
+          "CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'DISABLED'::text, 'DELETION_REQUESTED'::text])))"
+      },
+      {
+        schema: "public",
+        table: "cloud_users",
+        relkind: "r",
+        contype: "c",
+        name: "chk_deleted_requires_deleted_at",
+        columns: ["status", "deleted_at"],
+        definition: "CHECK (((status = 'DELETED'::text) = (deleted_at IS NOT NULL)))"
+      },
+      {
+        schema: "public",
+        table: "cloud_users",
+        relkind: "r",
+        contype: "c",
+        name: "chk_status_nonblank_upper",
+        columns: ["status"],
+        definition: "CHECK (((btrim(status) <> ''::text) AND (status = upper(status))))"
+      },
+      {
+        schema: "audit",
+        table: "cloud_users",
+        relkind: "r",
+        contype: "c",
+        name: "audit_cloud_users_status_check",
+        columns: ["status"],
+        definition:
+          "CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'DISABLED'::text, 'DELETION_REQUESTED'::text])))"
+      },
+      {
+        schema: "public",
+        table: "school_account_bindings",
+        relkind: "r",
+        contype: "c",
+        name: "bindings_status_check",
+        columns: ["status"],
+        definition:
+          "CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'DISABLED'::text, 'DELETION_REQUESTED'::text])))"
+      }
+    ],
+    rows: [
+      { schema: "public", table: "cloud_users", id: "u1", status: "DELETED" },
+      { schema: "public", table: "cloud_users", id: "u2", status: "ACTIVE" },
+      { schema: "audit", table: "cloud_users", id: "au1", status: "DELETED" }
+    ]
+  };
+
+  // 1) First UP run: upgrades custom-named status domain constraint on public.cloud_users ONLY
+  const afterUp1 = simulateMigration0004OnCatalog(initialCatalog, {
+    direction: "up",
+    currentSchema: "public"
+  });
+  assert.ok(
+    !afterUp1.constraints.some((c) => c.name === "chk_custom_user_status_v1"),
+    "Custom-named status domain CHECK on public.cloud_users must be replaced"
+  );
+  assert.ok(
+    afterUp1.constraints.some(
+      (c) =>
+        c.schema === "public" &&
+        c.table === "cloud_users" &&
+        c.name === "cloud_users_status_check" &&
+        c.definition.includes("'DELETED'")
+    )
+  );
+  assert.ok(
+    afterUp1.constraints.some((c) => c.name === "chk_deleted_requires_deleted_at"),
+    "Compound CHECK referencing status + deleted_at MUST survive!"
+  );
+  assert.ok(
+    afterUp1.constraints.some((c) => c.name === "chk_status_nonblank_upper"),
+    "Non-domain single-column status CHECK MUST survive!"
+  );
+  assert.ok(
+    afterUp1.constraints.some(
+      (c) => c.schema === "audit" && c.name === "audit_cloud_users_status_check"
+    ),
+    "Other schema (audit.cloud_users) CHECK MUST NOT be touched!"
+  );
+  assert.ok(
+    afterUp1.constraints.some((c) => c.name === "bindings_status_check"),
+    "Other table CHECK MUST NOT be touched!"
+  );
+
+  // 2) Repeated UP run (idempotency): succeeds without duplicate constraint and preserves all other checks
+  const afterUp2 = simulateMigration0004OnCatalog(afterUp1, {
+    direction: "up",
+    currentSchema: "public"
+  });
+  assert.equal(
+    afterUp2.constraints.filter(
+      (c) => c.schema === "public" && c.table === "cloud_users" && c.name === "cloud_users_status_check"
+    ).length,
+    1
+  );
+  assert.ok(afterUp2.constraints.some((c) => c.name === "chk_deleted_requires_deleted_at"));
+
+  // 3) Also verify OR-form and IN-form status domain definitions match cleanly
+  for (const altDef of [
+    "CHECK (status IN ('ACTIVE', 'DISABLED', 'DELETION_REQUESTED'))",
+    "CHECK (((status = 'ACTIVE'::character varying) OR (status = 'DISABLED'::character varying) OR (status = 'DELETION_REQUESTED'::character varying)))"
+  ]) {
+    const altRes = simulateMigration0004OnCatalog(
+      {
+        constraints: [
+          {
+            schema: "tenant_a",
+            table: "cloud_users",
+            relkind: "r",
+            contype: "c",
+            name: "custom_or_in_status_chk",
+            columns: ["status"],
+            definition: altDef
+          }
+        ],
+        rows: []
+      },
+      { direction: "up", currentSchema: "tenant_a" }
+    );
+    assert.equal(altRes.constraints.length, 1);
+    assert.equal(altRes.constraints[0].name, "cloud_users_status_check");
+  }
+
+  // 4) DOWN rollback: normalizes DELETED -> DELETION_REQUESTED ONLY in public.cloud_users and restores 3-value check while preserving compound & audit checks
+  const afterDown = simulateMigration0004OnCatalog(afterUp2, {
+    direction: "down",
+    currentSchema: "public"
+  });
+  assert.equal(afterDown.rows.find((r) => r.id === "u1").status, "DELETION_REQUESTED");
+  assert.equal(afterDown.rows.find((r) => r.id === "u2").status, "ACTIVE");
+  assert.equal(
+    afterDown.rows.find((r) => r.id === "au1").status,
+    "DELETED",
+    "audit.cloud_users rows must NOT be mutated when rolling back public"
+  );
+  const downStatusChk = afterDown.constraints.find(
+    (c) => c.schema === "public" && c.table === "cloud_users" && c.name === "cloud_users_status_check"
+  );
+  assert.ok(downStatusChk && !downStatusChk.definition.includes("'DELETED'"));
+  assert.ok(afterDown.constraints.some((c) => c.name === "chk_deleted_requires_deleted_at"));
+  assert.ok(afterDown.constraints.some((c) => c.name === "chk_status_nonblank_upper"));
+  assert.ok(afterDown.constraints.some((c) => c.name === "audit_cloud_users_status_check"));
 });
 
 test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (#9)", async () => {
