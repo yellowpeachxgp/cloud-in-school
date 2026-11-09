@@ -829,3 +829,160 @@ test("Fault Injection 9 (Morning 07:00:00 Root-Cause Regression): Wave 0 refresh
     "Must never skip #1 preferred seat (601) to book #2 seat (660) when #1 seat is merely in temporary 1122 Redis lock"
   );
 });
+
+test("Fault Injection 10 (Section 3.2 & 3.3 Gate): Explicit 08:00-22:00 slot_window is preserved verbatim, invalid replace_existing preserves old plan/events, expired prewarm is invalidated, and missing snapshotPath in requireDurableSnapshot mode fails closed", async () => {
+  const tokenNowMs = Date.parse("2026-11-17T06:00:00+08:00");
+  const fireNowMs = Date.parse("2026-11-17T07:00:02+08:00");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+  // 1. Create plan with explicit slot_window "08:00-22:00"
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_sec3_gate_10a"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-17",
+      target_local_time: "07:00:00",
+      slot_window: "08:00-22:00",
+      area_name: "四层西书库北区",
+      candidate_seats: ["05桌 A座"],
+      preferred_area_ids: ["四层西书库北区"],
+      preferred_seat_ids: ["05桌 A座"]
+    },
+    nowMs: tokenNowMs
+  });
+  assert.equal(planRes.status, 201);
+  const planId = planRes.body.data.plan_id;
+  const jobId = planRes.body.data.job_id;
+  const plan = app.store.reservationPlans.get(planId);
+  const job = app.store.reservationJobs.get(jobId);
+  assert.equal(plan.has_explicit_slot_window, true);
+  assert.equal(plan.slot_window, "08:00-22:00");
+
+  // 2. Invalid replace_existing (out-of-window time 06:59:59) MUST NOT cancel the existing plan/job/events!
+  const invalidReplaceRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_sec3_gate_10b_invalid"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-17",
+      target_local_time: "06:59:59",
+      area_name: "四层西书库北区",
+      candidate_seats: ["06桌 B座"],
+      replace_existing: true
+    },
+    nowMs: tokenNowMs + 500
+  });
+  assert.equal(invalidReplaceRes.status, 422);
+  assert.equal(plan.enabled, true, "Existing plan must remain enabled when replacement validation fails");
+  assert.equal(job.state, "ARMED", "Existing job must remain ARMED when replacement validation fails");
+  assert.ok(
+    app.store.eventsForJob(jobId).every((ev) => ev.status === "ARMED"),
+    "Existing schedule events must remain ARMED when replacement validation fails"
+  );
+
+  // 3. Prewarm preserves explicit 08:00-22:00 even when region open_time is 07:30-22:00
+  app.schoolProvider.authenticateHautSession = async () => ({
+    rawToken: "tok_sec3_prewarm_0123456789_abcdef_xyz",
+    userInfo: { userNo: "2026990101", userName: "Student" }
+  });
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/building")) {
+      return { code: 200, builderInfo: [{ id: "1", buildingName: "莲花街图书馆" }] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/region")) {
+      return {
+        code: 200,
+        regionList: [
+          {
+            id: 13,
+            regionName: "四层西书库北区",
+            openDate: "07:30",
+            closeDate: "22:00",
+            num: 100,
+            cannum: 80,
+            isOpen: 1
+          }
+        ]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      return {
+        code: 200,
+        layout: { regionName: "四层西书库北区" },
+        seatList: [{ id: 601, seatName: "四层西书库北区 05桌 A座", seatStatus: 2 }]
+      };
+    }
+    return { code: 200 };
+  };
+
+  await app.reservationEngine.runScheduleEvent(jobId, "PRECHECK", Date.parse("2026-11-17T06:30:00+08:00"));
+  assert.ok(job.prewarmed_targets, "PRECHECK must populate scoped prewarmed_targets");
+  assert.equal(
+    job.prewarmed_targets.start_full,
+    "2026-11-17 08:00:00",
+    "Explicit 08:00-22:00 must NOT be replaced by school open_time 07:30:00"
+  );
+  assert.equal(job.prewarmed_targets.binding_id, bindingId);
+  assert.equal(job.prewarmed_targets.student_no, "2026990101");
+
+  // 4. If FINAL_CHECK prewarm fails, stale prewarmed_targets must be invalidated (set to null)
+  app.schoolProvider.wslibGetJson = async () => {
+    throw new Error("Network error during FINAL_CHECK prewarm");
+  };
+  await app.reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", Date.parse("2026-11-17T06:55:00+08:00"));
+  assert.equal(job.prewarmed_targets, null, "Failed FINAL_CHECK refresh must invalidate stale prewarmed_targets");
+
+  // 5. requireDurableSnapshot=true without snapshotPath must fail-closed before any external write
+  app.store.requireDurableSnapshot = true;
+  app.store.snapshotPath = null;
+  let writeAttemptedWithoutSnapshotPath = false;
+  app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/building")) {
+      return { code: 200, builderInfo: [{ id: "1", buildingName: "莲花街图书馆" }] };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/region")) {
+      return {
+        code: 200,
+        regionList: [
+          {
+            id: 13,
+            regionName: "四层西书库北区",
+            openDate: "07:30",
+            closeDate: "22:00",
+            num: 100,
+            cannum: 80,
+            isOpen: 1
+          }
+        ]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      return {
+        code: 200,
+        layout: { regionName: "四层西书库北区" },
+        seatList: [{ id: 601, seatName: "四层西书库北区 05桌 A座", seatStatus: 2 }]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      writeAttemptedWithoutSnapshotPath = true;
+      return { code: 200, bookingid: "should_not_happen" };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const fireBlockedRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+  assert.equal(writeAttemptedWithoutSnapshotPath, false, "Must fail-closed before addbooking when requireDurableSnapshot=true and snapshotPath is missing");
+  assert.equal(fireBlockedRes.job.last_error_code, "STORAGE_PERSISTENCE_FAILED");
+});

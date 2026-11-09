@@ -506,10 +506,13 @@ export function listMigrations() {
 export class CloudDatabaseStore {
   constructor({
     snapshotPath = null,
+    requireDurableSnapshot =
+      process.env.NODE_ENV === "production" || process.env.CLOUD_REQUIRE_DURABLE_SNAPSHOT === "1",
     pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
     adminSsoSubjects = null
   } = {}) {
     this.snapshotPath = snapshotPath;
+    this.requireDurableSnapshot = Boolean(requireDurableSnapshot);
     this.pricingMicropeach = pricingMicropeach;
     this.adminSsoSubjects = new Set(
       (
@@ -809,7 +812,15 @@ export class CloudDatabaseStore {
   }
 
   _flushSnapshotSync({ strict = false } = {}) {
-    if (!this.snapshotPath) return;
+    if (!this.snapshotPath) {
+      if (strict && this.requireDurableSnapshot) {
+        throw new ContractError(
+          "STORAGE_PERSISTENCE_FAILED",
+          "Durable snapshotPath is required before external school write (fail-closed)"
+        );
+      }
+      return;
+    }
     this.pruneAuthEphemera();
     try {
       const dir = path.dirname(this.snapshotPath);

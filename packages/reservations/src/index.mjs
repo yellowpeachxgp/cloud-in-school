@@ -208,27 +208,7 @@ export class TripleScheduleEngine {
           `A reservation for ${payload.target_local_date} is already dispatched, awaiting verification (${unreplaceableJob.state}), or confirmed on school; refusing duplicate submission`
         );
       }
-      if (payload.replace_existing === true) {
-        const ts = new Date(nowMs).toISOString();
-        for (const dupJob of matchingJobsForDate) {
-          dupJob.user_intent_state = "STOP_REQUESTED";
-          dupJob.external_execution_state = "NOT_DISPATCHED";
-          dupJob.state = "CANCELLED";
-          dupJob.state_version += 1;
-          this.store.syncJobDisplayStatus?.(dupJob);
-          for (const ev of this.store.eventsForJob(dupJob.id)) {
-            if (ev.status === "ARMED") {
-              ev.status = "ABORTED_REVOKED";
-              ev.actual_at = ts;
-            }
-          }
-          const oldPlan = this.store.reservationPlans.get(dupJob.plan_id);
-          if (oldPlan) {
-            oldPlan.enabled = false;
-            oldPlan.user_intent_state = "STOP_REQUESTED";
-          }
-        }
-      } else {
+      if (payload.replace_existing !== true) {
         throw new ContractError(
           "CONFLICT",
           `An active reservation plan/job already exists for ${payload.target_local_date}`
@@ -257,6 +237,42 @@ export class TripleScheduleEngine {
       "CREATE_BOOKING",
       schoolIntegration
     );
+
+    const explicitSlotWindow =
+      typeof payload.slot_window === "string" && payload.slot_window.trim().length > 0
+        ? payload.slot_window.trim()
+        : null;
+    if (
+      explicitSlotWindow &&
+      !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\s*-\s*([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(
+        explicitSlotWindow
+      )
+    ) {
+      throw new ContractError("BAD_REQUEST", `Invalid slot_window format: ${explicitSlotWindow}`);
+    }
+
+    // Only after full schedule, capability, and slot_window validation succeeds do we replace existing queued jobs!
+    if (matchingJobsForDate.length > 0 && payload.replace_existing === true) {
+      const ts = new Date(nowMs).toISOString();
+      for (const dupJob of matchingJobsForDate) {
+        dupJob.user_intent_state = "STOP_REQUESTED";
+        dupJob.external_execution_state = "NOT_DISPATCHED";
+        dupJob.state = "CANCELLED";
+        dupJob.state_version += 1;
+        this.store.syncJobDisplayStatus?.(dupJob);
+        for (const ev of this.store.eventsForJob(dupJob.id)) {
+          if (ev.status === "ARMED") {
+            ev.status = "ABORTED_REVOKED";
+            ev.actual_at = ts;
+          }
+        }
+        const oldPlan = this.store.reservationPlans.get(dupJob.plan_id);
+        if (oldPlan) {
+          oldPlan.enabled = false;
+          oldPlan.user_intent_state = "STOP_REQUESTED";
+        }
+      }
+    }
 
     const planId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
@@ -299,7 +315,8 @@ export class TripleScheduleEngine {
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
       area_name: payload.area_name || "4楼北自习区",
       candidate_seats: payload.candidate_seats || payload.preferred_seat_ids || ["4N-001"],
-      slot_window: payload.slot_window || "07:30-22:00",
+      slot_window: explicitSlotWindow || "07:30-22:00",
+      has_explicit_slot_window: Boolean(explicitSlotWindow),
       preferences_json: {
         preferred_area_ids: payload.preferred_area_ids || (payload.area_code ? [payload.area_code] : ["area-haut-north-4f"]),
         preferred_seat_ids: payload.preferred_seat_ids || payload.candidate_seats || ["N4-088"],
@@ -955,14 +972,21 @@ export class TripleScheduleEngine {
                 if (prewarmRes?.auth) {
                   this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
                 }
-                if (prewarmRes?.prewarmed) {
+                if (
+                  prewarmRes?.prewarmed &&
+                  Array.isArray(prewarmRes.prewarmed.candidate_seats) &&
+                  prewarmRes.prewarmed.candidate_seats.length > 0
+                ) {
                   job.prewarmed_targets = prewarmRes.prewarmed;
+                } else {
+                  job.prewarmed_targets = null;
                 }
               } else {
                 const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
                 this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
               }
             } catch {
+              job.prewarmed_targets = null;
               // Will retry at FINAL_CHECK
             }
           }
@@ -1011,14 +1035,21 @@ export class TripleScheduleEngine {
                 if (prewarmRes?.auth) {
                   this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
                 }
-                if (prewarmRes?.prewarmed) {
+                if (
+                  prewarmRes?.prewarmed &&
+                  Array.isArray(prewarmRes.prewarmed.candidate_seats) &&
+                  prewarmRes.prewarmed.candidate_seats.length > 0
+                ) {
                   job.prewarmed_targets = prewarmRes.prewarmed;
+                } else {
+                  job.prewarmed_targets = null;
                 }
               } else {
                 const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
                 this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
               }
             } catch (err) {
+              job.prewarmed_targets = null;
               event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
             }
           }

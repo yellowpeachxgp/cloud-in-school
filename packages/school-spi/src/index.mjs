@@ -106,10 +106,12 @@ export function resolvePlanTimeWindow(
     const endHm = swMatch[3];
     const endSec = swMatch[4] || "00";
     const normalizedSw = `${startHm}-${endHm}`;
-    const isStandardFullDayDefault =
-      (normalizedSw === "07:30-22:00" || normalizedSw === "08:00-22:00") &&
-      plan?.has_explicit_slot_window !== true;
-    if (isStandardFullDayDefault && fallbackStartFull && fallbackEndFull) {
+    // Only when the plan did NOT explicitly specify a slot_window and holds the implicit "07:30-22:00" placeholder
+    // do we fall back to the school's dynamic open window; any explicit user slot_window (including "08:00-22:00")
+    // is preserved verbatim throughout prewarm, submission, and readback verification!
+    const isImplicitDefaultOnly =
+      normalizedSw === "07:30-22:00" && plan?.has_explicit_slot_window === false;
+    if (isImplicitDefaultOnly && fallbackStartFull && fallbackEndFull) {
       const fbStart = extractDateAndTimeHm(fallbackStartFull);
       const fbEnd = extractDateAndTimeHm(fallbackEndFull);
       if (fbStart && fbEnd && fbStart.date === dateStr) {
@@ -125,7 +127,7 @@ export function resolvePlanTimeWindow(
       startFull: `${dateStr} ${startHm}:${startSec}`,
       endFull: `${dateStr} ${endHm}:${endSec}`,
       slotWindow: normalizedSw,
-      hasExplicitSlotWindow: !isStandardFullDayDefault
+      hasExplicitSlotWindow: !isImplicitDefaultOnly
     };
   }
   return {
@@ -1706,13 +1708,24 @@ export class HautLibraryProvider {
       }
     }
 
+    if (matchedCandidateSeats.length === 0) {
+      return { auth, prewarmed: null };
+    }
+
     const openTime = cleanSpiText(primaryRegion.open_time, "07:30") || "07:30";
     const closeTime = cleanSpiText(primaryRegion.close_time, "22:00") || "22:00";
     const openFull = `${targetDate} ${openTime.split(":").length === 2 ? `${openTime}:00` : openTime}`;
     const closeFull = `${targetDate} ${closeTime.split(":").length === 2 ? `${closeTime}:00` : closeTime}`;
     const resolvedPrewarmWin = resolvePlanTimeWindow(targetDate, plan, openFull, closeFull);
+    const nowPrewarmMs = Date.now();
 
     const prewarmed = {
+      binding_id: binding.id,
+      student_no: String(binding.student_no || "").trim(),
+      auth_version: Number(job.auth_version ?? plan?.auth_version ?? binding.auth_version ?? 1),
+      plan_generation: Number(plan?.generation ?? job.generation ?? 1),
+      target_local_date: targetDate,
+      slot_window: resolvedPrewarmWin.slotWindow || null,
       region_id: primaryRegion.id,
       region_name: primaryRegion.region_name,
       open_time: openTime,
@@ -1720,7 +1733,8 @@ export class HautLibraryProvider {
       start_full: resolvedPrewarmWin.startFull,
       end_full: resolvedPrewarmWin.endFull,
       candidate_seats: matchedCandidateSeats,
-      prewarmed_at: new Date().toISOString()
+      prewarmed_at: new Date(nowPrewarmMs).toISOString(),
+      expires_at: new Date(nowPrewarmMs + 45 * 60 * 1000).toISOString()
     };
     return { auth, prewarmed };
   }
@@ -1817,7 +1831,25 @@ export class HautLibraryProvider {
       )
         .map((s) => String(s).trim())
         .filter(Boolean);
-      const prewarmed = job.prewarmed_targets;
+      const rawPrewarmed = job.prewarmed_targets;
+      const nowEpochMs = nowInstant instanceof Date ? nowInstant.getTime() : Date.now();
+      const isPrewarmedValid = Boolean(
+        rawPrewarmed &&
+          Array.isArray(rawPrewarmed.candidate_seats) &&
+          rawPrewarmed.candidate_seats.length > 0 &&
+          (!rawPrewarmed.binding_id || rawPrewarmed.binding_id === binding.id) &&
+          (!rawPrewarmed.student_no ||
+            !binding.student_no ||
+            String(rawPrewarmed.student_no).trim() === String(binding.student_no).trim()) &&
+          (!rawPrewarmed.auth_version ||
+            Number(rawPrewarmed.auth_version) ===
+              Number(job.auth_version ?? plan?.auth_version ?? binding.auth_version ?? 1)) &&
+          (!rawPrewarmed.plan_generation ||
+            Number(rawPrewarmed.plan_generation) === Number(plan?.generation ?? job.generation ?? 1)) &&
+          (!rawPrewarmed.target_local_date || rawPrewarmed.target_local_date === datesToTry[0]) &&
+          (!rawPrewarmed.expires_at || Date.parse(rawPrewarmed.expires_at) >= nowEpochMs)
+      );
+      const prewarmed = isPrewarmedValid ? rawPrewarmed : null;
       const hasExplicitCandidateSeats =
         wantedSeats.length > 0 ||
         (Array.isArray(prewarmed?.candidate_seats) && prewarmed.candidate_seats.length > 0);
@@ -1828,8 +1860,8 @@ export class HautLibraryProvider {
       const isMorningOpeningWindow = fireLocalTime >= "07:00:00" && fireLocalTime < "07:25:00";
       const isExactOpeningBurst = fireLocalTime >= "07:00:00" && fireLocalTime <= "07:00:03";
 
-      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist, use read-only gate check and submit
-      // strictly in candidate order; stop immediately on any unknown write result or readback failure.
+      // Wave 0 Ultra-Fast Path: if prewarmed candidate seat IDs exist and pass scope/TTL validation,
+      // use read-only gate check and submit strictly in candidate order; stop immediately on any unknown write result or readback failure.
       if (
         prewarmed &&
         Array.isArray(prewarmed.candidate_seats) &&
