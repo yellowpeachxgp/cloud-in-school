@@ -723,3 +723,109 @@ test("Fault Injection 8 (Multi-Device & Engine Switch Coordination): Second devi
   assert.equal(planRes2.status, 409, "Must reject replace_existing when existing job is in RESULT_UNKNOWN");
   assert.equal(app.store.reservationJobs.get(jobId1).state, "RESULT_UNKNOWN");
 });
+
+test("Fault Injection 9 (Morning 07:00:00 Root-Cause Regression): Wave 0 refreshes expired 401 token instead of aborting as RESULT_UNKNOWN, and preserves #1 candidate seat priority when cand[0] hits temporary 1122 Redis lock", async () => {
+  const tokenNowMs = Date.parse("2026-11-16T06:00:00+08:00");
+  const fireNowMs = Date.parse("2026-11-16T07:00:01+08:00");
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: {
+      ...authHeaders,
+      "idempotency-key": "idem_morning_priority_9"
+    },
+    body: {
+      school_binding_id: bindingId,
+      consent_id: consentId,
+      target_local_date: "2026-11-16",
+      target_local_time: "07:00:00",
+      area_name: "四层西书库北区",
+      candidate_seats: ["05桌 A座", "07桌 F座"],
+      preferred_area_ids: ["四层西书库北区"],
+      preferred_seat_ids: ["05桌 A座", "07桌 F座"]
+    },
+    nowMs: tokenNowMs
+  });
+  assert.equal(planRes.status, 201);
+  const jobId = planRes.body.data.job_id;
+  const job = app.store.reservationJobs.get(jobId);
+  job.prewarmed_targets = {
+    region_id: 13,
+    region_name: "四层西书库北区",
+    open_time: "07:30",
+    close_time: "22:00",
+    start_full: "2026-11-16 07:30:00",
+    end_full: "2026-11-16 22:00:00",
+    candidate_seats: [
+      { id: 601, seat_id: 601, seat_name: "四层西书库北区 05桌 A座", short_name: "05桌 A座" },
+      { id: 660, seat_id: 660, seat_name: "四层西书库北区 07桌 F座", short_name: "07桌 F座" }
+    ]
+  };
+
+  let reauthed = false;
+  app.schoolProvider.authenticateHautSession = async () => {
+    reauthed = true;
+    return {
+      rawToken: "tok_refreshed_after_401_0123456789_abcdef_xyz",
+      userInfo: { userNo: "2026990101", userName: "Student" }
+    };
+  };
+
+  const addbookingCalls = [];
+  app.schoolProvider.wslibGetJson = async (pathAndQuery, rawToken) => {
+    if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+      return {
+        code: 200,
+        layout: { regionName: "四层西书库北区" },
+        seatList: [
+          { id: 601, seatName: "四层西书库北区 05桌 A座", seatStatus: 2 },
+          { id: 660, seatName: "四层西书库北区 07桌 F座", seatStatus: 2 }
+        ]
+      };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+      addbookingCalls.push({ pathAndQuery, rawToken });
+      if (addbookingCalls.length === 1) {
+        // Call 1: Overnight cached token expired (401)
+        const err = new Error("图书馆登录 Token 已过期");
+        err.code = "SCHOOL_AUTH_EXPIRED";
+        throw err;
+      }
+      if (addbookingCalls.length === 2) {
+        // Call 2 (after token refresh): cand[0] (601) hits temporary 1122 seat lock at 07:00:01
+        return { code: 1122, msg: "本座位已锁定 请稍后再试!" };
+      }
+      // Call 3 (next wave after lock clears): must still target cand[0] (601), NOT skip to cand[1] (660)!
+      return { code: 200, bookingid: "9149999", msg: "成功" };
+    }
+    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+      return {
+        code: 200,
+        data: {
+          id: "9149999",
+          seatId: 601,
+          seatName: "四层西书库北区 05桌 A座",
+          regionName: "四层西书库北区",
+          buildingLayerRegionId: 13,
+          startDate: "2026-11-16 07:30:00",
+          endDate: "2026-11-16 22:00:00",
+          bookingStatus: 1
+        }
+      };
+    }
+    return { code: 200, rows: [] };
+  };
+
+  const fireRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+  assert.equal(reauthed, true, "Must automatically re-authenticate when overnight cached token returns 401");
+  assert.equal(fireRes.job.state, "CONFIRMED");
+  assert.equal(fireRes.schoolReservation.external_booking_id, "9149999");
+  assert.equal(fireRes.schoolReservation.seat_alias, "四层西书库北区 05桌 A座");
+  assert.ok(
+    addbookingCalls.every((c) => c.pathAndQuery.includes("seatid=601")),
+    "Must never skip #1 preferred seat (601) to book #2 seat (660) when #1 seat is merely in temporary 1122 Redis lock"
+  );
+});

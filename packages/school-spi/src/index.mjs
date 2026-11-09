@@ -1,3 +1,5 @@
+import dns from "node:dns";
+try { dns.setDefaultResultOrder("ipv4first"); } catch {}
 import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
 
@@ -103,11 +105,27 @@ export function resolvePlanTimeWindow(
     const startSec = swMatch[2] || "00";
     const endHm = swMatch[3];
     const endSec = swMatch[4] || "00";
+    const normalizedSw = `${startHm}-${endHm}`;
+    const isStandardFullDayDefault =
+      (normalizedSw === "07:30-22:00" || normalizedSw === "08:00-22:00") &&
+      plan?.has_explicit_slot_window !== true;
+    if (isStandardFullDayDefault && fallbackStartFull && fallbackEndFull) {
+      const fbStart = extractDateAndTimeHm(fallbackStartFull);
+      const fbEnd = extractDateAndTimeHm(fallbackEndFull);
+      if (fbStart && fbEnd && fbStart.date === dateStr) {
+        return {
+          startFull: fallbackStartFull,
+          endFull: fallbackEndFull,
+          slotWindow: `${fbStart.hm}-${fbEnd.hm}`,
+          hasExplicitSlotWindow: false
+        };
+      }
+    }
     return {
       startFull: `${dateStr} ${startHm}:${startSec}`,
       endFull: `${dateStr} ${endHm}:${endSec}`,
-      slotWindow: `${startHm}-${endHm}`,
-      hasExplicitSlotWindow: true
+      slotWindow: normalizedSw,
+      hasExplicitSlotWindow: !isStandardFullDayDefault
     };
   }
   return {
@@ -1148,7 +1166,20 @@ export class HautLibraryProvider {
         rawToken
       );
     } catch (addErr) {
-      if (addErr?.code === "CONSENT_WITHDRAWN" || addErr?.code === "STORAGE_PERSISTENCE_FAILED") throw addErr;
+      if (
+        addErr?.code === "CONSENT_WITHDRAWN" ||
+        addErr?.code === "STORAGE_PERSISTENCE_FAILED" ||
+        addErr?.code === "SCHOOL_AUTH_EXPIRED"
+      ) {
+        if (addErr?.code === "SCHOOL_AUTH_EXPIRED" && typeof onAfterExternalWrite === "function") {
+          await onAfterExternalWrite(attemptRecord?.id, {
+            writeDispatched: false,
+            rawResponseCode: "401",
+            rawResponseMsg: "SCHOOL_AUTH_EXPIRED"
+          });
+        }
+        throw addErr;
+      }
       if (typeof onAfterExternalWrite === "function") {
         await onAfterExternalWrite(attemptRecord?.id, {
           writeDispatched: true,
@@ -1872,25 +1903,56 @@ export class HautLibraryProvider {
               continue;
             }
             if ((seatLockedUntilMs.get(cand.id) || 0) > Date.now()) {
+              // Strictly preserve candidate preference order: if the highest-priority remaining seat is in a temporary
+              // Redis lock (NOT permanently occupied by others), wait for it to unlock instead of skipping to cand[1]!
               hasLockedCandidate = true;
-              continue;
+              break;
             }
-            const step = await this.submitCandidateSeatAndVerify({
-              cand,
-              startFull: wave0Win.startFull,
-              endFull: wave0Win.endFull,
-              expectedSlotWindow: wave0Win.slotWindow,
-              targetDate: targetDateForPrewarmed,
-              regionId: prewarmed.region_id,
-              regionName: prewarmed.region_name || preferredArea,
-              candidateSeats: prewarmed.candidate_seats,
-              wantedSeats,
-              rawToken,
-              assertStillAuthorized,
-              isStillAuthorized,
-              onBeforeExternalWrite,
-              onAfterExternalWrite
-            });
+            let step;
+            try {
+              step = await this.submitCandidateSeatAndVerify({
+                cand,
+                startFull: wave0Win.startFull,
+                endFull: wave0Win.endFull,
+                expectedSlotWindow: wave0Win.slotWindow,
+                targetDate: targetDateForPrewarmed,
+                regionId: prewarmed.region_id,
+                regionName: prewarmed.region_name || preferredArea,
+                candidateSeats: prewarmed.candidate_seats,
+                wantedSeats,
+                rawToken,
+                assertStillAuthorized,
+                isStillAuthorized,
+                onBeforeExternalWrite,
+                onAfterExternalWrite
+              });
+            } catch (w0Err) {
+              if (w0Err?.code === "SCHOOL_AUTH_EXPIRED") {
+                const freshAuth = await this.authenticateHautSession(
+                  { ...credBundle, raw_token: "" },
+                  binding
+                );
+                rawToken = freshAuth.rawToken;
+                step = await this.submitCandidateSeatAndVerify({
+                  cand,
+                  startFull: wave0Win.startFull,
+                  endFull: wave0Win.endFull,
+                  expectedSlotWindow: wave0Win.slotWindow,
+                  targetDate: targetDateForPrewarmed,
+                  regionId: prewarmed.region_id,
+                  regionName: prewarmed.region_name || preferredArea,
+                  candidateSeats: prewarmed.candidate_seats,
+                  wantedSeats,
+                  rawToken,
+                  assertStillAuthorized,
+                  isStillAuthorized,
+                  onBeforeExternalWrite,
+                  onAfterExternalWrite
+                });
+              } else {
+                throw w0Err;
+              }
+            }
             if (step.action === "RETURN_FINAL") {
               return step.result;
             }
@@ -1911,7 +1973,7 @@ export class HautLibraryProvider {
                 seatLockedUntilMs.set(cand.id, Date.now() + 1050);
               }
               hasLockedCandidate = true;
-              continue;
+              break;
             }
           }
           if (permanentlyOccupiedIds.size >= prewarmed.candidate_seats.length) {
@@ -2061,7 +2123,7 @@ export class HautLibraryProvider {
                 if (permanentlyOccupiedInWave.has(seat.id)) continue;
                 if ((seatLockedInWave.get(seat.id) || 0) > Date.now()) {
                   hasLockedWave = true;
-                  continue;
+                  break;
                 }
                 const discWin = resolvePlanTimeWindow(
                   targetDate,
@@ -2105,7 +2167,7 @@ export class HautLibraryProvider {
                     seatLockedInWave.set(seat.id, Date.now() + 1050);
                   }
                   hasLockedWave = true;
-                  continue;
+                  break;
                 }
               }
             }

@@ -1433,6 +1433,33 @@ export class CloudDatabaseStore {
     const ts = new Date(nowMs).toISOString();
     let mutated = false;
 
+    // 0. Normalize legacy active consents & bindings missing auth_version or consent_id
+    for (const c of this.consents.values()) {
+      if (!c.withdrawn_at && c.auth_version === undefined) {
+        const uVer = Number(this.users.get(c.cloud_user_id)?.auth_version || 1);
+        c.auth_version = uVer;
+        mutated = true;
+      }
+    }
+    for (const b of this.schoolBindings.values()) {
+      if (!b.revoked_at && b.status !== "REVOKED") {
+        const uVer = Number(this.users.get(b.cloud_user_id)?.auth_version || 1);
+        if (b.auth_version === undefined) {
+          b.auth_version = uVer;
+          mutated = true;
+        }
+        if (!b.consent_id) {
+          const activeConsents = this.recordsForUser("consents", b.cloud_user_id).filter(
+            (c) => (c.school_id || DEFAULT_SCHOOL_ID) === b.school_id && !c.withdrawn_at
+          );
+          if (activeConsents.length > 0) {
+            b.consent_id = activeConsents[activeConsents.length - 1].id;
+            mutated = true;
+          }
+        }
+      }
+    }
+
     // 1. Recover in-flight attempts that crashed in DISPATCH_INTENT / DISPATCHED -> RESULT_UNKNOWN (never blind-retry!)
     for (const att of this.reservationAttempts.values()) {
       if (att.status === "DISPATCH_INTENT" || att.status === "DISPATCHED") {
