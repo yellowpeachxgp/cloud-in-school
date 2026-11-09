@@ -55,6 +55,38 @@ export function isWslibSeatLockedMessage(rawMsg, code = null) {
   return /本座位已锁定|已锁定.*稍后再试|seat\.10062/i.test(text);
 }
 
+/**
+ * Explicit terminal cancellation/release whitelist for `wslib.haut.edu.cn` (`spacelink` seatbook):
+ * Official `bookingStatus` codes:
+ *   1 = 待履约签到 (FULFILLED)
+ *   2 = 学习使用中 (LEARNING)
+ *   3 = 中途暂离中 (LEAVING)
+ *   4 = 续座学习中 (CONTINUED_LEARNING)
+ *   5 = 已取消     (CANCELLED - terminal release)
+ *   6 = 已签退     (SIGNED_OUT - terminal release)
+ *   7 = 已违约     (DEFAULTED - penalty, NOT confirmed seat cancellation!)
+ * Any intermediate ("取消处理中"), failure ("取消失败"), unknown code (0/8/9/""), or code/label contradiction
+ * MUST return false so the caller keeps CANCEL_RESULT_UNKNOWN.
+ */
+export function isConfirmedSchoolCancelTerminalRecord(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  const code = String(row.bookingStatus ?? "").trim();
+  const rawLabel = String(row.bookingStatusName ?? row.statusName ?? "").trim();
+  if (code !== "5" && code !== "6") {
+    return false;
+  }
+  if (rawLabel.length > 0) {
+    const allowedLabels =
+      code === "5"
+        ? new Set(["已取消", "CANCELLED"])
+        : new Set(["已签退", "SIGNED_OUT"]);
+    if (!allowedLabels.has(rawLabel)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function isWslibSeatOccupiedByOthersMessage(rawMsg, code = null) {
   const text = String(rawMsg || "").trim();
   return (
@@ -1058,13 +1090,11 @@ export class HautLibraryProvider {
     if (data && String(data.id ?? "").trim()) {
       const bId = String(data.id).trim();
       const curSt = String(data.bookingStatus ?? "").trim();
-      const curStName = String(data.bookingStatusName || data.statusName || "").trim();
-      const isCurCancelled =
-        ["5", "6", "7", "8", "9"].includes(curSt) || /取消|签退|释放|结束/.test(curStName);
-      if (isCurCancelled && cancelledBookingIdsOut instanceof Set) {
+      const isCurConfirmedCancelled = isConfirmedSchoolCancelTerminalRecord(data);
+      if (isCurConfirmedCancelled && cancelledBookingIdsOut instanceof Set) {
         cancelledBookingIdsOut.add(bId);
       }
-      if (["1", "2", "3", "4"].includes(curSt) || (requireCompleteList && !isCurCancelled)) {
+      if (["1", "2", "3", "4"].includes(curSt) || (requireCompleteList && !isCurConfirmedCancelled)) {
         seenIds.add(bId);
         results.push({
           bookingId: bId,
@@ -1129,13 +1159,11 @@ export class HautLibraryProvider {
       }
       const bId = String(row.id).trim();
       const rowSt = String(row.bookingStatus ?? "").trim();
-      const rowStName = String(row.bookingStatusName || row.statusName || "").trim();
-      const isRowCancelled =
-        ["5", "6", "7", "8", "9"].includes(rowSt) || /取消|签退|释放|结束/.test(rowStName);
-      if (isRowCancelled && cancelledBookingIdsOut instanceof Set) {
+      const isRowConfirmedCancelled = isConfirmedSchoolCancelTerminalRecord(row);
+      if (isRowConfirmedCancelled && cancelledBookingIdsOut instanceof Set) {
         cancelledBookingIdsOut.add(bId);
       }
-      if (["1", "2", "3", "4"].includes(rowSt) || (requireCompleteList && !isRowCancelled)) {
+      if (["1", "2", "3", "4"].includes(rowSt) || (requireCompleteList && !isRowConfirmedCancelled)) {
         if (seenIds.has(bId)) continue;
         seenIds.add(bId);
         results.push({
@@ -1700,11 +1728,9 @@ export class HautLibraryProvider {
         }
       }
 
-      const matchedRow = histRows.find((r) => String(r.id).trim() === targetBookingId);
-      if (matchedRow) {
-        const st = String(matchedRow.bookingStatus ?? "").trim();
-        const stName = String(matchedRow.bookingStatusName || matchedRow.statusName || "").trim();
-        if (["5", "6", "7", "8", "9"].includes(st) || /取消|签退|释放|结束/.test(stName)) {
+      const matchedRows = histRows.filter((r) => String(r.id).trim() === targetBookingId);
+      if (matchedRows.length > 0) {
+        if (matchedRows.every((r) => isConfirmedSchoolCancelTerminalRecord(r))) {
           exactRecordCancelled = true;
         } else {
           return {
@@ -1712,7 +1738,7 @@ export class HautLibraryProvider {
             outcome: "CANCEL_RESULT_UNKNOWN",
             school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
             bookingId: targetBookingId,
-            message: "预约记录表未确认该预约号已取消，退座结果待核对"
+            message: "预约记录表状态处于处理中、违约、未知或字段矛盾，退座结果待核对"
           };
         }
       } else {

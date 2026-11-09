@@ -2932,17 +2932,25 @@ export function createCampusCloudApp(options = {}) {
     );
   }
 
-  function viewerHasMatchingVerifiedStudentNo(cloudUserId, maskedStudentNo) {
-    if (!cloudUserId || !maskedStudentNo) return false;
-    const m = /^([0-9A-Za-z]{2,})\*+([0-9A-Za-z]{2,})$/.exec(String(maskedStudentNo).trim());
-    if (!m) return false;
-    const [, prefix, suffix] = m;
-    const bindings = store.recordsForUser("schoolBindings", cloudUserId) || [];
-    return bindings.some((b) => {
-      if (!b || b.revoked_at || b.status === "REVOKED") return false;
-      const sno = String(b.student_no || "").trim();
-      return sno.length >= prefix.length + suffix.length && sno.startsWith(prefix) && sno.endsWith(suffix);
-    });
+  function verifyHighEntropyLegacyClaimToken(post, rawClaimToken) {
+    const storedHex = String(post?.legacy_claim_token_sha256 || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(storedHex)) return false;
+    const candidate = typeof rawClaimToken === "string" ? rawClaimToken.trim() : "";
+    if (candidate.length < 32) return false;
+    const actualDigest = crypto.createHash("sha256").update(candidate, "utf8").digest();
+    const expectedDigest = Buffer.from(storedHex, "hex");
+    if (actualDigest.length !== expectedDigest.length) return false;
+    return crypto.timingSafeEqual(actualDigest, expectedDigest);
+  }
+
+  function verifyUniqueTrustedLegacySsoBinding(post, viewerUserId) {
+    if (!viewerUserId || !post) return false;
+    const expectedIssuer = String(post.legacy_verified_sso_issuer || "").trim();
+    const expectedSubject = String(post.legacy_verified_sso_subject || "").trim();
+    if (!expectedIssuer || !expectedSubject) return false;
+    const viewerUser = store.users.get(viewerUserId);
+    if (!viewerUser || viewerUser.status !== "ACTIVE") return false;
+    return viewerUser.issuer === expectedIssuer && viewerUser.subject === expectedSubject;
   }
 
   function isPrivateMomentsComment(c) {
@@ -2959,11 +2967,13 @@ export function createCampusCloudApp(options = {}) {
     );
     const isLegacyUnowned = !post.owner_cloud_user_id;
     const canManage = Boolean(isOwner || isViewerAdmin);
+    // Self-service legacy claim is ONLY enabled when an original high-entropy claim token digest
+    // or trusted unique OIDC issuer+subject binding exists — NEVER via masked student_no or contact!
     const canClaimLegacy = Boolean(
       isLegacyUnowned &&
         viewerUserId &&
-        ((post.contact_visibility === "ON_REQUEST" && String(post.contact || "").trim().length >= 4) ||
-          Boolean(String(post.author_student_no_masked || "").trim()))
+        (/^[a-f0-9]{64}$/i.test(String(post.legacy_claim_token_sha256 || "").trim()) ||
+          verifyUniqueTrustedLegacySsoBinding(post, viewerUserId))
     );
     const isBlocked = Boolean(
       viewerUserId &&
@@ -2983,6 +2993,9 @@ export function createCampusCloudApp(options = {}) {
     const sanitized = { ...post };
     delete sanitized.contact_requests;
     delete sanitized.blocked_user_ids;
+    delete sanitized.legacy_claim_token_sha256;
+    delete sanitized.legacy_verified_sso_issuer;
+    delete sanitized.legacy_verified_sso_subject;
 
     if (sanitized.contact_visibility === "ON_REQUEST" && sanitized.contact) {
       if (!isOwner && !(isViewerAdmin && isLegacyUnowned) && !hasApprovedRequest) {
@@ -3349,6 +3362,17 @@ export function createCampusCloudApp(options = {}) {
       } else if (action === "REJECT") {
         if (!canManageRequests && !isAdmin) throw new ContractError("FORBIDDEN", "仅发起人或管理员可拒绝联系申请");
         reqItem.status = "REJECTED";
+        if (isAdmin && !isOwner) {
+          store.recordAudit({
+            actor_kind: "ADMIN",
+            actor_ref: auth.cloudUserId,
+            action: "ADMIN_REJECT_MOMENTS_CONTACT_REQUEST",
+            resource_kind: "moments_contact_request",
+            resource_ref: reqItem.id,
+            outcome: "REJECTED",
+            detail: { post_id: post.id }
+          });
+        }
       } else if (action === "BLOCK") {
         if (!canManageRequests && !isAdmin) throw new ContractError("FORBIDDEN", "仅发起人或管理员可屏蔽申请人");
         if (!Array.isArray(post.blocked_user_ids)) post.blocked_user_ids = [];
@@ -3361,6 +3385,17 @@ export function createCampusCloudApp(options = {}) {
             r.status = "BLOCKED";
             r.updated_at = nowIso;
           }
+        }
+        if (isAdmin && !isOwner) {
+          store.recordAudit({
+            actor_kind: "ADMIN",
+            actor_ref: auth.cloudUserId,
+            action: "ADMIN_BLOCK_MOMENTS_CONTACT_REQUEST",
+            resource_kind: "moments_contact_request",
+            resource_ref: reqItem.id,
+            outcome: "BLOCKED",
+            detail: { post_id: post.id, blocked_sender_user_id: reqItem.sender_user_id }
+          });
         }
       } else if (action === "REPORT") {
         post.reports_count = Number(post.reports_count || 0) + 1;
@@ -3420,45 +3455,88 @@ export function createCampusCloudApp(options = {}) {
         }
         throw new ContractError("CONFLICT", "该帖子已绑定归属账号，禁止重复认领管理权");
       }
-      const contactProof = String(body?.contact_proof || "").trim();
-      const storedContact = String(post.contact || "").trim();
-      const verifiedProtectedSecretMatch =
-        post.contact_visibility === "ON_REQUEST" &&
-        storedContact.length >= 4 &&
-        contactProof === storedContact;
-      const verifiedMaskedStudentMatch =
-        Boolean(String(post.author_student_no_masked || "").trim()) &&
-        viewerHasMatchingVerifiedStudentNo(viewerUserId, post.author_student_no_masked) &&
-        storedContact.length > 0 &&
-        contactProof === storedContact;
 
-      if (!isViewerAdmin && !verifiedProtectedSecretMatch && !verifiedMaskedStudentMatch) {
+      if (isViewerAdmin) {
+        const targetOwnerId = body?.target_owner_cloud_user_id !== undefined
+          ? String(body.target_owner_cloud_user_id || "").trim()
+          : viewerUserId;
+        const targetUser = targetOwnerId ? store.users.get(targetOwnerId) : null;
+        if (!targetOwnerId || !targetUser || targetUser.status !== "ACTIVE") {
+          throw new ContractError(
+            "BAD_REQUEST",
+            "管理员指派归属的目标云端账号不存在或状态非 ACTIVE，拒绝绑定无主旧帖"
+          );
+        }
+        const verificationNote = String(body?.verification_note || body?.reason || "").trim().slice(0, 240);
+        if (!verificationNote) {
+          throw new ContractError(
+            "BAD_REQUEST",
+            "管理员人工核验指派历史旧帖归属时必须填写 verification_note 核验依据"
+          );
+        }
+        post.owner_cloud_user_id = targetOwnerId;
+        delete post.legacy_claim_token_sha256;
+        post.updated_at = nowIso;
+        store.momentsState.updated_at = nowIso;
+        store.recordAudit({
+          actor_kind: "ADMIN",
+          actor_ref: viewerUserId,
+          action: "ADMIN_ASSIGN_LEGACY_MOMENTS_POST",
+          resource_kind: "moments_post",
+          resource_ref: post.id,
+          outcome: "CLAIMED",
+          detail: {
+            assigned_owner_cloud_user_id: targetOwnerId,
+            verification_mode: "ADMIN_MANUAL_VERIFICATION",
+            verification_note: verificationNote
+          }
+        });
+        store.saveSnapshot();
+        return {
+          status: 200,
+          code: "MOMENTS_POST_OWNERSHIP_CLAIMED",
+          data: projectMomentsPostForViewer(post, store.momentsState.posts, viewerUserId, isViewerAdmin)
+        };
+      }
+
+      // Non-admin self-service: strictly forbid masked student_no inference, PENDING_DELEGATION student_no,
+      // PUBLIC contact, or ON_REQUEST contact (which approved requesters also know!).
+      // Only accept an original high-entropy ownership token or a trusted unique OIDC issuer+subject binding.
+      const hasValidClaimToken = verifyHighEntropyLegacyClaimToken(post, body?.claim_token);
+      const hasTrustedUniqueSso = verifyUniqueTrustedLegacySsoBinding(post, viewerUserId);
+      if (!hasValidClaimToken && !hasTrustedUniqueSso) {
+        store.recordAudit({
+          actor_kind: "USER",
+          actor_ref: viewerUserId,
+          action: "REJECT_UNTRUSTED_LEGACY_MOMENTS_CLAIM",
+          resource_kind: "moments_post",
+          resource_ref: post.id,
+          outcome: "REJECTED"
+        });
         throw new ContractError(
           "FORBIDDEN",
-          "该历史匿名旧帖缺少可安全核验的归属特征（受保护联系方式或已绑定学号匹配），为防冒领已交由管理员核查处理"
+          "已关闭基于脱敏学号或联系方式的自助认领；缺少原始高熵所有权凭证的历史旧帖仅支持管理员人工核验处理"
         );
       }
-      const targetOwnerId =
-        isViewerAdmin && body?.target_owner_cloud_user_id
-          ? String(body.target_owner_cloud_user_id).trim()
-          : viewerUserId;
-      post.owner_cloud_user_id = targetOwnerId;
+
+      const viewerUser = store.users.get(viewerUserId);
+      if (!viewerUser || viewerUser.status !== "ACTIVE") {
+        throw new ContractError("FORBIDDEN", "当前云端账号状态异常，无法绑定帖子归属");
+      }
+      post.owner_cloud_user_id = viewerUserId;
+      delete post.legacy_claim_token_sha256;
       post.updated_at = nowIso;
       store.momentsState.updated_at = nowIso;
       store.recordAudit({
-        actor_kind: isViewerAdmin ? "ADMIN" : "USER",
+        actor_kind: "USER",
         actor_ref: viewerUserId,
         action: "CLAIM_LEGACY_MOMENTS_POST",
         resource_kind: "moments_post",
         resource_ref: post.id,
         outcome: "CLAIMED",
         detail: {
-          assigned_owner_cloud_user_id: targetOwnerId,
-          verification_mode: isViewerAdmin
-            ? "ADMIN_ASSIGN"
-            : verifiedProtectedSecretMatch
-              ? "PROTECTED_CONTACT_PROOF"
-              : "VERIFIED_STUDENT_NO_AND_CONTACT"
+          assigned_owner_cloud_user_id: viewerUserId,
+          verification_mode: hasValidClaimToken ? "HIGH_ENTROPY_CLAIM_TOKEN" : "TRUSTED_UNIQUE_SSO_SUBJECT"
         }
       });
       store.saveSnapshot();

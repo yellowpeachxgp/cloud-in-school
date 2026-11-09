@@ -538,37 +538,146 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   assert.equal(auditCheck.report.mutated_comments_count, 1);
   assert.equal(auditCheck.sanitizedState.momentsState.posts[0].comments[0].is_private_to_initiator, true);
 
-  // Bystander CANNOT hijack a PUBLIC legacy post merely by copying its public contact!
-  const hijackAttempt = await app.inject({
+  // P1 Legacy Post Claim Anti-Hijack Verification:
+  // Inject a legacy ON_REQUEST post where `finder` already has an APPROVED contact request (so finder knows post.contact!),
+  // and a legacy post with high-entropy original ownership token digest.
+  const fsMod = await import("node:fs");
+  const osMod = await import("node:os");
+  const pathMod = await import("node:path");
+  const nodeCrypto = await import("node:crypto");
+  const rawHighEntropyToken = "claim_tok_9f8e7d6c5b4a392817263544556677889900aabb";
+  const tokenSha256 = nodeCrypto.createHash("sha256").update(rawHighEntropyToken, "utf8").digest("hex");
+
+  app.store.momentsState.posts.push(
+    {
+      id: "mp_legacy_on_request_approved",
+      type: "LOST",
+      title: "历史受保护联系方式旧帖",
+      category: "证件",
+      campus: "莲花街校区",
+      location: "图书馆二楼",
+      description: "测试已批准联系人不可凭联系方式夺权",
+      contact: "微信: legacy_secret_wx_777",
+      contact_visibility: "ON_REQUEST",
+      author_name: "王同学",
+      author_student_no_masked: "20***01",
+      owner_cloud_user_id: null,
+      status: "OPEN",
+      comments: [],
+      contact_requests: [
+        {
+          id: "mcr_approved_finder",
+          post_id: "mp_legacy_on_request_approved",
+          sender_user_id: finder.id,
+          sender_name: "拾得者小李",
+          message: "我捡到了",
+          contact_info: "wx_finder",
+          status: "APPROVED",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }
+      ],
+      blocked_user_ids: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    },
+    {
+      id: "mp_legacy_high_entropy_token",
+      type: "FOUND",
+      title: "带高熵所有权凭证的历史招领帖",
+      category: "数码",
+      campus: "莲花街校区",
+      location: "8号楼",
+      description: "测试原始高熵凭证单次认领",
+      contact: "QQ: 55566677",
+      contact_visibility: "PUBLIC",
+      author_name: "赵同学",
+      author_student_no_masked: "20***01",
+      legacy_claim_token_sha256: tokenSha256,
+      owner_cloud_user_id: null,
+      status: "OPEN",
+      comments: [],
+      contact_requests: [],
+      blocked_user_ids: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }
+  );
+
+  // 1) Bystander CANNOT hijack PUBLIC legacy post with public contact
+  const hijackPublicRes = await app.inject({
     method: "POST",
     url: "/api/v1/moments/posts/mp_legacy_anon_public/action",
     headers: { Authorization: `Bearer ${bystanderToken}` },
     body: { action: "CLAIM_OWNERSHIP", contact_proof: "QQ: 88886666" }
   });
-  assert.equal(hijackAttempt.status, 403);
+  assert.equal(hijackPublicRes.status, 403);
 
-  // Verified original author with bound student_no matching "20***01" + contact_proof CAN claim their legacy post!
-  app.store.schoolBindings.set("bind_owner_claim_1", {
-    id: "bind_owner_claim_1",
-    cloud_user_id: owner.id,
+  // 2) Attacker with forged PENDING_DELEGATION student_no matching "20***01" MUST BE REJECTED (403)!
+  app.store.schoolBindings.set("bind_forged_pending", {
+    id: "bind_forged_pending",
+    cloud_user_id: bystander.id,
     school_id: "haut",
-    student_no: "2024990001",
+    student_no: "2099999901", // matches 20***01 mask, unverified PENDING_DELEGATION
+    status: "PENDING_DELEGATION",
+    revoked_at: null
+  });
+  app.store.indexUserScoped("schoolBindings", "bind_forged_pending", bystander.id);
+  const forgedPendingClaim = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${bystanderToken}` },
+    body: { action: "CLAIM_OWNERSHIP", contact_proof: "wx_owner_bound_01" }
+  });
+  assert.equal(forgedPendingClaim.status, 403);
+
+  // 3) Another student with a real DELEGATED_ACTIVE verified student_no sharing the SAME "20***01" mask MUST ALSO BE REJECTED (403)!
+  app.store.schoolBindings.set("bind_same_mask_other_student", {
+    id: "bind_same_mask_other_student",
+    cloud_user_id: finder.id,
+    school_id: "haut",
+    student_no: "2023888801", // DIFFERENT student sharing 20***01 mask!
     status: "DELEGATED_ACTIVE",
     revoked_at: null
   });
-  app.store.indexUserScoped("schoolBindings", "bind_owner_claim_1", owner.id);
-
-  const verifiedClaimRes = await app.inject({
+  app.store.indexUserScoped("schoolBindings", "bind_same_mask_other_student", finder.id);
+  const sameMaskCollisionClaim = await app.inject({
     method: "POST",
     url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
-    headers: { Authorization: `Bearer ${ownerToken}` },
+    headers: { Authorization: `Bearer ${finderToken}` },
     body: { action: "CLAIM_OWNERSHIP", contact_proof: "wx_owner_bound_01" }
   });
-  assert.equal(verifiedClaimRes.status, 200);
-  assert.equal(verifiedClaimRes.body.data.is_owner, true);
-  assert.equal(verifiedClaimRes.body.data.is_legacy_unowned, false);
+  assert.equal(sameMaskCollisionClaim.status, 403);
 
-  // Admin CAN handle contact requests and resolve/delete unclaimable legacy anonymous posts!
+  // 4) Approved contact requester who received ON_REQUEST `post.contact` ("微信: legacy_secret_wx_777") MUST BE REJECTED (403)!
+  const approvedContactHijack = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_on_request_approved/action",
+    headers: { Authorization: `Bearer ${finderToken}` },
+    body: { action: "CLAIM_OWNERSHIP", contact_proof: "微信: legacy_secret_wx_777" }
+  });
+  assert.equal(approvedContactHijack.status, 403);
+
+  // 5) High-entropy original ownership token succeeds once and never leaks digest in snapshot
+  const snapBeforeTokenClaim = await app.inject({
+    method: "GET",
+    url: "/api/v1/moments/snapshot"
+  });
+  const tokenPostPublicView = snapBeforeTokenClaim.body.data.posts.find(
+    (p) => p.id === "mp_legacy_high_entropy_token"
+  );
+  assert.equal(tokenPostPublicView.legacy_claim_token_sha256, undefined);
+
+  const highEntropyClaimRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_high_entropy_token/action",
+    headers: { Authorization: `Bearer ${ownerToken}` },
+    body: { action: "CLAIM_OWNERSHIP", claim_token: rawHighEntropyToken }
+  });
+  assert.equal(highEntropyClaimRes.status, 200);
+  assert.equal(highEntropyClaimRes.body.data.is_owner, true);
+
+  // 6) Admin governance: validates target account existence/ACTIVE status, requires verification_note, and writes audit events!
   const adminUser = app.store.findOrCreateCloudUser({
     issuer: "https://auth.yellowpeachxgp.com",
     subject: "sub_moments_admin",
@@ -577,6 +686,72 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
     role: "admin"
   });
   const adminToken = app.identity.issueDeviceSession(adminUser, "dev_admin").access_token;
+
+  const adminInvalidTargetRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: {
+      action: "CLAIM_OWNERSHIP",
+      target_owner_cloud_user_id: "non_existent_user_999",
+      verification_note: "人工核验"
+    }
+  });
+  assert.equal(adminInvalidTargetRes.status, 400);
+
+  const deletedUser = app.store.findOrCreateCloudUser({
+    issuer: "https://auth.yellowpeachxgp.com",
+    subject: "sub_deleted_target",
+    username: "deleted_user",
+    displayName: "已注销账号"
+  });
+  deletedUser.status = "DELETED";
+  const adminDeletedTargetRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: {
+      action: "CLAIM_OWNERSHIP",
+      target_owner_cloud_user_id: deletedUser.id,
+      verification_note: "人工核验"
+    }
+  });
+  assert.equal(adminDeletedTargetRes.status, 400);
+
+  const adminMissingNoteRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: {
+      action: "CLAIM_OWNERSHIP",
+      target_owner_cloud_user_id: owner.id
+    }
+  });
+  assert.equal(adminMissingNoteRes.status, 400);
+
+  const adminValidAssignRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts/mp_legacy_bound_author/action",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: {
+      action: "CLAIM_OWNERSHIP",
+      target_owner_cloud_user_id: owner.id,
+      verification_note: "工单核验校园卡原件通过"
+    }
+  });
+  assert.equal(adminValidAssignRes.status, 200);
+  assert.equal(
+    app.store.momentsState.posts.find((p) => p.id === "mp_legacy_bound_author").owner_cloud_user_id,
+    owner.id
+  );
+  assert.ok(
+    app.store.auditEvents.some(
+      (ev) =>
+        ev.action === "ADMIN_ASSIGN_LEGACY_MOMENTS_POST" &&
+        ev.resource_ref === "mp_legacy_bound_author" &&
+        ev.detail?.assigned_owner_cloud_user_id === owner.id
+    )
+  );
 
   const adminListLegacyReqs = await app.inject({
     method: "GET",
@@ -604,4 +779,116 @@ test("Unit: Campus Content (#16) & Lost-and-Found Private Contact Requests MVP (
   });
   assert.equal(adminResolveLegacy.status, 200);
   assert.equal(adminResolveLegacy.body.data.status, "RESOLVED");
+});
+
+test("Unit: Audit & Sanitize Moments State CLI rejects same-path/symlink/hardlink/existing-backup and leaves source untouched on write failure", async () => {
+  const fsMod = await import("node:fs");
+  const osMod = await import("node:os");
+  const pathMod = await import("node:path");
+  const {
+    applyMomentsStateSanitizationFile,
+    rollbackMomentsStateFromBackup
+  } = await import("../scripts/audit-and-sanitize-moments-state.mjs");
+  const tmpSanitizeDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "moments-sanitize-test-"));
+  const stateFile = pathMod.join(tmpSanitizeDir, "state.json");
+  const originalPayload = JSON.stringify(
+    {
+      momentsState: {
+        posts: [
+          {
+            id: "mp_temp_1",
+            title: "测试旧帖",
+            owner_cloud_user_id: null,
+            comments: [{ id: "c1", content: "【私密联系发起人】13800138000" }]
+          }
+        ]
+      }
+    },
+    null,
+    2
+  );
+  fsMod.writeFileSync(stateFile, originalPayload, "utf8");
+  const originalBytes = fsMod.readFileSync(stateFile);
+
+  // 7a: Same path rejected
+  assert.throws(
+    () => applyMomentsStateSanitizationFile({ statePath: stateFile, backupPath: stateFile }),
+    /identical|same/i
+  );
+  assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes);
+
+  // 7b: Existing backup file rejected without overwriting backup or modifying state
+  const preExistingBackup = pathMod.join(tmpSanitizeDir, "existing-backup.json");
+  fsMod.writeFileSync(preExistingBackup, '{"sentinel":"do_not_overwrite"}', "utf8");
+  assert.throws(
+    () => applyMomentsStateSanitizationFile({ statePath: stateFile, backupPath: preExistingBackup }),
+    /already exists/i
+  );
+  assert.equal(fsMod.readFileSync(preExistingBackup, "utf8"), '{"sentinel":"do_not_overwrite"}');
+  assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes);
+
+  // 7c: Symlink alias, hardlink alias, and directory symlink alias pointing to stateFile ALL rejected!
+  const symlinkAlias = pathMod.join(tmpSanitizeDir, "symlink-to-state.json");
+  fsMod.symlinkSync(stateFile, symlinkAlias);
+  assert.throws(
+    () => applyMomentsStateSanitizationFile({ statePath: stateFile, backupPath: symlinkAlias }),
+    /same physical|already exists/i
+  );
+
+  const hardlinkAlias = pathMod.join(tmpSanitizeDir, "hardlink-to-state.json");
+  fsMod.linkSync(stateFile, hardlinkAlias);
+  assert.throws(
+    () => applyMomentsStateSanitizationFile({ statePath: stateFile, backupPath: hardlinkAlias }),
+    /same physical/i
+  );
+
+  const dirAlias = pathMod.join(tmpSanitizeDir, "alias-dir");
+  fsMod.symlinkSync(tmpSanitizeDir, dirAlias);
+  assert.throws(
+    () =>
+      applyMomentsStateSanitizationFile({
+        statePath: stateFile,
+        backupPath: pathMod.join(dirAlias, "state.json")
+      }),
+    /same physical|alias/i
+  );
+  assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes);
+
+  // 7d: Write/rename failure leaves source file completely untouched
+  const failingBackup = pathMod.join(tmpSanitizeDir, "backup-when-rename-fails.json");
+  const faultyFs = {
+    ...fsMod,
+    renameSync() {
+      throw new Error("Simulated atomic rename failure");
+    }
+  };
+  assert.throws(
+    () =>
+      applyMomentsStateSanitizationFile({
+        statePath: stateFile,
+        backupPath: failingBackup,
+        fsImpl: faultyFs
+      }),
+    /Simulated atomic rename failure/
+  );
+  assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes, "State file must remain untouched on failure");
+
+  // 7e: Normal apply + SHA-256 verification + rollback restores exact original bytes
+  const freshBackup = pathMod.join(tmpSanitizeDir, "verified-backup.json");
+  const applyRes = applyMomentsStateSanitizationFile({
+    statePath: stateFile,
+    backupPath: freshBackup
+  });
+  assert.equal(applyRes.mode, "APPLIED");
+  assert.equal(applyRes.mutated, true);
+  assert.deepEqual(fsMod.readFileSync(freshBackup), originalBytes);
+  const sanitizedDiskObj = JSON.parse(fsMod.readFileSync(stateFile, "utf8"));
+  assert.equal(sanitizedDiskObj.momentsState.posts[0].comments[0].is_private_to_initiator, true);
+
+  const rollbackRes = rollbackMomentsStateFromBackup({
+    statePath: stateFile,
+    backupPath: freshBackup
+  });
+  assert.equal(rollbackRes.action, "ROLLBACK_COMPLETED");
+  assert.deepEqual(fsMod.readFileSync(stateFile), originalBytes);
 });

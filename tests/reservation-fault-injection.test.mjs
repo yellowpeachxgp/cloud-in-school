@@ -1278,33 +1278,81 @@ test("Fault Injection 12 (Strict Cancellation Readback Formats): Malformed crren
   });
   assert.equal(resNoExplicitEvidence.cancelled, false);
   assert.equal(resNoExplicitEvidence.outcome, "CANCEL_RESULT_UNKNOWN");
+});
 
-  // Case D: Complete, well-formed active lists + explicit cancelled record for 99887766 -> SCHOOL_CANCELLED
-  provider.wslibGetJson = async (pathAndQuery) => {
-    if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "取消成功" };
-    if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
-    if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
-      return {
-        code: 200,
-        total: 1,
-        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
-      };
-    }
-    if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
-      return {
-        code: 200,
-        total: 1,
-        rows: [{ id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" }]
-      };
-    }
-    return { code: 200 };
-  };
-  const resAuthoritativeOk = await provider.cancelLiveSeatBooking({
-    decryptedSecret: secret,
-    binding,
-    externalBookingId: "99887766"
+test("Fault Injection 13 (P2 Cancellation Terminal Whitelist): Intermediate '取消处理中', '取消失败', unknown/defaulted codes, and code/label contradictions stay CANCEL_RESULT_UNKNOWN", async () => {
+  const provider = new HautLibraryProvider({});
+  const secret = JSON.stringify({
+    student_no: "2026990101",
+    raw_token: "tok_cancel_terminal_whitelist_0123456789"
   });
-  assert.equal(resAuthoritativeOk.cancelled, true);
-  assert.equal(resAuthoritativeOk.outcome, "SCHOOL_CANCELLED");
-  assert.equal(resAuthoritativeOk.school_cancellation_state, "SCHOOL_CANCELLED");
+  const binding = { student_no: "2026990101" };
+
+  // Case D: Intermediate ("取消处理中"), failure ("取消失败"), unknown/defaulted codes (0, 7, 8, 9, 99),
+  // and code/label contradictions MUST ALL stay CANCEL_RESULT_UNKNOWN!
+  const nonTerminalOrContradictoryRows = [
+    { id: "99887766", bookingStatus: 5, bookingStatusName: "取消处理中" },
+    { id: "99887766", bookingStatus: "", bookingStatusName: "取消处理中" },
+    { id: "99887766", bookingStatus: 5, bookingStatusName: "取消失败" },
+    { id: "99887766", bookingStatus: 1, bookingStatusName: "取消失败" },
+    { id: "99887766", bookingStatus: 0, bookingStatusName: "未知状态" },
+    { id: "99887766", bookingStatus: 7, bookingStatusName: "已违约" },
+    { id: "99887766", bookingStatus: 8, bookingStatusName: "异常释放" },
+    { id: "99887766", bookingStatus: 9, bookingStatusName: "系统结束" },
+    { id: "99887766", bookingStatus: 99, bookingStatusName: "" },
+    { id: "99887766", bookingStatus: 5, bookingStatusName: "已签退" }, // code vs label contradiction
+    { id: "99887766", bookingStatus: 1, bookingStatusName: "已取消" } // active code vs cancelled label contradiction
+  ];
+
+  for (const badRow of nonTerminalOrContradictoryRows) {
+    provider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "操作已受理" };
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+      if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+        return { code: 200, total: 1, rows: [badRow] };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+        return { code: 200, total: 1, rows: [badRow] };
+      }
+      return { code: 200 };
+    };
+    const badRes = await provider.cancelLiveSeatBooking({
+      decryptedSecret: secret,
+      binding,
+      externalBookingId: "99887766"
+    });
+    assert.equal(
+      badRes.cancelled,
+      false,
+      `Must NOT treat ${JSON.stringify(badRow)} as SCHOOL_CANCELLED`
+    );
+    assert.equal(badRes.outcome, "CANCEL_RESULT_UNKNOWN");
+    assert.equal(badRes.school_cancellation_state, "CANCEL_RESULT_UNKNOWN");
+  }
+
+  // Case E: Explicit terminal whitelist (5="已取消" and 6="已签退") -> SCHOOL_CANCELLED
+  for (const validTerminalRow of [
+    { id: "99887766", bookingStatus: 5, bookingStatusName: "已取消" },
+    { id: "99887766", bookingStatus: 6, bookingStatusName: "已签退" }
+  ]) {
+    provider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/user/cancel")) return { code: 200, msg: "取消成功" };
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) return { code: 200, data: null };
+      if (pathAndQuery.startsWith("/seatbook/user/mybookingInProgress")) {
+        return { code: 200, total: 1, rows: [validTerminalRow] };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/bookinglist")) {
+        return { code: 200, total: 1, rows: [validTerminalRow] };
+      }
+      return { code: 200 };
+    };
+    const resAuthoritativeOk = await provider.cancelLiveSeatBooking({
+      decryptedSecret: secret,
+      binding,
+      externalBookingId: "99887766"
+    });
+    assert.equal(resAuthoritativeOk.cancelled, true);
+    assert.equal(resAuthoritativeOk.outcome, "SCHOOL_CANCELLED");
+    assert.equal(resAuthoritativeOk.school_cancellation_state, "SCHOOL_CANCELLED");
+  }
 });
