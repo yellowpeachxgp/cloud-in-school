@@ -2141,6 +2141,7 @@ export class CloudDatabaseStore {
     const user = this.users.get(cloudUserId);
     if (user) {
       user.auth_version = Number(user.auth_version || 1) + 1;
+      user._lastRevocationSeq = Number(user._lastRevocationSeq || 0) + 1;
     }
 
     for (const b of this.schoolBindings.values()) {
@@ -2301,6 +2302,9 @@ export class CloudDatabaseStore {
     const user = this.users.get(cloudUserId);
     if (user) {
       user.auth_version = Number(user.auth_version || 1) + 1;
+      if (reason !== "SCHOOL_IDENTITY_REBOUND") {
+        user._lastRevocationSeq = Number(user._lastRevocationSeq || 0) + 1;
+      }
     }
 
     const cancelledJobIds = [];

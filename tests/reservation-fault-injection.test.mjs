@@ -2682,3 +2682,349 @@ test("Fault Injection 19 (Cloud P1 #1 — Rebinding School Identity A->B->A Inva
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("Fault Injection 20 (Cloud P1-1 — Async Revocation / Rebind / Logout During Pending bind-live Never Resurrects Revoked Authorization, While Post-Revocation Explicit New bind-live Succeeds)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "fi20-async-bind-live-revoke-"));
+  const origFetch = globalThis.fetch;
+  let blockedNetwork = 0;
+  globalThis.fetch = async () => {
+    blockedNetwork += 1;
+    throw new Error("OFFLINE_TEST_GUARD: unexpected external fetch blocked");
+  };
+
+  try {
+    const baseMs = Date.parse("2026-11-21T10:00:00+08:00");
+    const newApp = (name) =>
+      createCampusCloudApp({
+        requireAdminAccess: false,
+        redisEnabled: false,
+        storeOptions: {
+          snapshotPath: path.join(tmpDir, `${name}.json`),
+          requireDurableSnapshot: true
+        }
+      });
+
+    async function setupBoundFixture(name, studentNo = "2026990101", secret = "mock_review_secret") {
+      const app = newApp(name);
+      const user = app.store.findOrCreateCloudUser({
+        issuer: "https://offline.invalid",
+        subject: `offline_${name}`,
+        displayName: "Offline review fixture"
+      });
+      const s = app.identity.issueDeviceSession(user, "Offline", null, 1, baseMs);
+      const headers = { authorization: `Bearer ${s.access_token}` };
+      const req = (method, url, body, delta = 0, customHeaders = headers) =>
+        app.inject({ method, url, headers: customHeaders, body, nowMs: baseMs + delta });
+      const c = await req("POST", "/api/v1/me/consents", { school_id: "haut" });
+      assert.equal(c.status, 201);
+      const b = await req("POST", "/api/v1/school-bindings", {
+        school_id: "haut",
+        student_no: studentNo,
+        consent_id: c.body.data.id
+      });
+      assert.equal(b.status, 201);
+      const r = await req("POST", `/api/v1/school-bindings/${b.body.data.id}/complete`, {
+        credential_kind: "DELEGATED_SESSION_BUNDLE",
+        consent_id: c.body.data.id,
+        delegated_secret: secret
+      });
+      assert.equal(r.status, 200);
+      return { app, user, s, headers, req, bindingId: b.body.data.id, consentId: c.body.data.id };
+    }
+
+    // 20a: DELETE /me/consents/{id} while same-student bind-live is awaiting authenticateHautSession
+    {
+      const { app, user, req, bindingId, consentId } = await setupBoundFixture("consent-withdraw-race");
+      let enterAuth;
+      let finishAuth;
+      const started = new Promise((r) => {
+        enterAuth = r;
+      });
+      const held = new Promise((r) => {
+        finishAuth = r;
+      });
+      app.schoolProvider.authenticateHautSession = async () => {
+        enterAuth();
+        await held;
+        return {
+          rawToken: "offline_fake_token_012345678901234567890123456",
+          userInfo: { userNo: "2026990101" }
+        };
+      };
+
+      const pendingBind = req("POST", "/api/v1/school-bindings/bind-live", {
+        school_id: "haut",
+        student_no: "2026990101",
+        raw_token: "fake_offline_input"
+      });
+      await started;
+
+      const withdrawRes = await req("DELETE", `/api/v1/me/consents/${consentId}`, null, 100);
+      assert.equal(withdrawRes.status, 200);
+      assert.equal(
+        app.store.recordsForUser("schoolBindings", user.id).filter((b) => !b.revoked_at).length,
+        0
+      );
+      assert.equal(
+        app.store.recordsForUser("consents", user.id).filter((c) => !c.withdrawn_at).length,
+        0
+      );
+      assert.equal(user.auth_version, 2);
+
+      finishAuth();
+      const staleBindRes = await pendingBind;
+      assert.equal(
+        staleBindRes.status,
+        403,
+        "Stale bind-live started before consent withdrawal must be rejected and never return 201"
+      );
+      assert.equal(staleBindRes.body.error.code, "CONSENT_WITHDRAWN");
+      assert.equal(
+        app.store.recordsForUser("schoolBindings", user.id).filter((b) => !b.revoked_at).length,
+        0,
+        "Revoked binding must not be resurrected by stale bind-live"
+      );
+      assert.equal(
+        app.store.recordsForUser("consents", user.id).filter((c) => !c.withdrawn_at).length,
+        0,
+        "Withdrawn consent must not be resurrected by stale bind-live"
+      );
+      assert.equal(Boolean(app.store.schoolBindings.get(bindingId).revoked_at), true);
+      const unrevokedCreds = Array.from(app.store.encryptedCredentials.values()).filter(
+        (cred) => !cred.revoked_at
+      );
+      assert.equal(unrevokedCreds.length, 0, "No unrevoked credentials may exist after consent withdrawal");
+
+      // 20e: Explicit NEW bind-live initiated AFTER consent withdrawal completes MUST succeed cleanly
+      app.schoolProvider.authenticateHautSession = async () => ({
+        rawToken: "offline_fresh_post_revoke_token_012345678901234",
+        userInfo: { userNo: "2026990101", userName: "PostRevokeUser" }
+      });
+      const explicitNewBind = await req(
+        "POST",
+        "/api/v1/school-bindings/bind-live",
+        {
+          school_id: "haut",
+          student_no: "2026990101",
+          raw_token: "fresh_post_revoke_input"
+        },
+        500
+      );
+      assert.equal(explicitNewBind.status, 201, "Explicit new bind-live after revocation must succeed");
+      assert.equal(
+        app.store.recordsForUser("schoolBindings", user.id).filter((b) => !b.revoked_at).length,
+        1
+      );
+      assert.equal(
+        app.store.recordsForUser("consents", user.id).filter((c) => !c.withdrawn_at).length,
+        1
+      );
+    }
+
+    // 20b: DELETE /school-bindings/{id} while bind-live is awaiting authenticateHautSession
+    {
+      const { app, user, req } = await setupBoundFixture("binding-revoke-race");
+      let enterAuth;
+      let finishAuth;
+      const started = new Promise((r) => {
+        enterAuth = r;
+      });
+      const held = new Promise((r) => {
+        finishAuth = r;
+      });
+      app.schoolProvider.authenticateHautSession = async () => {
+        enterAuth();
+        await held;
+        return {
+          rawToken: "offline_fake_token_binding_revoke_01234567890123",
+          userInfo: { userNo: "2026990101" }
+        };
+      };
+
+      const pendingBind = req("POST", "/api/v1/school-bindings/bind-live", {
+        school_id: "haut",
+        student_no: "2026990101",
+        raw_token: "fake_offline_input_2"
+      });
+      await started;
+
+      const activeBind = app.store.recordsForUser("schoolBindings", user.id).find((b) => !b.revoked_at);
+      const revokeBindRes = await req("DELETE", `/api/v1/school-bindings/${activeBind.id}`, null, 100);
+      assert.equal(revokeBindRes.status, 200);
+      assert.equal(
+        app.store.recordsForUser("schoolBindings", user.id).filter((b) => !b.revoked_at).length,
+        0
+      );
+
+      finishAuth();
+      const staleBindRes = await pendingBind;
+      assert.equal(staleBindRes.status, 403, "Stale bind-live must be rejected when binding was revoked in flight");
+      assert.equal(staleBindRes.body.error.code, "CONSENT_WITHDRAWN");
+      assert.equal(
+        app.store.recordsForUser("schoolBindings", user.id).filter((b) => !b.revoked_at).length,
+        0
+      );
+    }
+
+    // 20c: Concurrent bind-live ordering (Order 1: newer rebind B finishes before older A; Order 2: older B1 resolves before newer B2)
+    {
+      const { app, user, req } = await setupBoundFixture("concurrent-rebind-race", "2026990101");
+      let enterOldA;
+      let finishOldA;
+      const startedOldA = new Promise((r) => {
+        enterOldA = r;
+      });
+      const heldOldA = new Promise((r) => {
+        finishOldA = r;
+      });
+
+      app.schoolProvider.authenticateHautSession = async (input) => {
+        if (input.raw_token === "slow_old_A") {
+          enterOldA();
+          await heldOldA;
+          return {
+            rawToken: "tok_resolved_slow_old_A_01234567890123456789",
+            userInfo: { userNo: "2026990101" }
+          };
+        }
+        return {
+          rawToken: "tok_resolved_fast_new_B_01234567890123456789",
+          userInfo: { userNo: "2026990202" }
+        };
+      };
+
+      const pendingOldA = req(
+        "POST",
+        "/api/v1/school-bindings/bind-live",
+        { school_id: "haut", student_no: "2026990101", raw_token: "slow_old_A" },
+        10
+      );
+      await startedOldA;
+
+      const fastNewB = await req(
+        "POST",
+        "/api/v1/school-bindings/bind-live",
+        { school_id: "haut", student_no: "2026990202", raw_token: "fast_new_B" },
+        50
+      );
+      assert.equal(fastNewB.status, 201);
+      assert.equal(fastNewB.body.data.student_no, "2026990202");
+
+      finishOldA();
+      const staleOldARes = await pendingOldA;
+      assert.ok(
+        staleOldARes.status === 409 || staleOldARes.status === 403,
+        `Expected stale bind-live A to be rejected with 409/403 after newer rebind B, got ${staleOldARes.status}`
+      );
+      const activeBindingsAfterOrder1 = app.store
+        .recordsForUser("schoolBindings", user.id)
+        .filter((b) => !b.revoked_at);
+      assert.equal(activeBindingsAfterOrder1.length, 1);
+      assert.equal(activeBindingsAfterOrder1[0].student_no, "2026990202");
+
+      // Order 2: Older B1 starts at t=100, newer B2 starts at t=110 while B1 is still in flight; B1 resolves first, then B2 resolves second
+      let enterB1;
+      let finishB1;
+      let enterB2;
+      let finishB2;
+      const startedB1 = new Promise((r) => {
+        enterB1 = r;
+      });
+      const heldB1 = new Promise((r) => {
+        finishB1 = r;
+      });
+      const startedB2 = new Promise((r) => {
+        enterB2 = r;
+      });
+      const heldB2 = new Promise((r) => {
+        finishB2 = r;
+      });
+
+      app.schoolProvider.authenticateHautSession = async (input) => {
+        if (input.raw_token === "older_B1") {
+          enterB1();
+          await heldB1;
+          return {
+            rawToken: "tok_older_B1_session_0123456789012345678901",
+            userInfo: { userNo: "2026990202" }
+          };
+        }
+        enterB2();
+        await heldB2;
+        return {
+          rawToken: "tok_newer_B2_session_0123456789012345678902",
+          userInfo: { userNo: "2026990202" }
+        };
+      };
+
+      const pendingB1 = req(
+        "POST",
+        "/api/v1/school-bindings/bind-live",
+        { school_id: "haut", student_no: "2026990202", raw_token: "older_B1" },
+        100
+      );
+      await startedB1;
+
+      const pendingB2 = req(
+        "POST",
+        "/api/v1/school-bindings/bind-live",
+        { school_id: "haut", student_no: "2026990202", raw_token: "newer_B2" },
+        110
+      );
+      await startedB2;
+
+      // Resolve older B1 FIRST -> must be rejected because newer B2 was already initiated!
+      finishB1();
+      const resB1 = await pendingB1;
+      assert.equal(resB1.status, 409, "Superseded older concurrent bind-live B1 must be rejected with 409");
+
+      // Resolve newer B2 SECOND -> must succeed!
+      finishB2();
+      const resB2 = await pendingB2;
+      assert.equal(resB2.status, 201, "Latest concurrent bind-live B2 must succeed");
+    }
+
+    // 20d: Session logout while bind-live is awaiting authenticateHautSession
+    {
+      const { app, user, req } = await setupBoundFixture("logout-during-bind-race");
+      let enterAuth;
+      let finishAuth;
+      const started = new Promise((r) => {
+        enterAuth = r;
+      });
+      const held = new Promise((r) => {
+        finishAuth = r;
+      });
+      app.schoolProvider.authenticateHautSession = async () => {
+        enterAuth();
+        await held;
+        return {
+          rawToken: "offline_fake_token_logout_01234567890123456789",
+          userInfo: { userNo: "2026990101" }
+        };
+      };
+
+      const pendingBind = req("POST", "/api/v1/school-bindings/bind-live", {
+        school_id: "haut",
+        student_no: "2026990101",
+        raw_token: "logout_race_input"
+      });
+      await started;
+
+      const logoutRes = await req("POST", "/api/v1/auth/logout", {}, 100);
+      assert.equal(logoutRes.status, 200);
+
+      finishAuth();
+      const staleBindRes = await pendingBind;
+      assert.equal(staleBindRes.status, 401, "bind-live whose session logged out during auth must be rejected with 401");
+      assert.equal(staleBindRes.body.error.code, "CLOUD_AUTH_REQUIRED");
+      assert.ok(user);
+    }
+
+    assert.equal(blockedNetwork, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+

@@ -977,6 +977,11 @@ export function createCampusCloudApp(options = {}) {
       if (latestConsent) {
         latestConsent.auth_version = authVer;
       }
+      const userForBindSeq = store.users.get(auth.cloudUserId);
+      if (userForBindSeq) {
+        userForBindSeq._latestBindStartSeq = Number(userForBindSeq._latestBindStartSeq || 0) + 1;
+        userForBindSeq._lastBindCommitSeq = Number(userForBindSeq._lastBindCommitSeq || 0) + 1;
+      }
       await syncUserToSso(auth.cloudUserId);
       return {
         status: 200,
@@ -1034,6 +1039,8 @@ export function createCampusCloudApp(options = {}) {
       const userObj = store.users.get(auth.cloudUserId);
       if (userObj) {
         userObj.auth_version = Number(userObj.auth_version || 1) + 1;
+        userObj._latestBindStartSeq = Number(userObj._latestBindStartSeq || 0) + 1;
+        userObj._lastBindCommitSeq = Number(userObj._lastBindCommitSeq || 0) + 1;
       }
       const authVer = Number(userObj?.auth_version || 1);
       const activeConsents = store
@@ -2298,6 +2305,11 @@ export function createCampusCloudApp(options = {}) {
             targetBind.auth_version = serverAuthVersion;
           }
         }
+        const syncUserObj = store.users.get(auth.cloudUserId);
+        if (syncUserObj) {
+          syncUserObj._latestBindStartSeq = Number(syncUserObj._latestBindStartSeq || 0) + 1;
+          syncUserObj._lastBindCommitSeq = Number(syncUserObj._lastBindCommitSeq || 0) + 1;
+        }
       }
 
       if (Array.isArray(body.parcel_upserts)) {
@@ -2674,12 +2686,59 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/school-bindings/bind-live",
     "bindLiveSchoolAccount",
     "bearer",
-    async ({ auth, body, nowMs }) => {
+    async ({ auth, headers, body, nowMs }) => {
       const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
       const studentNoInput = String(body?.student_no || "").trim();
       const passwordInput = String(body?.password || "").trim();
       const rawTokenInput = String(body?.raw_token || "").trim();
       const casTgcInput = String(body?.cas_tgc || "").trim();
+
+      const entryUser = store.users.get(auth.cloudUserId);
+      if (!entryUser || entryUser.status !== "ACTIVE") {
+        throw new ContractError(
+          "CLOUD_AUTH_REQUIRED",
+          "Cloud user account is inactive or deleted"
+        );
+      }
+      if (body?.consent_id) {
+        const reqConsent = store.consents.get(String(body.consent_id).trim());
+        if (!reqConsent || reqConsent.cloud_user_id !== auth.cloudUserId || reqConsent.withdrawn_at) {
+          throw new ContractError("CONSENT_WITHDRAWN", "Specified consent is missing or withdrawn");
+        }
+      }
+      if (body?.binding_id || body?.school_binding_id) {
+        const reqBindId = String(body.binding_id || body.school_binding_id).trim();
+        const reqBind = store.schoolBindings.get(reqBindId);
+        if (
+          !reqBind ||
+          reqBind.cloud_user_id !== auth.cloudUserId ||
+          reqBind.revoked_at ||
+          reqBind.status === "REVOKED"
+        ) {
+          throw new ContractError(
+            "CONSENT_WITHDRAWN",
+            "Specified school binding is missing or revoked"
+          );
+        }
+      }
+
+      const entryAuthVersion = Number(entryUser.auth_version || 1);
+      const entryRevocationSeq = Number(entryUser._lastRevocationSeq || 0);
+      const entryBindCommitSeq = Number(entryUser._lastBindCommitSeq || 0);
+      const requestBindStartSeq = (entryUser._latestBindStartSeq =
+        Number(entryUser._latestBindStartSeq || 0) + 1);
+      const entryActiveBindingIds = new Set(
+        store
+          .recordsForUser("schoolBindings", auth.cloudUserId)
+          .filter((b) => b.school_id === schoolId && !b.revoked_at && b.status !== "REVOKED")
+          .map((b) => b.id)
+      );
+      const entryActiveConsentIds = new Set(
+        store
+          .recordsForUser("consents", auth.cloudUserId)
+          .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId && !c.withdrawn_at)
+          .map((c) => c.id)
+      );
 
       const authRes = await schoolProvider.authenticateHautSession({
         raw_token: rawTokenInput,
@@ -2690,7 +2749,47 @@ export function createCampusCloudApp(options = {}) {
         isLiveCredential: true
       });
 
+      // Re-verify session and account liveness after async school authentication (rejects if logged out or deleted in flight)
+      extractBearer(headers, nowMs, "POST");
+
       const userRecord = store.users.get(auth.cloudUserId);
+      if (!userRecord || userRecord.status !== "ACTIVE") {
+        throw new ContractError(
+          "CLOUD_AUTH_REQUIRED",
+          "Cloud user account is inactive or deleted"
+        );
+      }
+
+      const anyEntryConsentWithdrawn = Array.from(entryActiveConsentIds).some((cid) => {
+        const c = store.consents.get(cid);
+        return !c || Boolean(c.withdrawn_at);
+      });
+      const anyEntryBindingRevoked = Array.from(entryActiveBindingIds).some((bid) => {
+        const b = store.schoolBindings.get(bid);
+        return !b || Boolean(b.revoked_at) || b.status === "REVOKED";
+      });
+      if (
+        Number(userRecord._lastRevocationSeq || 0) !== entryRevocationSeq ||
+        anyEntryConsentWithdrawn ||
+        anyEntryBindingRevoked
+      ) {
+        throw new ContractError(
+          "CONSENT_WITHDRAWN",
+          "学校鉴权等待期间授权同意或学校绑定已被撤回，已拒绝旧绑定请求恢复权限"
+        );
+      }
+
+      if (
+        Number(userRecord.auth_version || 1) !== entryAuthVersion ||
+        Number(userRecord._latestBindStartSeq || 0) !== requestBindStartSeq ||
+        Number(userRecord._lastBindCommitSeq || 0) !== entryBindCommitSeq
+      ) {
+        throw new ContractError(
+          "CONFLICT",
+          "学校鉴权等待期间授权世代已变更或已有更新的绑定请求，已拒绝旧绑定请求覆盖当前状态"
+        );
+      }
+
       const resolvedStudentNo = String(authRes.userInfo?.userNo || studentNoInput || "20240001").trim();
 
       // Strictly forbid in-place mutation of binding.student_no!
@@ -2792,6 +2891,8 @@ export function createCampusCloudApp(options = {}) {
         store.indexUserScoped?.("consents", cid, consent.cloud_user_id);
       }
       binding.consent_id = consent.id;
+      userRecord._lastBindCommitSeq = Number(userRecord._lastBindCommitSeq || 0) + 1;
+      store.flushSnapshotStrictSync?.();
 
       await syncUserToSso(auth.cloudUserId);
       return {
@@ -2815,17 +2916,18 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/schools/haut/library/live-regions",
     "getHautLibraryLiveRegions",
     "bearer",
-    async ({ auth, query, nowMs }) => {
+    async ({ auth, headers, query, nowMs }) => {
       const dateParam =
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
       const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) => !b.revoked_at && b.credential_ref
+        (b) => !b.revoked_at && b.status !== "REVOKED" && b.credential_ref
       );
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
       }
+      const entryBindAuthVer = Number(binding.auth_version || 1);
       const credRecord = store.encryptedCredentials.get(binding.credential_ref);
       const permit = kmsVault.issueAccessPermit({
         taskId: `live_regions_${Date.now()}`,
@@ -2837,6 +2939,14 @@ export function createCampusCloudApp(options = {}) {
       });
       const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
       const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+      extractBearer(headers, nowMs, "GET");
+      if (
+        binding.revoked_at ||
+        binding.status === "REVOKED" ||
+        Number(binding.auth_version || 1) !== entryBindAuthVer
+      ) {
+        throw new ContractError("CONSENT_WITHDRAWN", "学校绑定在查询期间已撤销或变更");
+      }
       const snap = await schoolProvider.fetchLiveStudyRegions(authRes.rawToken, dateParam);
       const currentBooking = await schoolProvider.fetchCurrentActiveBooking(authRes.rawToken);
       return {
@@ -2856,18 +2966,19 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/schools/haut/library/live-seats",
     "getHautLibraryLiveSeats",
     "bearer",
-    async ({ auth, query, nowMs }) => {
+    async ({ auth, headers, query, nowMs }) => {
       const regionId = Number(query.get("region_id") || 7);
       const dateParam =
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
       const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) => !b.revoked_at && b.credential_ref
+        (b) => !b.revoked_at && b.status !== "REVOKED" && b.credential_ref
       );
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
       }
+      const entryBindAuthVer = Number(binding.auth_version || 1);
       const credRecord = store.encryptedCredentials.get(binding.credential_ref);
       const permit = kmsVault.issueAccessPermit({
         taskId: `live_seats_${Date.now()}`,
@@ -2879,6 +2990,14 @@ export function createCampusCloudApp(options = {}) {
       });
       const decrypted = kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
       const authRes = await schoolProvider.authenticateHautSession(decrypted, binding);
+      extractBearer(headers, nowMs, "GET");
+      if (
+        binding.revoked_at ||
+        binding.status === "REVOKED" ||
+        Number(binding.auth_version || 1) !== entryBindAuthVer
+      ) {
+        throw new ContractError("CONSENT_WITHDRAWN", "学校绑定在查询期间已撤销或变更");
+      }
       const snap = await schoolProvider.fetchLiveRegionSeats(authRes.rawToken, regionId, dateParam);
       return {
         status: 200,
