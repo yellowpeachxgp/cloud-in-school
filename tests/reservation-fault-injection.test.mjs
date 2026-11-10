@@ -3028,3 +3028,331 @@ test("Fault Injection 20 (Cloud P1-1 — Async Revocation / Rebind / Logout Duri
   }
 });
 
+test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Provider Across Initial Auth, 401 Re-login, and Signoff Fallback Blocks Subsequent Writes, Preserves Zero-Write vs Post-Dispatch State, and Blocks Stale Credential Refresh Ciphertext)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "fi21-async-cancel-revoke-"));
+  const origFetch = globalThis.fetch;
+  let blockedNetwork = 0;
+  globalThis.fetch = async () => {
+    blockedNetwork += 1;
+    throw new Error("OFFLINE_TEST_GUARD: unexpected external fetch blocked");
+  };
+
+  try {
+    const baseMs = Date.parse("2026-11-21T12:00:00+08:00");
+    const newApp = (name) =>
+      createCampusCloudApp({
+        requireAdminAccess: false,
+        redisEnabled: false,
+        storeOptions: {
+          snapshotPath: path.join(tmpDir, `${name}.json`),
+          requireDurableSnapshot: true
+        }
+      });
+
+    async function setupCancelFixture(name, secret) {
+      const app = newApp(name);
+      const user = app.store.findOrCreateCloudUser({
+        issuer: "https://offline.invalid",
+        subject: `offline_${name}`,
+        displayName: "Offline cancel review fixture"
+      });
+      const s = app.identity.issueDeviceSession(user, "Offline", null, 1, baseMs);
+      const headers = { authorization: `Bearer ${s.access_token}` };
+      const req = (method, url, body, delta = 0) =>
+        app.inject({ method, url, headers, body, nowMs: baseMs + delta });
+      const c = await req("POST", "/api/v1/me/consents", { school_id: "haut" });
+      assert.equal(c.status, 201);
+      const b = await req("POST", "/api/v1/school-bindings", {
+        school_id: "haut",
+        student_no: "2026990101",
+        consent_id: c.body.data.id
+      });
+      assert.equal(b.status, 201);
+      const r = await req("POST", `/api/v1/school-bindings/${b.body.data.id}/complete`, {
+        credential_kind: "DELEGATED_SESSION_BUNDLE",
+        consent_id: c.body.data.id,
+        delegated_secret: secret
+      });
+      assert.equal(r.status, 200);
+      const bindingId = b.body.data.id;
+      const consentId = c.body.data.id;
+      const binding = app.store.schoolBindings.get(bindingId);
+      const plan = {
+        id: "offline-plan",
+        cloud_user_id: user.id,
+        school_binding_id: bindingId,
+        school_id: "haut",
+        consent_id: consentId,
+        student_no: binding.student_no,
+        auth_version: 1,
+        enabled: true,
+        user_intent_state: "ACTIVE",
+        remaining_days: 1
+      };
+      const job = {
+        id: "offline-job",
+        plan_id: plan.id,
+        cloud_user_id: user.id,
+        school_binding_id: bindingId,
+        school_id: "haut",
+        consent_id: consentId,
+        student_no: binding.student_no,
+        auth_version: 1,
+        state: "CONFIRMED",
+        state_version: 1,
+        user_intent_state: "ACTIVE",
+        external_execution_state: "SCHOOL_CONFIRMED",
+        school_cancellation_state: "NOT_REQUESTED",
+        external_booking_id: "offline-exact-123"
+      };
+      app.store.reservationPlans.set(plan.id, plan);
+      app.store.indexUserScoped("reservationPlans", plan.id, user.id);
+      app.store.reservationJobs.set(job.id, job);
+      app.store.indexUserScoped("reservationJobs", job.id, user.id);
+      app.store.schoolReservations.set(job.id, {
+        id: "offline-res",
+        job_id: job.id,
+        external_booking_id: "offline-exact-123",
+        official_status: "CONFIRMED",
+        confirmed_official_status: "CONFIRMED",
+        evidence_sha256: "offline_evidence"
+      });
+      return { app, user, req, bindingId, consentId, binding, plan, job };
+    }
+
+    // Timeline ①: initial-auth (no raw_token, binding revoked while authenticateHautSession is in flight BEFORE 1st write)
+    // -> 0 external writes, zero-write revocation preserves MANUAL_ACTION_REQUIRED / DELEGATION_STOPPED_SCHOOL_CONFIRMED
+    {
+      const secret = JSON.stringify({
+        student_no: "2026990101",
+        raw_token: "",
+        password: "offline_fake_password"
+      });
+      const { app, req, bindingId, binding, job } = await setupCancelFixture("cancel-initial-auth", secret);
+      let revoked = false;
+      const calls = [];
+      app.schoolProvider.authenticateHautSession = async () => {
+        if (!revoked) {
+          const r = await req("DELETE", `/api/v1/school-bindings/${bindingId}`, null, 1);
+          assert.equal(r.status, 200);
+          revoked = true;
+        }
+        return {
+          rawToken: "offline_new_token_012345678901234567890123456",
+          userInfo: { userNo: binding.student_no }
+        };
+      };
+      app.schoolProvider.wslibGetJson = async (url) => {
+        if (url.includes("/cancel?") || url.includes("/signoff?")) {
+          calls.push({ path: url.split("?")[0], afterRevocation: revoked });
+          return { code: 200 };
+        }
+        return { code: 200, rows: [], total: 0 };
+      };
+      app.schoolProvider.fetchActiveBookings = async () => [];
+
+      const result = await req("POST", `/api/v1/reservation-jobs/${job.id}/cancel-seat`, {}, 2);
+      assert.equal(result.status, 200);
+      assert.equal(
+        calls.length,
+        0,
+        "Timeline ①: zero external cancel/signoff writes may be dispatched when binding was revoked during initial authenticateHautSession"
+      );
+      assert.equal(job.user_intent_state, "REVOKED");
+      assert.equal(job.external_execution_state, "SCHOOL_CONFIRMED");
+      assert.equal(
+        job.school_cancellation_state,
+        "MANUAL_ACTION_REQUIRED",
+        "Zero-write revocation must be MANUAL_ACTION_REQUIRED (not SCHOOL_CANCELLED and not CANCEL_RESULT_UNKNOWN)"
+      );
+      assert.equal(job.state, "DELEGATION_STOPPED_SCHOOL_CONFIRMED");
+      assert.equal(result.body.data.live_cancel.cancelled, false);
+      const sr = app.store.schoolReservations.get(job.id);
+      assert.equal(sr.external_booking_id, "offline-exact-123");
+      assert.equal(sr.confirmed_official_status, "CONFIRMED");
+    }
+
+    // Timeline ②: reauth-after-401 (1st /seatbook/user/cancel returns 401, binding revoked during re-login authenticateHautSession)
+    // -> 1st write was dispatched before revocation, 2nd retry write & signoff fallback MUST be blocked -> CANCEL_RESULT_UNKNOWN
+    {
+      const secret = JSON.stringify({
+        student_no: "2026990101",
+        raw_token: "offline_fake_token_012345678901234567890123456",
+        password: "offline_fake_password"
+      });
+      const { app, req, bindingId, binding, job } = await setupCancelFixture("cancel-reauth-after-401", secret);
+      let revoked = false;
+      const calls = [];
+      app.schoolProvider.authenticateHautSession = async () => {
+        if (!revoked) {
+          const r = await req("DELETE", `/api/v1/school-bindings/${bindingId}`, null, 1);
+          assert.equal(r.status, 200);
+          revoked = true;
+        }
+        return {
+          rawToken: "offline_new_token_012345678901234567890123456",
+          userInfo: { userNo: binding.student_no }
+        };
+      };
+      app.schoolProvider.wslibGetJson = async (url) => {
+        if (url.includes("/cancel?") || url.includes("/signoff?")) {
+          calls.push({ path: url.split("?")[0], afterRevocation: revoked });
+          if (calls.length === 1) return { code: 401 };
+          return { code: 200 };
+        }
+        return { code: 200, rows: [], total: 0 };
+      };
+      app.schoolProvider.fetchActiveBookings = async () => [];
+
+      const result = await req("POST", `/api/v1/reservation-jobs/${job.id}/cancel-seat`, {}, 2);
+      assert.equal(result.status, 200);
+      assert.equal(
+        calls.filter((c) => c.afterRevocation).length,
+        0,
+        "Timeline ②: no retry cancel or fallback signoff write may be dispatched after revocation during 401 re-login"
+      );
+      assert.equal(calls.length, 1, "Only the pre-revocation 1st cancel attempt was dispatched");
+      assert.equal(job.user_intent_state, "REVOKED");
+      assert.equal(job.external_execution_state, "SCHOOL_CONFIRMED");
+      assert.equal(
+        job.school_cancellation_state,
+        "CANCEL_RESULT_UNKNOWN",
+        "Post-dispatch revocation must record CANCEL_RESULT_UNKNOWN (never SCHOOL_CANCELLED or zero-write MANUAL_ACTION_REQUIRED)"
+      );
+      assert.equal(job.state, "CANCEL_RESULT_UNKNOWN");
+      assert.equal(result.body.data.live_cancel.cancelled, false);
+      const sr = app.store.schoolReservations.get(job.id);
+      assert.equal(sr.official_status, "CANCEL_RESULT_UNKNOWN");
+      assert.equal(sr.confirmed_official_status, "CONFIRMED");
+      assert.equal(sr.confirmed_booking_evidence.external_booking_id, "offline-exact-123");
+    }
+
+    // Timeline ③: fallback-after-error (1st /seatbook/user/cancel throws after revocation -> /seatbook/user/signoff fallback MUST be blocked)
+    {
+      const secret = JSON.stringify({
+        student_no: "2026990101",
+        raw_token: "offline_fake_token_012345678901234567890123456",
+        password: "offline_fake_password"
+      });
+      const { app, req, consentId, binding, job } = await setupCancelFixture("cancel-fallback-after-error", secret);
+      let revoked = false;
+      const calls = [];
+      app.schoolProvider.authenticateHautSession = async () => ({
+        rawToken: "offline_new_token_012345678901234567890123456",
+        userInfo: { userNo: binding.student_no }
+      });
+      app.schoolProvider.wslibGetJson = async (url) => {
+        if (url.includes("/cancel?") || url.includes("/signoff?")) {
+          calls.push({ path: url.split("?")[0], afterRevocation: revoked });
+          if (calls.length === 1) {
+            const r = await req("DELETE", `/api/v1/me/consents/${consentId}`, null, 1);
+            assert.equal(r.status, 200);
+            revoked = true;
+            throw new Error("offline response lost");
+          }
+          return { code: 200 };
+        }
+        return { code: 200, rows: [], total: 0 };
+      };
+      app.schoolProvider.fetchActiveBookings = async () => [];
+
+      const result = await req("POST", `/api/v1/reservation-jobs/${job.id}/cancel-seat`, {}, 2);
+      assert.equal(result.status, 200);
+      assert.equal(
+        calls.filter((c) => c.afterRevocation).length,
+        0,
+        "Timeline ③: fallback /seatbook/user/signoff must be blocked when consent/binding was revoked during 1st cancel write"
+      );
+      assert.equal(calls.length, 1);
+      assert.equal(job.user_intent_state, "REVOKED");
+      assert.equal(job.school_cancellation_state, "CANCEL_RESULT_UNKNOWN");
+      assert.equal(job.state, "CANCEL_RESULT_UNKNOWN");
+      assert.equal(result.body.data.live_cancel.cancelled, false);
+      const sr = app.store.schoolReservations.get(job.id);
+      assert.equal(sr.confirmed_booking_evidence.external_booking_id, "offline-exact-123");
+    }
+
+    // Timeline ④: Async credential refresh (_updateBindingCredentialTokens in createPlanAndJob background prewarm & PRECHECK)
+    // finishing AFTER binding revocation must NEVER write unrevoked ciphertext to encryptedCredentials or overwrite revoked binding
+    {
+      const secret = JSON.stringify({
+        student_no: "2026990101",
+        raw_token: "offline_fake_token_012345678901234567890123456",
+        password: "offline_fake_password"
+      });
+      const { app, req, bindingId, consentId, binding } = await setupCancelFixture(
+        "async-cred-refresh-revoke",
+        secret
+      );
+      let enterPrewarm;
+      let finishPrewarm;
+      const prewarmStarted = new Promise((r) => {
+        enterPrewarm = r;
+      });
+      const prewarmHeld = new Promise((r) => {
+        finishPrewarm = r;
+      });
+      app.schoolProvider.prewarmJobTargetSeats = async () => {
+        enterPrewarm();
+        await prewarmHeld;
+        return {
+          auth: {
+            rawToken: "refreshed_after_revocation_token_012345678901234",
+            userInfo: { userNo: "2026990101" }
+          },
+          prewarmed: { region_id: 7, candidate_seats: [] }
+        };
+      };
+
+      const createPlanRes = await req(
+        "POST",
+        "/api/v1/reservation-plans",
+        {
+          school_binding_id: bindingId,
+          consent_id: consentId,
+          target_local_date: "2026-11-22",
+          target_local_time: "07:00:00",
+          slot_window: "08:00-22:00",
+          area_name: "五层东区",
+          candidate_seats: ["01桌 A座"]
+        },
+        10
+      );
+      assert.equal(createPlanRes.status, 201);
+      await prewarmStarted;
+
+      const revokeRes = await req("DELETE", `/api/v1/school-bindings/${bindingId}`, null, 20);
+      assert.equal(revokeRes.status, 200);
+      assert.ok(binding.revoked_at);
+
+      finishPrewarm();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // Also test direct _updateBindingCredentialTokens call on revoked binding
+      app.reservationEngine._updateBindingCredentialTokens(
+        binding,
+        {
+          rawToken: "direct_refresh_after_revocation_token_0123456789",
+          userInfo: { userNo: "2026990101" }
+        },
+        secret,
+        baseMs + 50
+      );
+
+      const unrevokedForBinding = Array.from(app.store.encryptedCredentials.values()).filter(
+        (c) => c.binding_id === bindingId && !c.revoked_at
+      );
+      assert.equal(
+        unrevokedForBinding.length,
+        0,
+        "Revoked binding must never receive a new unrevoked encryptedCredentials entry from late async refresh"
+      );
+    }
+
+    assert.equal(blockedNetwork, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

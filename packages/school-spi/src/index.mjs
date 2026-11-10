@@ -1627,7 +1627,19 @@ export class HautLibraryProvider {
     };
   }
 
-  async cancelLiveSeatBooking({ decryptedSecret, binding, externalBookingId }) {
+  async cancelLiveSeatBooking({
+    decryptedSecret,
+    binding,
+    externalBookingId,
+    expectedStudentNo = null,
+    expectedAuthVersion = null,
+    onWriteTrackingReady = null,
+    beforeReauth = null,
+    beforeEachExternalWrite = null
+  }) {
+    if (typeof onWriteTrackingReady === "function") {
+      onWriteTrackingReady();
+    }
     const targetBookingId = externalBookingId ? String(externalBookingId).trim() : "";
     if (!targetBookingId) {
       return {
@@ -1639,6 +1651,9 @@ export class HautLibraryProvider {
     }
 
     if (this.mockBackend && typeof this.mockBackend.handleCancelReservation === "function") {
+      if (typeof beforeEachExternalWrite === "function") {
+        await beforeEachExternalWrite({ pathAndQuery: "mock:handleCancelReservation" });
+      }
       return this.mockBackend.handleCancelReservation({ binding, externalBookingId: targetBookingId });
     }
     if (this.mockBackend || targetBookingId.startsWith("haut_mock_")) {
@@ -1651,19 +1666,96 @@ export class HautLibraryProvider {
       };
     }
 
+    const initialStudentNo = String(expectedStudentNo || binding?.student_no || "").trim();
+    const initialAuthVersion =
+      expectedAuthVersion !== null && expectedAuthVersion !== undefined
+        ? Number(expectedAuthVersion)
+        : Number(binding?.auth_version || 1);
+
+    const assertBindingAndIdentityStillCurrent = () => {
+      if (binding) {
+        if (binding.revoked_at || binding.status === "REVOKED") {
+          throw new ContractError(
+            "CONSENT_WITHDRAWN",
+            "学校绑定在退座执行期间已被撤销，已终止后续学校退座请求"
+          );
+        }
+        if (Number(binding.auth_version || 1) !== initialAuthVersion) {
+          throw new ContractError(
+            "CONSENT_WITHDRAWN",
+            "学校授权世代在退座执行期间已变更，已终止后续学校退座请求"
+          );
+        }
+        const currentBindSno = String(binding.student_no || "").trim();
+        if (initialStudentNo && (!currentBindSno || currentBindSno !== initialStudentNo)) {
+          throw new ContractError(
+            "CONSENT_WITHDRAWN",
+            "学校绑定身份在退座执行期间已变更，已终止后续学校退座请求"
+          );
+        }
+      }
+    };
+
+    const runAuthenticatedSessionRefresh = async (bundleForAuth) => {
+      assertBindingAndIdentityStillCurrent();
+      if (typeof beforeReauth === "function") {
+        await beforeReauth();
+      }
+      const auth = await this.authenticateHautSession(bundleForAuth, binding);
+      assertBindingAndIdentityStillCurrent();
+      if (typeof beforeReauth === "function") {
+        await beforeReauth();
+      }
+      const authSno = String(auth?.userInfo?.userNo || "").trim();
+      if (initialStudentNo && authSno && authSno !== initialStudentNo) {
+        throw new ContractError(
+          "CONSENT_WITHDRAWN",
+          "学校重登返回的学号与当前退座任务所属不可变学号不一致"
+        );
+      }
+      return auth;
+    };
+
+    const dispatchAuthorizedWrite = async (pathAndQuery) => {
+      assertBindingAndIdentityStillCurrent();
+      if (typeof beforeEachExternalWrite === "function") {
+        await beforeEachExternalWrite({ pathAndQuery });
+      }
+      return this.wslibGetJson(pathAndQuery, rawToken);
+    };
+
     const credBundle = this.parseCredentialBundle(decryptedSecret, binding);
     let rawToken = credBundle.raw_token;
     if (!rawToken) {
-      const auth = await this.authenticateHautSession(credBundle, binding);
+      const auth = await runAuthenticatedSessionRefresh(credBundle);
       rawToken = auth.rawToken;
     }
 
-    const callWslibWithReauth = async (pathAndQuery) => {
+    const callWslibWriteWithReauth = async (pathAndQuery) => {
+      try {
+        return await dispatchAuthorizedWrite(pathAndQuery);
+      } catch (err) {
+        if (err?.code === "CONSENT_WITHDRAWN") {
+          throw err;
+        }
+        if (err?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(err?.message || ""))) {
+          const reauth = await runAuthenticatedSessionRefresh({ ...credBundle, raw_token: "" });
+          rawToken = reauth.rawToken;
+          return await dispatchAuthorizedWrite(pathAndQuery);
+        }
+        throw err;
+      }
+    };
+
+    const callWslibReadWithReauth = async (pathAndQuery) => {
       try {
         return await this.wslibGetJson(pathAndQuery, rawToken);
       } catch (err) {
+        if (err?.code === "CONSENT_WITHDRAWN") {
+          throw err;
+        }
         if (err?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(err?.message || ""))) {
-          const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+          const reauth = await runAuthenticatedSessionRefresh({ ...credBundle, raw_token: "" });
           rawToken = reauth.rawToken;
           return await this.wslibGetJson(pathAndQuery, rawToken);
         }
@@ -1674,26 +1766,35 @@ export class HautLibraryProvider {
     let cancelJson = null;
     let cancelHttpFailed = false;
     try {
-      cancelJson = await callWslibWithReauth(
+      cancelJson = await callWslibWriteWithReauth(
         `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`
       );
       if (cancelJson?.code === 401) {
-        const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+        const reauth = await runAuthenticatedSessionRefresh({ ...credBundle, raw_token: "" });
         rawToken = reauth.rawToken;
-        cancelJson = await this.wslibGetJson(
-          `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`,
-          rawToken
+        cancelJson = await dispatchAuthorizedWrite(
+          `/seatbook/user/cancel?bookingid=${encodeURIComponent(targetBookingId)}&channelType=1003`
         );
       }
-    } catch {
+    } catch (err) {
+      if (err?.code === "CONSENT_WITHDRAWN") {
+        throw err;
+      }
       cancelHttpFailed = true;
     }
 
     let signOffJson = null;
     if (cancelHttpFailed || cancelJson?.code !== 200) {
-      signOffJson = await callWslibWithReauth(
-        `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`
-      ).catch(() => null);
+      try {
+        signOffJson = await callWslibWriteWithReauth(
+          `/seatbook/user/signoff?bookingid=${encodeURIComponent(targetBookingId)}`
+        );
+      } catch (err) {
+        if (err?.code === "CONSENT_WITHDRAWN") {
+          throw err;
+        }
+        signOffJson = null;
+      }
       if (signOffJson?.code === 200) {
         cancelJson = signOffJson;
         cancelHttpFailed = false;
@@ -1715,8 +1816,11 @@ export class HautLibraryProvider {
           cancelledBookingIdsOut: cancelledIdsFromActiveReadback
         });
       } catch (activeErr) {
+        if (activeErr?.code === "CONSENT_WITHDRAWN") {
+          throw activeErr;
+        }
         if (activeErr?.code === "SCHOOL_AUTH_EXPIRED" || /401|过期/.test(String(activeErr?.message || ""))) {
-          const reauth = await this.authenticateHautSession({ ...credBundle, raw_token: "" }, binding);
+          const reauth = await runAuthenticatedSessionRefresh({ ...credBundle, raw_token: "" });
           rawToken = reauth.rawToken;
           cancelledIdsFromActiveReadback.clear();
           activeList = await this.fetchActiveBookings(rawToken, {
@@ -1749,7 +1853,7 @@ export class HautLibraryProvider {
       const fetchHistoryPageJson = async (pageNum) => {
         const querySuffix = `?bookingstatus=0&pageSize=${pageSize}&pageNum=${pageNum}`;
         try {
-          const primaryRes = await callWslibWithReauth(`${historyEndpoint}${querySuffix}`);
+          const primaryRes = await callWslibReadWithReauth(`${historyEndpoint}${querySuffix}`);
           if (
             isPlainObj(primaryRes) &&
             primaryRes.code === 200 &&
@@ -1758,7 +1862,7 @@ export class HautLibraryProvider {
             return primaryRes;
           }
           if (historyEndpoint === "/seatbook/user/mybookinghis") {
-            const legacyRes = await callWslibWithReauth(
+            const legacyRes = await callWslibReadWithReauth(
               `/seatbook/user/my/bookinglist?pageSize=${pageSize}&pageNum=${pageNum}`
             );
             if (isPlainObj(legacyRes)) {
@@ -1767,9 +1871,12 @@ export class HautLibraryProvider {
             }
           }
           return primaryRes;
-        } catch {
+        } catch (histErr) {
+          if (histErr?.code === "CONSENT_WITHDRAWN") {
+            throw histErr;
+          }
           if (historyEndpoint === "/seatbook/user/mybookinghis") {
-            const legacyRes = await callWslibWithReauth(
+            const legacyRes = await callWslibReadWithReauth(
               `/seatbook/user/my/bookinglist?pageSize=${pageSize}&pageNum=${pageNum}`
             );
             historyEndpoint = "/seatbook/user/my/bookinglist";
@@ -1783,7 +1890,10 @@ export class HautLibraryProvider {
         let historyJson = null;
         try {
           historyJson = await fetchHistoryPageJson(pageNum);
-        } catch {
+        } catch (pageErr) {
+          if (pageErr?.code === "CONSENT_WITHDRAWN") {
+            throw pageErr;
+          }
           return {
             cancelled: false,
             outcome: "CANCEL_RESULT_UNKNOWN",
@@ -1936,7 +2046,10 @@ export class HautLibraryProvider {
         bookingId: targetBookingId,
         message: cancelJson?.msg || "已通过学校权威回查确认该笔预约已取消并释放座位"
       };
-    } catch {
+    } catch (outerErr) {
+      if (outerErr?.code === "CONSENT_WITHDRAWN") {
+        throw outerErr;
+      }
       return {
         cancelled: false,
         outcome: "CANCEL_RESULT_UNKNOWN",

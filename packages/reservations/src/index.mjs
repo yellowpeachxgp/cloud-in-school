@@ -437,8 +437,15 @@ export class TripleScheduleEngine {
       binding.credential_ref &&
       typeof this.schoolProvider.prewarmJobTargetSeats === "function"
     ) {
+      const prewarmAuthVer = Number(job.auth_version ?? plan.auth_version ?? 1);
       Promise.resolve()
         .then(async () => {
+          if (
+            !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+            (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+          ) {
+            return;
+          }
           const decrypted = this._decryptBindingCredential(job, binding, Date.now());
           const prewarmRes = await this.schoolProvider.prewarmJobTargetSeats({
             job,
@@ -446,8 +453,20 @@ export class TripleScheduleEngine {
             binding,
             decryptedSecret: decrypted
           });
+          if (
+            !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+            (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+          ) {
+            return;
+          }
           if (prewarmRes?.auth) {
-            this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, Date.now());
+            this._updateBindingCredentialTokens(
+              binding,
+              prewarmRes.auth,
+              decrypted,
+              Date.now(),
+              prewarmAuthVer
+            );
           }
           if (prewarmRes?.prewarmed) {
             job.prewarmed_targets = prewarmRes.prewarmed;
@@ -571,10 +590,42 @@ export class TripleScheduleEngine {
     return plaintext;
   }
 
-  _updateBindingCredentialTokens(binding, authResult, oldSecret, nowMs = Date.now()) {
-    if (!binding || !authResult?.rawToken) return;
+  _updateBindingCredentialTokens(
+    binding,
+    authResult,
+    oldSecret,
+    nowMs = Date.now(),
+    expectedAuthVersion = null
+  ) {
+    if (!binding || !authResult?.rawToken) return false;
+    const liveBind = this.store.schoolBindings?.get?.(binding.id) || binding;
+    if (!liveBind || liveBind.revoked_at || liveBind.status === "REVOKED") {
+      return false;
+    }
+    const liveUser = this.store.users?.get?.(liveBind.cloud_user_id) || null;
+    if (liveUser && liveUser.status && liveUser.status !== "ACTIVE") {
+      return false;
+    }
+    const currentUserAuthVer = Number(liveUser?.auth_version ?? liveBind.auth_version ?? 1);
+    const currentBindAuthVer = Number(liveBind.auth_version ?? 1);
+    if (currentBindAuthVer !== currentUserAuthVer) {
+      return false;
+    }
+    if (
+      expectedAuthVersion !== null &&
+      expectedAuthVersion !== undefined &&
+      Number(expectedAuthVersion) !== currentUserAuthVer
+    ) {
+      return false;
+    }
+    if (liveBind.consent_id && this.store.consents?.has?.(liveBind.consent_id)) {
+      const liveConsent = this.store.consents.get(liveBind.consent_id);
+      if (!liveConsent || liveConsent.withdrawn_at) {
+        return false;
+      }
+    }
     const returnedSno = String(authResult?.userInfo?.userNo || "").trim();
-    const bindSno = String(binding.student_no || "").trim();
+    const bindSno = String(liveBind.student_no || "").trim();
     if (returnedSno && bindSno && returnedSno !== bindSno) {
       throw new ContractError(
         "CONSENT_WITHDRAWN",
@@ -582,27 +633,37 @@ export class TripleScheduleEngine {
       );
     }
     try {
-      const parsed = oldSecret && String(oldSecret).trim().startsWith("{") ? JSON.parse(oldSecret) : {};
+      const parsed =
+        oldSecret && String(oldSecret).trim().startsWith("{") ? JSON.parse(oldSecret) : {};
       const nextPayload = JSON.stringify({
         ...parsed,
         raw_token: authResult.rawToken,
         cas_tgc: authResult.casTgc || parsed.cas_tgc || "",
         cas_jsessionid: authResult.casJsessionId || parsed.cas_jsessionid || "",
-        student_no: authResult.userInfo?.userNo || parsed.student_no || binding.student_no || "",
+        student_no: authResult.userInfo?.userNo || parsed.student_no || liveBind.student_no || "",
         user_name: authResult.userInfo?.userName || parsed.user_name || ""
       });
       const encrypted = this.kmsVault.encryptSecret({
-        bindingId: binding.id,
-        schoolId: binding.school_id,
+        bindingId: liveBind.id,
+        schoolId: liveBind.school_id,
         credentialKind: "DELEGATED_SESSION_BUNDLE",
         plaintext: nextPayload,
         expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
       });
+      if (liveBind.revoked_at || liveBind.status === "REVOKED") {
+        return false;
+      }
+      const prevRef = liveBind.credential_ref;
+      if (prevRef && this.store.encryptedCredentials.has(prevRef)) {
+        this.store.encryptedCredentials.get(prevRef).revoked_at = new Date(nowMs).toISOString();
+      }
       this.store.encryptedCredentials.set(encrypted.id, encrypted);
-      binding.credential_ref = encrypted.id;
-      binding.credential_expires_at = encrypted.expires_at;
+      liveBind.credential_ref = encrypted.id;
+      liveBind.credential_expires_at = encrypted.expires_at;
+      return true;
     } catch {
       // Keep existing credential on non-fatal refresh update error
+      return false;
     }
   }
 
@@ -1094,8 +1155,20 @@ export class TripleScheduleEngine {
                   binding,
                   decryptedSecret: decrypted
                 });
+                if (
+                  !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+                  (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+                ) {
+                  return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+                }
                 if (prewarmRes?.auth) {
-                  this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+                  this._updateBindingCredentialTokens(
+                    binding,
+                    prewarmRes.auth,
+                    decrypted,
+                    nowMs,
+                    job.auth_version
+                  );
                 }
                 if (
                   prewarmRes?.prewarmed &&
@@ -1108,13 +1181,31 @@ export class TripleScheduleEngine {
                 }
               } else {
                 const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-                this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+                if (
+                  !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+                  (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+                ) {
+                  return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+                }
+                this._updateBindingCredentialTokens(
+                  binding,
+                  authRes,
+                  decrypted,
+                  nowMs,
+                  job.auth_version
+                );
               }
             } catch {
               job.prewarmed_targets = null;
               // Will retry at FINAL_CHECK
             }
           }
+        }
+        if (
+          !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+          (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+        ) {
+          return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
         }
         event.status = "PRECHECK_OK";
         event.actual_at = new Date(nowMs).toISOString();
@@ -1157,8 +1248,20 @@ export class TripleScheduleEngine {
                   binding,
                   decryptedSecret: decrypted
                 });
+                if (
+                  !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+                  (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+                ) {
+                  return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+                }
                 if (prewarmRes?.auth) {
-                  this._updateBindingCredentialTokens(binding, prewarmRes.auth, decrypted, nowMs);
+                  this._updateBindingCredentialTokens(
+                    binding,
+                    prewarmRes.auth,
+                    decrypted,
+                    nowMs,
+                    job.auth_version
+                  );
                 }
                 if (
                   prewarmRes?.prewarmed &&
@@ -1171,13 +1274,31 @@ export class TripleScheduleEngine {
                 }
               } else {
                 const authRes = await this.schoolProvider.authenticateHautSession(bundle, binding);
-                this._updateBindingCredentialTokens(binding, authRes, decrypted, nowMs);
+                if (
+                  !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+                  (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+                ) {
+                  return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
+                }
+                this._updateBindingCredentialTokens(
+                  binding,
+                  authRes,
+                  decrypted,
+                  nowMs,
+                  job.auth_version
+                );
               }
             } catch (err) {
               job.prewarmed_targets = null;
               event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
             }
           }
+        }
+        if (
+          !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
+          (job.user_intent_state && job.user_intent_state !== "ACTIVE")
+        ) {
+          return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
         }
         event.status = "FINAL_CHECK_OK";
         event.actual_at = new Date(nowMs).toISOString();
@@ -2017,17 +2138,62 @@ export class TripleScheduleEngine {
       }
 
       // If binding/credentials were revoked or school identity changed, forbid using credentials for school API calls
-      const expectedCancelSno = String(job.student_no || plan?.student_no || "").trim();
-      const currentBindSno = String(binding?.student_no || "").trim();
-      const bindingIdentityMismatch =
-        Boolean(expectedCancelSno) && (!currentBindSno || expectedCancelSno !== currentBindSno);
-      if (
-        !binding ||
-        binding.revoked_at ||
-        binding.status === "REVOKED" ||
-        !binding.credential_ref ||
-        bindingIdentityMismatch
-      ) {
+      const expectedCancelSno = String(
+        job.student_no || plan?.student_no || binding?.student_no || ""
+      ).trim();
+      const cancelStartUser = this.store.users?.get?.(job.cloud_user_id) || null;
+      const cancelStartAuthVer = Number(
+        cancelStartUser?.auth_version ?? binding?.auth_version ?? job.auth_version ?? 1
+      );
+      const cancelStartRevokeSeq = Number(cancelStartUser?._lastRevocationSeq || 0);
+      const cancelConsentId = job.consent_id || plan?.consent_id || binding?.consent_id || null;
+
+      const isCancelAuthorizationStillValid = () => {
+        const liveBind = binding?.id ? this.store.schoolBindings.get(binding.id) : null;
+        if (
+          !liveBind ||
+          liveBind.revoked_at ||
+          liveBind.status === "REVOKED" ||
+          !liveBind.credential_ref
+        ) {
+          return false;
+        }
+        const liveBindSno = String(liveBind.student_no || "").trim();
+        if (expectedCancelSno && (!liveBindSno || liveBindSno !== expectedCancelSno)) {
+          return false;
+        }
+        if (
+          plan?.student_no &&
+          String(plan.student_no).trim() &&
+          String(plan.student_no).trim() !== liveBindSno
+        ) {
+          return false;
+        }
+        const liveUser = this.store.users?.get?.(job.cloud_user_id) || null;
+        if (liveUser) {
+          if (liveUser.status && liveUser.status !== "ACTIVE") return false;
+          if (Number(liveUser.auth_version || 1) !== cancelStartAuthVer) return false;
+          if (Number(liveUser._lastRevocationSeq || 0) !== cancelStartRevokeSeq) return false;
+        }
+        if (Number(liveBind.auth_version ?? cancelStartAuthVer) !== cancelStartAuthVer) {
+          return false;
+        }
+        if (cancelConsentId && this.store.consents?.has?.(cancelConsentId)) {
+          const liveConsent = this.store.consents.get(cancelConsentId);
+          if (!liveConsent || liveConsent.withdrawn_at) return false;
+          if (Number(liveConsent.auth_version ?? cancelStartAuthVer) !== cancelStartAuthVer) {
+            return false;
+          }
+        } else if (typeof this.store.recordsForUser === "function") {
+          const activeConsents = this.store
+            .recordsForUser("consents", job.cloud_user_id)
+            .filter((c) => (c.school_id || job.school_id) === job.school_id && !c.withdrawn_at);
+          if (activeConsents.length === 0) return false;
+        }
+        return true;
+      };
+
+      if (!isCancelAuthorizationStillValid()) {
         job.user_intent_state = "REVOKED";
         job.external_execution_state = "SCHOOL_CONFIRMED";
         job.school_cancellation_state = hadUnknownCancel
@@ -2075,6 +2241,20 @@ export class TripleScheduleEngine {
       // Persist CANCEL_IN_PROGRESS strictly BEFORE external live seat cancel call (crash-safe & fail-closed)
       this._flushStopStateStrict();
 
+      let providerSupportsWriteTracking = false;
+      let externalCancelWriteCount = 0;
+      let revokedDuringCancelFlow = false;
+
+      const assertCancelStillAuthorized = () => {
+        if (!isCancelAuthorizationStillValid()) {
+          revokedDuringCancelFlow = true;
+          throw new ContractError(
+            "CONSENT_WITHDRAWN",
+            "退座执行期间学校绑定或授权同意已撤回，已拦截后续学校退座请求"
+          );
+        }
+      };
+
       let liveCancelResult = null;
       if (typeof this.schoolProvider.cancelLiveSeatBooking === "function") {
         try {
@@ -2082,16 +2262,53 @@ export class TripleScheduleEngine {
           liveCancelResult = await this.schoolProvider.cancelLiveSeatBooking({
             decryptedSecret,
             binding,
-            externalBookingId: exactBookingId
+            externalBookingId: exactBookingId,
+            expectedStudentNo: expectedCancelSno,
+            expectedAuthVersion: cancelStartAuthVer,
+            onWriteTrackingReady: () => {
+              providerSupportsWriteTracking = true;
+            },
+            beforeReauth: async () => {
+              assertCancelStillAuthorized();
+            },
+            beforeEachExternalWrite: async () => {
+              assertCancelStillAuthorized();
+              externalCancelWriteCount += 1;
+            }
           });
         } catch (err) {
-          liveCancelResult = {
-            cancelled: false,
-            outcome: "CANCEL_RESULT_UNKNOWN",
-            school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
-            bookingId: exactBookingId,
-            message: err?.message || "学校取消接口调用异常，取消结果待核对"
-          };
+          const isRevokedErr =
+            err?.code === "CONSENT_WITHDRAWN" ||
+            revokedDuringCancelFlow ||
+            !isCancelAuthorizationStillValid();
+          const zeroWritesDispatched =
+            providerSupportsWriteTracking && externalCancelWriteCount === 0;
+          if (isRevokedErr && zeroWritesDispatched && !hadUnknownCancel) {
+            job.user_intent_state = "REVOKED";
+            liveCancelResult = {
+              cancelled: false,
+              outcome: "REVOKED_BEFORE_CANCEL_WRITE_MANUAL_REQUIRED",
+              school_cancellation_state: "MANUAL_ACTION_REQUIRED",
+              writeDispatched: false,
+              bookingId: exactBookingId,
+              message:
+                "学校鉴权等待期间绑定或授权已撤销，未发出任何学校退座写请求；已保留原预约确认证据，请使用预约号在学校端自行处理"
+            };
+          } else {
+            if (isRevokedErr) {
+              job.user_intent_state = "REVOKED";
+            }
+            liveCancelResult = {
+              cancelled: false,
+              outcome: "CANCEL_RESULT_UNKNOWN",
+              school_cancellation_state: "CANCEL_RESULT_UNKNOWN",
+              writeDispatched: !zeroWritesDispatched,
+              bookingId: exactBookingId,
+              message: isRevokedErr
+                ? "学校退座请求发出后授权或绑定被撤销，已拦截后续重试/签退写请求，此前已发出请求的退座结果待核对"
+                : err?.message || "学校取消接口调用异常，取消结果待核对"
+            };
+          }
         }
       }
 
@@ -2108,11 +2325,13 @@ export class TripleScheduleEngine {
         !hadUnknownCancel &&
         liveCancelResult?.school_cancellation_state === "MANUAL_ACTION_REQUIRED"
       ) {
+        job.external_execution_state = "SCHOOL_CONFIRMED";
         job.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
         job.state = "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
         job.state_version += 1;
         if (schoolRes) {
           schoolRes.confirmed_official_status = schoolRes.confirmed_official_status || "CONFIRMED";
+          schoolRes.official_status = "CONFIRMED";
           schoolRes.school_cancellation_state = "MANUAL_ACTION_REQUIRED";
         }
       } else {
