@@ -971,15 +971,45 @@ export class CloudDatabaseStore {
       }
       fs.renameSync(tmp, this.snapshotPath);
       if (strict) {
+        const isUnsupportedDirFsyncError = (err, stage) => {
+          const code = String(err?.code || "").toUpperCase();
+          if (stage === "open") {
+            return (
+              process.platform === "win32" &&
+              (code === "EISDIR" || code === "EPERM" || code === "EINVAL")
+            );
+          }
+          if (stage === "fsync") {
+            return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP";
+          }
+          return false;
+        };
+
+        let dirFd = null;
         try {
-          const dirFd = fs.openSync(dir, "r");
+          dirFd = fs.openSync(dir, "r");
+        } catch (openErr) {
+          if (!isUnsupportedDirFsyncError(openErr, "open")) {
+            throw openErr;
+          }
+        }
+        if (dirFd !== null) {
+          let fsyncErr = null;
           try {
             fs.fsyncSync(dirFd);
-          } finally {
-            fs.closeSync(dirFd);
+          } catch (err) {
+            if (!isUnsupportedDirFsyncError(err, "fsync")) {
+              fsyncErr = err;
+            }
           }
-        } catch {
-          // Directory fsync may not be supported on all virtual filesystems; file fsync + stat check still apply
+          let closeErr = null;
+          try {
+            fs.closeSync(dirFd);
+          } catch (err) {
+            closeErr = err;
+          }
+          if (fsyncErr) throw fsyncErr;
+          if (closeErr) throw closeErr;
         }
         const st = fs.statSync(this.snapshotPath);
         if (!st || !st.isFile() || st.size !== expectedBytes) {

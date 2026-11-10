@@ -2162,3 +2162,203 @@ test("Fault Injection 17 (Cloud #2 — Verifiable Stop Persistence & Fail-Closed
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("Fault Injection 18 (Cloud #3 — Strict Directory open/fsync/close Error Propagation, Pending Retention & Zero External Calls)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-cloud-fi18-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  const origOpenSync = fs.openSync;
+  const origFsyncSync = fs.fsyncSync;
+  const origCloseSync = fs.closeSync;
+
+  try {
+    const tokenNowMs = Date.parse("2026-11-20T06:00:00+08:00");
+    const fireNowMs = Date.parse("2026-11-20T07:00:02+08:00");
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const { authHeaders, consentId, bindingId } = await setupBoundUser(app, tokenNowMs);
+
+    const planRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...authHeaders, "idempotency-key": "idem_fi18_dir_fsync" },
+      body: {
+        school_binding_id: bindingId,
+        consent_id: consentId,
+        target_local_date: "2026-11-20",
+        target_local_time: "07:00:00",
+        slot_window: "08:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"],
+        repeat_days: 2,
+        remaining_days: 2
+      },
+      nowMs: tokenNowMs
+    });
+    assert.equal(planRes.status, 201);
+    const jobId = planRes.body.data.job_id;
+    const job = app.store.reservationJobs.get(jobId);
+    const planId = job.plan_id;
+
+    // Confirm seat offline so we can also test cancel-seat external call count = 0 on dir I/O fault
+    job.prewarmed_targets = {
+      binding_id: bindingId,
+      student_no: "2026990101",
+      auth_version: 1,
+      plan_generation: 1,
+      target_local_date: "2026-11-20",
+      slot_window: "08:00-22:00",
+      expires_at: "2026-11-20T07:30:00+08:00",
+      region_id: 23,
+      region_name: "五层中区",
+      open_time: "07:30",
+      close_time: "22:00",
+      start_full: "2026-11-20 08:00:00",
+      end_full: "2026-11-20 22:00:00",
+      candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+    };
+    app.schoolProvider.wslibGetJson = async (pathAndQuery) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+        return {
+          code: 200,
+          layout: { regionName: "五层中区" },
+          seatList: [{ id: 501, seatName: "五层中区05桌 A座", seatStatus: 2 }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+        return { code: 200, bookingid: "99118822", msg: "预约成功" };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+        return {
+          code: 200,
+          data: {
+            id: "99118822",
+            seatId: 501,
+            seatName: "五层中区05桌 A座",
+            regionName: "五层中区",
+            buildingLayerRegionId: 23,
+            startDate: "2026-11-20 08:00:00",
+            endDate: "2026-11-20 22:00:00",
+            bookingStatus: 1
+          }
+        };
+      }
+      return { code: 200, rows: [] };
+    };
+    const fireRes = await app.reservationEngine.runScheduleEvent(jobId, "FIRE", fireNowMs);
+    assert.equal(fireRes.job.state, "CONFIRMED");
+
+    let externalLiveCancelCalls = 0;
+    app.schoolProvider.cancelLiveSeatBooking = async () => {
+      externalLiveCancelCalls += 1;
+      return { cancelled: true, outcome: "SCHOOL_CANCELLED", school_cancellation_state: "SCHOOL_CANCELLED" };
+    };
+
+    let faultMode = "none"; // "open_eacces" | "fsync_eio" | "close_eio" | "fsync_einval"
+    const activeDirFds = new Set();
+
+    fs.openSync = function (targetPath, flags, mode) {
+      if (String(targetPath) === tmpDir) {
+        if (faultMode === "open_eacces") {
+          const err = new Error("Simulated directory openSync permission error");
+          err.code = "EACCES";
+          throw err;
+        }
+        const fd = origOpenSync.call(fs, targetPath, flags, mode);
+        activeDirFds.add(fd);
+        return fd;
+      }
+      return origOpenSync.call(fs, targetPath, flags, mode);
+    };
+
+    fs.fsyncSync = function (fd) {
+      if (activeDirFds.has(fd)) {
+        if (faultMode === "fsync_eio") {
+          const err = new Error("Simulated directory fsyncSync EIO");
+          err.code = "EIO";
+          throw err;
+        }
+        if (faultMode === "fsync_einval") {
+          const err = new Error("Filesystem does not support directory fsync");
+          err.code = "EINVAL";
+          throw err;
+        }
+      }
+      return origFsyncSync.call(fs, fd);
+    };
+
+    fs.closeSync = function (fd) {
+      const isDir = activeDirFds.has(fd);
+      activeDirFds.delete(fd);
+      const res = origCloseSync.call(fs, fd);
+      if (isDir && faultMode === "close_eio") {
+        const err = new Error("Simulated directory closeSync EIO");
+        err.code = "EIO";
+        throw err;
+      }
+      return res;
+    };
+
+    // 1. Directory openSync EACCES on stopPlan -> 503 STORAGE_PERSISTENCE_FAILED & _stopPersistencePending preserved!
+    faultMode = "open_eacces";
+    const stopOpenErrRes = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/reservation-plans/${planId}`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 5_000
+    });
+    assert.equal(stopOpenErrRes.status, 503);
+    assert.equal(stopOpenErrRes.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(Boolean(app.store.reservationPlans.get(planId)._stopPersistencePending), true);
+    assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), true);
+
+    // 2. Directory fsyncSync EIO on cancel-seat -> 503 STORAGE_PERSISTENCE_FAILED, _stopPersistencePending preserved, 0 external cancel calls!
+    faultMode = "fsync_eio";
+    const cancelSeatFsyncErrRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 6_000
+    });
+    assert.equal(cancelSeatFsyncErrRes.status, 503);
+    assert.equal(cancelSeatFsyncErrRes.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(externalLiveCancelCalls, 0, "Must NEVER call external school cancel when dir fsync fails");
+    assert.equal(Boolean(app.store.reservationPlans.get(planId)._stopPersistencePending), true);
+    assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), true);
+
+    // 3. Directory closeSync EIO on cancel-seat -> 503 STORAGE_PERSISTENCE_FAILED, _stopPersistencePending preserved, 0 external cancel calls!
+    faultMode = "close_eio";
+    const cancelSeatCloseErrRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 7_000
+    });
+    assert.equal(cancelSeatCloseErrRes.status, 503);
+    assert.equal(cancelSeatCloseErrRes.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(externalLiveCancelCalls, 0, "Must NEVER call external school cancel when dir close fails");
+    assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), true);
+
+    // 4. Unsupported directory fsync (EINVAL) is cleanly distinguished from real I/O failure -> succeeds & clears _stopPersistencePending!
+    faultMode = "fsync_einval";
+    const cancelSeatEinvalOk = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireNowMs + 8_000
+    });
+    assert.equal(cancelSeatEinvalOk.status, 200);
+    assert.equal(externalLiveCancelCalls, 1);
+    assert.equal(Boolean(app.store.reservationPlans.get(planId)._stopPersistencePending), false);
+    assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), false);
+    assert.equal(app.store.reservationJobs.get(jobId).state, "SCHOOL_CANCELLED");
+  } finally {
+    fs.openSync = origOpenSync;
+    fs.fsyncSync = origFsyncSync;
+    fs.closeSync = origCloseSync;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

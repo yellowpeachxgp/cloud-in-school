@@ -364,10 +364,15 @@ export function createCampusCloudApp(options = {}) {
       .map((j) => {
         store.syncJobDisplayStatus?.(j);
         const p = store.reservationPlans.get(j.plan_id) || {};
+        const jbId = j.school_binding_id || p.school_binding_id || null;
+        const jb = jbId ? store.schoolBindings.get(jbId) : null;
         const sr = store.schoolReservations.get(j.id) || null;
         const attempts = store.attemptsForJob?.(j.id) || [];
         return {
           ...j,
+          school_binding_id: jbId,
+          student_no: jb?.student_no || j.student_no || p.student_no || null,
+          student_no_masked: jb?.student_no_masked || null,
           area_code: p.area_code || "4F_NORTH",
           area_name: p.area_name || "4楼北自习区",
           candidate_seats: p.candidate_seats || [],

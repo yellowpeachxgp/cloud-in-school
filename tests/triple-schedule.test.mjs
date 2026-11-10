@@ -1078,14 +1078,16 @@ test("High-Risk Regression: Same binding_id/consent_id snapshot omitting auth_ve
 test("P1 Race Regression: Concurrent revocation during in-flight query blocks addbooking write and preserves CANCELLED state (never overwritten with RESULT_UNKNOWN)", async () => {
   const { createCampusCloudApp } = await import("../apps/api/src/app.mjs");
   const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { authHeaders: userHeaders } = setupBoundUser(app, Date.now());
+  const createMs = Date.parse("2026-11-10T06:00:00+08:00");
+  const { authHeaders: userHeaders } = setupBoundUser(app, createMs);
   const fakeJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIyMzEwNDAxMDA4ODgifQ.signature_long_enough_for_live_cred_check";
 
   const cRes = await app.inject({
     method: "POST",
     url: "/api/v1/me/consents",
     headers: userHeaders,
-    body: { school_id: "haut" }
+    body: { school_id: "haut" },
+    nowMs: createMs
   });
   const consentId = cRes.body.data.id;
 
@@ -1093,7 +1095,8 @@ test("P1 Race Regression: Concurrent revocation during in-flight query blocks ad
     method: "POST",
     url: "/api/v1/school-bindings",
     headers: userHeaders,
-    body: { school_id: "haut", student_no: "231040100888", consent_id: consentId }
+    body: { school_id: "haut", student_no: "231040100888", consent_id: consentId },
+    nowMs: createMs
   });
   const bindId = bInit.body.data.id;
 
@@ -1104,7 +1107,8 @@ test("P1 Race Regression: Concurrent revocation during in-flight query blocks ad
     body: {
       consent_id: consentId,
       delegated_secret: JSON.stringify({ student_no: "231040100888", raw_token: fakeJwt })
-    }
+    },
+    nowMs: createMs
   });
 
   const targetDate = "2026-11-10";
@@ -1119,7 +1123,8 @@ test("P1 Race Regression: Concurrent revocation during in-flight query blocks ad
       target_local_time: "07:00:00",
       area_name: "四层西书库北区",
       candidate_seats: ["05桌 A座"]
-    }
+    },
+    nowMs: createMs
   });
   assert.equal(planRes.status, 201);
   const jobId = planRes.body.data.job_id;
@@ -1147,7 +1152,8 @@ test("P1 Race Regression: Concurrent revocation during in-flight query blocks ad
       await app.inject({
         method: "DELETE",
         url: `/api/v1/me/consents/${consentId}`,
-        headers: userHeaders
+        headers: userHeaders,
+        nowMs: Date.parse("2026-11-10T07:00:01+08:00")
       });
       return { code: 200, msg: "成功", seatList: [] };
     }
