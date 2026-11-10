@@ -2362,3 +2362,323 @@ test("Fault Injection 18 (Cloud #3 — Strict Directory open/fsync/close Error P
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("Fault Injection 19 (Cloud P1 #1 — Rebinding School Identity A->B->A Invalidates Old A Plans, Blocks Cross-Student Token Use, Preserves Confirmed/Unknown Evidence & Immutable Snapshot student_no, While Allowing Same-Student Renewal)", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    throw new Error(`Offline test blocked unexpected network fetch: ${url}`);
+  };
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-cloud-fi19-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+
+  try {
+    const t0 = Date.parse("2026-11-20T06:00:00+08:00");
+    const fireMs = Date.parse("2026-11-20T07:00:02+08:00");
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+
+    const user = app.store.findOrCreateCloudUser({
+      issuer: "https://sso.xpeach.codes/t/acme",
+      subject: "sub_fi19_rebind_p1",
+      displayName: "Rebind Safety User"
+    });
+    const session = app.identity.issueDeviceSession(user, "Android", null, 1, t0);
+    const authHeaders = { authorization: `Bearer ${session.access_token}` };
+
+    // Mock school auth & seat endpoints completely offline
+    app.schoolProvider.authenticateHautSession = async ({ student_no, raw_token }) => ({
+      rawToken: raw_token || `tok_mock_${student_no}_0123456789abcdef`,
+      casTgc: "",
+      casJsessionId: "",
+      userInfo: {
+        userNo: student_no,
+        userName: `User_${student_no}`,
+        department: "信息科学与工程学院"
+      }
+    });
+
+    const addbookingCalls = [];
+    let liveCancelCalls = 0;
+    app.schoolProvider.cancelLiveSeatBooking = async () => {
+      liveCancelCalls += 1;
+      return { cancelled: true, outcome: "SCHOOL_CANCELLED", school_cancellation_state: "SCHOOL_CANCELLED" };
+    };
+    app.schoolProvider.wslibGetJson = async (pathAndQuery, rawToken) => {
+      if (pathAndQuery.startsWith("/seatbook/layout/query")) {
+        return {
+          code: 200,
+          layout: { regionName: "五层中区" },
+          seatList: [{ id: 501, seatName: "五层中区05桌 A座", seatStatus: 2 }]
+        };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/addbooking")) {
+        addbookingCalls.push({ pathAndQuery, rawToken });
+        return { code: 200, bookingid: `bk_${addbookingCalls.length}`, msg: "预约成功" };
+      }
+      if (pathAndQuery.startsWith("/seatbook/user/my/crrentbooking")) {
+        const lastId = `bk_${addbookingCalls.length}`;
+        const dateMatch = lastId === "bk_1" ? "2026-11-20" : "2026-11-22";
+        return {
+          code: 200,
+          data: {
+            id: lastId,
+            seatId: 501,
+            seatName: "五层中区05桌 A座",
+            regionName: "五层中区",
+            buildingLayerRegionId: 23,
+            startDate: `${dateMatch} 08:00:00`,
+            endDate: `${dateMatch} 22:00:00`,
+            bookingStatus: 1
+          }
+        };
+      }
+      return { code: 200, rows: [] };
+    };
+
+    // 1. Bind Student A ("20240001") via bind-live
+    const bindARes = await app.inject({
+      method: "POST",
+      url: "/api/v1/school-bindings/bind-live",
+      headers: authHeaders,
+      body: {
+        school_id: "haut",
+        student_no: "20240001",
+        raw_token: "tok_live_student_A_fake_session_00000001"
+      },
+      nowMs: t0
+    });
+    assert.equal(bindARes.status, 201);
+    const bindAId = bindARes.body.data.id;
+    const consentAId = bindARes.body.data.consent_id;
+
+    // Create 3 jobs for A: (a) confirmed on 2026-11-20, (b) RESULT_UNKNOWN on 2026-11-21, (c) queued ARMED on 2026-11-22
+    const createJobFor = async (bId, cId, dateStr, idem) => {
+      const r = await app.inject({
+        method: "POST",
+        url: "/api/v1/reservation-plans",
+        headers: { ...authHeaders, "idempotency-key": idem },
+        body: {
+          school_binding_id: bId,
+          consent_id: cId,
+          target_local_date: dateStr,
+          target_local_time: "07:00:00",
+          slot_window: "08:00-22:00",
+          area_name: "五层中区",
+          candidate_seats: ["05桌 A座"],
+          preferred_area_ids: ["五层中区"],
+          preferred_seat_ids: ["05桌 A座"],
+          repeat_days: 2,
+          remaining_days: 2
+        },
+        nowMs: t0 + 1_000
+      });
+      assert.equal(r.status, 201);
+      const jId = r.body.data.job_id;
+      const j = app.store.reservationJobs.get(jId);
+      j.prewarmed_targets = {
+        binding_id: bId,
+        student_no: app.store.schoolBindings.get(bId).student_no,
+        auth_version: app.store.schoolBindings.get(bId).auth_version,
+        plan_generation: 1,
+        target_local_date: dateStr,
+        slot_window: "08:00-22:00",
+        expires_at: `${dateStr}T07:30:00+08:00`,
+        region_id: 23,
+        region_name: "五层中区",
+        open_time: "07:30",
+        close_time: "22:00",
+        start_full: `${dateStr} 08:00:00`,
+        end_full: `${dateStr} 22:00:00`,
+        candidate_seats: [{ id: 501, seat_id: 501, seat_name: "五层中区05桌 A座", short_name: "05桌 A座" }]
+      };
+      return jId;
+    };
+
+    const jobAConfId = await createJobFor(bindAId, consentAId, "2026-11-20", "idem_fi19_A_conf");
+    const confFire = await app.reservationEngine.runScheduleEvent(jobAConfId, "FIRE", fireMs);
+    assert.equal(confFire.job.state, "CONFIRMED");
+    assert.equal(addbookingCalls.length, 1);
+    assert.equal(addbookingCalls[0].rawToken, "tok_live_student_A_fake_session_00000001");
+
+    // Cancel rolled-over Day-2 of jobAConf so 2026-11-21 can hold jobAUnknown
+    for (const j of app.store.reservationJobs.values()) {
+      if (j.id !== jobAConfId && j.booking_local_date === "2026-11-21") {
+        j.state = "CANCELLED";
+      }
+    }
+
+    const jobAUnknownId = await createJobFor(bindAId, consentAId, "2026-11-21", "idem_fi19_A_unk");
+    const jobAUnknown = app.store.reservationJobs.get(jobAUnknownId);
+    jobAUnknown.state = "RESULT_UNKNOWN";
+    jobAUnknown.external_execution_state = "RESULT_UNKNOWN";
+
+    const jobAQueuedId = await createJobFor(bindAId, consentAId, "2026-11-22", "idem_fi19_A_queued");
+
+    // 2. Rebind A -> B ("20240002") via POST /api/v1/school-bindings/bind-live!
+    const bindBRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/school-bindings/bind-live",
+      headers: authHeaders,
+      body: {
+        school_id: "haut",
+        student_no: "20240002",
+        raw_token: "tok_live_student_B_fake_session_00000002"
+      },
+      nowMs: fireMs + 5_000
+    });
+    assert.equal(bindBRes.status, 201);
+    const bindBId = bindBRes.body.data.id;
+    const consentBId = bindBRes.body.data.consent_id;
+    assert.notEqual(bindBId, bindAId, "Rebinding to a different student_no MUST NOT mutate binding in-place");
+    assert.equal(app.store.schoolBindings.get(bindAId).student_no, "20240001");
+    assert.ok(app.store.schoolBindings.get(bindAId).revoked_at, "Old A binding must be revoked on rebind to B");
+
+    // 3. Running FIRE on A's queued job MUST NOT call addbooking with B's token!
+    const callsBeforeBlockedAFire = addbookingCalls.length;
+    const blockedAFire = await app.reservationEngine.runScheduleEvent(
+      jobAQueuedId,
+      "FIRE",
+      Date.parse("2026-11-22T07:00:02+08:00")
+    );
+    assert.equal(addbookingCalls.length, callsBeforeBlockedAFire, "Zero external addbooking calls allowed for A's plan after rebinding to B!");
+    assert.equal(blockedAFire.job.state, "CANCELLED");
+
+    // 4. A's confirmed & unknown evidence MUST be preserved, AND sync/snapshot MUST keep student_no = "20240001" on ALL of A's jobs!
+    assert.equal(app.store.reservationJobs.get(jobAConfId).display_status, "DELEGATION_STOPPED_SCHOOL_CONFIRMED");
+    assert.equal(app.store.schoolReservations.get(jobAConfId).external_booking_id, "bk_1");
+    assert.equal(app.store.reservationJobs.get(jobAUnknownId).state, "RESULT_UNKNOWN");
+
+    // Calling cancel-seat on A's confirmed job while bound to B MUST NOT invoke live cancel with B's credentials!
+    const cancelAConfUnderB = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${jobAConfId}/cancel-seat`,
+      headers: authHeaders,
+      nowMs: fireMs + 6_000
+    });
+    assert.equal(cancelAConfUnderB.status, 200);
+    assert.equal(liveCancelCalls, 0, "Must NEVER cancel A's seat using B's credentials");
+
+    const snapUnderB = await app.inject({
+      method: "POST",
+      url: "/api/v1/sync/snapshot",
+      headers: authHeaders,
+      body: {},
+      nowMs: fireMs + 7_000
+    });
+    assert.equal(snapUnderB.status, 200);
+    for (const aJobId of [jobAConfId, jobAUnknownId, jobAQueuedId]) {
+      const sj = snapUnderB.body.data.reservation_jobs.find((x) => x.id === aJobId);
+      assert.ok(sj, `Expected historical job ${aJobId} in sync snapshot`);
+      assert.equal(sj.student_no, "20240001", `Historical A job ${aJobId} must NEVER be mislabeled as B (20240002)!`);
+    }
+
+    // 5. Same-student normal renewal: B creates plan on 2026-11-22, refreshes B's own token via bind-live ("20240002"), and FIRE + multi-day rollover succeed!
+    const jobBId = await createJobFor(bindBId, consentBId, "2026-11-22", "idem_fi19_B_active");
+    const refreshSameB = await app.inject({
+      method: "POST",
+      url: "/api/v1/school-bindings/bind-live",
+      headers: authHeaders,
+      body: {
+        school_id: "haut",
+        student_no: "20240002",
+        raw_token: "tok_live_student_B_refreshed_session_002"
+      },
+      nowMs: fireMs + 8_000
+    });
+    assert.equal(refreshSameB.status, 201);
+    assert.equal(refreshSameB.body.data.id, bindBId, "Same-student bind-live refresh keeps binding active");
+
+    const fireB = await app.reservationEngine.runScheduleEvent(
+      jobBId,
+      "FIRE",
+      Date.parse("2026-11-22T07:00:02+08:00")
+    );
+    assert.equal(fireB.job.state, "CONFIRMED");
+    assert.equal(addbookingCalls[addbookingCalls.length - 1].rawToken, "tok_live_student_B_refreshed_session_002");
+    assert.ok(fireB.next_job_id, "Same-student multi-day rollover must succeed");
+    assert.equal(app.store.reservationJobs.get(fireB.next_job_id).student_no, "20240002");
+
+    // 6. Rebind back B -> A (A -> B -> A): B's rolled-over job is invalidated, old A1 job stays cancelled, and new A2 plan works!
+    const day22AuthMs = Date.parse("2026-11-22T07:30:00+08:00");
+    const day22Session = app.identity.issueDeviceSession(
+      user,
+      "Android",
+      null,
+      user.auth_version,
+      day22AuthMs
+    );
+    const day22Headers = { authorization: `Bearer ${day22Session.access_token}` };
+
+    const rebindBackARes = await app.inject({
+      method: "POST",
+      url: "/api/v1/school-bindings/bind-live",
+      headers: day22Headers,
+      body: {
+        school_id: "haut",
+        student_no: "20240001",
+        raw_token: "tok_live_student_A_rebound_session_00003"
+      },
+      nowMs: day22AuthMs + 1_000
+    });
+    assert.equal(rebindBackARes.status, 201);
+    assert.notEqual(rebindBackARes.body.data.id, bindBId);
+    assert.notEqual(rebindBackARes.body.data.id, bindAId);
+
+    const callsBeforeBlockedBRollover = addbookingCalls.length;
+    const blockedBRollover = await app.reservationEngine.runScheduleEvent(
+      fireB.next_job_id,
+      "FIRE",
+      Date.parse("2026-11-23T07:00:02+08:00")
+    );
+    assert.equal(addbookingCalls.length, callsBeforeBlockedBRollover, "B's rolled-over job must not fire after rebinding back to A");
+    assert.equal(blockedBRollover.job.state, "CANCELLED");
+
+    // New A2 plan created under rebound A binding works cleanly AND defense-in-depth blocks direct binding.student_no tamper!
+    const bindA2Id = rebindBackARes.body.data.id;
+    const consentA2Id = rebindBackARes.body.data.consent_id;
+    const rA2 = await app.inject({
+      method: "POST",
+      url: "/api/v1/reservation-plans",
+      headers: { ...day22Headers, "idempotency-key": "idem_fi19_A2_after_aba" },
+      body: {
+        school_binding_id: bindA2Id,
+        consent_id: consentA2Id,
+        target_local_date: "2026-11-22",
+        target_local_time: "08:00:00",
+        slot_window: "09:00-22:00",
+        area_name: "五层中区",
+        candidate_seats: ["05桌 A座"],
+        preferred_area_ids: ["五层中区"],
+        preferred_seat_ids: ["05桌 A座"]
+      },
+      nowMs: day22AuthMs + 2_000
+    });
+    assert.equal(rA2.status, 201);
+    const jobA2Id = rA2.body.data.job_id;
+    // Simulate direct tamper of binding.student_no in memory without bumping auth_version: _isJobAuthorizationCurrent & snapshot MUST still protect A!
+    app.store.schoolBindings.get(bindA2Id).student_no = "20249999";
+    const callsBeforeTamperFire = addbookingCalls.length;
+    const blockedTamperFire = await app.reservationEngine.runScheduleEvent(
+      jobA2Id,
+      "FIRE",
+      Date.parse("2026-11-22T08:00:02+08:00")
+    );
+    assert.equal(addbookingCalls.length, callsBeforeTamperFire, "_isJobAuthorizationCurrent must block tampered binding.student_no");
+    assert.equal(blockedTamperFire.job.state, "CANCELLED");
+
+    const snapAfterTamper = await app.inject({
+      method: "POST",
+      url: "/api/v1/sync/snapshot",
+      headers: day22Headers,
+      body: {},
+      nowMs: day22AuthMs + 10_000
+    });
+    const sjA2 = snapAfterTamper.body.data.reservation_jobs.find((x) => x.id === jobA2Id);
+    assert.equal(sjA2.student_no, "20240001", "Snapshot must prioritize immutable job/plan student_no over mutated binding.student_no");
+  } finally {
+    globalThis.fetch = origFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

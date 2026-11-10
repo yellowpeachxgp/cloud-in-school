@@ -1690,6 +1690,10 @@ export class CloudDatabaseStore {
     // 3. Backfill three-axis state on jobs and recover in-flight / legacy jobs
     for (const j of this.reservationJobs.values()) {
       const p = j.plan_id ? this.reservationPlans.get(j.plan_id) : null;
+      if (!j.student_no && p?.student_no) {
+        j.student_no = String(p.student_no).trim();
+        mutated = true;
+      }
       const sr = this.schoolReservations.get(j.id);
       const jobAttempts = this.attemptsForJob(j.id);
       const hadDispatchedAttempt =

@@ -368,11 +368,17 @@ export function createCampusCloudApp(options = {}) {
         const jb = jbId ? store.schoolBindings.get(jbId) : null;
         const sr = store.schoolReservations.get(j.id) || null;
         const attempts = store.attemptsForJob?.(j.id) || [];
+        const immutableStudentNo =
+          String(j.student_no || p.student_no || jb?.student_no || "").trim() || null;
+        const immutableMaskedStudentNo =
+          immutableStudentNo && immutableStudentNo.length >= 4
+            ? `${immutableStudentNo.slice(0, 2)}***${immutableStudentNo.slice(-2)}`
+            : jb?.student_no_masked || null;
         return {
           ...j,
           school_binding_id: jbId,
-          student_no: jb?.student_no || j.student_no || p.student_no || null,
-          student_no_masked: jb?.student_no_masked || null,
+          student_no: immutableStudentNo,
+          student_no_masked: immutableMaskedStudentNo,
           area_code: p.area_code || "4F_NORTH",
           area_name: p.area_name || "4楼北自习区",
           candidate_seats: p.candidate_seats || [],
@@ -922,11 +928,46 @@ export function createCampusCloudApp(options = {}) {
         expiresAt:
           body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
       });
+      // If another active binding for the same school has a DIFFERENT student_no, revoke it first so old student's plans are invalidated!
+      const targetBindSno = String(binding.student_no || "").trim();
+      for (const other of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
+        if (
+          other.id !== binding.id &&
+          other.school_id === binding.school_id &&
+          !other.revoked_at &&
+          other.status !== "REVOKED" &&
+          targetBindSno &&
+          String(other.student_no || "").trim() &&
+          String(other.student_no || "").trim() !== targetBindSno
+        ) {
+          store.revokeSchoolBindingCascade(
+            auth.cloudUserId,
+            other.id,
+            "SCHOOL_IDENTITY_REBOUND",
+            nowMs
+          );
+        }
+      }
       const authVer = Number(store.users.get(auth.cloudUserId)?.auth_version || 1);
       const activeConsents = store
         .recordsForUser("consents", auth.cloudUserId)
         .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === binding.school_id && !c.withdrawn_at);
-      const latestConsent = activeConsents[activeConsents.length - 1] || null;
+      let latestConsent = activeConsents[activeConsents.length - 1] || null;
+      if (!latestConsent) {
+        const cid = crypto.randomUUID();
+        latestConsent = {
+          id: cid,
+          cloud_user_id: auth.cloudUserId,
+          school_id: binding.school_id,
+          scope_list: ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+          policy_version: "policy-2026-11-v4",
+          auth_version: authVer,
+          granted_at: new Date(nowMs).toISOString(),
+          withdrawn_at: null
+        };
+        store.consents.set(cid, latestConsent);
+        store.indexUserScoped?.("consents", cid, latestConsent.cloud_user_id);
+      }
       store.encryptedCredentials.set(encrypted.id, encrypted);
       binding.credential_ref = encrypted.id;
       binding.credential_expires_at = encrypted.expires_at;
@@ -2650,10 +2691,33 @@ export function createCampusCloudApp(options = {}) {
       });
 
       const userRecord = store.users.get(auth.cloudUserId);
+      const resolvedStudentNo = String(authRes.userInfo?.userNo || studentNoInput || "20240001").trim();
+
+      // Strictly forbid in-place mutation of binding.student_no!
+      // Any active binding for this school belonging to a DIFFERENT student_no MUST be revoked first (bumping auth_version & halting old plans while preserving confirmed/unknown evidence).
+      for (const activeBind of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
+        if (
+          activeBind.school_id === schoolId &&
+          !activeBind.revoked_at &&
+          activeBind.status !== "REVOKED" &&
+          String(activeBind.student_no || "").trim() !== resolvedStudentNo
+        ) {
+          store.revokeSchoolBindingCascade(
+            auth.cloudUserId,
+            activeBind.id,
+            "SCHOOL_IDENTITY_REBOUND",
+            nowMs
+          );
+        }
+      }
+
       const currentAuthVersion = Number(userRecord?.auth_version || 1);
-      const resolvedStudentNo = authRes.userInfo?.userNo || studentNoInput || "20240001";
       let binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) => b.school_id === schoolId && !b.revoked_at
+        (b) =>
+          b.school_id === schoolId &&
+          !b.revoked_at &&
+          b.status !== "REVOKED" &&
+          String(b.student_no || "").trim() === resolvedStudentNo
       );
       if (!binding) {
         const bindingId = crypto.randomUUID();
@@ -2662,7 +2726,10 @@ export function createCampusCloudApp(options = {}) {
           cloud_user_id: auth.cloudUserId,
           school_id: schoolId,
           student_no: resolvedStudentNo,
-          student_no_masked: resolvedStudentNo.length >= 4 ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}` : "***",
+          student_no_masked:
+            resolvedStudentNo.length >= 4
+              ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}`
+              : "***",
           user_name: authRes.userInfo?.userName || "",
           department: authRes.userInfo?.department || "",
           status: "DELEGATED_ACTIVE",
@@ -2676,8 +2743,9 @@ export function createCampusCloudApp(options = {}) {
         store.schoolBindings.set(bindingId, binding);
         store.indexUserScoped?.("schoolBindings", bindingId, binding.cloud_user_id);
       } else {
-        binding.student_no = resolvedStudentNo;
-        binding.student_no_masked = resolvedStudentNo.length >= 4 ? `${resolvedStudentNo.slice(0, 2)}***${resolvedStudentNo.slice(-2)}` : "***";
+        if (binding.credential_ref && store.encryptedCredentials.has(binding.credential_ref)) {
+          store.encryptedCredentials.get(binding.credential_ref).revoked_at = new Date(nowMs).toISOString();
+        }
         binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
         binding.department = authRes.userInfo?.department || binding.department || "";
         binding.status = "DELEGATED_ACTIVE";

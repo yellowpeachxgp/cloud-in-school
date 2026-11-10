@@ -377,6 +377,7 @@ export class TripleScheduleEngine {
       consent_id: consent.id,
       auth_version: currentAuthVersion,
       school_id: binding.school_id,
+      student_no: targetStudentNo,
       booking_local_date: schedule.targetLocalDate,
       target_local_time: schedule.targetLocalTime,
       repeat_days: repeatDays,
@@ -523,6 +524,21 @@ export class TripleScheduleEngine {
 
   _decryptBindingCredential(job, binding, nowMs = Date.now()) {
     if (!binding || binding.id !== job.school_binding_id || !binding.credential_ref) return null;
+    const plan = job.plan_id ? this.store.reservationPlans?.get(job.plan_id) : null;
+    const isTrackedReservationJob =
+      Boolean(this.store.reservationJobs?.has?.(job.id)) ||
+      Boolean(job.plan_id) ||
+      Boolean(job.student_no);
+    const expectedSno = isTrackedReservationJob
+      ? String(job.student_no || plan?.student_no || "").trim()
+      : String(binding.student_no || "").trim();
+    const bindSno = String(binding.student_no || "").trim();
+    if (!expectedSno || !bindSno || expectedSno !== bindSno) {
+      throw new ContractError(
+        "CONSENT_WITHDRAWN",
+        "School binding identity no longer matches immutable job/plan student_no"
+      );
+    }
     const credRecord = this.store.encryptedCredentials.get(binding.credential_ref);
     if (!credRecord || credRecord.revoked_at || credRecord.binding_id !== binding.id) return null;
     const permit = this.kmsVault.issueAccessPermit({
@@ -534,6 +550,21 @@ export class TripleScheduleEngine {
       nowMs
     });
     const plaintext = this.kmsVault.decryptSecretWithPermit(credRecord, permit, nowMs);
+    if (typeof plaintext === "string" && plaintext.trim().startsWith("{")) {
+      let parsedBundle = null;
+      try {
+        parsedBundle = JSON.parse(plaintext.trim());
+      } catch {
+        parsedBundle = null;
+      }
+      const bundleSno = String(parsedBundle?.student_no || parsedBundle?.studentId || "").trim();
+      if (bundleSno && bundleSno !== expectedSno) {
+        throw new ContractError(
+          "CONSENT_WITHDRAWN",
+          "Decrypted school credential student_no does not match immutable job/plan student_no"
+        );
+      }
+    }
     if (typeof this.schoolProvider?.parseCredentialBundle === "function") {
       this.schoolProvider.parseCredentialBundle(plaintext, binding);
     }
@@ -542,6 +573,14 @@ export class TripleScheduleEngine {
 
   _updateBindingCredentialTokens(binding, authResult, oldSecret, nowMs = Date.now()) {
     if (!binding || !authResult?.rawToken) return;
+    const returnedSno = String(authResult?.userInfo?.userNo || "").trim();
+    const bindSno = String(binding.student_no || "").trim();
+    if (returnedSno && bindSno && returnedSno !== bindSno) {
+      throw new ContractError(
+        "CONSENT_WITHDRAWN",
+        "Refreshed school session student_no does not match bound school identity"
+      );
+    }
     try {
       const parsed = oldSecret && String(oldSecret).trim().startsWith("{") ? JSON.parse(oldSecret) : {};
       const nextPayload = JSON.stringify({
@@ -585,6 +624,15 @@ export class TripleScheduleEngine {
     if (binding.id !== job.school_binding_id || binding.cloud_user_id !== job.cloud_user_id) {
       return false;
     }
+    if (plan.school_binding_id && plan.school_binding_id !== binding.id) {
+      return false;
+    }
+    const planSno = String(plan.student_no || "").trim();
+    const jobSno = String(job.student_no || planSno).trim();
+    const bindSno = String(binding.student_no || "").trim();
+    if (!planSno || !jobSno || !bindSno || planSno !== bindSno || jobSno !== bindSno) {
+      return false;
+    }
     if (consent.cloud_user_id !== job.cloud_user_id) {
       return false;
     }
@@ -594,6 +642,9 @@ export class TripleScheduleEngine {
     if (job.consent_id && consent.id !== job.consent_id) {
       return false;
     }
+    if (plan.consent_id && consent.id !== plan.consent_id) {
+      return false;
+    }
     if (binding.consent_id && binding.consent_id !== consent.id) {
       return false;
     }
@@ -601,8 +652,10 @@ export class TripleScheduleEngine {
     const bindAuthVer = Number(binding.auth_version || 1);
     const consentAuthVer = Number(consent.auth_version || 1);
     const jobAuthVer = Number(job.auth_version ?? plan.auth_version ?? 1);
+    const planAuthVer = Number(plan.auth_version ?? jobAuthVer);
     if (
       jobAuthVer !== userAuthVer ||
+      planAuthVer !== userAuthVer ||
       bindAuthVer !== userAuthVer ||
       consentAuthVer !== userAuthVer
     ) {
@@ -1963,8 +2016,18 @@ export class TripleScheduleEngine {
         };
       }
 
-      // If binding/credentials were revoked and policy forbids using revoked credentials for school API calls
-      if (!binding || binding.revoked_at || binding.status === "REVOKED" || !binding.credential_ref) {
+      // If binding/credentials were revoked or school identity changed, forbid using credentials for school API calls
+      const expectedCancelSno = String(job.student_no || plan?.student_no || "").trim();
+      const currentBindSno = String(binding?.student_no || "").trim();
+      const bindingIdentityMismatch =
+        Boolean(expectedCancelSno) && (!currentBindSno || expectedCancelSno !== currentBindSno);
+      if (
+        !binding ||
+        binding.revoked_at ||
+        binding.status === "REVOKED" ||
+        !binding.credential_ref ||
+        bindingIdentityMismatch
+      ) {
         job.user_intent_state = "REVOKED";
         job.external_execution_state = "SCHOOL_CONFIRMED";
         job.school_cancellation_state = hadUnknownCancel
@@ -2199,6 +2262,7 @@ export class TripleScheduleEngine {
       consent_id: plan.consent_id,
       auth_version: Number(plan.auth_version ?? finishedJob?.auth_version ?? 1),
       school_id: plan.school_id,
+      student_no: String(plan.student_no || finishedJob?.student_no || binding?.student_no || "").trim(),
       booking_local_date: nextDate,
       target_local_time: nextSchedule.targetLocalTime,
       repeat_days: repeatDays,
