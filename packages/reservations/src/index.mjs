@@ -660,6 +660,21 @@ export class TripleScheduleEngine {
       this.store.encryptedCredentials.set(encrypted.id, encrypted);
       liveBind.credential_ref = encrypted.id;
       liveBind.credential_expires_at = encrypted.expires_at;
+      if (typeof this.store.recordsForUser === "function") {
+        for (const sib of this.store.recordsForUser("schoolBindings", liveBind.cloud_user_id)) {
+          if (
+            sib.id !== liveBind.id &&
+            sib.school_id === liveBind.school_id &&
+            !sib.revoked_at &&
+            sib.status !== "REVOKED" &&
+            String(sib.student_no || "").trim() === bindSno &&
+            Number(sib.auth_version ?? 1) === currentBindAuthVer
+          ) {
+            sib.credential_ref = encrypted.id;
+            sib.credential_expires_at = encrypted.expires_at;
+          }
+        }
+      }
       return true;
     } catch {
       // Keep existing credential on non-fatal refresh update error

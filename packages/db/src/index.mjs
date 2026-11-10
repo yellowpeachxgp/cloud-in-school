@@ -1642,6 +1642,45 @@ export class CloudDatabaseStore {
       }
     }
 
+    // 1b. Reconcile duplicate active schoolBindings for the same (cloud_user_id, school_id, student_no, auth_version)
+    // so the newest unrevoked credential_ref and credential_expires_at are shared across same-student active bindings.
+    const activeBindsByStudentKey = new Map();
+    for (const b of this.schoolBindings.values()) {
+      if (!b || b.revoked_at || b.status === "REVOKED") continue;
+      const sno = String(b.student_no || "").trim();
+      if (!sno) continue;
+      const key = `${b.cloud_user_id}|${b.school_id}|${sno}|${Number(b.auth_version || 1)}`;
+      if (!activeBindsByStudentKey.has(key)) activeBindsByStudentKey.set(key, []);
+      activeBindsByStudentKey.get(key).push(b);
+    }
+    for (const group of activeBindsByStudentKey.values()) {
+      if (group.length <= 1) continue;
+      let bestBind = null;
+      let bestExpMs = -1;
+      for (const b of group) {
+        if (!b.credential_ref) continue;
+        const cred = this.encryptedCredentials.get(b.credential_ref);
+        if (!cred || cred.revoked_at) continue;
+        const expMs = Date.parse(b.credential_expires_at || cred.expires_at || "") || 0;
+        if (expMs >= bestExpMs) {
+          bestExpMs = expMs;
+          bestBind = b;
+        }
+      }
+      if (bestBind) {
+        for (const b of group) {
+          if (
+            b.credential_ref !== bestBind.credential_ref ||
+            b.credential_expires_at !== bestBind.credential_expires_at
+          ) {
+            b.credential_ref = bestBind.credential_ref;
+            b.credential_expires_at = bestBind.credential_expires_at;
+            mutated = true;
+          }
+        }
+      }
+    }
+
     // 2. Migrate legacy plans lacking verifiable authorization provenance -> NEEDS_RECONFIRMATION
     // Strictly forbid guessing auth_version or consent_id from current user/binding/consent state!
     for (const p of this.reservationPlans.values()) {
@@ -1649,6 +1688,15 @@ export class CloudDatabaseStore {
       const userAuthVer = Number(user?.auth_version || 1);
       const bind = p.school_binding_id ? this.schoolBindings.get(p.school_binding_id) : null;
       const consent = p.consent_id ? this.consents.get(p.consent_id) : null;
+      if (
+        !p.student_no &&
+        bind &&
+        bind.cloud_user_id === p.cloud_user_id &&
+        String(bind.student_no || "").trim()
+      ) {
+        p.student_no = String(bind.student_no).trim();
+        mutated = true;
+      }
       const hasVerifiableOrigin =
         Boolean(p.school_binding_id) &&
         Boolean(bind) &&
@@ -1690,8 +1738,17 @@ export class CloudDatabaseStore {
     // 3. Backfill three-axis state on jobs and recover in-flight / legacy jobs
     for (const j of this.reservationJobs.values()) {
       const p = j.plan_id ? this.reservationPlans.get(j.plan_id) : null;
-      if (!j.student_no && p?.student_no) {
-        j.student_no = String(p.student_no).trim();
+      const jBind =
+        (j.school_binding_id && this.schoolBindings.get(j.school_binding_id)) ||
+        (p?.school_binding_id && this.schoolBindings.get(p.school_binding_id)) ||
+        null;
+      const inferredSno = String(p?.student_no || jBind?.student_no || "").trim();
+      if (!j.student_no && inferredSno) {
+        j.student_no = inferredSno;
+        mutated = true;
+      }
+      if (j.auth_version === undefined && p?.auth_version !== undefined) {
+        j.auth_version = Number(p.auth_version);
         mutated = true;
       }
       const sr = this.schoolReservations.get(j.id);

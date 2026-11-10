@@ -2811,13 +2811,16 @@ export function createCampusCloudApp(options = {}) {
       }
 
       const currentAuthVersion = Number(userRecord?.auth_version || 1);
-      let binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) =>
-          b.school_id === schoolId &&
-          !b.revoked_at &&
-          b.status !== "REVOKED" &&
-          String(b.student_no || "").trim() === resolvedStudentNo
-      );
+      const sameStudentBindings = store
+        .recordsForUser("schoolBindings", auth.cloudUserId)
+        .filter(
+          (b) =>
+            b.school_id === schoolId &&
+            !b.revoked_at &&
+            b.status !== "REVOKED" &&
+            String(b.student_no || "").trim() === resolvedStudentNo
+        );
+      let binding = sameStudentBindings[sameStudentBindings.length - 1] || null;
       if (!binding) {
         const bindingId = crypto.randomUUID();
         binding = {
@@ -2841,15 +2844,20 @@ export function createCampusCloudApp(options = {}) {
         };
         store.schoolBindings.set(bindingId, binding);
         store.indexUserScoped?.("schoolBindings", bindingId, binding.cloud_user_id);
+        sameStudentBindings.push(binding);
       } else {
-        if (binding.credential_ref && store.encryptedCredentials.has(binding.credential_ref)) {
-          store.encryptedCredentials.get(binding.credential_ref).revoked_at = new Date(nowMs).toISOString();
+        for (const sb of sameStudentBindings) {
+          if (sb.credential_ref && store.encryptedCredentials.has(sb.credential_ref)) {
+            store.encryptedCredentials.get(sb.credential_ref).revoked_at = new Date(
+              nowMs
+            ).toISOString();
+          }
+          sb.user_name = authRes.userInfo?.userName || sb.user_name || "";
+          sb.department = authRes.userInfo?.department || sb.department || "";
+          sb.status = "DELEGATED_ACTIVE";
+          sb.auth_version = currentAuthVersion;
+          sb.verified_at = new Date(nowMs).toISOString();
         }
-        binding.user_name = authRes.userInfo?.userName || binding.user_name || "";
-        binding.department = authRes.userInfo?.department || binding.department || "";
-        binding.status = "DELEGATED_ACTIVE";
-        binding.auth_version = currentAuthVersion;
-        binding.verified_at = new Date(nowMs).toISOString();
       }
 
       const credBundleJson = JSON.stringify({
@@ -2869,8 +2877,10 @@ export function createCampusCloudApp(options = {}) {
         expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
       });
       store.encryptedCredentials.set(encrypted.id, encrypted);
-      binding.credential_ref = encrypted.id;
-      binding.credential_expires_at = encrypted.expires_at;
+      for (const sb of sameStudentBindings) {
+        sb.credential_ref = encrypted.id;
+        sb.credential_expires_at = encrypted.expires_at;
+      }
 
       let consent = store.recordsForUser("consents", auth.cloudUserId).find(
         (c) => !c.withdrawn_at && Number(c.auth_version || 1) === currentAuthVersion
@@ -2890,7 +2900,9 @@ export function createCampusCloudApp(options = {}) {
         store.consents.set(cid, consent);
         store.indexUserScoped?.("consents", cid, consent.cloud_user_id);
       }
-      binding.consent_id = consent.id;
+      for (const sb of sameStudentBindings) {
+        sb.consent_id = consent.id;
+      }
       userRecord._lastBindCommitSeq = Number(userRecord._lastBindCommitSeq || 0) + 1;
       store.flushSnapshotStrictSync?.();
 
