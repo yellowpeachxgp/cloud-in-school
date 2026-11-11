@@ -14,6 +14,7 @@ import {
   xpeachClubCard,
   xpeachChannelCard,
   xpeachCompetitionCard,
+  xpeachJobRowCard,
   xpeachOrderRowCard,
   xpeachSchoolControlCard,
   xpeachAuditRowCard
@@ -34,7 +35,7 @@ export const CONSOLE_VIEWS = [
   { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
-export const CONSOLE_UI_VERSION = "20261108a";
+export const CONSOLE_UI_VERSION = "20261111a";
 
 function renderHiddenContractViews() {
   return `<template id="contract-views-marker" hidden>${CONSOLE_VIEWS.map(
@@ -99,7 +100,7 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
         </div>
         <div class="stack gap-3">
           <a class="btn btn-primary btn-block btn-lg" id="open-app-btn" href="${customSchemeUrl}">立即返回日在校园 App</a>
-          <a class="btn btn-secondary btn-block" href="/">进入运维管理控制台</a>
+          <a class="btn btn-secondary btn-block" href="/reservations">进入网页版云端抢座</a>
         </div>
         <input type="hidden" id="cb-ticket" value="${safeTicket}" />
         <input type="hidden" id="cb-txn" value="${safeTxn}" />
@@ -121,8 +122,10 @@ export function renderMobileCallbackHtml({ ticket, txn }) {
 </html>`;
 }
 
-function renderUnauthenticatedLandingHtml() {
-  return `${renderHead("日在校园 · 运维管理控制台")}
+function renderUnauthenticatedLandingHtml({ mode = "portal", nonAdminBlocked = false } = {}) {
+  const isConsoleGate = mode === "console";
+  const pageTitle = isConsoleGate ? "日在校园 · 运维管理控制台" : "日在校园 · 云端抢座";
+  return `${renderHead(pageTitle)}
   <body class="auth-body">
     ${renderHiddenContractViews()}
     <header class="auth-toolbar" aria-label="偏好设置">
@@ -153,40 +156,60 @@ function renderUnauthenticatedLandingHtml() {
         </a>
       </header>
       <main class="card auth-window xp-card">
-        <div class="auth-header">
-          <div class="auth-eyebrow">🍑 XPeach 管理员认证</div>
-          <h1 class="auth-title">日在校园 · 运维管理控制台</h1>
-          <p class="auth-subtitle" id="landing-subtitle">仅限 owner/admin 管理员登录。登录后可执行预约任务监控、账单对账退还、学校服务熔断与校园内容云控。</p>
-        </div>
-
-        <div class="stack gap-3">
-          <a class="btn btn-primary btn-block btn-lg" id="sso-login-btn" href="/api/v1/auth/web/start">
-            使用 XPeach 管理员账号登录
-          </a>
-          <a class="btn btn-secondary btn-block btn-lg" href="https://sso.xpeach.codes/portal">
-            返回 XPeach 账户中心
-          </a>
-        </div>
-
-        <div class="auth-divider"><span>运维能力概览</span></div>
-
-        <div class="xp-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px;">
-          <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">预约任务调度监控</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">查看全站占座任务、三段式调度事件与失败诊断状态。</p>
-          </div>
-          <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">账单对账与一键退还</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">全站 🍑 消费账单对账，支持幂等一键退还至用户钱包。</p>
-          </div>
-          <div class="xp-well">
-            <div class="xp-entity-title" style="font-size: 14px;">内容云控与安全审计</div>
-            <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">社团、竞赛、频道与横幅公告实时下发，全程审计留痕。</p>
-          </div>
-        </div>
+        ${
+          isConsoleGate
+            ? `<div class="auth-header">
+                <div class="auth-eyebrow">🍑 XPeach 管理员认证</div>
+                <h1 class="auth-title">日在校园 · 运维管理控制台</h1>
+                <p class="auth-subtitle" id="landing-subtitle">${
+                  nonAdminBlocked
+                    ? "当前登录账号无管理员权限（仅限 owner/admin 访问运维后台）。您可以直接前往云端抢座工作台。"
+                    : "仅限 owner/admin 管理员登录。登录后可执行预约任务监控、账单对账退还、学校服务熔断与校园内容云控。"
+                }</p>
+              </div>
+              <div class="stack gap-3">
+                ${
+                  nonAdminBlocked
+                    ? `<a class="btn btn-primary btn-block btn-lg" href="/reservations">返回我的云端抢座工作台</a>
+                       <a class="btn btn-secondary btn-block btn-lg" href="/api/v1/auth/web/logout">切换管理员账号登录</a>`
+                    : `<a class="btn btn-primary btn-block btn-lg" id="sso-login-btn" href="/api/v1/auth/web/start?flow=console&return_to=/console">使用 XPeach 管理员账号登录</a>
+                       <a class="btn btn-secondary btn-block btn-lg" href="/reservations">前往学生云端抢座入口</a>`
+                }
+              </div>`
+            : `<div class="auth-header">
+                <div class="auth-eyebrow">🍑 XPeach 云端通行证</div>
+                <h1 class="auth-title">日在校园 · 图书馆云端抢座</h1>
+                <p class="auth-subtitle" id="landing-subtitle">使用 XPeach 账号登录后绑定校园学号，选择实时自习室与备选座位，每天 07:00 云端准点自动抢座并与 Android 客户端实时同步。</p>
+              </div>
+              <div class="stack gap-3">
+                <a class="btn btn-primary btn-block btn-lg" id="sso-login-btn" href="/api/v1/auth/web/start?flow=portal&return_to=/reservations">
+                  使用 XPeach 账号登录开启云端抢座
+                </a>
+                <a class="btn btn-secondary btn-block btn-lg" href="https://sso.xpeach.codes/portal">
+                  查看 XPeach 账户与 🍑 余额
+                </a>
+              </div>
+              <div class="auth-divider"><span>云端抢座核心能力</span></div>
+              <div class="xp-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px;">
+                <div class="xp-well">
+                  <div class="xp-entity-title" style="font-size: 14px;">每日 07:00 毫秒级准点抢座</div>
+                  <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">T-30m 自动保活、T-5m 预热座位坐标、07:00 零延迟发起预约，手机锁屏断网也不受影响。</p>
+                </div>
+                <div class="xp-well">
+                  <div class="xp-entity-title" style="font-size: 14px;">实时空位加载与多备选</div>
+                  <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">直连河工大图书馆座位系统，支持首选 + 2 个备选座位及连续 3/7/14/30 天自动连抢。</p>
+                </div>
+                <div class="xp-well">
+                  <div class="xp-entity-title" style="font-size: 14px;">成功才扣费 · 双端同步</div>
+                  <p class="xp-entity-summary" style="font-size: 12px; margin-top: 4px;">学校权威回查确认成功后才扣除 1 🍑，未抢中或提前取消不扣费，状态与 App 双向同步。</p>
+                </div>
+              </div>`
+        }
       </main>
       <footer class="auth-footer">
         <span>XPeach · 日在校园</span>
+        <span>·</span>
+        <a href="/console">运维控制台</a>
         <span>·</span>
         <a href="https://sso.xpeach.codes/portal">XPeach 主站</a>
         <span>·</span>
@@ -247,11 +270,23 @@ export function renderConsoleHtml(ctx = {}) {
   const pricePeachText = formatPeachFromMicropeach(pricingMicropeach);
   const user = ctx.user || null;
   if (!user) {
-    return renderUnauthenticatedLandingHtml();
+    return renderUnauthenticatedLandingHtml({
+      mode: ctx.authLandingMode || (ctx.activeNav && ctx.activeNav !== "reservations" ? "console" : "portal"),
+      nonAdminBlocked: Boolean(ctx.nonAdminBlocked)
+    });
   }
 
-  const username = user.username || user.display_name || "站点管理员";
-  const userInitial = String(username).trim().slice(0, 1).toUpperCase() || "A";
+  const roles = Array.isArray(ctx.roles) ? ctx.roles : [];
+  const username = user.username || user.display_name || "XPeach 用户";
+  const userInitial = String(username).trim().slice(0, 1).toUpperCase() || "U";
+  const isAdmin =
+    roles.includes("ADMIN") ||
+    roles.includes("OPERATOR") ||
+    roles.includes("FINANCE") ||
+    roles.includes("SUPPORT") ||
+    roles.includes("PLATFORM_OWNER") ||
+    user.role === "admin" ||
+    user.role === "owner";
   const userRoleLabel =
     user.role === "owner"
       ? "平台所有者"
@@ -265,19 +300,32 @@ export function renderConsoleHtml(ctx = {}) {
               ? "财务运营"
               : roles.includes("SECURITY_AUDITOR")
                 ? "安全审计"
-                : roles.length > 0
+                : isAdmin
                   ? "运维成员"
-                  : "运维成员";
-  const roles = Array.isArray(ctx.roles) ? ctx.roles : [];
-  const isAdmin =
-    roles.includes("ADMIN") ||
-    roles.includes("OPERATOR") ||
-    roles.includes("FINANCE") ||
-    roles.includes("SUPPORT") ||
-    roles.includes("PLATFORM_OWNER") ||
-    user.role === "admin" ||
-    user.role === "owner";
-  const activeNav = ctx.activeNav || "console";
+                  : "校园通行证";
+  const activeNav = ctx.activeNav || (isAdmin ? "console" : "reservations");
+
+  const wallet = ctx.wallet && typeof ctx.wallet === "object" ? ctx.wallet : user.peach_wallet || {};
+  const peachBalanceNum = Number(wallet.peach_balance ?? wallet.peachBalance ?? 0);
+  const peachUsedNum = Number(wallet.peach_used ?? wallet.peachUsed ?? 0);
+  const peachBalanceFormatted =
+    wallet.peach_balance_formatted || wallet.peachBalanceFormatted || peachBalanceNum.toFixed(2);
+  const peachUsedFormatted =
+    wallet.peach_used_formatted || wallet.peachUsedFormatted || peachUsedNum.toFixed(2);
+
+  const userBindings = Array.isArray(ctx.userBindings) ? ctx.userBindings : [];
+  const activeBinding =
+    userBindings.find(
+      (b) => !b.revoked_at && (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE")
+    ) ||
+    userBindings.find((b) => !b.revoked_at) ||
+    null;
+  const activeStudentNo = activeBinding
+    ? cleanDisplayText(activeBinding.student_no || activeBinding.student_no_masked, "")
+    : "";
+  const userPlans = Array.isArray(ctx.userPlans) ? ctx.userPlans : [];
+  const userJobs = Array.isArray(ctx.userJobs) ? ctx.userJobs : [];
+  const userOrders = Array.isArray(ctx.userOrders) ? ctx.userOrders : [];
 
   const adminStats = ctx.adminStats && typeof ctx.adminStats === "object" ? ctx.adminStats : {};
   const allJobs = Array.isArray(ctx.allJobs) ? ctx.allJobs : [];
@@ -308,6 +356,10 @@ export function renderConsoleHtml(ctx = {}) {
   const accessToken = ctx.accessToken || "";
 
   const pageHeaderConfig = {
+    reservations: {
+      title: "图书馆云端抢座",
+      subtitle: "绑定校园学号后选择实时自习室与备选座位，每天 07:00 云端准点自动抢座并与客户端同步。"
+    },
     console: {
       title: "运维总览",
       subtitle: "站点运行指标、学校服务状态、接入用户与最近审计事件。"
@@ -333,8 +385,8 @@ export function renderConsoleHtml(ctx = {}) {
       subtitle: "社团、竞赛、频道与社区横幅公告的云端下发管理。"
     }
   }[activeNav] || {
-    title: "运维总览",
-    subtitle: "站点运行指标、学校服务状态、接入用户与最近审计事件。"
+    title: "图书馆云端抢座",
+    subtitle: "绑定校园学号后选择实时自习室与备选座位，每天 07:00 云端准点自动抢座。"
   };
 
   function jobStateBadge(state) {
@@ -1056,20 +1108,270 @@ export function renderConsoleHtml(ctx = {}) {
       </section>`;
   }
 
-  const activeMainHtml =
-    activeNav === "jobs"
-      ? renderJobsView()
-      : activeNav === "orders"
-        ? renderOrdersAdminView()
-        : activeNav === "audit"
-          ? renderAuditView()
-          : activeNav === "schools"
-            ? renderSchoolsView()
-            : activeNav === "content"
-              ? renderContentView()
-              : renderDashboardView();
+  function renderReservationsView() {
+    const sortedJobs = [...userJobs].reverse();
+    const sortedOrders = [...userOrders].reverse();
+    return `
+      <section class="xp-bento-grid" aria-label="云端抢座状态概览" style="margin-bottom: 18px;">
+        ${xpeachBentoTile({
+          label: "当前 XPeach 余额",
+          value: `🍑 ${peachBalanceFormatted}`,
+          valueId: "wallet-balance-text",
+          hint: `累计已用 🍑 ${peachUsedFormatted} · 成功扣 ${pricePeachText} 🍑`,
+          badge: `<button type="button" class="xp-pill xp-pill--compact" id="btn-sync-wallet">同步余额</button>`
+        })}
+        ${xpeachBentoTile({
+          label: "校园学号绑定",
+          value: activeStudentNo || "待绑定",
+          hint: activeStudentNo ? "河南工业大学 · KMS 信封加密托管" : "请在下方第一步完成学号验证",
+          badge: activeStudentNo
+            ? xpeachBadge("已授权", "success")
+            : xpeachBadge("需绑定", "warning")
+        })}
+        ${xpeachBentoTile({
+          label: "启用中的抢座计划",
+          value: `${userPlans.filter((p) => p.enabled !== false).length} 项`,
+          hint: "支持单日准点与连续多日自动连抢",
+          badge: xpeachBadge("07:00 准点", "primary")
+        })}
+        ${xpeachBentoTile({
+          label: "历史预约记录",
+          value: `${sortedJobs.length} 条`,
+          hint: "未抢中或停止委托绝不扣费",
+          badge: xpeachBadge("权威回查", "success")
+        })}
+      </section>
 
-  return `${renderHead("日在校园 · 运维管理控制台")}
+      <section class="xp-card" id="section-reservations" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 16px;">
+          <div class="xp-icon-box" aria-hidden="true">📚</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">云端定时抢座工作台</h2>
+              ${xpeachBadge(`${pricePeachText} 🍑 / 次 · 仅成功扣费`, "peach")}
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">绑定学号后加载图书馆实时空位，设置首选与备选座位，云端将在开抢前自动保活并准点发起抢座。</p>
+          </div>
+        </div>
+
+        <div class="xp-split-grid">
+          <!-- Step 1: 绑定校园学号 -->
+          <div class="xp-well" style="padding: 18px;">
+            <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 8px;">
+              <h3 class="xp-entity-title" style="font-size: 15px;">第一步：绑定校园学号</h3>
+              ${
+                activeStudentNo
+                  ? xpeachBadge(`已绑定 ${activeStudentNo}`, "success")
+                  : xpeachBadge("待绑定", "warning")
+              }
+            </div>
+            <p class="text-xs text-muted" style="margin: 0 0 14px;">凭据经 KMS AES-256-GCM 加密保存，仅用于您本人授权的图书馆选座，与 Android 客户端自动同步。</p>
+            <div class="stack gap-3">
+              <div class="field">
+                <label class="label" for="bind-school">所属学校</label>
+                <select class="input" id="bind-school">
+                  <option value="haut">河南工业大学（莲花街校区图书馆）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="label" for="bind-student-no">校园学号</label>
+                <input class="input" id="bind-student-no" type="text" placeholder="请输入 12 位学号，例如 231040600206" value="${escapeHtml(activeStudentNo)}" />
+              </div>
+              <div class="field">
+                <label class="label" for="bind-secret">统一身份认证 / 图书馆密码</label>
+                <input class="input" id="bind-secret" type="password" placeholder="请输入登录密码（实时连接学校验证）" />
+              </div>
+              <div class="xp-action-group">
+                <button type="button" class="btn btn-primary" style="flex:1;" id="btn-save-binding">
+                  ${activeStudentNo ? "更新验证学号与密码" : "验证并绑定学号"}
+                </button>
+                ${
+                  activeBinding
+                    ? `<button type="button" class="btn btn-secondary" id="btn-revoke-binding" data-binding-id="${escapeHtml(activeBinding.id)}">解绑停用</button>`
+                    : ""
+                }
+              </div>
+            </div>
+            <div id="binding-list-box" style="margin-top: 12px;" class="text-xs text-muted">
+              ${
+                activeStudentNo
+                  ? `当前生效学号：<strong>${escapeHtml(activeStudentNo)}</strong>（更换学号或解绑会自动终止旧排队委托）`
+                  : "尚未绑定校园学号，绑定后会自动拉取图书馆实时自习室与座位。"
+              }
+            </div>
+          </div>
+
+          <!-- Step 2: 选择区域、座位与抢座时间 -->
+          <div class="xp-well" style="padding: 18px;">
+            <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 8px;">
+              <h3 class="xp-entity-title" style="font-size: 15px;">第二步：选择自习室与备选座位</h3>
+              <span class="xp-badge xp-badge--success" id="live-region-badge" style="display:none;">实时座位数据已连接</span>
+            </div>
+            <p class="text-xs text-muted" style="margin: 0 0 10px;">点选楼层区域与座位卡片设置首选 + 2 个备选座位（按优先级依次尝试）。</p>
+
+            <div class="xp-pill-bar" id="area-pills-bar" style="margin-bottom: 12px;">
+              <button type="button" class="area-pill active" data-area-pill="五层中区">五层中区</button>
+              <button type="button" class="area-pill" data-area-pill="四层西书库北区">四层西书库北区</button>
+              <button type="button" class="area-pill" data-area-pill="三层西书库北区">三层西书库北区</button>
+              <button type="button" class="area-pill" data-area-pill="四层东书库南区">四层东书库南区</button>
+            </div>
+
+            <div class="stack gap-3">
+              <div class="field">
+                <label class="label" for="plan-area">1. 目标自习区域</label>
+                <select class="input" id="plan-area">
+                  <option value="五层中区">五层 · 五层中区</option>
+                  <option value="四层西书库北区">四层 · 四层西书库北区</option>
+                  <option value="三层西书库北区">三层 · 三层西书库北区</option>
+                  <option value="四层东书库南区">四层 · 四层东书库南区</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 4px;">
+                  <label class="label" style="margin: 0;">2. 点选候选座位（蓝色首选，绿色备选）</label>
+                  <span class="text-xs text-muted" id="seat-selection-summary">正在加载座位…</span>
+                </div>
+                <div class="seat-visual-grid" id="seat-visual-grid" style="max-height: 220px; overflow-y: auto;"></div>
+              </div>
+
+              <div class="xp-form-grid-3">
+                <div class="field">
+                  <label class="label" for="plan-seat-1">1号首选座位</label>
+                  <select class="input" id="plan-seat-1"></select>
+                </div>
+                <div class="field">
+                  <label class="label" for="plan-seat-2">2号备选座位</label>
+                  <select class="input" id="plan-seat-2"></select>
+                </div>
+                <div class="field">
+                  <label class="label" for="plan-seat-3">3号备选座位</label>
+                  <select class="input" id="plan-seat-3"></select>
+                </div>
+              </div>
+
+              <div class="xp-form-grid-3">
+                <div class="field">
+                  <label class="label" for="plan-date">预约用座日期</label>
+                  <input class="input" id="plan-date" type="date" />
+                </div>
+                <div class="field">
+                  <label class="label" for="plan-time">云端开抢时刻</label>
+                  <select class="input" id="plan-time">
+                    <option value="07:00:00">07:00:00（每日早间准点开抢）</option>
+                    <option value="07:30:00">07:30:00（早间开馆场次）</option>
+                    <option value="08:00:00">08:00:00（上午场次）</option>
+                    <option value="12:30:00">12:30:00（午间场次）</option>
+                    <option value="14:00:00">14:00:00（下午场次）</option>
+                    <option value="18:00:00">18:00:00（晚间场次）</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="label" for="plan-repeat-days">连续抢座周期</label>
+                  <select class="input" id="plan-repeat-days">
+                    <option value="1">单次（仅所选日期）</option>
+                    <option value="3">连续 3 天自动抢座</option>
+                    <option value="7">连续 7 天自动抢座</option>
+                    <option value="14">连续 14 天自动抢座</option>
+                    <option value="30">连续 30 天自动抢座</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="label" for="plan-slot">自习用座时段</label>
+                <select class="input" id="plan-slot">
+                  <option value="07:30-22:00">07:30 - 22:00（全天开馆时段）</option>
+                  <option value="08:00-22:00">08:00 - 22:00（全天标准时段）</option>
+                  <option value="08:00-12:00">08:00 - 12:00（上午时段）</option>
+                  <option value="14:00-18:00">14:00 - 18:00（下午时段）</option>
+                  <option value="18:30-22:00">18:30 - 22:00（晚间时段）</option>
+                </select>
+              </div>
+
+              <div class="xp-action-group">
+                <button type="button" class="btn btn-primary" style="flex:1;" id="btn-create-plan">开启云端准点抢座</button>
+                <button type="button" class="btn btn-secondary" id="btn-fire-now">立即抢座</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="xp-section-subtitle">我的云端抢座计划与记录 (${sortedJobs.length})</h3>
+        <div class="xp-row-list" id="jobs-tbody">
+          ${
+            sortedJobs.length === 0
+              ? xpeachEmptyState({
+                  icon: "💺",
+                  title: "暂无云端抢座记录",
+                  subtitle: "在上方绑定学号并选择自习室与座位后，点击「开启云端准点抢座」即可交由云端托管执行。"
+                })
+              : sortedJobs
+                  .map((j) => {
+                    const p = userPlans.find((x) => x.id === j.plan_id) || {};
+                    return xpeachJobRowCard(j, p, { pricePeachText });
+                  })
+                  .join("")
+          }
+        </div>
+      </section>
+
+      <section class="xp-card" id="section-user-orders" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
+          <div class="xp-entity-title-col">
+            <div class="xp-badge-flow" style="justify-content: space-between;">
+              <h2 class="xp-entity-title">🍑 消费与退还明细 (${sortedOrders.length})</h2>
+              <a class="xp-pill xp-pill--compact" href="https://sso.xpeach.codes/portal">XPeach 账户账单 →</a>
+            </div>
+            <p class="xp-entity-summary" style="margin-top: 2px;">仅在学校座位权威确认预约成功后扣除 ${pricePeachText} 🍑；未抢中、停止委托或取消计划均不扣费。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${
+            sortedOrders.length === 0
+              ? xpeachEmptyState({
+                  icon: "🍑",
+                  title: "暂无 🍑 消费记录",
+                  subtitle: `云端抢座成功并经学校确认后扣除 ${pricePeachText} 🍑。`
+                })
+              : sortedOrders
+                  .map((o) =>
+                    xpeachOrderRowCard(o, {
+                      isAdmin: false,
+                      pricingMicropeach,
+                      micropeachPerPeach: MICROPEACH_PER_PEACH
+                    })
+                  )
+                  .join("")
+          }
+        </div>
+      </section>`;
+  }
+
+  const activeMainHtml =
+    activeNav === "reservations"
+      ? renderReservationsView()
+      : activeNav === "jobs"
+        ? renderJobsView()
+        : activeNav === "orders"
+          ? renderOrdersAdminView()
+          : activeNav === "audit"
+            ? renderAuditView()
+            : activeNav === "schools"
+              ? renderSchoolsView()
+              : activeNav === "content"
+                ? renderContentView()
+                : renderDashboardView();
+
+  const htmlDocTitle =
+    activeNav === "reservations"
+      ? "日在校园 · 图书馆云端抢座"
+      : "日在校园 · 运维管理控制台";
+
+  return `${renderHead(htmlDocTitle)}
   <body class="console-body">
     ${renderHiddenContractViews()}
     <div class="mobile-topbar">
@@ -1103,37 +1405,49 @@ export function renderConsoleHtml(ctx = {}) {
               <span class="brand-caption">日在校园</span>
             </div>
           </a>
-          ${xpeachBadge(isAdmin ? "运维管理" : "只读访客", "primary")}
+          ${xpeachBadge(isAdmin ? "运维管理" : "云端抢座", "primary")}
         </div>
 
         <nav class="sidebar-nav">
           <div class="nav-section">
-            <div class="nav-section-title">站点管理</div>
-            <a class="nav-item ${activeNav === "console" ? "active" : ""}" href="/console">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
-              <span>运维总览</span>
-            </a>
-            <a class="nav-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
-              <span>预约任务</span>
-            </a>
-            <a class="nav-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-              <span>账单退还</span>
-            </a>
-            <a class="nav-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              <span>审计日志</span>
-            </a>
-            <a class="nav-item ${activeNav === "schools" ? "active" : ""}" href="/console/schools">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
-              <span>学校服务</span>
-            </a>
-            <a class="nav-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
-              <span>内容云控</span>
+            <div class="nav-section-title">校园服务</div>
+            <a class="nav-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              <span>图书馆云端抢座</span>
             </a>
           </div>
+
+          ${
+            isAdmin
+              ? `<div class="nav-section">
+                  <div class="nav-section-title">站点管理</div>
+                  <a class="nav-item ${activeNav === "console" ? "active" : ""}" href="/console">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+                    <span>运维总览</span>
+                  </a>
+                  <a class="nav-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
+                    <span>预约任务</span>
+                  </a>
+                  <a class="nav-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                    <span>账单退还</span>
+                  </a>
+                  <a class="nav-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span>审计日志</span>
+                  </a>
+                  <a class="nav-item ${activeNav === "schools" ? "active" : ""}" href="/console/schools">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
+                    <span>学校服务</span>
+                  </a>
+                  <a class="nav-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+                    <span>内容云控</span>
+                  </a>
+                </div>`
+              : ""
+          }
 
           <div class="nav-section">
             <div class="nav-section-title">互联站点</div>
@@ -1184,6 +1498,13 @@ export function renderConsoleHtml(ctx = {}) {
             <p class="page-subtitle">${escapeHtml(pageHeaderConfig.subtitle)}</p>
           </div>
           <div class="xp-action-group">
+            ${
+              isAdmin && activeNav === "reservations"
+                ? `<a class="xp-pill xp-pill--compact" href="/console">🛠️ 运维控制台</a>`
+                : isAdmin
+                  ? `<a class="xp-pill xp-pill--active xp-pill--compact" href="/reservations">💺 云端抢座</a>`
+                  : ""
+            }
             <button type="button" class="xp-pill xp-pill--compact" data-ui-style-toggle title="切换液态毛玻璃 / 经典 M3 视觉语言">
               <span data-ui-style-label>✨ 液态毛玻璃</span>
             </button>
@@ -1198,26 +1519,37 @@ export function renderConsoleHtml(ctx = {}) {
     </div>
 
     <nav class="mobile-glass-dock" aria-label="快捷导航">
-      <a class="mobile-dock-item ${activeNav === "console" ? "active" : ""}" href="/console">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
-        <span>总览</span>
+      <a class="mobile-dock-item ${activeNav === "reservations" ? "active" : ""}" href="/reservations">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>抢座</span>
       </a>
-      <a class="mobile-dock-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
-        <span>任务</span>
-      </a>
-      <a class="mobile-dock-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-        <span>账单</span>
-      </a>
-      <a class="mobile-dock-item ${activeNav === "audit" ? "active" : ""}" href="/console/audit">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <span>审计</span>
-      </a>
-      <a class="mobile-dock-item ${activeNav === "content" ? "active" : ""}" href="/console/content">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
-        <span>云控</span>
-      </a>
+      ${
+        isAdmin
+          ? `<a class="mobile-dock-item ${activeNav === "console" ? "active" : ""}" href="/console">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+              <span>总览</span>
+            </a>
+            <a class="mobile-dock-item ${activeNav === "jobs" ? "active" : ""}" href="/console/jobs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
+              <span>任务</span>
+            </a>
+            <a class="mobile-dock-item ${activeNav === "orders" ? "active" : ""}" href="/console/orders">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              <span>账单</span>
+            </a>
+            <a class="mobile-dock-item ${activeNav === "schools" ? "active" : ""}" href="/console/schools">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
+              <span>学校</span>
+            </a>`
+          : `<a class="mobile-dock-item" href="https://sso.xpeach.codes/portal">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+              <span>账户</span>
+            </a>
+            <a class="mobile-dock-item" href="https://github.com/yellowpeachxgp/day-in-school/releases/latest" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>客户端</span>
+            </a>`
+      }
     </nav>
 
     <script src="/static/app.js?v=${CONSOLE_UI_VERSION}" defer></script>
@@ -1721,6 +2053,553 @@ export function renderConsoleHtml(ctx = {}) {
               showToast("竞赛已删除");
               setTimeout(function () { window.location.reload(); }, 400);
             });
+          });
+        });
+
+        // =========================================================================
+        // Web Cloud Seat-Booking Workbench (/reservations & /)
+        // =========================================================================
+        var dateInput = document.getElementById("plan-date");
+        if (dateInput && !dateInput.value) {
+          var shNow = new Date(Date.now() + 8 * 3600000);
+          var shHour = shNow.getUTCHours();
+          var targetSh = shHour < 7 ? shNow : new Date(shNow.getTime() + 86400000);
+          dateInput.value = targetSh.toISOString().slice(0, 10);
+        }
+
+        var areaSelect = document.getElementById("plan-area");
+        var areaPillsBar = document.getElementById("area-pills-bar");
+        var liveBadge = document.getElementById("live-region-badge");
+        var seat1 = document.getElementById("plan-seat-1");
+        var seat2 = document.getElementById("plan-seat-2");
+        var seat3 = document.getElementById("plan-seat-3");
+        var seatGrid = document.getElementById("seat-visual-grid");
+        var seatSummary = document.getElementById("seat-selection-summary");
+        var LIVE_REGIONS_MAP = {};
+
+        var FALLBACK_AREAS = {
+          "五层中区": { name: "五层中区", prefix: "01桌 ", seats: ["01桌 A座", "01桌 B座", "01桌 C座", "01桌 D座", "02桌 A座", "02桌 B座", "02桌 C座", "02桌 D座", "03桌 A座", "03桌 B座", "04桌 A座", "04桌 B座"] },
+          "四层西书库北区": { name: "四层西书库北区", seats: ["05桌 A座", "05桌 B座", "06桌 A座", "06桌 F座", "07桌 A座", "08桌 A座", "08桌 B座", "09桌 A座", "10桌 A座", "10桌 B座", "11桌 A座", "12桌 A座"] },
+          "三层西书库北区": { name: "三层西书库北区", seats: ["02桌 A座", "02桌 E座", "04桌 B座", "04桌 D座", "04桌 F座", "06桌 B座", "08桌 A座", "10桌 A座", "10桌 B座", "12桌 A座", "14桌 A座", "16桌 A座"] },
+          "四层东书库南区": { name: "四层东书库南区", seats: ["01桌 A座", "01桌 B座", "02桌 A座", "02桌 B座", "03桌 A座", "03桌 B座", "04桌 A座", "04桌 B座", "05桌 A座", "05桌 B座", "06桌 A座", "06桌 B座"] }
+        };
+
+        function updateSeatGridHighlights() {
+          if (!seatGrid || !seat1 || !seat2 || !seat3) return;
+          var s1 = seat1.value;
+          var s2 = seat2.value;
+          var s3 = seat3.value;
+          var chosen = [s1, s2, s3].filter(Boolean);
+          if (seatSummary) {
+            seatSummary.textContent = "已选：" + (chosen.length ? chosen.join(" / ") : "请点击下方座位");
+          }
+          seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
+            var code = chip.getAttribute("data-seat-code");
+            chip.classList.remove("selected-primary", "selected-backup");
+            if (code === s1) {
+              chip.classList.add("selected-primary");
+            } else if (code === s2 || code === s3) {
+              chip.classList.add("selected-backup");
+            }
+          });
+        }
+
+        function bindSeatChipsClick() {
+          if (!seatGrid || !seat1 || !seat2 || !seat3) return;
+          seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
+            chip.addEventListener("click", function () {
+              if (chip.disabled) return;
+              var code = chip.getAttribute("data-seat-code");
+              if (seat1.value === code) return;
+              if (seat2.value === code) {
+                seat2.value = seat1.value;
+                seat1.value = code;
+              } else if (seat3.value === code) {
+                seat3.value = seat2.value;
+                seat2.value = seat1.value;
+                seat1.value = code;
+              } else {
+                seat3.value = seat2.value;
+                seat2.value = seat1.value;
+                seat1.value = code;
+              }
+              updateSeatGridHighlights();
+            });
+          });
+        }
+
+        function populateSeatsFromList(seatItems) {
+          if (!seat1 || !seat2 || !seat3) return;
+          var html1 = "";
+          var html2 = '<option value="">不设置备选</option>';
+          var html3 = '<option value="">不设置备选</option>';
+          var gridHtml = "";
+          var availableCodes = [];
+
+          seatItems.forEach(function (item) {
+            var code = String(item.code || "");
+            var tag = String(item.tag || "");
+            var safeCode = escHtml(code);
+            var safeTag = escHtml(tag);
+            var isAvail = item.available !== false;
+            var label = safeCode + "（" + safeTag + "）";
+            html1 += '<option value="' + safeCode + '">' + label + "</option>";
+            html2 += '<option value="' + safeCode + '">' + label + "</option>";
+            html3 += '<option value="' + safeCode + '">' + label + "</option>";
+            if (isAvail) availableCodes.push(code);
+            gridHtml +=
+              '<button type="button" class="seat-chip' +
+              (isAvail ? "" : " occupied") +
+              '" data-seat-code="' +
+              safeCode +
+              '"><span class="seat-chip-code">' +
+              safeCode +
+              '</span><span class="seat-chip-tag">' +
+              safeTag +
+              "</span></button>";
+          });
+
+          seat1.innerHTML = html1;
+          seat2.innerHTML = html2;
+          seat3.innerHTML = html3;
+          if (seatGrid) {
+            seatGrid.innerHTML = gridHtml;
+            bindSeatChipsClick();
+          }
+          var pickPool = availableCodes.length >= 3 ? availableCodes : seatItems.map(function (x) { return x.code; });
+          if (pickPool.length >= 1) seat1.value = pickPool[0];
+          if (pickPool.length >= 2) seat2.value = pickPool[1];
+          if (pickPool.length >= 3) seat3.value = pickPool[2];
+          updateSeatGridHighlights();
+        }
+
+        function populateSeatsForArea() {
+          if (!areaSelect || !seat1 || !seat2 || !seat3) return;
+          var areaKey = areaSelect.value || "五层中区";
+          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+            pill.classList.toggle("active", pill.getAttribute("data-area-pill") === areaKey);
+          });
+
+          if (LIVE_REGIONS_MAP[areaKey]) {
+            var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+            apiFetch(
+              "/api/v1/schools/haut/library/live-seats?region_id=" +
+                encodeURIComponent(areaKey) +
+                "&booking_date=" +
+                encodeURIComponent(bDate),
+              { method: "GET" }
+            )
+              .then(function (res) {
+                var seats = (res.data && res.data.seats) || [];
+                if (seats.length > 0) {
+                  populateSeatsFromList(
+                    seats.map(function (s) {
+                      var cleanShort = s.short_name && s.short_name !== "null" ? s.short_name : "";
+                      var cleanFull = s.seat_name && s.seat_name !== "null" ? s.seat_name : "";
+                      return {
+                        code: cleanShort || cleanFull || String(s.seat_id),
+                        tag: s.available ? "空闲可选" : "已占",
+                        available: Boolean(s.available)
+                      };
+                    })
+                  );
+                }
+              })
+              .catch(function () {});
+            return;
+          }
+
+          var fb = FALLBACK_AREAS[areaKey] || FALLBACK_AREAS["五层中区"];
+          populateSeatsFromList(
+            fb.seats.map(function (code) {
+              return { code: code, tag: "绑定学号后加载实时状态", available: true };
+            })
+          );
+        }
+
+        function loadLiveRegionsIfBound() {
+          if (!areaSelect) return;
+          var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+          apiFetch("/api/v1/schools/haut/library/live-regions?booking_date=" + encodeURIComponent(bDate), {
+            method: "GET"
+          })
+            .then(function (res) {
+              var regions = (res.data && res.data.regions) || [];
+              if (!regions.length) return;
+              LIVE_REGIONS_MAP = {};
+              var optHtml = "";
+              var pillsHtml = "";
+              regions.forEach(function (r, idx) {
+                var key = String(r.region_id);
+                var safeKey = escHtml(key);
+                var safeLayer = escHtml(r.layer_name);
+                var safeName = escHtml(r.region_name);
+                var safeAvail = escHtml(r.available_seats);
+                var safeTotal = escHtml(r.total_seats);
+                LIVE_REGIONS_MAP[key] = {
+                  name: r.region_name,
+                  layerName: r.layer_name,
+                  totalSeats: r.total_seats,
+                  availableSeats: r.available_seats
+                };
+                optHtml +=
+                  '<option value="' +
+                  safeKey +
+                  '">' +
+                  safeLayer +
+                  " · " +
+                  safeName +
+                  "（空闲 " +
+                  safeAvail +
+                  "/" +
+                  safeTotal +
+                  "）</option>";
+                if (idx < 8) {
+                  pillsHtml +=
+                    '<button type="button" class="area-pill' +
+                    (idx === 0 ? " active" : "") +
+                    '" data-area-pill="' +
+                    safeKey +
+                    '">' +
+                    safeName +
+                    " (" +
+                    safeAvail +
+                    ")</button>";
+                }
+              });
+              areaSelect.innerHTML = optHtml;
+              if (areaPillsBar && pillsHtml) {
+                areaPillsBar.innerHTML = pillsHtml;
+                areaPillsBar.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+                  pill.addEventListener("click", function () {
+                    areaSelect.value = pill.getAttribute("data-area-pill");
+                    populateSeatsForArea();
+                  });
+                });
+              }
+              if (liveBadge) {
+                liveBadge.style.display = "inline-flex";
+              }
+              populateSeatsForArea();
+            })
+            .catch(function () {});
+        }
+
+        if (areaSelect) {
+          areaSelect.addEventListener("change", populateSeatsForArea);
+          if (dateInput) dateInput.addEventListener("change", loadLiveRegionsIfBound);
+          if (seat1) seat1.addEventListener("change", updateSeatGridHighlights);
+          if (seat2) seat2.addEventListener("change", updateSeatGridHighlights);
+          if (seat3) seat3.addEventListener("change", updateSeatGridHighlights);
+          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+            pill.addEventListener("click", function () {
+              areaSelect.value = pill.getAttribute("data-area-pill");
+              populateSeatsForArea();
+            });
+          });
+          populateSeatsForArea();
+          loadLiveRegionsIfBound();
+        }
+
+        var btnSyncWallet = document.getElementById("btn-sync-wallet");
+        if (btnSyncWallet) {
+          btnSyncWallet.addEventListener("click", function () {
+            btnSyncWallet.disabled = true;
+            btnSyncWallet.textContent = "同步中…";
+            apiFetch("/api/v1/me/wallet", { method: "GET" })
+              .then(function (res) {
+                var w = res.data || {};
+                var bal = w.peach_balance_formatted || Number(w.peach_balance || 0).toFixed(2);
+                var el1 = document.getElementById("wallet-balance-text");
+                if (el1) el1.textContent = "🍑 " + bal;
+                showToast("已与 XPeach 主站同步最新余额：🍑 " + bal);
+              })
+              .catch(function (err) {
+                showToast(err.message, true);
+              })
+              .finally(function () {
+                btnSyncWallet.disabled = false;
+                btnSyncWallet.textContent = "同步余额";
+              });
+          });
+        }
+
+        var btnSaveBinding = document.getElementById("btn-save-binding");
+        if (btnSaveBinding) {
+          btnSaveBinding.addEventListener("click", function () {
+            var schoolId = (document.getElementById("bind-school") && document.getElementById("bind-school").value) || "haut";
+            var studentNo = (document.getElementById("bind-student-no").value || "").trim();
+            var secret = (document.getElementById("bind-secret").value || "").trim();
+            if (!studentNo) {
+              showToast("请填写您的校园学号", true);
+              return;
+            }
+            if (!secret) {
+              showToast("请填写您的统一认证 / 图书馆密码", true);
+              return;
+            }
+            btnSaveBinding.disabled = true;
+            btnSaveBinding.textContent = "正在连接学校验证…";
+            apiFetch("/api/v1/school-bindings/bind-live", {
+              method: "POST",
+              body: JSON.stringify({ school_id: schoolId, student_no: studentNo, password: secret })
+            })
+              .then(function (r) {
+                var uName = r.data && r.data.user_name ? "（" + r.data.user_name + "）" : "";
+                showToast("学号 " + studentNo + uName + " 验证并加密绑定成功！");
+                setTimeout(function () { window.location.reload(); }, 600);
+              })
+              .catch(function (err) {
+                showToast(err.message, true);
+              })
+              .finally(function () {
+                btnSaveBinding.disabled = false;
+                btnSaveBinding.textContent = "验证并绑定学号";
+              });
+          });
+        }
+
+        var btnRevokeBinding = document.getElementById("btn-revoke-binding");
+        if (btnRevokeBinding) {
+          btnRevokeBinding.addEventListener("click", function () {
+            var bindId = btnRevokeBinding.getAttribute("data-binding-id");
+            if (!bindId) return;
+            btnRevokeBinding.disabled = true;
+            apiFetch("/api/v1/school-bindings/" + encodeURIComponent(bindId), {
+              method: "DELETE"
+            })
+              .then(function () {
+                showToast("已解绑学号并停止所有未执行的云端排队委托");
+                setTimeout(function () { window.location.reload(); }, 600);
+              })
+              .catch(function (err) {
+                btnRevokeBinding.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        }
+
+        function ensureBindingAndConsent() {
+          return Promise.all([
+            apiFetch("/api/v1/school-bindings", { method: "GET" }),
+            apiFetch("/api/v1/me/consents", { method: "GET" })
+          ]).then(function (results) {
+            var bList = ((results[0].data && results[0].data.bindings) || []).slice().reverse();
+            var cList = ((results[1].data && results[1].data.consents) || []).slice().reverse();
+            var activeBinding =
+              bList.find(function (b) {
+                return !b.revoked_at && (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE");
+              }) ||
+              bList.find(function (b) {
+                return !b.revoked_at && b.status !== "REVOKED";
+              });
+            if (!activeBinding) {
+              throw new Error("请先在左侧第一步填写并验证绑定您的校园学号");
+            }
+            var bindAuthVer = Number(activeBinding.auth_version || 1);
+            var matchedConsent =
+              (activeBinding.consent_id
+                ? cList.find(function (c) {
+                    return (
+                      c.id === activeBinding.consent_id &&
+                      !c.withdrawn_at &&
+                      Number(c.auth_version || 1) === bindAuthVer
+                    );
+                  })
+                : null) ||
+              cList.find(function (c) {
+                return (
+                  !c.withdrawn_at &&
+                  (c.school_id || "haut") === (activeBinding.school_id || "haut") &&
+                  Number(c.auth_version || 1) === bindAuthVer
+                );
+              });
+            if (matchedConsent && (!activeBinding.consent_id || activeBinding.consent_id === matchedConsent.id)) {
+              return { bindingId: activeBinding.id, consentId: matchedConsent.id };
+            }
+            return apiFetch("/api/v1/me/consents", {
+              method: "POST",
+              body: JSON.stringify({ school_id: activeBinding.school_id || "haut" })
+            }).then(function (cr) {
+              return { bindingId: activeBinding.id, consentId: cr.data.id };
+            });
+          });
+        }
+
+        function createReservationPlanFromSelection() {
+          var areaKey = areaSelect ? areaSelect.value : "五层中区";
+          var areaCfg = LIVE_REGIONS_MAP[areaKey] || FALLBACK_AREAS[areaKey] || { name: areaKey };
+          var seats = [seat1 && seat1.value, seat2 && seat2.value, seat3 && seat3.value].filter(Boolean);
+          if (seats.length === 0) {
+            return Promise.reject(new Error("请至少选择 1 个候选座位"));
+          }
+          var targetDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+          var targetTime = (document.getElementById("plan-time") && document.getElementById("plan-time").value) || "07:00:00";
+          var repeatEl = document.getElementById("plan-repeat-days");
+          var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
+          var slot = (document.getElementById("plan-slot") && document.getElementById("plan-slot").value) || "07:30-22:00";
+
+          return ensureBindingAndConsent().then(function (ids) {
+            return apiFetch("/api/v1/reservation-plans", {
+              method: "POST",
+              body: JSON.stringify({
+                school_binding_id: ids.bindingId,
+                consent_id: ids.consentId,
+                area_code: areaKey,
+                area_name: areaCfg.name || areaKey,
+                candidate_seats: seats,
+                slot_window: slot,
+                target_local_date: targetDate,
+                target_local_time: targetTime,
+                repeat_days: repeatDays,
+                remaining_days: repeatDays,
+                replace_existing: true
+              })
+            });
+          });
+        }
+
+        var btnCreatePlan = document.getElementById("btn-create-plan");
+        if (btnCreatePlan) {
+          btnCreatePlan.addEventListener("click", function () {
+            btnCreatePlan.disabled = true;
+            var repeatEl = document.getElementById("plan-repeat-days");
+            var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
+            createReservationPlanFromSelection()
+              .then(function () {
+                showToast(
+                  repeatDays > 1
+                    ? "已开启连续 " + repeatDays + " 天云端自动抢座！每天到点自动抢座并续期次日任务。"
+                    : "云端自动抢座计划已开启！到点将自动为您抢座，并已同步至日在校园 App。"
+                );
+                setTimeout(function () { window.location.reload(); }, 700);
+              })
+              .catch(function (err) {
+                showToast(err.message, true);
+              })
+              .finally(function () {
+                btnCreatePlan.disabled = false;
+              });
+          });
+        }
+
+        function handleExecuteJobResult(execRes) {
+          var data = (execRes && execRes.data) || {};
+          var job = data.job || {};
+          var sr = data.schoolReservation || data.school_reservation || {};
+          if (job.state === "CONFIRMED") {
+            var alias = sr.seat_alias || job.booked_seat_alias ? "（" + (sr.seat_alias || job.booked_seat_alias) + "）" : "";
+            showToast("抢座成功！" + alias + " 已从您的 XPeach 账户扣除 " + PRICE_PEACH_TEXT + " 🍑。");
+          } else if (job.state === "RESULT_UNKNOWN") {
+            showToast("请求已发出但学校回查结果待核对，请先核实预约记录避免重复提交", true);
+          } else {
+            showToast(job.last_error_message || "暂未锁定所选座位（不在开放预约时段或座位已被占用），本次未扣费", true);
+          }
+          setTimeout(function () { window.location.reload(); }, 900);
+        }
+
+        var btnFireNow = document.getElementById("btn-fire-now");
+        if (btnFireNow) {
+          btnFireNow.addEventListener("click", function () {
+            btnFireNow.disabled = true;
+            btnFireNow.textContent = "正在抢座…";
+            createReservationPlanFromSelection()
+              .then(function (planRes) {
+                var jobId = planRes.data && (planRes.data.job_id || (planRes.data.job && planRes.data.job.id));
+                return apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/execute-now", {
+                  method: "POST",
+                  body: JSON.stringify({})
+                });
+              })
+              .then(handleExecuteJobResult)
+              .catch(function (err) {
+                showToast(err.message, true);
+              })
+              .finally(function () {
+                btnFireNow.disabled = false;
+                btnFireNow.textContent = "立即抢座";
+              });
+          });
+        }
+
+        document.querySelectorAll("[data-execute-now-job]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var jobId = btn.getAttribute("data-execute-now-job");
+            btn.disabled = true;
+            btn.textContent = "抢座中…";
+            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/execute-now", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(handleExecuteJobResult)
+              .catch(function (err) {
+                showToast(err.message, true);
+                btn.disabled = false;
+                btn.textContent = "立即抢座";
+              });
+          });
+        });
+
+        document.querySelectorAll("[data-cancel-job]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var jobId = btn.getAttribute("data-cancel-job");
+            var planId = btn.getAttribute("data-plan-id");
+            btn.disabled = true;
+            var req = planId
+              ? apiFetch("/api/v1/reservation-plans/" + encodeURIComponent(planId), { method: "DELETE" })
+              : apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/cancel", {
+                  method: "POST",
+                  body: JSON.stringify({})
+                });
+            req
+              .then(function () {
+                showToast("已停止云端抢座委托（未扣费）");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btn.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        });
+
+        document.querySelectorAll("[data-stop-plan]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var planId = btn.getAttribute("data-stop-plan");
+            if (!planId) return;
+            btn.disabled = true;
+            apiFetch("/api/v1/reservation-plans/" + encodeURIComponent(planId), {
+              method: "DELETE"
+            })
+              .then(function () {
+                showToast("已停止后续连续抢座委托（不影响今日已确认座位）");
+                setTimeout(function () { window.location.reload(); }, 500);
+              })
+              .catch(function (err) {
+                btn.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        });
+
+        document.querySelectorAll("[data-cancel-seat-job]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var jobId = btn.getAttribute("data-cancel-seat-job");
+            btn.disabled = true;
+            btn.textContent = "正在退座核对…";
+            apiFetch("/api/v1/reservation-jobs/" + encodeURIComponent(jobId) + "/cancel-seat", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(function (r) {
+                showToast((r.data && r.data.message) || "退座请求已处理并完成学校端回查");
+                setTimeout(function () { window.location.reload(); }, 600);
+              })
+              .catch(function (err) {
+                showToast(err.message, true);
+                btn.disabled = false;
+                btn.textContent = "退座释放";
+              });
           });
         });
       })();

@@ -1721,6 +1721,7 @@ export function createCampusCloudApp(options = {}) {
         resource_ref: params.schoolId,
         outcome: school.kill_switch ? "KILL_SWITCH_ON" : "KILL_SWITCH_OFF"
       });
+      store.flushSnapshotStrictSync?.();
       return { status: 200, code: "KILL_SWITCH_UPDATED", data: school };
     }
   );
@@ -1744,6 +1745,16 @@ export function createCampusCloudApp(options = {}) {
       school.approver_primary_ref = auth.cloudUserId;
       school.approver_secondary_ref = body.secondary_approver_ref;
       school.updated_at = new Date().toISOString();
+      await redisBuffer.invalidate("schools");
+      store.recordAudit({
+        actor_kind: "ADMIN",
+        actor_ref: auth.cloudUserId,
+        action: "APPROVE_SCHOOL_AUTHORIZATION",
+        resource_kind: "school_integration",
+        resource_ref: params.schoolId,
+        outcome: school.authorization_evidence_ref ? "AUTHORIZED_AUTOMATION" : "MOCK_ONLY"
+      });
+      store.flushSnapshotStrictSync?.();
       return { status: 200, code: "SCHOOL_AUTHORIZATION_APPROVED", data: school };
     }
   );
@@ -1826,7 +1837,19 @@ export function createCampusCloudApp(options = {}) {
 
   // --- 67..88 Standardized BFF, Sync, Live Library & Cloud-Controlled Campus Content Operations ---
   register("GET", "/api/v1/auth/web/start", "startWebOidcRedirect", "public", async ({ query, nowMs }) => {
-    const webTxn = identity.startWebTransaction({ returnTo: query.get("return_to") || "/" }, nowMs);
+    const rawReturnTo = query.get("return_to") || "/";
+    const requestedFlow = String(query.get("flow") || "").trim().toLowerCase();
+    const isConsoleTarget =
+      requestedFlow === "console" ||
+      rawReturnTo === "/console" ||
+      rawReturnTo.startsWith("/console/");
+    const webTxn = identity.startWebTransaction(
+      {
+        returnTo: rawReturnTo,
+        flowKind: isConsoleTarget ? "WEB_CONSOLE" : "WEB_PORTAL"
+      },
+      nowMs
+    );
     return {
       status: 302,
       headers: { Location: webTxn.redirect_url },
@@ -4292,7 +4315,8 @@ export function createCampusCloudApp(options = {}) {
       }
 
       const webConsoleRoutes = new Map([
-        ["/", "console"],
+        ["/", "reservations"],
+        ["/reservations", "reservations"],
         ["/console", "console"],
         ["/console/jobs", "jobs"],
         ["/console/orders", "orders"],
@@ -4300,10 +4324,20 @@ export function createCampusCloudApp(options = {}) {
         ["/console/schools", "schools"],
         ["/console/content", "content"]
       ]);
-      const retiredConsoleRoutes = new Set(["/portal", "/reservations", "/parcels", "/community", "/orders"]);
+      const retiredConsoleRoutes = new Set(["/community", "/parcels"]);
+      const portalAliasRoutes = new Set(["/portal", "/orders"]);
 
       const consolePathname =
         pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+
+      if (upperMethod === "GET" && portalAliasRoutes.has(consolePathname)) {
+        return {
+          status: 302,
+          headers: { Location: "/reservations", "cache-control": "no-store", "x-request-id": requestId },
+          rawBody: "",
+          body: okEnvelope("PORTAL_ROUTE_REDIRECT", { to: "/reservations" }, requestId)
+        };
+      }
 
       if (upperMethod === "GET" && retiredConsoleRoutes.has(consolePathname)) {
         return {
@@ -4316,6 +4350,7 @@ export function createCampusCloudApp(options = {}) {
 
       if (upperMethod === "GET" && webConsoleRoutes.has(consolePathname)) {
         const activeNav = webConsoleRoutes.get(consolePathname);
+        const isPortalRoute = activeNav === "reservations";
         // Stage-nav version handshake: a cached page holding an older
         // UI_ASSET_VERSION must full-reload instead of partial-swapping
         // markup built for a different JS/CSS bundle.
@@ -4337,13 +4372,18 @@ export function createCampusCloudApp(options = {}) {
             body: okEnvelope("UI_VERSION_STALE", { reload: true }, requestId)
           };
         }
-        let cookieAuth = identity.verifyWebSessionCookie(
+        const rawCookieAuth = identity.verifyWebSessionCookie(
           headers?.cookie || headers?.Cookie || "",
           nowMs
         );
-        if (cookieAuth && !store.hasAdminAccess?.(cookieAuth.cloudUserId)) {
-          cookieAuth = null;
-        }
+        const isCookieAdmin = Boolean(
+          rawCookieAuth && store.hasAdminAccess?.(rawCookieAuth.cloudUserId)
+        );
+        const cookieAuth = isPortalRoute
+          ? rawCookieAuth
+          : isCookieAdmin
+            ? rawCookieAuth
+            : null;
         const referer = String(headers?.referer || headers?.Referer || "");
         let isTrustedSsoReferer = false;
         if (referer) {
@@ -4357,11 +4397,18 @@ export function createCampusCloudApp(options = {}) {
         }
         if (
           !cookieAuth &&
+          !(rawCookieAuth && !isPortalRoute) &&
           isTrustedSsoReferer &&
           !parsedUrl.searchParams.has("web_ticket") &&
           !parsedUrl.searchParams.has("code")
         ) {
-          const webTxn = identity.startWebTransaction({ returnTo: pathname }, nowMs);
+          const webTxn = identity.startWebTransaction(
+            {
+              returnTo: isPortalRoute ? "/reservations" : pathname,
+              flowKind: isPortalRoute ? "WEB_PORTAL" : "WEB_CONSOLE"
+            },
+            nowMs
+          );
           return {
             status: 302,
             headers: {
@@ -4376,79 +4423,107 @@ export function createCampusCloudApp(options = {}) {
 
         let consoleCtx = {
           activeNav,
+          authLandingMode: isPortalRoute ? "portal" : "console",
+          nonAdminBlocked: Boolean(!isPortalRoute && rawCookieAuth && !isCookieAdmin),
           pricingMicropeach: store.pricingMicropeach,
           campusContent: store.getCampusContent(DEFAULT_SCHOOL_ID, { includeDisabled: false })
         };
         if (cookieAuth) {
-          const memoEntry = consoleViewDataMemo.get(activeNav);
-          let viewData =
-            memoEntry && nowMs - memoEntry.atMs < CONSOLE_VIEW_MEMO_MS ? memoEntry.data : null;
-          if (!viewData) {
-            viewData = {};
-            if (activeNav === "console") {
-              viewData.adminStats = {
-                users_count: store.users.size,
-                active_bindings_count: Array.from(store.schoolBindings.values()).filter(
-                  (b) => !b.revoked_at
-                ).length,
-                jobs_count: store.reservationJobs.size,
-                orders_count: store.reservationOrders.size,
-                parcels_count: store.parcels.size,
-                audit_events_count: store.auditEvents.length
-              };
-              viewData.allUsers = Array.from(store.users.values()).map((u) => ({
-                id: u.id,
-                username: u.username,
-                display_name: u.display_name,
-                subject: u.subject,
-                role: u.role,
-                status: u.status,
-                roles: store.getUserRoles(u.id)
-              }));
-              viewData.auditEvents = store.auditEvents.slice(-10).reverse();
-              viewData.schools = Array.from(store.schoolIntegrations.values());
-              viewData.financeMatrix = getFinanceMatrixCached(nowMs);
-            } else if (activeNav === "jobs") {
-              viewData.allJobs = Array.from(store.reservationJobs.values()).map((j) => {
-                const u = store.users.get(j.cloud_user_id);
-                const p = j.plan_id ? store.reservationPlans.get(j.plan_id) : null;
-                return {
-                  ...j,
-                  username: u?.username || u?.display_name || j.cloud_user_id,
-                  plan_label: p?.area_name || p?.area_code || null
+          if (isPortalRoute) {
+            const wallet = await financeService.getWalletSnapshot(cookieAuth.cloudUserId);
+            const userBindings = store.recordsForUser("schoolBindings", cookieAuth.cloudUserId);
+            const userPlans = store.recordsForUser("reservationPlans", cookieAuth.cloudUserId);
+            const userJobs = store
+              .recordsForUser("reservationJobs", cookieAuth.cloudUserId)
+              .map((j) => {
+                store.syncJobDisplayStatus?.(j);
+                return j;
+              });
+            const userOrders = store.recordsForUser("reservationOrders", cookieAuth.cloudUserId);
+            consoleCtx = {
+              user: cookieAuth.user,
+              roles: cookieAuth.roles,
+              activeNav,
+              nowIso: new Date(nowMs).toISOString(),
+              pricingMicropeach: store.pricingMicropeach,
+              accessToken: cookieAuth.accessToken,
+              wallet,
+              userBindings,
+              userPlans,
+              userJobs,
+              userOrders
+            };
+          } else {
+            const memoEntry = consoleViewDataMemo.get(activeNav);
+            let viewData =
+              memoEntry && nowMs - memoEntry.atMs < CONSOLE_VIEW_MEMO_MS ? memoEntry.data : null;
+            if (!viewData) {
+              viewData = {};
+              if (activeNav === "console") {
+                viewData.adminStats = {
+                  users_count: store.users.size,
+                  active_bindings_count: Array.from(store.schoolBindings.values()).filter(
+                    (b) => !b.revoked_at
+                  ).length,
+                  jobs_count: store.reservationJobs.size,
+                  orders_count: store.reservationOrders.size,
+                  parcels_count: store.parcels.size,
+                  audit_events_count: store.auditEvents.length
                 };
-              });
-              viewData.allEvents = Array.from(store.scheduleEvents.values());
-            } else if (activeNav === "orders") {
-              viewData.allOrders = Array.from(store.reservationOrders.values()).map((o) => {
-                const u = store.users.get(o.cloud_user_id);
-                return {
-                  ...o,
-                  username: u?.username || u?.display_name || o.cloud_user_id,
-                  sso_subject: u?.subject || "-"
-                };
-              });
-              viewData.financeMatrix = getFinanceMatrixCached(nowMs);
-            } else if (activeNav === "audit") {
-              viewData.auditEvents = store.auditEvents.slice(-200).reverse();
-            } else if (activeNav === "schools") {
-              viewData.schools = Array.from(store.schoolIntegrations.values());
-            } else if (activeNav === "content") {
-              viewData.campusContent = store.getCampusContent(DEFAULT_SCHOOL_ID, {
-                includeDisabled: true
-              });
+                viewData.allUsers = Array.from(store.users.values()).map((u) => ({
+                  id: u.id,
+                  username: u.username,
+                  display_name: u.display_name,
+                  subject: u.subject,
+                  role: u.role,
+                  status: u.status,
+                  roles: store.getUserRoles(u.id)
+                }));
+                viewData.auditEvents = store.auditEvents.slice(-10).reverse();
+                viewData.schools = Array.from(store.schoolIntegrations.values());
+                viewData.financeMatrix = getFinanceMatrixCached(nowMs);
+              } else if (activeNav === "jobs") {
+                viewData.allJobs = Array.from(store.reservationJobs.values()).map((j) => {
+                  const u = store.users.get(j.cloud_user_id);
+                  const p = j.plan_id ? store.reservationPlans.get(j.plan_id) : null;
+                  return {
+                    ...j,
+                    username: u?.username || u?.display_name || j.cloud_user_id,
+                    plan_label: p?.area_name || p?.area_code || null
+                  };
+                });
+                viewData.allEvents = Array.from(store.scheduleEvents.values());
+              } else if (activeNav === "orders") {
+                viewData.allOrders = Array.from(store.reservationOrders.values()).map((o) => {
+                  const u = store.users.get(o.cloud_user_id);
+                  return {
+                    ...o,
+                    username: u?.username || u?.display_name || o.cloud_user_id,
+                    sso_subject: u?.subject || "-"
+                  };
+                });
+                viewData.financeMatrix = getFinanceMatrixCached(nowMs);
+              } else if (activeNav === "audit") {
+                viewData.auditEvents = store.auditEvents.slice(-200).reverse();
+              } else if (activeNav === "schools") {
+                viewData.schools = Array.from(store.schoolIntegrations.values());
+              } else if (activeNav === "content") {
+                viewData.campusContent = store.getCampusContent(DEFAULT_SCHOOL_ID, {
+                  includeDisabled: true
+                });
+              }
+              consoleViewDataMemo.set(activeNav, { atMs: nowMs, data: viewData });
             }
-            consoleViewDataMemo.set(activeNav, { atMs: nowMs, data: viewData });
+            consoleCtx = {
+              user: cookieAuth.user,
+              roles: cookieAuth.roles,
+              activeNav,
+              nowIso: new Date(nowMs).toISOString(),
+              pricingMicropeach: store.pricingMicropeach,
+              accessToken: cookieAuth.accessToken,
+              ...viewData
+            };
           }
-          consoleCtx = {
-            user: cookieAuth.user,
-            roles: cookieAuth.roles,
-            activeNav,
-            nowIso: new Date(nowMs).toISOString(),
-            pricingMicropeach: store.pricingMicropeach,
-            accessToken: cookieAuth.accessToken,
-            ...viewData
-          };
         }
 
         return {

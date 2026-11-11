@@ -375,42 +375,93 @@ export function xpeachCompetitionCard(comp, { isAdmin = false } = {}) {
 export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) {
   const j = job || {};
   const p = plan || {};
-  const areaLabel = cleanDisplayText(p.area_name || p.area_code, "4楼北自习区");
+  const areaLabel = cleanDisplayText(p.area_name || p.area_code || j.area_name, "图书馆自习室");
   const seats =
     Array.isArray(p.candidate_seats) && p.candidate_seats.length > 0
       ? p.candidate_seats.join(" / ")
       : "自动分配";
   const bookingDate = cleanDisplayText(j.booking_local_date || p.target_local_date, "-");
   const fireTime = cleanDisplayText(p.target_local_time || j.target_local_time, "07:00:00");
-  const slotWindow = cleanDisplayText(p.slot_window, "08:00-22:00");
+  const slotWindow = cleanDisplayText(p.slot_window, "07:30-22:00");
   const repDays = Number(p.repeat_days || j.repeat_days || 1);
   const remDays = Number(p.remaining_days ?? j.remaining_days ?? repDays);
+  const planId = cleanDisplayText(p.id || j.plan_id, "");
+  const planStillEnabled = p.enabled !== false && Boolean(planId);
+  const extBookingId = cleanDisplayText(j.external_booking_id, "");
+  const bookedSeatText = cleanDisplayText(j.booked_seat_alias, "");
 
   const repeatBadge =
     repDays > 1
-      ? xpeachBadge(`连续 ${repDays} 天 (剩 ${remDays} 天)`, "primary")
-      : xpeachBadge("单日", "neutral");
+      ? xpeachBadge(
+          planStillEnabled ? `连续 ${repDays} 天 (剩 ${remDays} 天)` : `连续 ${repDays} 天 (已停续期)`,
+          planStillEnabled ? "primary" : "neutral"
+        )
+      : xpeachBadge("单次", "neutral");
+
+  const isConfirmedSeat =
+    j.state === "CONFIRMED" || j.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED";
+  const isCancelUnknown =
+    j.state === "CANCEL_RESULT_UNKNOWN" || j.school_cancellation_state === "CANCEL_RESULT_UNKNOWN";
+  const isResultUnknown =
+    j.state === "RESULT_UNKNOWN" ||
+    j.state === "DELEGATION_STOPPED_RESULT_UNKNOWN" ||
+    j.external_execution_state === "RESULT_UNKNOWN";
+  const isQueuedState = [
+    "ARMED",
+    "QUEUED",
+    "PRECHECK_OK",
+    "FINAL_CHECK_OK",
+    "READY_TO_FIRE"
+  ].includes(j.state);
 
   const stateBadge =
     j.state === "CONFIRMED"
-      ? xpeachBadge(`已成功 (-${pricePeachText} 🍑)`, "success")
-      : j.state === "CANCELLED"
-        ? xpeachBadge("已取消", "neutral")
-        : j.state === "FAILED"
-          ? xpeachBadge("未成功 (未扣费)", "danger")
-          : j.state === "EXPIRED"
-            ? xpeachBadge("已过期 (未扣费)", "danger")
-            : xpeachBadge("待执行", "primary");
+      ? xpeachBadge(
+          j.billing_state === "PAYMENT_DUE"
+            ? "抢座已成功 (待补扣 🍑)"
+            : `抢座已成功 (-${pricePeachText} 🍑)`,
+          "success"
+        )
+      : j.state === "DELEGATION_STOPPED_SCHOOL_CONFIRMED"
+        ? xpeachBadge("委托已停止 · 座位有效", "success")
+        : j.state === "SCHOOL_CANCELLED"
+          ? xpeachBadge("学校座位已退", "neutral")
+          : isCancelUnknown
+            ? xpeachBadge("退座结果待核对", "warning")
+            : isResultUnknown
+              ? xpeachBadge("执行结果待核对", "warning")
+              : j.state === "CANCELLED"
+                ? xpeachBadge("已停止委托 (未扣费)", "neutral")
+                : j.state === "FAILED"
+                  ? xpeachBadge("未抢中 (未扣费)", "danger")
+                  : j.state === "EXPIRED"
+                    ? xpeachBadge("已过窗口 (未扣费)", "warning")
+                    : xpeachBadge("云端待准点抢座", "primary");
 
+  const actionButtons = [];
+  if (isConfirmedSeat || isCancelUnknown) {
+    actionButtons.push(
+      `<button type="button" class="xp-pill xp-pill--compact" data-cancel-seat-job="${escapeHtml(j.id)}">${
+        isCancelUnknown ? "再次核对/退座" : "退座释放"
+      }</button>`
+    );
+  }
+  if (isQueuedState) {
+    actionButtons.push(
+      `<button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-execute-now-job="${escapeHtml(j.id)}">立即抢座</button>`
+    );
+    actionButtons.push(
+      `<button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}" data-plan-id="${escapeHtml(planId)}">停止委托</button>`
+    );
+  } else if (planStillEnabled) {
+    actionButtons.push(
+      `<button type="button" class="xp-pill xp-pill--compact" data-stop-plan="${escapeHtml(planId)}">停止后续连抢</button>`
+    );
+  }
   const actionHtml =
-    j.state === "CONFIRMED"
-      ? `<button type="button" class="xp-pill xp-pill--compact" data-cancel-seat-job="${escapeHtml(j.id)}">退座释放</button>`
-      : !["CONFIRMED", "FAILED", "CANCELLED"].includes(j.state)
-        ? `<div class="xp-action-group">
-            <button type="button" class="xp-pill xp-pill--active xp-pill--compact" data-execute-now-job="${escapeHtml(j.id)}">立即执行</button>
-            <button type="button" class="xp-pill xp-pill--compact" data-cancel-job="${escapeHtml(j.id)}">取消预约</button>
-          </div>`
-        : "";
+    actionButtons.length > 0 ? `<div class="xp-action-group">${actionButtons.join("")}</div>` : "";
+
+  const diagText = cleanDisplayText(j.status_label || j.last_error_message, "");
 
   return `
     <article class="xp-row-card" data-job-row="${escapeHtml(j.id)}">
@@ -419,14 +470,16 @@ export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) 
         <div class="xp-entity-title-col">
           <div class="xp-badge-flow">
             <span class="xp-row-card-title">${escapeHtml(areaLabel)}</span>
-            <code class="xp-code-pill">${escapeHtml(seats)}</code>
+            <code class="xp-code-pill">${escapeHtml(bookedSeatText || seats)}</code>
             ${repeatBadge}
             ${stateBadge}
           </div>
           <div class="xp-row-card-meta">
             <span>日期：<strong>${escapeHtml(bookingDate)}</strong></span>
-            <span>执行时间：<code>${escapeHtml(fireTime)}</code></span>
+            <span>开抢时刻：<code>${escapeHtml(fireTime)}</code></span>
             <span>时段：${escapeHtml(slotWindow)}</span>
+            ${extBookingId ? `<span>学校预约号：<code>${escapeHtml(extBookingId)}</code></span>` : ""}
+            ${diagText ? `<span>状态说明：${escapeHtml(diagText)}</span>` : ""}
           </div>
         </div>
       </div>

@@ -831,6 +831,7 @@ export class CloudDatabaseStore {
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
       loadMap(this.parcelSyncJobs, raw.parcelSyncJobs);
       loadMap(this.pluginInstallations, raw.pluginInstallations);
+      loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
@@ -953,6 +954,7 @@ export class CloudDatabaseStore {
         parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
         parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
         pluginInstallations: Array.from(this.pluginInstallations.entries()),
+        schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
         campusContent: Array.from(this.campusContent.entries()),
         momentsState: this.momentsState,
         notifications: Array.from(this.notifications.entries()),

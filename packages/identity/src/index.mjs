@@ -108,22 +108,27 @@ export class CloudIdentityService {
         : !this.clientSecret && process.env.NODE_ENV !== "production";
   }
 
-  startWebTransaction({ returnTo = "/" } = {}, nowMs = Date.now()) {
+  startWebTransaction({ returnTo = "/", flowKind = "WEB_CONSOLE" } = {}, nowMs = Date.now()) {
     const loginTxn = `wtxn_${crypto.randomBytes(18).toString("base64url")}`;
     const serverState = crypto.randomBytes(24).toString("base64url");
     const serverNonce = crypto.randomBytes(24).toString("base64url");
     const serverVerifier = crypto.randomBytes(32).toString("base64url");
     const serverChallenge = computeS256Challenge(serverVerifier);
     const expiresAtMs = nowMs + 15 * 60 * 1000;
+    const effectiveFlowKind = flowKind === "WEB_PORTAL" ? "WEB_PORTAL" : "WEB_CONSOLE";
 
     this.store.pruneAuthEphemera?.(nowMs);
     this.store.authTransactions.set(loginTxn, {
       loginTxn,
-      flowKind: "WEB_CONSOLE",
+      flowKind: effectiveFlowKind,
       returnTo: sanitizeReturnToPath(returnTo),
-      installEphemeralId: "web_console_session",
+      installEphemeralId:
+        effectiveFlowKind === "WEB_PORTAL" ? "web_portal_session" : "web_console_session",
       mobileCodeChallenge: null,
-      deviceLabel: "Campus Cloud Web Console",
+      deviceLabel:
+        effectiveFlowKind === "WEB_PORTAL"
+          ? "Campus Cloud Web Portal"
+          : "Campus Cloud Web Console",
       serverState,
       serverNonce,
       serverVerifier,
@@ -499,8 +504,17 @@ export class CloudIdentityService {
     this.store.saveSnapshot?.();
 
     let webSessionCookie = null;
-    if (txn.flowKind === "WEB_CONSOLE") {
-      const webSess = this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs, "WEB_CONSOLE");
+    const isWebFlow = txn.flowKind === "WEB_CONSOLE" || txn.flowKind === "WEB_PORTAL";
+    if (isWebFlow) {
+      const webSess = this.issueDeviceSession(
+        user,
+        txn.deviceLabel ||
+          (txn.flowKind === "WEB_PORTAL" ? "Campus Cloud Web Portal" : "Campus Cloud Web Console"),
+        null,
+        1,
+        nowMs,
+        txn.flowKind
+      );
       webSessionCookie = this.signWebSessionCookie({
         cloudUserId: user.id,
         accessToken: webSess.access_token,
@@ -510,14 +524,13 @@ export class CloudIdentityService {
 
     const safeReturnTo = sanitizeReturnToPath(txn.returnTo || "/");
     const joiner = safeReturnTo.includes("?") ? "&" : "?";
-    const appLinkUrl =
-      txn.flowKind === "WEB_CONSOLE"
-        ? `${this.publicBaseUrl}${safeReturnTo}${joiner}web_ticket=${encodeURIComponent(
-            appTicket
-          )}&txn=${encodeURIComponent(txn.loginTxn)}`
-        : `${this.publicBaseUrl}/app-link/auth/callback?ticket=${encodeURIComponent(
-            appTicket
-          )}&txn=${encodeURIComponent(txn.loginTxn)}`;
+    const appLinkUrl = isWebFlow
+      ? `${this.publicBaseUrl}${safeReturnTo}${joiner}web_ticket=${encodeURIComponent(
+          appTicket
+        )}&txn=${encodeURIComponent(txn.loginTxn)}`
+      : `${this.publicBaseUrl}/app-link/auth/callback?ticket=${encodeURIComponent(
+          appTicket
+        )}&txn=${encodeURIComponent(txn.loginTxn)}`;
     return {
       appTicket,
       loginTxn: txn.loginTxn,
@@ -695,7 +708,13 @@ export class CloudIdentityService {
 
   exchangeWebTicket({ loginTxn, webTicket }, nowMs = Date.now()) {
     const ticket = this.store.exchangeTickets.get(webTicket);
-    if (!ticket || ticket.loginTxn !== loginTxn || (ticket.flowKind && ticket.flowKind !== "WEB_CONSOLE")) {
+    if (
+      !ticket ||
+      ticket.loginTxn !== loginTxn ||
+      (ticket.flowKind &&
+        ticket.flowKind !== "WEB_CONSOLE" &&
+        ticket.flowKind !== "WEB_PORTAL")
+    ) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Invalid web_ticket or transaction mismatch");
     }
     if (ticket.consumedAtMs !== null) {
@@ -730,7 +749,16 @@ export class CloudIdentityService {
     if (user.status !== "ACTIVE") {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
     }
-    return this.issueDeviceSession(user, txn.deviceLabel || "Campus Cloud Web Console", null, 1, nowMs, "WEB_CONSOLE");
+    const targetFlow = ticket.flowKind || txn.flowKind || "WEB_CONSOLE";
+    return this.issueDeviceSession(
+      user,
+      txn.deviceLabel ||
+        (targetFlow === "WEB_PORTAL" ? "Campus Cloud Web Portal" : "Campus Cloud Web Console"),
+      null,
+      1,
+      nowMs,
+      targetFlow
+    );
   }
 
   exchangeMobileTicket({ loginTxn, appTicket, codeVerifier }, nowMs = Date.now()) {
@@ -1039,7 +1067,12 @@ export class CloudIdentityService {
         }
       }
       if (!user || user.status !== "ACTIVE") return null;
-      if (this.requireAdminAccess && !this.store.hasAdminAccess?.(user.id)) return null;
+      const specificSess = jwtPayload?.sid ? this.store.deviceSessions.get(jwtPayload.sid) : null;
+      if (specificSess && specificSess.revoked_at !== null) return null;
+      const isPortalSession = specificSess?.flow === "WEB_PORTAL";
+      if (this.requireAdminAccess && !isPortalSession && !this.store.hasAdminAccess?.(user.id)) {
+        return null;
+      }
       if (jwtPayload?.family_id) {
         const famIds = this.store._idxSessionIdsByFamily?.get(jwtPayload.family_id);
         const famSessions = famIds ? [...famIds].map((id) => this.store.deviceSessions.get(id)).filter(Boolean) : [];
@@ -1065,7 +1098,8 @@ export class CloudIdentityService {
         cloudUserId: user.id,
         accessToken: activeAccessToken,
         refreshToken: parsed.rt,
-        roles
+        roles,
+        sessionFlow: specificSess?.flow || "WEB_CONSOLE"
       };
     } catch {
       return null;
@@ -1206,12 +1240,14 @@ export class CloudIdentityService {
         throw new ContractError("CLOUD_AUTH_REQUIRED", "Device session has been revoked");
       }
     }
-    // Console-flow sessions require current admin access; app-flow sessions
-    // (MOBILE_APP and any non-console) are allowed for any active user — admin
+    // Console-flow sessions require current admin access; user-open sessions
+    // (MOBILE_APP and WEB_PORTAL) are allowed for any active user — admin
     // endpoints remain gated by requireRole. Missing/unknown flow fails closed.
+    const isUserOpenFlow =
+      specificSess?.flow === "MOBILE_APP" || specificSess?.flow === "WEB_PORTAL";
     if (
       this.requireAdminAccess &&
-      specificSess?.flow !== "MOBILE_APP" &&
+      !isUserOpenFlow &&
       !this.store.hasAdminAccess?.(user.id)
     ) {
       throw new ContractError("FORBIDDEN", "仅管理员账号可访问云平台后台");
