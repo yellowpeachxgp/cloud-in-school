@@ -35,7 +35,7 @@ export const CONSOLE_VIEWS = [
   { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
-export const CONSOLE_UI_VERSION = "20261114a";
+export const CONSOLE_UI_VERSION = "20261114b";
 
 function renderHiddenContractViews() {
   return `<template id="contract-views-marker" hidden>${CONSOLE_VIEWS.map(
@@ -1609,7 +1609,10 @@ export function renderConsoleHtml(ctx = {}) {
           return fetch(url, options).then(function (r) {
             return r.json().then(function (d) {
               if (!r.ok || (d && d.ok === false)) {
-                throw new Error((d && d.error && d.error.message) || "操作失败，请稍后重试");
+                var e = new Error((d && d.error && d.error.message) || "操作失败，请稍后重试");
+                e.code = d && d.error && d.error.code;
+                e.details = d && d.error && d.error.details;
+                throw e;
               }
               return d;
             });
@@ -1621,8 +1624,11 @@ export function renderConsoleHtml(ctx = {}) {
           window.history.replaceState({}, document.title, window.location.pathname || "/");
         }
 
+        function initDisConsoleStage() {
         // Copy QQ Group on admin club / competition cards
         document.querySelectorAll("[data-copy-qq]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
           btn.addEventListener("click", function () {
             var qq = btn.getAttribute("data-copy-qq") || "";
             var name = btn.getAttribute("data-copy-club-name") || "合作社团";
@@ -1635,6 +1641,8 @@ export function renderConsoleHtml(ctx = {}) {
 
         // Admin: toggle school kill-switch
         document.querySelectorAll("[data-toggle-kill]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
           btn.addEventListener("click", function () {
             var schoolId = btn.getAttribute("data-toggle-kill");
             var currentKill = btn.getAttribute("data-current-kill") === "true";
@@ -1652,15 +1660,27 @@ export function renderConsoleHtml(ctx = {}) {
           });
         });
 
-        // Admin: 1-click order refund
+        // Admin: 1-click order refund (requires explicit dual-person approval reference)
         document.querySelectorAll("[data-refund-order]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
           btn.addEventListener("click", function () {
             var orderId = btn.getAttribute("data-refund-order");
+            var secondRef = window.prompt(
+              "请输入二次复核审批单号或复核管理员标识（双人复核必填）：",
+              ""
+            );
+            if (!secondRef || !secondRef.trim()) {
+              return;
+            }
             btn.disabled = true;
             btn.textContent = "退还中…";
             apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/quick-refund", {
               method: "POST",
-              body: JSON.stringify({ reason: "管理员在站点后台执行一键退还 🍑" })
+              body: JSON.stringify({
+                reason: "管理员在站点后台执行退还 🍑",
+                second_approver_ref: secondRef.trim()
+              })
             })
               .then(function () {
                 showToast("已将 " + PRICE_PEACH_TEXT + " 🍑 原路退还至用户 XPeach 账户！");
@@ -1677,7 +1697,17 @@ export function renderConsoleHtml(ctx = {}) {
         // Admin: jobs table state pills + text search
         var jobsSearchInput = document.getElementById("jobs-search");
         var activeJobStateFilter = "ALL";
-        var TERMINAL_JOB_STATES = ["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"];
+        var TERMINAL_JOB_STATES = [
+          "CONFIRMED",
+          "DELEGATION_STOPPED_SCHOOL_CONFIRMED",
+          "FAILED",
+          "CANCELLED",
+          "REVOKED",
+          "SCHOOL_CANCELLED",
+          "EXPIRED",
+          "SKIPPED_FINANCE",
+          "SKIPPED_AUTH"
+        ];
         function filterAdminJobs() {
           var q = jobsSearchInput ? jobsSearchInput.value.trim().toLowerCase() : "";
           document.querySelectorAll("[data-job-row]").forEach(function (row) {
@@ -2174,7 +2204,9 @@ export function renderConsoleHtml(ctx = {}) {
             gridHtml +=
               '<button type="button" class="seat-chip' +
               (isAvail ? "" : " occupied") +
-              '" data-seat-code="' +
+              '"' +
+              (isAvail ? "" : ' disabled aria-disabled="true"') +
+              ' data-seat-code="' +
               safeCode +
               '"><span class="seat-chip-code">' +
               safeCode +
@@ -2190,10 +2222,10 @@ export function renderConsoleHtml(ctx = {}) {
             seatGrid.innerHTML = gridHtml;
             bindSeatChipsClick();
           }
-          var pickPool = availableCodes.length >= 3 ? availableCodes : seatItems.map(function (x) { return x.code; });
-          if (pickPool.length >= 1) seat1.value = pickPool[0];
-          if (pickPool.length >= 2) seat2.value = pickPool[1];
-          if (pickPool.length >= 3) seat3.value = pickPool[2];
+          var pickPool = availableCodes.length > 0 ? availableCodes : seatItems.map(function (x) { return x.code; });
+          seat1.value = pickPool.length >= 1 ? pickPool[0] : "";
+          seat2.value = pickPool.length >= 2 ? pickPool[1] : "";
+          seat3.value = pickPool.length >= 3 ? pickPool[2] : "";
           updateSeatGridHighlights();
         }
 
@@ -2241,8 +2273,19 @@ export function renderConsoleHtml(ctx = {}) {
           );
         }
 
+        var liveRegionsLoading = false;
+        function setActionButtonsRegionLoading(loading) {
+          liveRegionsLoading = loading;
+          var bCreate = document.getElementById("btn-create-plan");
+          var bFire = document.getElementById("btn-fire-now");
+          if (bCreate) bCreate.disabled = loading;
+          if (bFire) bFire.disabled = loading;
+        }
+
         function loadLiveRegionsIfBound() {
           if (!areaSelect) return;
+          var hasBoundAccount = Boolean(document.getElementById("btn-revoke-binding"));
+          if (hasBoundAccount) setActionButtonsRegionLoading(true);
           var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
           apiFetch("/api/v1/schools/haut/library/live-regions?booking_date=" + encodeURIComponent(bDate), {
             method: "GET"
@@ -2306,7 +2349,10 @@ export function renderConsoleHtml(ctx = {}) {
               }
               populateSeatsForArea();
             })
-            .catch(function () {});
+            .catch(function () {})
+            .finally(function () {
+              if (hasBoundAccount) setActionButtonsRegionLoading(false);
+            });
         }
 
         if (areaSelect) {
@@ -2451,6 +2497,9 @@ export function renderConsoleHtml(ctx = {}) {
         }
 
         function createReservationPlanFromSelection() {
+          if (liveRegionsLoading) {
+            return Promise.reject(new Error("正在同步学校图书馆实时阅览区与座位，请稍候 1 秒再试"));
+          }
           var areaKey = areaSelect ? areaSelect.value : "五层中区";
           var areaCfg = LIVE_REGIONS_MAP[areaKey] || FALLBACK_AREAS[areaKey] || { name: areaKey };
           var seats = [seat1 && seat1.value, seat2 && seat2.value, seat3 && seat3.value].filter(Boolean);
@@ -2463,7 +2512,23 @@ export function renderConsoleHtml(ctx = {}) {
           var repeatDays = Number((repeatEl && repeatEl.value) || 1) || 1;
           var slot = (document.getElementById("plan-slot") && document.getElementById("plan-slot").value) || "07:30-22:00";
 
-          return ensureBindingAndConsent().then(function (ids) {
+          return Promise.all([
+            ensureBindingAndConsent(),
+            apiFetch("/api/v1/me/wallet", { method: "GET" }).catch(function () { return null; })
+          ]).then(function (pair) {
+            var ids = pair[0];
+            var walletRes = pair[1];
+            if (walletRes && walletRes.data) {
+              var microBal =
+                walletRes.data.available_micropeach != null
+                  ? Number(walletRes.data.available_micropeach)
+                  : Math.round(Number(walletRes.data.peach_balance || 0) * 1000000);
+              if (microBal < 1000000) {
+                throw new Error(
+                  "当前 XPeach 账户余额不足 " + PRICE_PEACH_TEXT + " 🍑，请先前往 XPeach 主站补充后再开启云端抢座"
+                );
+              }
+            }
             return apiFetch("/api/v1/reservation-plans", {
               method: "POST",
               body: JSON.stringify({
@@ -2582,13 +2647,21 @@ export function renderConsoleHtml(ctx = {}) {
                   body: JSON.stringify({})
                 });
             req
-              .then(function () {
-                showToast("已停止云端抢座委托（未扣费）");
-                setTimeout(function () { window.location.reload(); }, 500);
+              .then(function (res) {
+                var blocking = res && res.data && res.data.blocking_jobs;
+                if (Array.isArray(blocking) && blocking.length > 0) {
+                  showToast("已停止后续续期，但当前任务已在执行或结果待核对，请刷新核实座位状态", true);
+                } else {
+                  showToast("已停止云端抢座委托（未扣费）");
+                }
+                setTimeout(function () { window.location.reload(); }, 650);
               })
               .catch(function (err) {
                 btn.disabled = false;
                 showToast(err.message, true);
+                if (err.details && Array.isArray(err.details.blocking_jobs) && err.details.blocking_jobs.length > 0) {
+                  setTimeout(function () { window.location.reload(); }, 900);
+                }
               });
           });
         });
@@ -2632,6 +2705,10 @@ export function renderConsoleHtml(ctx = {}) {
               });
           });
         });
+        }
+
+        window.initDisConsoleStage = initDisConsoleStage;
+        initDisConsoleStage();
       })();
     </script>
   </body>

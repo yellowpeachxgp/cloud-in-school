@@ -13,6 +13,8 @@ COPY SYSTEM_CONTRACT.md THIRD_PARTY_NOTICES.md ./
 COPY licenses ./licenses
 COPY docs ./docs
 
+RUN mkdir -p /app/.data && chown -R discloud:discloud /app/.data
+VOLUME ["/app/.data"]
 USER discloud
 EXPOSE 8080 8081
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \

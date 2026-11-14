@@ -326,6 +326,7 @@ export class IsolatedFinanceBridge {
               user_id: ssoSubject,
               user_uuid: ssoSubject,
               username: userObj?.username || userObj?.display_name || ssoSubject,
+              event_category: resolvedPeach < 0 ? "consumption" : "refund",
               event_type: resolvedPeach < 0 ? "library_seat_reservation_debit" : "library_seat_reservation_refund",
               direction: resolvedPeach < 0 ? "debit" : "credit",
               peach_amount: Math.abs(resolvedPeach),
@@ -662,5 +663,42 @@ export class FinanceSagaService {
       if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
       return order;
     });
+  }
+
+  async retryPendingDebits(nowMs = Date.now()) {
+    const retried = [];
+    for (const order of this.store.reservationOrders.values()) {
+      if (!order || order.school_result !== "CONFIRMED" || order.payment_state !== "DEBIT_PENDING") {
+        continue;
+      }
+      const eventKey = buildDebitEventKey(order.id);
+      const op = this.store.financeOperations.get(eventKey);
+      if (op && op.status !== "FAILED_RETRYABLE") {
+        continue;
+      }
+      if (op && Number(op.attempt_count || 0) >= 20) {
+        continue;
+      }
+      const lastTriedMs = op?.updated_at ? new Date(op.updated_at).getTime() : 0;
+      if (lastTriedMs && nowMs - lastTriedMs < 30_000) {
+        continue;
+      }
+      try {
+        const settled = await this.executeDebitForOrder(order.id, nowMs);
+        const job = this.store.reservationJobs?.get?.(order.job_id);
+        if (job && settled?.payment_state) {
+          job.billing_state = settled.payment_state;
+        }
+        for (const outEv of this.store.outboxEvents || []) {
+          if (outEv.aggregate_id === order.id && !outEv.delivered_at && settled?.payment_state === "PAID") {
+            outEv.delivered_at = new Date(nowMs).toISOString();
+          }
+        }
+        retried.push({ order_id: order.id, payment_state: settled?.payment_state || order.payment_state });
+      } catch (err) {
+        retried.push({ order_id: order.id, payment_state: "DEBIT_PENDING", error: err?.code || "RETRY_FAILED" });
+      }
+    }
+    return retried;
   }
 }

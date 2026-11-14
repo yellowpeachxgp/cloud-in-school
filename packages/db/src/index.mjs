@@ -2028,6 +2028,15 @@ export class CloudDatabaseStore {
         return "结果待核对";
       case "SCHOOL_REJECTED":
         return "未抢到座位";
+      case "SKIPPED_FINANCE":
+        return "余额不足已跳过（未扣费）";
+      case "SKIPPED_AUTH":
+        return "授权失效已跳过（未扣费）";
+      case "EXPIRED":
+        return "已过预约窗口（未扣费）";
+      case "CANCELLED":
+      case "REVOKED":
+        return "已停止委托";
       default:
         return "排队等待执行";
     }

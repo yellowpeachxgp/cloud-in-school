@@ -11,6 +11,9 @@ services:
       NODE_ENV: production
       PORT: 8080
       HOST: 0.0.0.0
+      DIS_PERSIST_PATH: /app/.data/cloud-state.json
+    volumes:
+      - campus_cloud_data:/app/.data
     ports:
       - "127.0.0.1:18080:8080"
     networks:
@@ -51,3 +54,6 @@ services:
 networks:
   dis_internal_net:
     driver: bridge
+
+volumes:
+  campus_cloud_data:

@@ -178,7 +178,19 @@ export class TripleScheduleEngine {
     const targetStudentNo = String(binding.student_no || "").trim();
     const matchingJobsForDate = Array.from(this.store.reservationJobs.values()).filter((j) => {
       if (j.booking_local_date !== payload.target_local_date) return false;
-      if (["CANCELLED", "FAILED", "EXPIRED", "SCHOOL_CANCELLED"].includes(j.state)) return false;
+      if (
+        [
+          "CANCELLED",
+          "REVOKED",
+          "FAILED",
+          "EXPIRED",
+          "SCHOOL_CANCELLED",
+          "SKIPPED_FINANCE",
+          "SKIPPED_AUTH"
+        ].includes(j.state)
+      ) {
+        return false;
+      }
       if (j.school_binding_id === binding.id) return true;
       if (j.cloud_user_id === cloudUserId && j.school_id === binding.school_id) {
         const otherBind = this.store.schoolBindings.get(j.school_binding_id);
@@ -187,6 +199,16 @@ export class TripleScheduleEngine {
       }
       return false;
     });
+
+    const unpaidDueOrders = this.store
+      .recordsForUser("reservationOrders", cloudUserId)
+      .filter((o) => o && o.payment_state === "PAYMENT_DUE");
+    if (unpaidDueOrders.length > 0) {
+      throw new ContractError(
+        "CONFLICT",
+        "您存在待补扣 🍑 的历史成功预约订单，请先补充 XPeach 余额完成结算后再开启新委托"
+      );
+    }
 
     if (matchingJobsForDate.length > 0) {
       const unreplaceableJob = matchingJobsForDate.find(
@@ -1002,7 +1024,9 @@ export class TripleScheduleEngine {
           "FAILED",
           "CANCELLED",
           "EXPIRED",
-          "REVOKED"
+          "REVOKED",
+          "SKIPPED_FINANCE",
+          "SKIPPED_AUTH"
         ].includes(job.state)
       ) {
         if (event.status === "ARMED") {
@@ -1140,7 +1164,15 @@ export class TripleScheduleEngine {
             event.diagnostic_code = "WALLET_INSUFFICIENT";
             event.actual_at = new Date(nowMs).toISOString();
             this.casJobState(jobId, job.state_version, "SKIPPED_FINANCE", {
-              last_error_code: "WALLET_INSUFFICIENT"
+              last_error_code: "WALLET_INSUFFICIENT",
+              last_diagnostic_message: "当前 XPeach 账户余额不足 1 🍑，本次云端抢座已跳过（未扣费）"
+            });
+            this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
+            this.store.addNotification?.({
+              cloudUserId: job.cloud_user_id,
+              category: "RESERVATION_SKIPPED_FINANCE",
+              title: "云端抢座因余额不足已暂停",
+              body: `您预约 ${job.booking_local_date} 的图书馆抢座任务在预检时检测到余额不足 1 🍑，已安全跳过（未扣费）。请前往 XPeach 充值后重新开启委托。`
             });
             return { job, event };
           }
@@ -1156,7 +1188,15 @@ export class TripleScheduleEngine {
             event.diagnostic_code = decErr?.code || "SCHOOL_AUTH_EXPIRED";
             event.actual_at = new Date(nowMs).toISOString();
             this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
-              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED"
+              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED",
+              last_diagnostic_message: "学校图书馆绑定授权已过期或失效，请重新验证学号与密码"
+            });
+            this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
+            this.store.addNotification?.({
+              cloudUserId: job.cloud_user_id,
+              category: "RESERVATION_SKIPPED_AUTH",
+              title: "云端抢座需重新验证学校账号",
+              body: `您预约 ${job.booking_local_date} 的图书馆抢座任务因学校授权凭证过期已暂停（未扣费），请重新绑定学号与密码。`
             });
             return { job, event };
           }
@@ -1236,8 +1276,10 @@ export class TripleScheduleEngine {
           event.diagnostic_code = "SCHOOL_AUTH_EXPIRED";
           event.actual_at = new Date(nowMs).toISOString();
           this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
-            last_error_code: "SCHOOL_AUTH_EXPIRED"
+            last_error_code: "SCHOOL_AUTH_EXPIRED",
+            last_diagnostic_message: "学校图书馆绑定授权已过期，请重新验证学号与密码"
           });
+          this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
           return { job, event };
         }
         if (binding.credential_ref && typeof this.schoolProvider.parseCredentialBundle === "function") {
@@ -1249,8 +1291,10 @@ export class TripleScheduleEngine {
             event.diagnostic_code = decErr?.code || "SCHOOL_AUTH_EXPIRED";
             event.actual_at = new Date(nowMs).toISOString();
             this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
-              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED"
+              last_error_code: decErr?.code || "SCHOOL_AUTH_EXPIRED",
+              last_diagnostic_message: "学校图书馆绑定授权已失效，请重新验证学号与密码"
             });
+            this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
             return { job, event };
           }
           const bundle = this.schoolProvider.parseCredentialBundle(decrypted, binding);
@@ -1305,6 +1349,18 @@ export class TripleScheduleEngine {
               }
             } catch (err) {
               job.prewarmed_targets = null;
+              if (err?.code === "SCHOOL_AUTH_INVALID") {
+                event.status = "FINAL_CHECK_NEEDS_USER";
+                event.diagnostic_code = "SCHOOL_AUTH_INVALID";
+                event.actual_at = new Date(nowMs).toISOString();
+                this.casJobState(jobId, job.state_version, "SKIPPED_AUTH", {
+                  last_error_code: "SCHOOL_AUTH_INVALID",
+                  last_diagnostic_message:
+                    err?.message || "学校统一身份认证学号或密码校验未通过，请重新绑定后再试"
+                });
+                this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
+                return { job, event };
+              }
               event.diagnostic_code = err?.code || "FINAL_CHECK_AUTH_WARN";
             }
           }
@@ -1323,6 +1379,18 @@ export class TripleScheduleEngine {
       }
 
       if (kind === "FIRE") {
+        const liveSchoolIntegration = this.store.schoolIntegrations.get(binding.school_id);
+        if (liveSchoolIntegration?.kill_switch === true) {
+          event.status = "ABORTED_KILL_SWITCH";
+          event.diagnostic_code = "SCHOOL_KILL_SWITCH_ACTIVE";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "CANCELLED", {
+            last_error_code: "SCHOOL_KILL_SWITCH_ACTIVE",
+            last_diagnostic_message: "学校自动化紧急熔断开关已启用，本次云端抢座已安全中止（未扣费）"
+          });
+          this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
+          return { job, event };
+        }
         let decryptedSecret;
         try {
           decryptedSecret = this._decryptBindingCredential(job, binding, nowMs);
@@ -1787,6 +1855,19 @@ export class TripleScheduleEngine {
     });
   }
 
+  _disarmRemainingScheduleEvents(jobId, status = "SKIPPED_TERMINAL", nowMs = Date.now()) {
+    const ts = new Date(nowMs).toISOString();
+    for (const ev of this.store.eventsForJob(jobId)) {
+      if (ev.status === "ARMED") {
+        ev.status = status;
+        ev.actual_at = ev.actual_at || ts;
+      }
+    }
+    if (typeof this.store.saveSnapshot === "function") {
+      this.store.saveSnapshot();
+    }
+  }
+
   _flushStopStateStrict() {
     if (typeof this.store.flushSnapshotStrictSync === "function") {
       this.store.flushSnapshotStrictSync();
@@ -1849,7 +1930,17 @@ export class TripleScheduleEngine {
         }
       }
 
-      if (["FAILED", "EXPIRED", "CANCELLED", "SCHOOL_CANCELLED"].includes(j.state)) {
+      if (
+        [
+          "FAILED",
+          "EXPIRED",
+          "CANCELLED",
+          "REVOKED",
+          "SCHOOL_CANCELLED",
+          "SKIPPED_FINANCE",
+          "SKIPPED_AUTH"
+        ].includes(j.state)
+      ) {
         j.remaining_days = 0;
         if (j.user_intent_state !== "REVOKED") {
           j.user_intent_state = "STOP_REQUESTED";
@@ -2402,7 +2493,7 @@ export class TripleScheduleEngine {
       (j) =>
         j.plan_id === plan.id &&
         j.booking_local_date === nextDate &&
-        !["CANCELLED", "FAILED", "EXPIRED", "SCHOOL_CANCELLED"].includes(j.state)
+        !["CANCELLED", "REVOKED", "FAILED", "EXPIRED", "SCHOOL_CANCELLED", "SKIPPED_FINANCE", "SKIPPED_AUTH"].includes(j.state)
     );
     if (existingNext) return existingNext;
 
@@ -2667,12 +2758,19 @@ export class TripleScheduleEngine {
         nowMs
       );
     }
-    const order = await this.financeService.createAndSettleOrderForConfirmedJob({
-      job,
-      plan,
-      nowMs
-    });
-    job.billing_state = order?.payment_state || "PAID";
+    let order = null;
+    try {
+      order = await this.financeService.createAndSettleOrderForConfirmedJob({
+        job,
+        plan,
+        nowMs
+      });
+    } catch {
+      const existingOrderId = this.store._idxOrderByJob?.get(job.id);
+      order = existingOrderId ? this.store.reservationOrders.get(existingOrderId) || null : null;
+    }
+    const paymentState = order?.payment_state || "DEBIT_PENDING";
+    job.billing_state = paymentState;
     if (attemptId && order?.id) {
       this.store.updateReservationAttempt?.(attemptId, {
         billing_order_id: order.id,
@@ -2680,9 +2778,18 @@ export class TripleScheduleEngine {
       });
     }
 
-    // Step 3: Check authorization/intent eligibility right before multi-day rollover
+    // Step 3: Check authorization/intent AND settled/retryable payment eligibility right before multi-day rollover
     let nextJob = null;
-    if (
+    if (paymentState === "PAYMENT_DUE") {
+      if (plan) {
+        plan.enabled = false;
+        plan.remaining_days = 0;
+        plan.updated_at = ts;
+      }
+      if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
+    } else if (
       this._isJobAuthorizationCurrent(job, plan, binding, consent) &&
       (!job.user_intent_state || job.user_intent_state === "ACTIVE")
     ) {
@@ -2698,7 +2805,7 @@ export class TripleScheduleEngine {
       cloudUserId: job.cloud_user_id,
       category: "RESERVATION_CONFIRMED",
       title: "图书馆座位预约已核实成功",
-      body: `座位 ${schoolReservation.region_alias} ${schoolReservation.seat_alias} 已通过学校记录核验，请本人按校规到馆刷脸签到。订单状态：${order.payment_state}${
+      body: `座位 ${schoolReservation.region_alias} ${schoolReservation.seat_alias} 已通过学校记录核验，请本人按校规到馆刷脸签到。订单状态：${paymentState}${
         nextJob
           ? ` · 已自动续期次日 ${nextJob.booking_local_date} 抢座（剩余 ${nextJob.remaining_days}/${nextJob.repeat_days} 天）`
           : ""

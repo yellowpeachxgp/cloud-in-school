@@ -460,3 +460,306 @@ test("Web Portal & Execute-Now: UI_ASSET_VERSION matches CONSOLE_UI_VERSION, man
   assert.equal(exec1.body.data.job.state, "CONFIRMED");
   assert.equal(externalWriteCalls, 1);
 });
+
+test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fallback billing, SKIPPED_FINANCE disarms FIRE, kill-switch at FIRE, retryPendingDebits, idempotent consent/binding, and #9 multi-turn chat", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const nowMs = Date.parse("2026-11-15T06:20:00+08:00");
+
+  async function loginStudent(sub, peachMicro) {
+    const st = await app.inject({ method: "GET", url: "/api/v1/auth/web/start?flow=portal", nowMs });
+    const txn = app.store.authTransactions.get(st.body.data.login_txn);
+    const cb = await app.identity.handleOidcCallback(
+      {
+        state: txn.serverState,
+        code: `sim_${sub}`,
+        simulatedIdTokenClaims: {
+          iss: app.identity.expectedIssuer,
+          aud: app.identity.clientId,
+          sub,
+          username: sub,
+          role: "member",
+          peachBalance: peachMicro / 10000,
+          nonce: txn.serverNonce,
+          exp: Math.floor((nowMs + 3_600_000) / 1000)
+        }
+      },
+      nowMs
+    );
+    const ex = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/web/exchange",
+      body: { login_txn: st.body.data.login_txn, web_ticket: cb.appTicket },
+      nowMs
+    });
+    const uid = ex.body.data.cloud_user_id || cb.user.id;
+    app.financeBridge.setSandboxBalance(uid, peachMicro);
+    return { uid, auth: { authorization: `Bearer ${ex.body.data.access_token}` } };
+  }
+
+  // 1) 06:30 SKIPPED_FINANCE disarms FINAL_CHECK and FIRE so 07:00 scheduler cannot bypass 0-peach!
+  const uZero = await loginStudent("sub_skip_fin_guard", 0);
+  const cZero = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: uZero.auth, body: { school_id: "haut" }, nowMs });
+  const bZero = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: uZero.auth,
+    body: { school_id: "haut", student_no: "2024990001", consent_id: cZero.body.data.id },
+    nowMs
+  });
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${bZero.body.data.id}/complete`,
+    headers: uZero.auth,
+    body: { consent_id: cZero.body.data.id, delegated_secret: "mock_sec_skip" },
+    nowMs
+  });
+  const planZero = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: uZero.auth,
+    body: {
+      school_binding_id: bZero.body.data.id,
+      consent_id: cZero.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["01桌 A座"],
+      target_local_date: "2026-11-15",
+      target_local_time: "07:00:00",
+      repeat_days: 7,
+      remaining_days: 7
+    },
+    nowMs
+  });
+  assert.equal(planZero.status, 201);
+  const zeroJobId = planZero.body.data.job_id;
+  await app.reservationEngine.runScheduleEvent(zeroJobId, "PRECHECK", Date.parse("2026-11-15T06:30:00+08:00"));
+  assert.equal(app.store.reservationJobs.get(zeroJobId).state, "SKIPPED_FINANCE");
+  const zeroEvents = app.store.eventsForJob(zeroJobId);
+  assert.ok(zeroEvents.filter((e) => e.event_type !== "PRECHECK").every((e) => e.status !== "ARMED"));
+  await app.reservationEngine.runScheduleEvent(zeroJobId, "FIRE", Date.parse("2026-11-15T07:00:00+08:00"));
+  assert.equal(app.store.reservationJobs.get(zeroJobId).state, "SKIPPED_FINANCE", "FIRE must be a no-op after SKIPPED_FINANCE");
+  assert.equal(app.store.recordsForUser("reservationJobs", uZero.uid).length, 1, "No Day 2 rollover after SKIPPED_FINANCE");
+
+  // 2) Production allowSandboxFallback=false blocks non-live 'delegated_android_session' without charging 1 🍑
+  const uProd = await loginStudent("sub_prod_nomock", 50_000);
+  const cProd1 = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: uProd.auth, body: { school_id: "haut" }, nowMs });
+  const cProd2 = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: uProd.auth, body: { school_id: "haut" }, nowMs });
+  assert.equal(cProd2.body.data.id, cProd1.body.data.id, "POST /me/consents reuses active consent");
+  const bProd1 = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: uProd.auth,
+    body: { school_id: "haut", student_no: "2024990002", consent_id: cProd1.body.data.id },
+    nowMs
+  });
+  const bProd2 = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: uProd.auth,
+    body: { school_id: "haut", student_no: "2024990002", consent_id: cProd1.body.data.id },
+    nowMs
+  });
+  assert.equal(bProd2.body.data.id, bProd1.body.data.id, "POST /school-bindings reuses active same-student_no binding");
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${bProd1.body.data.id}/complete`,
+    headers: uProd.auth,
+    body: { consent_id: cProd1.body.data.id, delegated_secret: "delegated_android_session" },
+    nowMs
+  });
+  const planProd = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: uProd.auth,
+    body: {
+      school_binding_id: bProd1.body.data.id,
+      consent_id: cProd1.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["01桌 C座"],
+      target_local_date: "2026-11-15",
+      target_local_time: "07:00:00"
+    },
+    nowMs
+  });
+  app.schoolProvider.allowSandboxFallback = false;
+  try {
+    const execProd = await app.inject({
+      method: "POST",
+      url: `/api/v1/reservation-jobs/${planProd.body.data.job_id}/execute-now`,
+      headers: uProd.auth,
+      body: {},
+      nowMs
+    });
+    assert.equal(execProd.body.data.job.state, "FAILED");
+    assert.equal(app.store.recordsForUser("reservationOrders", uProd.uid).length, 0, "Zero orders/debits when non-live credential rejected");
+  } finally {
+    app.schoolProvider.allowSandboxFallback = true;
+  }
+
+  // 3) kill_switch enabled right before FIRE aborts FIRE cleanly with SCHOOL_KILL_SWITCH_ACTIVE
+  const planKill = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: uProd.auth,
+    body: {
+      school_binding_id: bProd1.body.data.id,
+      consent_id: cProd1.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["01桌 D座"],
+      target_local_date: "2026-11-16",
+      target_local_time: "07:00:00"
+    },
+    nowMs
+  });
+  assert.equal(planKill.status, 201);
+  const adminUser = app.store.findOrCreateCloudUser({
+    issuer: app.identity.expectedIssuer,
+    subject: "ops_killswitch_admin",
+    username: "ops_killswitch_admin",
+    role: "admin"
+  });
+  const adminSess = app.identity.issueDeviceSession(adminUser, "Admin KillSwitch");
+  const adminAuth = { authorization: `Bearer ${adminSess.access_token}` };
+  const ksOn = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/schools/haut/kill-switch",
+    headers: adminAuth,
+    body: { kill_switch: true }
+  });
+  assert.equal(ksOn.status, 200);
+  try {
+    await app.reservationEngine.runScheduleEvent(
+      planKill.body.data.job_id,
+      "FIRE",
+      Date.parse("2026-11-16T07:00:00+08:00")
+    );
+    assert.equal(app.store.reservationJobs.get(planKill.body.data.job_id).state, "CANCELLED");
+    assert.equal(app.store.reservationJobs.get(planKill.body.data.job_id).last_error_code, "SCHOOL_KILL_SWITCH_ACTIVE");
+  } finally {
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/schools/haut/kill-switch",
+      headers: adminAuth,
+      body: { kill_switch: false }
+    });
+  }
+
+  // 4) Transient SSO settlement error -> DEBIT_PENDING -> settled by retryPendingDebits()
+  const planRetry = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: uProd.auth,
+    body: {
+      school_binding_id: bProd1.body.data.id,
+      consent_id: cProd1.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["02桌 A座"],
+      target_local_date: "2026-11-17",
+      target_local_time: "07:00:00"
+    },
+    nowMs
+  });
+  const origAdjust = app.financeBridge.adjustBalanceIdempotent.bind(app.financeBridge);
+  let failOnce = true;
+  app.financeBridge.adjustBalanceIdempotent = async (payload) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error("Simulated transient SSO 502");
+    }
+    return origAdjust(payload);
+  };
+  try {
+    await app.reservationEngine.runScheduleEvent(
+      planRetry.body.data.job_id,
+      "FIRE",
+      Date.parse("2026-11-17T07:00:00+08:00")
+    );
+    const retryJob = app.store.reservationJobs.get(planRetry.body.data.job_id);
+    assert.equal(retryJob.state, "CONFIRMED");
+    assert.equal(retryJob.billing_state, "DEBIT_PENDING");
+    const retryRes = await app.financeService.retryPendingDebits(Date.parse("2026-11-17T07:00:35+08:00"));
+    assert.equal(retryRes.length, 1);
+    assert.equal(retryRes[0].payment_state, "PAID");
+    assert.equal(retryJob.billing_state, "PAID");
+  } finally {
+    app.financeBridge.adjustBalanceIdempotent = origAdjust;
+  }
+
+  // 5) Moments Lost & Found Multi-Turn Private Chat (#9)
+  const uFinder = await loginStudent("sub_chat_finder", 10_000);
+  const postRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/moments/posts",
+    headers: uProd.auth,
+    body: {
+      type: "LOST",
+      title: "丢失深蓝色校园卡套",
+      campus: "莲花街校区",
+      location: "钟楼二楼",
+      contact: "微信: owner_wx_99",
+      contact_visibility: "ON_REQUEST"
+    },
+    nowMs
+  });
+  assert.equal(postRes.status, 201);
+  const chatPostId = postRes.body.data.id;
+
+  // Owner cannot send contact request to own post
+  const selfReq = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${chatPostId}/contact-requests`,
+    headers: uProd.auth,
+    body: { message: "我自己测试一下" },
+    nowMs
+  });
+  assert.equal(selfReq.status, 400);
+
+  // Finder sends message 1 -> Owner replies via REPLY -> Finder replies via REPLY -> Owner APPROVEs
+  const m1 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${chatPostId}/contact-requests`,
+    headers: uFinder.auth,
+    body: { sender_name: "拾得同学", message: "同学你好，卡套背面是不是有小猫贴纸？", contact_info: "QQ: 889900" },
+    nowMs
+  });
+  assert.equal(m1.status, 201);
+  const threadId = m1.body.data.id;
+  assert.equal(m1.body.data.messages.length, 1);
+
+  const ownerSnap = await app.inject({ method: "GET", url: "/api/v1/moments/snapshot", headers: uProd.auth, nowMs });
+  const ownerPostView = ownerSnap.body.data.posts.find((p) => p.id === chatPostId);
+  assert.equal(ownerPostView.pending_contact_requests_count, 1);
+
+  const m2 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${chatPostId}/contact-requests/${threadId}/action`,
+    headers: uProd.auth,
+    body: { action: "REPLY", reply_message: "对的对的！卡号尾号是 3521！" },
+    nowMs: nowMs + 1000
+  });
+  assert.equal(m2.status, 200);
+  assert.equal(m2.body.data.messages.length, 2);
+  assert.equal(m2.body.data.messages[1].sender_role, "OWNER");
+
+  const m3 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${chatPostId}/contact-requests/${threadId}/action`,
+    headers: uFinder.auth,
+    body: { action: "REPLY", reply_message: "核对上了！我放在钟楼值班室还是当面给你？" },
+    nowMs: nowMs + 2000
+  });
+  assert.equal(m3.status, 200);
+  assert.equal(m3.body.data.messages.length, 3);
+  assert.equal(m3.body.data.messages[2].sender_role, "REQUESTER");
+
+  const m4 = await app.inject({
+    method: "POST",
+    url: `/api/v1/moments/posts/${chatPostId}/contact-requests/${threadId}/action`,
+    headers: uProd.auth,
+    body: { action: "APPROVE", reply_message: "太感谢啦，加我微信当面拿吧！" },
+    nowMs: nowMs + 3000
+  });
+  assert.equal(m4.status, 200);
+  assert.equal(m4.body.data.status, "APPROVED");
+  assert.equal(m4.body.data.messages.length, 4);
+  assert.equal(m4.body.data.initiator_contact, "微信: owner_wx_99");
+});

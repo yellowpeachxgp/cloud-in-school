@@ -413,6 +413,10 @@ export class HautLibraryProvider {
     this.providerId = "school.haut.library";
     this.allowedHosts = ["wslib.haut.edu.cn", "lib.haut.edu.cn", "mapp.haut.edu.cn"];
     this.mockBackend = options.mockBackend || null;
+    this.allowSandboxFallback =
+      options.allowSandboxFallback !== undefined
+        ? Boolean(options.allowSandboxFallback)
+        : process.env.NODE_ENV !== "production";
   }
 
   getRules() {
@@ -2671,7 +2675,16 @@ export class HautLibraryProvider {
       };
     }
 
-    // Default deterministic mock reservation result (safe sandbox for unit/redteam tests)
+    // Default deterministic mock reservation result (safe sandbox ONLY for non-production unit/redteam tests)
+    if (!this.allowSandboxFallback) {
+      return {
+        outcome: "FAILED",
+        writeDispatched: false,
+        errorCode: "SCHOOL_CREDENTIAL_REQUIRED",
+        diagnosticMessage:
+          "未检测到有效的学校图书馆账号密码或实时登录凭证，请重新绑定学号与密码后再试"
+      };
+    }
     if (typeof assertStillAuthorized === "function") {
       assertStillAuthorized();
     }
@@ -2822,6 +2835,9 @@ export class HautLibraryProvider {
     }
     if (!expectedExternalBookingId) {
       return { verified: false, officialStatus: "NOT_CREATED" };
+    }
+    if (!this.allowSandboxFallback) {
+      return { verified: false, officialStatus: "MOCK_PROHIBITED_IN_PRODUCTION" };
     }
 
     const evidenceSha256 = crypto

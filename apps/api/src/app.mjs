@@ -666,12 +666,43 @@ export function createCampusCloudApp(options = {}) {
   register("POST", "/api/v1/me/consents", "grantConsent", "bearer", async ({ auth, body, nowMs }) => {
     const user = store.users.get(auth.cloudUserId);
     const authVer = Number(user?.auth_version || 1);
+    const schoolId = body?.school_id || "haut";
+    const requestedScopes =
+      Array.isArray(body?.scope_list) && body.scope_list.length > 0
+        ? body.scope_list
+        : ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"];
+    const existingActive = store
+      .recordsForUser("consents", auth.cloudUserId)
+      .find(
+        (c) =>
+          (c.school_id || DEFAULT_SCHOOL_ID) === schoolId &&
+          !c.withdrawn_at &&
+          Number(c.auth_version || 1) === authVer
+      );
+    if (existingActive) {
+      const mergedScopes = Array.from(
+        new Set([...(existingActive.scope_list || []), ...requestedScopes])
+      );
+      existingActive.scope_list = mergedScopes;
+      for (const b of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
+        if (
+          b.school_id === schoolId &&
+          !b.revoked_at &&
+          b.status !== "REVOKED" &&
+          Number(b.auth_version || 1) === authVer
+        ) {
+          b.consent_id = existingActive.id;
+        }
+      }
+      store.saveSnapshot?.();
+      return { status: 201, code: "CONSENT_GRANTED", data: existingActive };
+    }
     const id = crypto.randomUUID();
     const record = {
       id,
       cloud_user_id: auth.cloudUserId,
-      school_id: body?.school_id || "haut",
-      scope_list: body?.scope_list || ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"],
+      school_id: schoolId,
+      scope_list: requestedScopes,
       policy_version: body?.policy_version || "policy-2026-11-v4",
       auth_version: authVer,
       granted_at: new Date(nowMs).toISOString(),
@@ -860,13 +891,32 @@ export function createCampusCloudApp(options = {}) {
       if (!store.schoolIntegrations.has(schoolId)) {
         throw new ContractError("NOT_FOUND", `Unsupported school_id: ${schoolId}`);
       }
-      const studentNo = String(body?.student_no || "").trim() || "20240001";
-      const bindingId = crypto.randomUUID();
+      const explicitSno = typeof body?.student_no === "string" ? body.student_no.trim() : "";
+      const studentNo = explicitSno || "20240001";
       const authVer = Number(store.users.get(auth.cloudUserId)?.auth_version || 1);
       const activeConsents = store
         .recordsForUser("consents", auth.cloudUserId)
         .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId && !c.withdrawn_at);
       const latestConsent = activeConsents[activeConsents.length - 1] || null;
+      if (explicitSno && explicitSno !== "haut_bound_user") {
+        const reusableBinding = store
+          .recordsForUser("schoolBindings", auth.cloudUserId)
+          .find(
+            (b) =>
+              b.school_id === schoolId &&
+              !b.revoked_at &&
+              b.status !== "REVOKED" &&
+              String(b.student_no || "").trim() === studentNo &&
+              Number(b.auth_version || 1) === authVer
+          );
+        if (reusableBinding) {
+          reusableBinding.consent_id =
+            body?.consent_id || latestConsent?.id || reusableBinding.consent_id || null;
+          store.saveSnapshot();
+          return { status: 201, code: "SCHOOL_BINDING_INITIATED", data: reusableBinding };
+        }
+      }
+      const bindingId = crypto.randomUUID();
       const binding = {
         id: bindingId,
         cloud_user_id: auth.cloudUserId,
@@ -1294,7 +1344,7 @@ export function createCampusCloudApp(options = {}) {
           (sib) =>
             sib.plan_id === p.id &&
             sib.id !== job.id &&
-            !["FAILED", "EXPIRED", "CANCELLED", "SCHOOL_CANCELLED"].includes(sib.state)
+            !["FAILED", "EXPIRED", "CANCELLED", "REVOKED", "SCHOOL_CANCELLED", "SKIPPED_FINANCE", "SKIPPED_AUTH"].includes(sib.state)
         );
       })();
 
@@ -1323,7 +1373,7 @@ export function createCampusCloudApp(options = {}) {
       if (
         !hadActiveParentOrChildBeforeStop &&
         !stopRes.completed_pending_persistence &&
-        ["CONFIRMED", "DELEGATION_STOPPED_SCHOOL_CONFIRMED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "CANCELLED", "EXPIRED"].includes(
+        ["CONFIRMED", "DELEGATION_STOPPED_SCHOOL_CONFIRMED", "SCHOOL_CANCELLED", "CANCEL_RESULT_UNKNOWN", "FAILED", "CANCELLED", "REVOKED", "EXPIRED", "SKIPPED_FINANCE", "SKIPPED_AUTH"].includes(
           job.state
         ) &&
         stopRes.cancelled_job_ids.length === 0
@@ -2480,7 +2530,7 @@ export function createCampusCloudApp(options = {}) {
               j.cloud_user_id === auth.cloudUserId &&
               j.school_binding_id === activeBinding.id &&
               j.booking_local_date === targetDate &&
-              !["CANCELLED", "FAILED", "EXPIRED", "REVOKED", "SCHOOL_CANCELLED"].includes(j.state)
+              !["CANCELLED", "FAILED", "EXPIRED", "REVOKED", "SCHOOL_CANCELLED", "SKIPPED_FINANCE", "SKIPPED_AUTH"].includes(j.state)
           );
           if (alreadyActive) {
             planResults.push({
@@ -2652,7 +2702,10 @@ export function createCampusCloudApp(options = {}) {
           "SCHOOL_CANCELLED",
           "CANCEL_RESULT_UNKNOWN",
           "CANCELLED",
-          "EXPIRED"
+          "REVOKED",
+          "EXPIRED",
+          "SKIPPED_FINANCE",
+          "SKIPPED_AUTH"
         ].includes(job.state)
       ) {
         const schoolReservation = store.schoolReservations.get(job.id) || null;
@@ -3381,6 +3434,12 @@ export function createCampusCloudApp(options = {}) {
         return projectedComment;
       });
 
+    const allPostReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
+    const viewerContactReq =
+      viewerUserId && !isOwner
+        ? allPostReqs.find((r) => r && r.sender_user_id === viewerUserId) || null
+        : null;
+
     return {
       ...sanitized,
       viewer_role: isOwner ? "OWNER" : isViewerAdmin ? "ADMIN" : viewerUserId ? "AUTHENTICATED" : "GUEST",
@@ -3388,7 +3447,12 @@ export function createCampusCloudApp(options = {}) {
       can_manage: canManage,
       is_legacy_unowned: isLegacyUnowned,
       can_claim_legacy: canClaimLegacy,
-      contact_requests_count: Array.isArray(post.contact_requests) ? post.contact_requests.length : 0,
+      contact_requests_count: allPostReqs.length,
+      pending_contact_requests_count: canManage
+        ? allPostReqs.filter((r) => r && r.status === "PENDING").length
+        : 0,
+      has_my_contact_request: Boolean(viewerContactReq),
+      my_contact_request_status: viewerContactReq ? String(viewerContactReq.status || "PENDING") : null,
       matched_clues: computePostMatches(post, allPosts || []).map((m) => ({
         id: m.post.id,
         type: m.post.type,
@@ -3431,6 +3495,39 @@ export function createCampusCloudApp(options = {}) {
     };
   }
 
+  function normalizeContactMessages(reqItem, post) {
+    if (!reqItem) return [];
+    if (Array.isArray(reqItem.messages) && reqItem.messages.length > 0) {
+      return reqItem.messages.map((m) => ({
+        id: String(m.id || "mcm_legacy"),
+        sender_role: m.sender_role === "OWNER" ? "OWNER" : "REQUESTER",
+        sender_name: String(m.sender_name || (m.sender_role === "OWNER" ? post?.author_name || "发起人" : reqItem.sender_name || "河工大同学")),
+        content: String(m.content || ""),
+        created_at: m.created_at || reqItem.created_at
+      }));
+    }
+    const seeded = [];
+    if (reqItem.message) {
+      seeded.push({
+        id: `${reqItem.id}_init`,
+        sender_role: "REQUESTER",
+        sender_name: String(reqItem.sender_name || "河工大同学"),
+        content: String(reqItem.message),
+        created_at: reqItem.created_at
+      });
+    }
+    if (reqItem.reply_message) {
+      seeded.push({
+        id: `${reqItem.id}_reply`,
+        sender_role: "OWNER",
+        sender_name: String(post?.author_name || "发起人"),
+        content: String(reqItem.reply_message),
+        created_at: reqItem.updated_at || reqItem.created_at
+      });
+    }
+    return seeded;
+  }
+
   function projectContactRequestForViewer(reqItem, post, { canSeeInitiatorContact = false, canSeeSenderContact = true } = {}) {
     if (!reqItem) return null;
     return {
@@ -3441,6 +3538,7 @@ export function createCampusCloudApp(options = {}) {
       contact_info: canSeeSenderContact ? String(reqItem.contact_info || "") : "",
       status: reqItem.status,
       reply_message: reqItem.reply_message || null,
+      messages: normalizeContactMessages(reqItem, post),
       initiator_contact: canSeeInitiatorContact ? post?.contact || null : null,
       created_at: reqItem.created_at,
       updated_at: reqItem.updated_at
@@ -3621,6 +3719,12 @@ export function createCampusCloudApp(options = {}) {
     async ({ auth, params, body, headers, nowMs }) => {
       const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
       if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
+      if (post.owner_cloud_user_id && post.owner_cloud_user_id === auth.cloudUserId) {
+        throw new ContractError(
+          "BAD_REQUEST",
+          "您是该帖发起人，无需向自己发送认领申请；请在详情页查看并回复他人的私信"
+        );
+      }
       if (post.status === "RESOLVED" || post.status === "CLOSED") {
         throw new ContractError("CONFLICT", "该失物招领帖已结案或关闭联系");
       }
@@ -3640,7 +3744,10 @@ export function createCampusCloudApp(options = {}) {
       if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
       if (idempotencyKey) {
         const dup = post.contact_requests.find(
-          (r) => r.sender_user_id === auth.cloudUserId && r.idempotency_key === idempotencyKey
+          (r) =>
+            r.sender_user_id === auth.cloudUserId &&
+            (r.idempotency_key === idempotencyKey ||
+              (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey)))
         );
         if (dup) {
           return {
@@ -3654,6 +3761,58 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      const nowIso = new Date(nowMs).toISOString();
+      const senderUser = store.users.get(auth.cloudUserId);
+      const resolvedSenderName = String(
+        body?.sender_name || senderUser?.display_name || "河工大同学"
+      )
+        .trim()
+        .slice(0, 24);
+
+      const existingThread = post.contact_requests.find(
+        (r) => r.sender_user_id === auth.cloudUserId && (r.status === "PENDING" || r.status === "APPROVED")
+      );
+      if (existingThread) {
+        const existingMsgs = normalizeContactMessages(existingThread, post);
+        const recentThreadMsgs = existingMsgs.filter(
+          (m) => m.sender_role === "REQUESTER" && nowMs - new Date(m.created_at).getTime() < 60_000
+        );
+        if (recentThreadMsgs.length >= 6) {
+          throw new ContractError("RATE_LIMITED", "私信发送过于频繁，请稍后再试");
+        }
+        existingMsgs.push({
+          id: "mcm_" + crypto.randomUUID().slice(0, 8),
+          sender_role: "REQUESTER",
+          sender_name: resolvedSenderName,
+          content: message,
+          idempotency_key: idempotencyKey || null,
+          created_at: nowIso
+        });
+        existingThread.messages = existingMsgs.slice(-50);
+        existingThread.message = message;
+        if (contactInfo) existingThread.contact_info = contactInfo;
+        existingThread.updated_at = nowIso;
+        post.updated_at = nowIso;
+        store.momentsState.updated_at = nowIso;
+        if (post.owner_cloud_user_id && post.owner_cloud_user_id !== auth.cloudUserId) {
+          store.addNotification({
+            cloudUserId: post.owner_cloud_user_id,
+            category: "MOMENTS_CONTACT_MESSAGE",
+            title: `收到「${post.title}」的新认领私信`,
+            body: `${resolvedSenderName}：${message}`
+          });
+        }
+        store.saveSnapshot();
+        return {
+          status: 201,
+          code: "CONTACT_MESSAGE_APPENDED",
+          data: projectContactRequestForViewer(existingThread, post, {
+            canSeeInitiatorContact: existingThread.status === "APPROVED",
+            canSeeSenderContact: true
+          })
+        };
+      }
+
       const recentBySender = post.contact_requests.filter(
         (r) =>
           r.sender_user_id === auth.cloudUserId &&
@@ -3663,18 +3822,26 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("RATE_LIMITED", "发送过于频繁，请稍后再试");
       }
 
-      const nowIso = new Date(nowMs).toISOString();
-      const senderUser = store.users.get(auth.cloudUserId);
       const reqItem = {
         id: "mcr_" + crypto.randomUUID().slice(0, 10),
         post_id: post.id,
         sender_user_id: auth.cloudUserId,
-        sender_name: String(body?.sender_name || senderUser?.display_name || "河工大同学").trim().slice(0, 24),
+        sender_name: resolvedSenderName,
         message,
         contact_info: contactInfo,
         idempotency_key: idempotencyKey || null,
         status: "PENDING",
         reply_message: null,
+        messages: [
+          {
+            id: "mcm_" + crypto.randomUUID().slice(0, 8),
+            sender_role: "REQUESTER",
+            sender_name: resolvedSenderName,
+            content: message,
+            idempotency_key: idempotencyKey || null,
+            created_at: nowIso
+          }
+        ],
         created_at: nowIso,
         updated_at: nowIso
       };
@@ -3769,9 +3936,31 @@ export function createCampusCloudApp(options = {}) {
         if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
         }
+        const existingMsgs = normalizeContactMessages(reqItem, post);
         reqItem.status = "APPROVED";
         if (body?.reply_message) {
-          reqItem.reply_message = String(body.reply_message).trim().slice(0, 240);
+          const cleanReply = String(body.reply_message).trim().slice(0, 240);
+          if (cleanReply) {
+            reqItem.reply_message = cleanReply;
+            existingMsgs.push({
+              id: "mcm_" + crypto.randomUUID().slice(0, 8),
+              sender_role: "OWNER",
+              sender_name: String(post.author_name || "发起人").slice(0, 24),
+              content: cleanReply,
+              created_at: nowIso
+            });
+          }
+        }
+        reqItem.messages = existingMsgs.slice(-50);
+        if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
+          store.addNotification({
+            cloudUserId: reqItem.sender_user_id,
+            category: "MOMENTS_CONTACT_APPROVED",
+            title: `发起人已同意公开「${post.title}」的联系方式`,
+            body: reqItem.reply_message
+              ? `发起人附言：${reqItem.reply_message}`
+              : "您现在可在该帖详情中查看发起人联系方式或继续私信沟通"
+          });
         }
         if (isAdmin && !isOwner) {
           store.recordAudit({
@@ -3783,6 +3972,56 @@ export function createCampusCloudApp(options = {}) {
             outcome: "APPROVED",
             detail: { post_id: post.id }
           });
+        }
+      } else if (action === "REPLY") {
+        if (!canManageRequests && !isSender) {
+          throw new ContractError("FORBIDDEN", "仅发起人或申请人本人可在该私信会话中回复");
+        }
+        if (reqItem.status === "BLOCKED" || reqItem.status === "REJECTED") {
+          throw new ContractError("CONFLICT", "当前联系申请已被拒绝或屏蔽，无法继续发送私信");
+        }
+        if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
+          throw new ContractError("FORBIDDEN", "当前会话已被屏蔽");
+        }
+        const replyMsg = String(body?.reply_message || body?.message || "").trim();
+        if (!replyMsg || replyMsg.length > 240) {
+          throw new ContractError("BAD_REQUEST", "私信回复内容长度需在 1–240 字之间");
+        }
+        const existingMsgs = normalizeContactMessages(reqItem, post);
+        const actorRole = canManageRequests && !isSender ? "OWNER" : "REQUESTER";
+        const actorUser = store.users.get(auth.cloudUserId);
+        const actorName =
+          actorRole === "OWNER"
+            ? String(post.author_name || actorUser?.display_name || "发起人").slice(0, 24)
+            : String(reqItem.sender_name || actorUser?.display_name || "河工大同学").slice(0, 24);
+        existingMsgs.push({
+          id: "mcm_" + crypto.randomUUID().slice(0, 8),
+          sender_role: actorRole,
+          sender_name: actorName,
+          content: replyMsg,
+          created_at: nowIso
+        });
+        reqItem.messages = existingMsgs.slice(-50);
+        if (actorRole === "OWNER") {
+          reqItem.reply_message = replyMsg;
+          if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
+            store.addNotification({
+              cloudUserId: reqItem.sender_user_id,
+              category: "MOMENTS_CONTACT_REPLY",
+              title: `发起人回复了您在「${post.title}」的私信`,
+              body: `${actorName}：${replyMsg}`
+            });
+          }
+        } else {
+          reqItem.message = replyMsg;
+          if (post.owner_cloud_user_id && post.owner_cloud_user_id !== auth.cloudUserId) {
+            store.addNotification({
+              cloudUserId: post.owner_cloud_user_id,
+              category: "MOMENTS_CONTACT_MESSAGE",
+              title: `收到「${post.title}」的新认领私信`,
+              body: `${actorName}：${replyMsg}`
+            });
+          }
         }
       } else if (action === "REJECT") {
         if (!canManageRequests && !isAdmin) throw new ContractError("FORBIDDEN", "仅发起人或管理员可拒绝联系申请");

@@ -1,7 +1,7 @@
 (() => {
   const root = document.documentElement;
   const darkQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  const UI_ASSET_VERSION = "20261114a";
+  const UI_ASSET_VERSION = "20261114b";
 
   function escapeCssAttr(val) {
     if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
@@ -526,6 +526,13 @@
         preserveScroll,
         preserveInputs,
       });
+      if (typeof window.initDisConsoleStage === "function") {
+        try {
+          window.initDisConsoleStage();
+        } catch {
+          // Ignore stage listener re-init errors
+        }
+      }
 
       const stageEl = document.querySelector("[data-stage-container]");
       if (stageEl) {

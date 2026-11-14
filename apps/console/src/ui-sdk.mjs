@@ -388,7 +388,11 @@ export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) 
   const planId = cleanDisplayText(p.id || j.plan_id, "");
   const planStillEnabled = p.enabled !== false && Boolean(planId);
   const extBookingId = cleanDisplayText(j.external_booking_id, "");
-  const bookedSeatText = cleanDisplayText(j.booked_seat_alias, "");
+  const bookedSeatText = cleanDisplayText(
+    j.confirmed_seat_name || j.booked_seat_alias,
+    ""
+  );
+  const bookedRegionText = cleanDisplayText(j.confirmed_region_name, "");
 
   const repeatBadge =
     repDays > 1
@@ -432,11 +436,17 @@ export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) 
               ? xpeachBadge("执行结果待核对", "warning")
               : j.state === "CANCELLED"
                 ? xpeachBadge("已停止委托 (未扣费)", "neutral")
-                : j.state === "FAILED"
-                  ? xpeachBadge("未抢中 (未扣费)", "danger")
-                  : j.state === "EXPIRED"
-                    ? xpeachBadge("已过窗口 (未扣费)", "warning")
-                    : xpeachBadge("云端待准点抢座", "primary");
+                : j.state === "REVOKED"
+                  ? xpeachBadge("授权已撤销 (未扣费)", "neutral")
+                  : j.state === "SKIPPED_FINANCE"
+                    ? xpeachBadge("余额不足跳过 (未扣费)", "warning")
+                    : j.state === "SKIPPED_AUTH"
+                      ? xpeachBadge("授权失效跳过 (未扣费)", "warning")
+                      : j.state === "FAILED"
+                        ? xpeachBadge("未抢中 (未扣费)", "danger")
+                        : j.state === "EXPIRED"
+                          ? xpeachBadge("已过窗口 (未扣费)", "warning")
+                          : xpeachBadge("云端待准点抢座", "primary");
 
   const actionButtons = [];
   if (isConfirmedSeat || isCancelUnknown) {
@@ -469,7 +479,7 @@ export function xpeachJobRowCard(job, plan = {}, { pricePeachText = "1" } = {}) 
         <div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">💺</div>
         <div class="xp-entity-title-col">
           <div class="xp-badge-flow">
-            <span class="xp-row-card-title">${escapeHtml(areaLabel)}</span>
+            <span class="xp-row-card-title">${escapeHtml(bookedRegionText || areaLabel)}</span>
             <code class="xp-code-pill">${escapeHtml(bookedSeatText || seats)}</code>
             ${repeatBadge}
             ${stateBadge}
