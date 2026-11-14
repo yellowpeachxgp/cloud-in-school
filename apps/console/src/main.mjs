@@ -35,7 +35,7 @@ export const CONSOLE_VIEWS = [
   { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
-export const CONSOLE_UI_VERSION = "20261111a";
+export const CONSOLE_UI_VERSION = "20261114a";
 
 function renderHiddenContractViews() {
   return `<template id="contract-views-marker" hidden>${CONSOLE_VIEWS.map(
@@ -1252,7 +1252,13 @@ export function renderConsoleHtml(ctx = {}) {
 
               <div class="xp-form-grid-3">
                 <div class="field">
-                  <label class="label" for="plan-date">预约用座日期</label>
+                  <div class="xp-badge-flow" style="justify-content: space-between; margin-bottom: 4px;">
+                    <label class="label" for="plan-date" style="margin: 0;">预约用座日期</label>
+                    <span style="display: inline-flex; gap: 4px;">
+                      <button type="button" class="xp-pill xp-pill--compact" id="btn-date-tomorrow" style="padding: 1px 8px; font-size: 11px;">明天</button>
+                      <button type="button" class="xp-pill xp-pill--compact" id="btn-date-today" style="padding: 1px 8px; font-size: 11px;">今天</button>
+                    </span>
+                  </div>
                   <input class="input" id="plan-date" type="date" />
                 </div>
                 <div class="field">
@@ -2060,11 +2066,29 @@ export function renderConsoleHtml(ctx = {}) {
         // Web Cloud Seat-Booking Workbench (/reservations & /)
         // =========================================================================
         var dateInput = document.getElementById("plan-date");
-        if (dateInput && !dateInput.value) {
+        function shanghaiDateStrings() {
           var shNow = new Date(Date.now() + 8 * 3600000);
-          var shHour = shNow.getUTCHours();
-          var targetSh = shHour < 7 ? shNow : new Date(shNow.getTime() + 86400000);
-          dateInput.value = targetSh.toISOString().slice(0, 10);
+          var todayStr = shNow.toISOString().slice(0, 10);
+          var tomorrowStr = new Date(shNow.getTime() + 86400000).toISOString().slice(0, 10);
+          return { shHour: shNow.getUTCHours(), todayStr: todayStr, tomorrowStr: tomorrowStr };
+        }
+        if (dateInput && !dateInput.value) {
+          var initDates = shanghaiDateStrings();
+          dateInput.value = initDates.shHour < 7 ? initDates.todayStr : initDates.tomorrowStr;
+        }
+        var btnDateTomorrow = document.getElementById("btn-date-tomorrow");
+        var btnDateToday = document.getElementById("btn-date-today");
+        if (btnDateTomorrow && dateInput) {
+          btnDateTomorrow.addEventListener("click", function () {
+            dateInput.value = shanghaiDateStrings().tomorrowStr;
+            loadLiveRegionsIfBound();
+          });
+        }
+        if (btnDateToday && dateInput) {
+          btnDateToday.addEventListener("click", function () {
+            dateInput.value = shanghaiDateStrings().todayStr;
+            loadLiveRegionsIfBound();
+          });
         }
 
         var areaSelect = document.getElementById("plan-area");
@@ -2501,6 +2525,12 @@ export function renderConsoleHtml(ctx = {}) {
         var btnFireNow = document.getElementById("btn-fire-now");
         if (btnFireNow) {
           btnFireNow.addEventListener("click", function () {
+            var curDates = shanghaiDateStrings();
+            var pickedDate = (dateInput && dateInput.value) || curDates.todayStr;
+            if (pickedDate > curDates.todayStr) {
+              showToast("次日座位每日 07:00 由学校开放预约：预约明天请点击「开启云端准点抢座」；若需现在入馆选座，请先点日期右上角「今天」", true);
+              return;
+            }
             btnFireNow.disabled = true;
             btnFireNow.textContent = "正在抢座…";
             createReservationPlanFromSelection()

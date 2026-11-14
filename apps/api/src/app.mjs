@@ -2668,11 +2668,41 @@ export function createCampusCloudApp(options = {}) {
         job.external_execution_state === "DISPATCH_INTENT" ||
         Number(job.attempt_count || 0) >= 1;
       if (!isAlreadyDispatchedOrUnknown) {
-        await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
-        await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", nowMs);
+        const preRes = await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
+        if (
+          preRes?.job &&
+          ["SKIPPED_FINANCE", "SKIPPED_AUTH", "CANCELLED", "REVOKED"].includes(preRes.job.state)
+        ) {
+          if (preRes.job.state === "SKIPPED_FINANCE") {
+            preRes.job.last_error_message =
+              "当前 XPeach 账户余额不足（云端抢座成功需 1 🍑），请先补充余额后再执行";
+          } else if (preRes.job.state === "SKIPPED_AUTH") {
+            preRes.job.last_error_message = "校园学号登录凭据已失效，请重新验证绑定学号";
+          }
+          return {
+            status: 200,
+            code: "RESERVATION_JOB_EXECUTED",
+            data: preRes
+          };
+        }
+        const finalRes = await reservationEngine.runScheduleEvent(jobId, "FINAL_CHECK", nowMs);
+        if (
+          finalRes?.job &&
+          ["SKIPPED_FINANCE", "SKIPPED_AUTH", "CANCELLED", "REVOKED"].includes(finalRes.job.state)
+        ) {
+          if (finalRes.job.state === "SKIPPED_AUTH") {
+            finalRes.job.last_error_message = "校园学号登录凭据已失效，请重新验证绑定学号";
+          }
+          return {
+            status: 200,
+            code: "RESERVATION_JOB_EXECUTED",
+            data: finalRes
+          };
+        }
       }
       const fireRes = await reservationEngine.runScheduleEvent(jobId, "FIRE", nowMs, {
-        allowDateFallbackToToday: false
+        allowDateFallbackToToday: false,
+        manualExecuteNow: true
       });
       await syncUserToSso(auth.cloudUserId);
       return {

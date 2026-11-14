@@ -1340,10 +1340,12 @@ export class TripleScheduleEngine {
         const fireAtMs = new Date(job.fire_at).getTime();
         const rawExpiresAtMs = new Date(job.expires_at).getTime();
         const effectiveExpiresAtMs = Math.max(rawExpiresAtMs, fireAtMs + 1800 * 1000);
-        if (nowMs < fireAtMs) {
+        if (!options.manualExecuteNow && nowMs < fireAtMs) {
           throw new ContractError("BOOKING_WINDOW_CLOSED", "Cannot execute FIRE before target time T");
         }
-        if (nowMs > effectiveExpiresAtMs) {
+        const shTodayStr = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        const isPastBookingDate = Boolean(job.booking_local_date && job.booking_local_date < shTodayStr);
+        if (options.manualExecuteNow ? isPastBookingDate : nowMs > effectiveExpiresAtMs) {
           event.status = "MISSED_WINDOW";
           event.actual_at = new Date(nowMs).toISOString();
           this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });

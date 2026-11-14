@@ -8,7 +8,7 @@ import {
   loadEndpointInventory,
   loadOpenApiText
 } from "../packages/contracts/src/index.mjs";
-import { CONSOLE_VIEWS, renderConsoleHtml } from "../apps/console/src/main.mjs";
+import { CONSOLE_UI_VERSION, CONSOLE_VIEWS, renderConsoleHtml } from "../apps/console/src/main.mjs";
 
 test("Contract Parity: 100% bidirectional parity between registered HTTP routes, endpoint-inventory.yaml, and OpenAPI 3.1.2 spec", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
@@ -302,4 +302,161 @@ test("Web Cloud Seat-Booking (WEB_PORTAL) allows XPeach member students on /rese
       }),
     /仅管理员账号可登录云平台后台/
   );
+});
+
+test("Web Portal & Execute-Now: UI_ASSET_VERSION matches CONSOLE_UI_VERSION, manual execute-now works pre-fire_at, and 0-peach stops at SKIPPED_FINANCE without external write", async () => {
+  const appJsPath = new URL("../apps/console/public/static/app.js", import.meta.url);
+  const appJsText = fs.readFileSync(appJsPath, "utf8");
+  const versionMatch = appJsText.match(/const\s+UI_ASSET_VERSION\s*=\s*"([^"]+)"/);
+  assert.ok(versionMatch, "app.js must declare UI_ASSET_VERSION");
+  assert.equal(versionMatch[1], CONSOLE_UI_VERSION, "UI_ASSET_VERSION must match CONSOLE_UI_VERSION");
+
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const nowMs = Date.parse("2026-11-14T10:15:00+08:00");
+
+  // 1) 0-peach user calling execute-now stops cleanly at SKIPPED_FINANCE without invoking schoolProvider
+  const start0 = await app.inject({ method: "GET", url: "/api/v1/auth/web/start?flow=portal", nowMs });
+  const txn0 = app.store.authTransactions.get(start0.body.data.login_txn);
+  const cb0 = await app.identity.handleOidcCallback(
+    {
+      state: txn0.serverState,
+      code: "sim_0_peach",
+      simulatedIdTokenClaims: {
+        iss: app.identity.expectedIssuer,
+        aud: app.identity.clientId,
+        sub: "student_zero_peach",
+        username: "zero_peach_user",
+        role: "member",
+        peachBalance: 0,
+        nonce: txn0.serverNonce,
+        exp: Math.floor((nowMs + 300_000) / 1000)
+      }
+    },
+    nowMs
+  );
+  const ex0 = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/web/exchange",
+    body: { login_txn: start0.body.data.login_txn, web_ticket: cb0.appTicket },
+    nowMs
+  });
+  const token0 = ex0.body.data.access_token;
+  app.financeBridge.setSandboxBalance(ex0.body.data.cloud_user_id || cb0.user.id, 0);
+  const auth0 = { authorization: `Bearer ${token0}` };
+
+  const c0 = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: auth0, body: { school_id: "haut" }, nowMs });
+  const b0 = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: auth0,
+    body: { school_id: "haut", student_no: "2024008801", consent_id: c0.body.data.id },
+    nowMs
+  });
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b0.body.data.id}/complete`,
+    headers: auth0,
+    body: { consent_id: c0.body.data.id, delegated_secret: "mock_secret_0" },
+    nowMs
+  });
+  const p0 = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: auth0,
+    body: {
+      school_binding_id: b0.body.data.id,
+      consent_id: c0.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["01桌 A座"],
+      target_local_date: "2026-11-14",
+      target_local_time: "18:00:00"
+    },
+    nowMs
+  });
+  assert.equal(p0.status, 201);
+  let externalWriteCalls = 0;
+  const origExecute = app.schoolProvider.executeMockOrAuthorizedCreate.bind(app.schoolProvider);
+  app.schoolProvider.executeMockOrAuthorizedCreate = async (...args) => {
+    externalWriteCalls += 1;
+    return origExecute(...args);
+  };
+  const exec0 = await app.inject({
+    method: "POST",
+    url: `/api/v1/reservation-jobs/${p0.body.data.job_id}/execute-now`,
+    headers: auth0,
+    body: {},
+    nowMs
+  });
+  assert.equal(exec0.status, 200);
+  assert.equal(exec0.body.data.job.state, "SKIPPED_FINANCE");
+  assert.equal(externalWriteCalls, 0, "0-peach execute-now must stop at PRECHECK without dispatching external booking");
+
+  // 2) Funded user calling execute-now BEFORE fire_at (10:15 vs 18:00) succeeds immediately
+  const start1 = await app.inject({ method: "GET", url: "/api/v1/auth/web/start?flow=portal", nowMs });
+  const txn1 = app.store.authTransactions.get(start1.body.data.login_txn);
+  const cb1 = await app.identity.handleOidcCallback(
+    {
+      state: txn1.serverState,
+      code: "sim_funded_peach",
+      simulatedIdTokenClaims: {
+        iss: app.identity.expectedIssuer,
+        aud: app.identity.clientId,
+        sub: "student_funded_peach",
+        username: "funded_peach_user",
+        role: "member",
+        peachBalance: 5,
+        nonce: txn1.serverNonce,
+        exp: Math.floor((nowMs + 300_000) / 1000)
+      }
+    },
+    nowMs
+  );
+  const ex1 = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/web/exchange",
+    body: { login_txn: start1.body.data.login_txn, web_ticket: cb1.appTicket },
+    nowMs
+  });
+  const auth1 = { authorization: `Bearer ${ex1.body.data.access_token}` };
+  app.financeBridge.setSandboxBalance(ex1.body.data.cloud_user_id || cb1.user.id, 50_000);
+  const c1 = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: auth1, body: { school_id: "haut" }, nowMs });
+  const b1 = await app.inject({
+    method: "POST",
+    url: "/api/v1/school-bindings",
+    headers: auth1,
+    body: { school_id: "haut", student_no: "2024008802", consent_id: c1.body.data.id },
+    nowMs
+  });
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b1.body.data.id}/complete`,
+    headers: auth1,
+    body: { consent_id: c1.body.data.id, delegated_secret: "mock_secret_1" },
+    nowMs
+  });
+  const p1 = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: auth1,
+    body: {
+      school_binding_id: b1.body.data.id,
+      consent_id: c1.body.data.id,
+      area_name: "五层中区",
+      candidate_seats: ["01桌 B座"],
+      target_local_date: "2026-11-14",
+      target_local_time: "18:00:00"
+    },
+    nowMs
+  });
+  assert.equal(p1.status, 201);
+  const exec1 = await app.inject({
+    method: "POST",
+    url: `/api/v1/reservation-jobs/${p1.body.data.job_id}/execute-now`,
+    headers: auth1,
+    body: {},
+    nowMs
+  });
+  assert.equal(exec1.status, 200);
+  assert.equal(exec1.body.data.job.state, "CONFIRMED");
+  assert.equal(externalWriteCalls, 1);
 });

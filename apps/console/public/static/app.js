@@ -1,7 +1,7 @@
 (() => {
   const root = document.documentElement;
   const darkQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  const UI_ASSET_VERSION = "20261108a";
+  const UI_ASSET_VERSION = "20261114a";
 
   function escapeCssAttr(val) {
     if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
