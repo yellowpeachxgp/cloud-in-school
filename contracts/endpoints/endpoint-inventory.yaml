@@ -441,3 +441,38 @@ endpoints:
     operationId: deleteAdminCampusCompetition
     auth: bearer_admin
     owner: admin
+  - method: POST
+    path: /api/v1/me/orders/{orderId}/settle
+    operationId: settleMyOrder
+    auth: bearer
+    owner: finance
+  - method: POST
+    path: /api/v1/admin/orders/{orderId}/refund-requests
+    operationId: createRefundRequest
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/refund-requests
+    operationId: listRefundRequests
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/refund-requests/{requestId}/approve
+    operationId: approveRefundRequest
+    auth: bearer_rbac
+    owner: admin
+  - method: POST
+    path: /api/v1/admin/refund-requests/{requestId}/execute
+    operationId: executeRefundRequest
+    auth: bearer_rbac
+    owner: admin
+  - method: GET
+    path: /api/v1/admin/credential-integrity
+    operationId: auditCredentialIntegrity
+    auth: bearer_rbac
+    owner: security
+  - method: GET
+    path: /api/v1/admin/finance-worker/metrics
+    operationId: getFinanceWorkerMetrics
+    auth: bearer_rbac
+    owner: admin

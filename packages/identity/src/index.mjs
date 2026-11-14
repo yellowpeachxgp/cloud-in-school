@@ -1164,16 +1164,61 @@ export class CloudIdentityService {
     });
   }
 
-  revokeAllUserSessions(cloudUserId, unlinkXpeach = false, nowMs = Date.now()) {
+  /**
+   * Revoke every device session for a user.
+   *
+   * The second argument MUST be an options object so a bare truthy value can
+   * never be silently interpreted as an unlink flag again (regression: the web
+   * logout route used to pass the reason string as the unlinkXpeach boolean,
+   * which halted all plans/bindings on a normal logout).
+   *
+   * @param {string} cloudUserId
+   * @param {{unlinkXpeach?: boolean, reason?: string, nowMs?: number}} [options]
+   *   unlinkXpeach: also revoke school bindings/delegations (explicit unlink or
+   *   account deletion only — never for a plain logout). reason: audit label.
+   */
+  revokeAllUserSessions(cloudUserId, options = {}) {
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+      throw new ContractError(
+        "INVALID_ARGUMENT",
+        "revokeAllUserSessions requires an options object {unlinkXpeach, reason, nowMs}; bare flags are rejected"
+      );
+    }
+    const {
+      unlinkXpeach = false,
+      reason = "USER_LOGOUT_ALL",
+      nowMs = Date.now()
+    } = options;
+    if (typeof unlinkXpeach !== "boolean") {
+      throw new ContractError(
+        "INVALID_ARGUMENT",
+        "revokeAllUserSessions: unlinkXpeach must be a boolean"
+      );
+    }
     const ts = new Date(nowMs).toISOString();
+    let revokedSessions = 0;
     for (const s of this.store.deviceSessions.values()) {
       if (s.cloud_user_id === cloudUserId && !s.revoked_at) {
         s.revoked_at = ts;
+        revokedSessions += 1;
       }
     }
+    this.store.recordAudit({
+      actor_kind: "USER",
+      actor_ref: cloudUserId,
+      action: "REVOKE_ALL_USER_SESSIONS",
+      resource_kind: "user",
+      resource_ref: cloudUserId,
+      outcome: reason,
+      detail: {
+        revoked_sessions: revokedSessions,
+        unlink_xpeach: unlinkXpeach
+      }
+    });
     if (unlinkXpeach) {
       this.store.haltAllUserPlansAndBindings(cloudUserId, "XPEACH_UNLINKED", nowMs);
     }
+    return { revokedSessions, unlinkedXpeach: unlinkXpeach };
   }
 
   signAccessToken({ sub, familyId, sessionId, iss, ssoSub, roles, nowMs = Date.now() }) {

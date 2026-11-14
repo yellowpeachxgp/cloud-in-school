@@ -30,6 +30,21 @@ export const ERROR_CODES = Object.freeze({
   SCHOOL_RATE_LIMITED: { status: 429, retryable: true, userAction: "WAIT_FOR_RATE_LIMIT_WINDOW" },
   RATE_LIMITED: { status: 429, retryable: true, userAction: "WAIT_FOR_RATE_LIMIT_WINDOW" },
   BOOKING_WINDOW_CLOSED: { status: 422, retryable: false, userAction: "SELECT_TARGET_TIME_WITHIN_SCHOOL_WINDOW" },
+  BOOKING_NOT_OPEN: {
+    status: 422,
+    retryable: false,
+    userAction: "WAIT_UNTIL_BOOKING_OPENS"
+  },
+  MANUAL_DATE_NOT_ALLOWED: {
+    status: 422,
+    retryable: false,
+    userAction: "MANUAL_EXECUTE_ONLY_FOR_TODAY"
+  },
+  SCHOOL_KILL_SWITCH_ACTIVE: {
+    status: 409,
+    retryable: false,
+    userAction: "SCHOOL_AUTOMATION_PAUSED_BY_ADMIN"
+  },
   BOOKING_RESULT_UNKNOWN: { status: 202, retryable: false, userAction: "AWAIT_AUTHORITATIVE_READBACK" },
   WALLET_INSUFFICIENT: { status: 409, retryable: false, userAction: "RECHARGE_PEACH_WALLET" },
   PAYMENT_RECONCILING: { status: 202, retryable: true, userAction: "AWAIT_LEDGER_RECONCILIATION" },
@@ -45,6 +60,7 @@ export const ERROR_CODES = Object.freeze({
   FORBIDDEN: { status: 403, retryable: false, userAction: "CHECK_PERMISSIONS" },
   NOT_FOUND: { status: 404, retryable: false, userAction: "CHECK_RESOURCE_ID" },
   BAD_REQUEST: { status: 400, retryable: false, userAction: "FIX_REQUEST_FIELDS" },
+  INVALID_ARGUMENT: { status: 400, retryable: false, userAction: "FIX_REQUEST_FIELDS" },
   CONFLICT: { status: 409, retryable: false, userAction: "RESOLVE_CONFLICT" },
   STORAGE_PERSISTENCE_FAILED: {
     status: 503,

@@ -313,35 +313,45 @@ test("Security Red-Team: Per-order mutex, terminal REFUNDED state guard, and whi
     displayName: "Fin Approver"
   });
 
-  // Whitespace-only secondApproverRef must be rejected
+  const adminA = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "fin_mutex_admin_a_sub",
+    username: "fin_admin_a",
+    role: "admin",
+    displayName: "Fin Admin A"
+  });
+
+  // A bare body-supplied approver ref grants NOTHING — refunds require an
+  // approved dual-person refund request, always.
   await assert.rejects(
     async () =>
       app.financeService.issueRefundForOrder(order.id, {
         amountMicropeach: 10_000,
-        reason: "Whitespace approver bypass attempt",
-        actorRef: "admin_1",
+        reason: "No request bypass attempt",
+        actorRef: adminA.id,
         secondApproverRef: "   "
       }),
     (err) => err?.code === "FORBIDDEN"
   );
 
-  // Concurrent refund attempts must serialize and only refund once
+  // Approved request lifecycle: create (admin A) -> approve (distinct admin B)
+  // -> execute; concurrent executions serialize and refund exactly once.
+  const req = await app.financeService.createRefundRequest({
+    orderId: order.id,
+    amountMicropeach: 10_000,
+    reason: "Concurrent refund",
+    actorRef: adminA.id
+  });
+  await app.financeService.approveRefundRequest({
+    requestId: req.id,
+    approverRef: approver.id
+  });
   const [r1, r2] = await Promise.all([
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 1",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    }),
-    app.financeService.issueRefundForOrder(order.id, {
-      amountMicropeach: 10_000,
-      reason: "Concurrent refund 2",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    })
+    app.financeService.executeRefundRequest({ requestId: req.id, actorRef: approver.id }),
+    app.financeService.executeRefundRequest({ requestId: req.id, actorRef: approver.id })
   ]);
-  assert.equal(r1.payment_state, "REFUNDED");
-  assert.equal(r2.payment_state, "REFUNDED");
+  assert.equal(r1.order.payment_state, "REFUNDED");
+  assert.equal(r2.order.payment_state, "REFUNDED");
   assert.equal(app.financeBridge.getSandboxBalance(user.id), 50_000);
 
   // Calling executeDebitForOrder on a REFUNDED order must fail with CONFLICT (never clobber REFUNDED back to PAID)
@@ -648,25 +658,36 @@ test("Security Red-Team: Refund requires real distinct approver, not fabricated 
   };
   app.store.reservationOrders.set(order.id, order);
 
+  // No matter what approver "ref" a caller supplies, a refund can never be
+  // issued without a real dual-approval request record.
+  for (const fakeRef of [`console_approver_${actor.id}`, "nonexistent_user_123", "   "]) {
+    await assert.rejects(
+      async () =>
+        app.financeService.issueRefundForOrder(order.id, {
+          amountMicropeach: 1000,
+          reason: "test",
+          actorRef: actor.id,
+          secondApproverRef: fakeRef
+        }),
+      /refund request/i
+    );
+  }
+
+  // Self-approval is rejected — approval needs a DISTINCT second admin.
+  const req = await app.financeService.createRefundRequest({
+    orderId: order.id,
+    amountMicropeach: 1000,
+    reason: "test",
+    actorRef: actor.id
+  });
   await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: `console_approver_${actor.id}`
-      }),
-    /distinct, existing, ACTIVE approver/
+    () => app.financeService.approveRefundRequest({ requestId: req.id, approverRef: actor.id }),
+    /distinct|self/i
   );
+  // A non-existent or role-less approver is rejected.
   await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: "nonexistent_user_123"
-      }),
-    /distinct, existing, ACTIVE approver/
+    () => app.financeService.approveRefundRequest({ requestId: req.id, approverRef: "nonexistent_user_123" }),
+    /role|approver/i
   );
   const outsider = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
@@ -674,14 +695,8 @@ test("Security Red-Team: Refund requires real distinct approver, not fabricated 
     displayName: "No Finance Role"
   });
   await assert.rejects(
-    async () =>
-      app.financeService.issueRefundForOrder(order.id, {
-        amountMicropeach: 1000,
-        reason: "test",
-        actorRef: actor.id,
-        secondApproverRef: outsider.id
-      }),
-    /finance approval role/
+    () => app.financeService.approveRefundRequest({ requestId: req.id, approverRef: outsider.id }),
+    /finance|role/i
   );
 });
 

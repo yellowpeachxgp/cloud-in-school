@@ -16,8 +16,8 @@ test("Contract Parity: 100% bidirectional parity between registered HTTP routes,
   const inventory = loadEndpointInventory();
   const openApiText = loadOpenApiText();
 
-  assert.equal(inventory.length, 88, "endpoint-inventory.yaml must declare 88 operations");
-  assert.equal(registered.length, 88, "CampusCloudApp must register all 88 operations");
+  assert.equal(inventory.length, 95, "endpoint-inventory.yaml must declare 95 operations");
+  assert.equal(registered.length, 95, "CampusCloudApp must register all 95 operations");
 
   const regByKey = new Map(registered.map((r) => [`${r.method} ${r.path}`, r]));
   const invByKey = new Map(inventory.map((e) => [`${e.method} ${e.path}`, e]));
@@ -582,12 +582,14 @@ test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fa
   });
   app.schoolProvider.allowSandboxFallback = false;
   try {
+    // execute-now now requires an OPEN booking window (07:00-21:30 Asia/Shanghai)
+    // for a TODAY booking — drive it at 07:00 so the credential check is reached.
     const execProd = await app.inject({
       method: "POST",
       url: `/api/v1/reservation-jobs/${planProd.body.data.job_id}/execute-now`,
       headers: uProd.auth,
       body: {},
-      nowMs
+      nowMs: Date.parse("2026-11-15T07:00:00+08:00")
     });
     assert.equal(execProd.body.data.job.state, "FAILED");
     assert.equal(app.store.recordsForUser("reservationOrders", uProd.uid).length, 0, "Zero orders/debits when non-live credential rejected");
@@ -677,8 +679,8 @@ test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fa
     assert.equal(retryJob.state, "CONFIRMED");
     assert.equal(retryJob.billing_state, "DEBIT_PENDING");
     const retryRes = await app.financeService.retryPendingDebits(Date.parse("2026-11-17T07:00:35+08:00"));
-    assert.equal(retryRes.length, 1);
-    assert.equal(retryRes[0].payment_state, "PAID");
+    assert.equal(retryRes.retried.length, 1);
+    assert.equal(retryRes.retried[0].payment_state, "PAID");
     assert.equal(retryJob.billing_state, "PAID");
   } finally {
     app.financeBridge.adjustBalanceIdempotent = origAdjust;

@@ -631,6 +631,7 @@ export class CloudDatabaseStore {
     // Finance & Outbox
     this.reservationOrders = new Map(); // orderId -> order
     this.financeOperations = new Map(); // eventKey -> operation
+    this.refundRequests = new Map(); // refundRequestId -> immutable dual-approval request
     this.outboxEvents = [];
 
     // Parcel Hub
@@ -683,7 +684,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -826,6 +827,7 @@ export class CloudDatabaseStore {
       loadMap(this.reservationAttempts, raw.reservationAttempts);
       loadMap(this.reservationOrders, raw.reservationOrders);
       loadMap(this.financeOperations, raw.financeOperations);
+      loadMap(this.refundRequests, raw.refundRequests);
       loadMap(this.parcels, raw.parcels);
       loadMap(this.parcelEvents, raw.parcelEvents);
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
@@ -949,6 +951,7 @@ export class CloudDatabaseStore {
         reservationAttempts: Array.from(this.reservationAttempts.entries()),
         reservationOrders: Array.from(this.reservationOrders.entries()),
         financeOperations: Array.from(this.financeOperations.entries()),
+        refundRequests: Array.from(this.refundRequests.entries()),
         parcels: Array.from(this.parcels.entries()),
         parcelEvents: Array.from(this.parcelEvents.entries()),
         parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
@@ -1644,43 +1647,41 @@ export class CloudDatabaseStore {
       }
     }
 
-    // 1b. Reconcile duplicate active schoolBindings for the same (cloud_user_id, school_id, student_no, auth_version)
-    // so the newest unrevoked credential_ref and credential_expires_at are shared across same-student active bindings.
-    const activeBindsByStudentKey = new Map();
+    // 1b. Detect — never propagate — shared/mismatched credential_ref across
+    // same-student bindings. Each binding must own an independently encrypted
+    // credential record whose AAD is bound to ITS OWN id: a ref pointing at a
+    // record bound to another binding_id can never satisfy the access-permit
+    // scope check at decrypt time. Copying the "best" ref across siblings (the
+    // previous behaviour) silently granted the record owner's credential scope
+    // and made cross-binding isolation unauditable. Non-owner holders are now
+    // flagged credential_needs_reconfirmation for the controlled re-key tool /
+    // user re-bind instead of being given a ref they cannot use.
+    const refHolders = new Map(); // credential_ref -> [binding]
     for (const b of this.schoolBindings.values()) {
-      if (!b || b.revoked_at || b.status === "REVOKED") continue;
-      const sno = String(b.student_no || "").trim();
-      if (!sno) continue;
-      const key = `${b.cloud_user_id}|${b.school_id}|${sno}|${Number(b.auth_version || 1)}`;
-      if (!activeBindsByStudentKey.has(key)) activeBindsByStudentKey.set(key, []);
-      activeBindsByStudentKey.get(key).push(b);
+      if (!b || !b.credential_ref) continue;
+      if (!refHolders.has(b.credential_ref)) refHolders.set(b.credential_ref, []);
+      refHolders.get(b.credential_ref).push(b);
+      const rec = this.encryptedCredentials.get(b.credential_ref);
+      if (rec && rec.binding_id !== b.id && !b.credential_needs_reconfirmation) {
+        b.credential_needs_reconfirmation = true;
+        mutated = true;
+      }
     }
-    for (const group of activeBindsByStudentKey.values()) {
-      if (group.length <= 1) continue;
-      let bestBind = null;
-      let bestExpMs = -1;
-      for (const b of group) {
-        if (!b.credential_ref) continue;
-        const cred = this.encryptedCredentials.get(b.credential_ref);
-        if (!cred || cred.revoked_at) continue;
-        const expMs = Date.parse(b.credential_expires_at || cred.expires_at || "") || 0;
-        if (expMs >= bestExpMs) {
-          bestExpMs = expMs;
-          bestBind = b;
+    for (const [ref, holders] of refHolders) {
+      if (holders.length <= 1) continue;
+      const rec = this.encryptedCredentials.get(ref);
+      this.recordAudit({
+        actor_kind: "SYSTEM",
+        actor_ref: "migrateAndRecoverState",
+        action: "CREDENTIAL_REF_SHARED_DETECTED",
+        resource_kind: "encrypted_credential",
+        resource_ref: ref,
+        outcome: "NEEDS_RECONFIRMATION",
+        detail: {
+          binding_ids: holders.map((h) => h.id),
+          record_binding_id: rec?.binding_id ?? null
         }
-      }
-      if (bestBind) {
-        for (const b of group) {
-          if (
-            b.credential_ref !== bestBind.credential_ref ||
-            b.credential_expires_at !== bestBind.credential_expires_at
-          ) {
-            b.credential_ref = bestBind.credential_ref;
-            b.credential_expires_at = bestBind.credential_expires_at;
-            mutated = true;
-          }
-        }
-      }
+      });
     }
 
     // 2. Migrate legacy plans lacking verifiable authorization provenance -> NEEDS_RECONFIRMATION

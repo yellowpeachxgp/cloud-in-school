@@ -33,6 +33,91 @@ export function addDaysToLocalDate(yyyyMmDd, deltaDays) {
   return dt.toISOString().slice(0, 10);
 }
 
+/**
+ * Asia/Shanghai wall-clock parts for a UTC epoch (the school booking window is
+ * defined in Asia/Shanghai local time; the codebase stores UTC instants).
+ */
+export function getShanghaiLocalParts(nowMs) {
+  const shifted = new Date(Number(nowMs) + 8 * 3600 * 1000);
+  return {
+    localDate: shifted.toISOString().slice(0, 10),
+    localTime: shifted.toISOString().slice(11, 19)
+  };
+}
+
+/**
+ * Pure validation for an explicit user-triggered "execute now" dispatch.
+ *
+ * Product semantics: manual execution is only permitted for a job whose
+ * booking_local_date is TODAY in the school's time zone AND only while the
+ * school's official booking window [window_start, window_end_exclusive) is
+ * open. Rejections must be stable business errors and MUST NOT mutate
+ * job state, attempt_count, schedule events or remaining_days — the caller
+ * decides what to do; nothing is consumed by a failed manual validation.
+ */
+export function validateManualExecution({ job, schoolRules, nowMs = Date.now() }) {
+  const { localDate, localTime } = getShanghaiLocalParts(nowMs);
+  const windowStart = schoolRules?.window_start || "07:00:00";
+  const windowEnd = schoolRules?.window_end_exclusive || "21:30:00";
+  const bookingDate = String(job?.booking_local_date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDate)) {
+    return {
+      ok: false,
+      code: "MANUAL_DATE_NOT_ALLOWED",
+      message: "该任务没有有效的预约日期，无法立即执行",
+      detail: { booking_local_date: bookingDate || null, next_allowed_at: null }
+    };
+  }
+  if (bookingDate < localDate) {
+    return {
+      ok: false,
+      code: "BOOKING_WINDOW_CLOSED",
+      message: "该预约日期已过，无法立即执行；任务保留供只读核对",
+      detail: { booking_local_date: bookingDate, next_allowed_at: null }
+    };
+  }
+  if (bookingDate > localDate) {
+    return {
+      ok: false,
+      code: "MANUAL_DATE_NOT_ALLOWED",
+      message:
+        "立即执行仅限当天 " + localDate + " 的预约；该任务预约日期为 " + bookingDate +
+        "，任务保持原排程不变",
+      detail: {
+        booking_local_date: bookingDate,
+        today_local_date: localDate,
+        next_allowed_at: bookingDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  if (localTime < windowStart) {
+    return {
+      ok: false,
+      code: "BOOKING_NOT_OPEN",
+      message:
+        "学校抢座通道尚未开放（开放时间 " + windowStart + "，当前 " + localTime +
+        "）；任务仍按原排程保留",
+      detail: {
+        booking_local_date: bookingDate,
+        next_allowed_at: localDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  if (localTime >= windowEnd) {
+    const nextDate = addDaysToLocalDate(localDate, 1);
+    return {
+      ok: false,
+      code: "BOOKING_NOT_OPEN",
+      message: "学校抢座通道今日已关闭（" + windowEnd + " 起停止），无法立即执行",
+      detail: {
+        booking_local_date: bookingDate,
+        next_allowed_at: nextDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  return { ok: true };
+}
+
 export function computeTripleSchedule({
   targetLocalDate,
   targetLocalTime,
@@ -334,6 +419,15 @@ export class TripleScheduleEngine {
       max_lateness_seconds: requestedLatenessSec,
       policy_version: payload.accepted_policy_version || rules.rule_version,
       price_version: payload.accepted_price_version || "price-library-cloud-2026-11-v1",
+      // Immutable acceptance snapshot: the price the user agreed to AT PLAN
+      // CREATION. Orders for jobs under this plan MUST use this snapshot — a
+      // later global price change must never silently charge a different
+      // amount on an already-accepted delegation.
+      accepted_price_micropeach: Number.isInteger(this.store.pricingMicropeach)
+        ? this.store.pricingMicropeach
+        : 10_000,
+      accepted_at: new Date(nowMs).toISOString(),
+      acceptance_scope: "PER_CONFIRMED_RESERVATION",
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
       area_name:
         payload.area_name ||
@@ -773,6 +867,21 @@ export class TripleScheduleEngine {
     return true;
   }
 
+  _abortJobForKillSwitch(job, event, nowMs = Date.now()) {
+    const ts = new Date(nowMs).toISOString();
+    if (event) {
+      event.status = "ABORTED_KILL_SWITCH";
+      event.diagnostic_code = "SCHOOL_KILL_SWITCH_ACTIVE";
+      event.actual_at = ts;
+    }
+    this.casJobState(job.id, job.state_version, "CANCELLED", {
+      last_error_code: "SCHOOL_KILL_SWITCH_ACTIVE",
+      last_diagnostic_message: "学校自动化紧急熔断开关已启用，本次云端抢座已安全中止（未扣费）"
+    });
+    this._disarmRemainingScheduleEvents(job.id, "SKIPPED_TERMINAL", nowMs);
+    return { job, event };
+  }
+
   _abortJobForStaleAuthorization(job, plan, event, nowMs = Date.now()) {
     const ts = new Date(nowMs).toISOString();
     if (event) {
@@ -1159,7 +1268,12 @@ export class TripleScheduleEngine {
         // Read-only precheck at T-30m: check binding, rules, wallet availability
         try {
           const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
-          if (wallet.micropeach_balance < this.store.pricingMicropeach) {
+          // Use the plan's accepted-price snapshot — never the live global,
+          // which may have moved since the user delegated.
+          const requiredMicro = Number.isInteger(plan?.accepted_price_micropeach)
+            ? plan.accepted_price_micropeach
+            : this.store.pricingMicropeach;
+          if (wallet.micropeach_balance < requiredMicro) {
             event.status = "PRECHECK_NEEDS_USER";
             event.diagnostic_code = "WALLET_INSUFFICIENT";
             event.actual_at = new Date(nowMs).toISOString();
@@ -1381,15 +1495,7 @@ export class TripleScheduleEngine {
       if (kind === "FIRE") {
         const liveSchoolIntegration = this.store.schoolIntegrations.get(binding.school_id);
         if (liveSchoolIntegration?.kill_switch === true) {
-          event.status = "ABORTED_KILL_SWITCH";
-          event.diagnostic_code = "SCHOOL_KILL_SWITCH_ACTIVE";
-          event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "CANCELLED", {
-            last_error_code: "SCHOOL_KILL_SWITCH_ACTIVE",
-            last_diagnostic_message: "学校自动化紧急熔断开关已启用，本次云端抢座已安全中止（未扣费）"
-          });
-          this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
-          return { job, event };
+          return this._abortJobForKillSwitch(job, event, nowMs);
         }
         let decryptedSecret;
         try {
@@ -1421,6 +1527,21 @@ export class TripleScheduleEngine {
           return { job, event };
         }
 
+        // Engine-side defence-in-depth for explicit manual dispatch: re-run the
+        // same pure validation as the API layer. Thrown BEFORE any CAS so a
+        // rejected manual execution consumes nothing (no attempt, no state
+        // change, schedule events stay ARMED).
+        if (options.manualExecuteNow) {
+          const verdict = validateManualExecution({
+            job,
+            schoolRules: this.schoolProvider.getRules(),
+            nowMs
+          });
+          if (!verdict.ok) {
+            throw new ContractError(verdict.code, verdict.message, verdict.detail);
+          }
+        }
+
         // Re-verify authorization version & consent immediately before acquiring execution lock and writing
         if (
           !this._isJobAuthorizationCurrent(job, plan, binding, consent) ||
@@ -1445,7 +1566,24 @@ export class TripleScheduleEngine {
           job.state === "EXECUTING" &&
           job.state_version === executingStateVersion;
 
+        // Kill-switch fence: re-read the LIVE integration object on every
+        // invocation so a switch flipped mid-flight (during school auth,
+        // seat queries or between candidate attempts) still blocks the next
+        // external write. Checked inside the unified authorization fence AND
+        // again in onBeforeExternalWrite before the dispatch intent is
+        // persisted — there is no await between this check and the write.
+        const assertKillSwitchOff = () => {
+          const liveInteg = this.store.schoolIntegrations.get(job.school_id);
+          if (liveInteg?.kill_switch === true) {
+            throw new ContractError(
+              "SCHOOL_KILL_SWITCH_ACTIVE",
+              "学校自动化紧急熔断开关已启用，已阻止后续学校写入"
+            );
+          }
+        };
+
         const assertStillAuthorized = () => {
+          assertKillSwitchOff();
           if (!isStillAuthorized()) {
             throw new ContractError(
               "CONSENT_WITHDRAWN",
@@ -1459,6 +1597,10 @@ export class TripleScheduleEngine {
         let activeAttempt = null;
 
         const onBeforeExternalWrite = async (targetInfo = {}) => {
+          // Kill-switch MUST be re-checked immediately before persisting the
+          // dispatch intent (and again inside assertStillAuthorized right
+          // before the provider issues the actual write).
+          assertKillSwitchOff();
           assertStillAuthorized();
           const attempt = this.store.createReservationAttempt({
             job_id: job.id,
@@ -1562,13 +1704,27 @@ export class TripleScheduleEngine {
             onAfterExternalWrite
           });
         } catch (err) {
-          if (
+          if (err?.code === "SCHOOL_KILL_SWITCH_ACTIVE") {
+            // Kill switch opened during execution. If no external write was
+            // ever dispatched, abort cleanly as CANCELLED. If a write is
+            // already in flight we must NOT claim cancellation: keep the
+            // ambiguous/confirmed state and allow read-only reconciliation.
+            if (!writeDispatchedInThisRun) {
+              return this._abortJobForKillSwitch(job, event, nowMs);
+            }
+            submitRes = {
+              outcome: hasUnresolvedInFlightWrite ? "TIMEOUT_AMBIGUOUS" : "FAILED",
+              writeDispatched: true,
+              errorCode: "SCHOOL_KILL_SWITCH_ACTIVE",
+              diagnosticMessage:
+                "学校自动化熔断开关在执行中启用；已派发请求保持核对，不再发起后续写入"
+            };
+          } else if (
             !writeDispatchedInThisRun &&
             (err?.code === "CONSENT_WITHDRAWN" || !isStillAuthorized())
           ) {
             return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
-          }
-          if (
+          } else if (
             writeDispatchedInThisRun &&
             !hasUnresolvedInFlightWrite &&
             (err?.code === "CONSENT_WITHDRAWN" || !isStillAuthorized())

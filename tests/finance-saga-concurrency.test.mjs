@@ -150,32 +150,74 @@ test("Finance Saga: Refund requires dual-person approval and cannot exceed paid 
     displayName: "Refund Approver"
   });
 
-  // Self-approval must fail
-  await assert.rejects(async () => {
-    await app.financeService.issueRefundForOrder(orderId, {
-      amountMicropeach: 1_000,
-      reason: "Test",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_1"
-    });
+  const adminA = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_refund_admin_a",
+    username: "refund_admin_a",
+    role: "admin",
+    displayName: "Refund Admin A"
+  });
+  const adminB = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_refund_admin_b",
+    username: "refund_admin_b",
+    role: "admin",
+    displayName: "Refund Admin B"
   });
 
-  // Over-refund (> paid amount) must fail
-  await assert.rejects(async () => {
-    await app.financeService.issueRefundForOrder(orderId, {
-      amountMicropeach: 2_000,
-      reason: "Test",
-      actorRef: "admin_1",
-      secondApproverRef: "admin_2"
-    });
-  });
+  // Direct refund without a dual-approval request is always rejected
+  await assert.rejects(
+    () => app.financeService.issueRefundForOrder(orderId, { actorRef: adminA.id }),
+    /refund request/i
+  );
 
-  // Valid dual-person refund succeeds and credits wallet idempotently
-  const refunded = await app.financeService.issueRefundForOrder(orderId, {
+  // Over-refund (> paid amount) request is rejected at creation
+  await assert.rejects(
+    () =>
+      app.financeService.createRefundRequest({
+        orderId,
+        amountMicropeach: 2_000,
+        reason: "Test",
+        actorRef: adminA.id
+      }),
+    /paid amount|between/i
+  );
+
+  // Create a valid request -> PENDING_APPROVAL
+  const req = await app.financeService.createRefundRequest({
+    orderId,
     amountMicropeach: 1_000,
     reason: "Service goodwill refund",
-    actorRef: "admin_1",
-    secondApproverRef: "admin_2"
+    actorRef: adminA.id
+  });
+  assert.equal(req.status, "PENDING_APPROVAL");
+
+  // Self-approval must fail — a second DISTINCT approver is mandatory
+  await assert.rejects(
+    () => app.financeService.approveRefundRequest({ requestId: req.id, approverRef: adminA.id }),
+    /distinct|self/i
+  );
+
+  // Approver without a finance role must fail
+  const outsider = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "sso_refund_outsider",
+    displayName: "No Finance Role"
+  });
+  await assert.rejects(
+    () => app.financeService.approveRefundRequest({ requestId: req.id, approverRef: outsider.id }),
+    /finance|role/i
+  );
+
+  // Second admin approves -> APPROVED -> execute -> REFUNDED
+  const approved = await app.financeService.approveRefundRequest({
+    requestId: req.id,
+    approverRef: adminB.id
+  });
+  assert.equal(approved.status, "APPROVED");
+  const { order: refunded } = await app.financeService.executeRefundRequest({
+    requestId: req.id,
+    actorRef: adminB.id
   });
   assert.equal(refunded.payment_state, "REFUNDED");
 });

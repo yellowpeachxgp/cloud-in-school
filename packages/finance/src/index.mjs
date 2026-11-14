@@ -18,6 +18,25 @@ export function buildRefundEventKey(orderId) {
   return `dis:reservation:${orderId}:refund:v1`;
 }
 
+/**
+ * Tamper-evident hash of the immutable payload bound to an idempotency key.
+ * The same event_key must ALWAYS carry the same payload — a mismatch means a
+ * caller tried to reuse a key for different money and must be rejected.
+ */
+export function buildFinancePayloadHash({ kind, orderId, eventKey, amountMicropeach }) {
+  return crypto
+    .createHash("sha256")
+    .update(`${kind}|${orderId}|${eventKey}|${Number(amountMicropeach)}`)
+    .digest("hex");
+}
+
+function computeRetryBackoffMs(attemptCount) {
+  const exp = Math.min(Math.max(Number(attemptCount) || 1, 1), 8);
+  const base = Math.min(30_000 * 2 ** (exp - 1), 15 * 60_000);
+  const jitter = crypto.randomInt(0, 5_000);
+  return base + jitter;
+}
+
 export function isSafeSsoSubject(ssoSubject) {
   if (!ssoSubject || typeof ssoSubject !== "string") return false;
   const trimmed = ssoSubject.trim();
@@ -446,17 +465,29 @@ export class FinanceSagaService {
     let order = existingOrderId ? this.store.reservationOrders.get(existingOrderId) : null;
     if (!order) {
       const orderId = crypto.randomUUID();
-      const pricePeach = this.store.pricingMicropeach / MICROPEACH_PER_PEACH;
+      // Price comes from the plan's immutable acceptance snapshot when present;
+      // legacy plans without a snapshot fall back to the global price (marked
+      // LEGACY_GLOBAL_PRICE for audit — never fabricate an acceptance record).
+      const hasPlanSnapshot = Number.isInteger(plan?.accepted_price_micropeach);
+      const orderPriceMicro = hasPlanSnapshot
+        ? plan.accepted_price_micropeach
+        : this.store.pricingMicropeach;
+      const pricePeach = orderPriceMicro / MICROPEACH_PER_PEACH;
       order = {
         id: orderId,
         job_id: job.id,
         cloud_user_id: job.cloud_user_id,
         price_peach: pricePeach,
-        price_micropeach: this.store.pricingMicropeach,
+        price_micropeach: orderPriceMicro,
         price_version: plan?.price_version || "price-library-cloud-2026-11-v1",
-        accepted_at: plan?.created_at || new Date(nowMs).toISOString(),
+        price_snapshot_source: hasPlanSnapshot ? "PLAN_ACCEPTANCE" : "LEGACY_GLOBAL_PRICE",
+        accepted_at: plan?.accepted_at || plan?.created_at || new Date(nowMs).toISOString(),
+        acceptance_scope: plan?.acceptance_scope || null,
+        consent_id: plan?.consent_id || null,
+        policy_version: plan?.policy_version || null,
+        auth_version: plan?.auth_version ?? null,
         school_result: "CONFIRMED",
-        payment_state: this.store.pricingMicropeach === 0 ? "NOT_REQUIRED" : "DEBIT_PENDING",
+        payment_state: orderPriceMicro === 0 ? "NOT_REQUIRED" : "DEBIT_PENDING",
         paid_at: null,
         created_at: new Date(nowMs).toISOString()
       };
@@ -502,6 +533,12 @@ export class FinanceSagaService {
       const eventKey = buildDebitEventKey(order.id);
       let op = this.store.financeOperations.get(eventKey);
       const pricePeach = order.price_peach ?? order.price_micropeach / MICROPEACH_PER_PEACH;
+      const payloadHash = buildFinancePayloadHash({
+        kind: "DEBIT",
+        orderId: order.id,
+        eventKey,
+        amountMicropeach: order.price_micropeach
+      });
       if (!op) {
         op = {
           id: crypto.randomUUID(),
@@ -510,18 +547,41 @@ export class FinanceSagaService {
           event_key: eventKey,
           peach_amount: pricePeach,
           amount_micropeach: order.price_micropeach,
+          payload_hash: payloadHash,
           status: "IN_FLIGHT",
           sso_request_id: null,
           last_error_code: null,
           attempt_count: 0,
+          next_attempt_at: null,
           created_at: new Date(nowMs).toISOString(),
           updated_at: new Date(nowMs).toISOString()
         };
         this.store.financeOperations.set(eventKey, op);
+      } else {
+        // Same event_key must carry the same payload — a mismatch means the key
+        // is being reused for different money and must be rejected, never sent.
+        if (op.payload_hash && op.payload_hash !== payloadHash) {
+          throw new ContractError(
+            "CONFLICT",
+            "Idempotency key payload mismatch for debit operation; refusing external call"
+          );
+        }
+        if (!op.payload_hash) op.payload_hash = payloadHash;
       }
 
       op.attempt_count += 1;
       op.updated_at = new Date(nowMs).toISOString();
+      // STRICT durable commit of the immutable order+operation+eventKey+payload
+      // BEFORE the external SSO call. If the snapshot cannot be fsynced we must
+      // not dispatch money — an unrecorded debit is unrecoverable. If the
+      // process dies after this point, restart recovery sees IN_FLIGHT +
+      // event_key and retries the SAME key (idempotent readback), never a new
+      // charge.
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        this.store.flushSnapshotStrictSync();
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
       const user = this.store.users.get(order.cloud_user_id);
 
       let bridgeRes;
@@ -538,14 +598,40 @@ export class FinanceSagaService {
       } catch (err) {
         op.status = "FAILED_RETRYABLE";
         op.last_error_code = err?.code || "SSO_UNAVAILABLE";
-        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        op.next_attempt_at = new Date(
+          nowMs + computeRetryBackoffMs(op.attempt_count)
+        ).toISOString();
+        if (typeof this.store.flushSnapshotStrictSync === "function") {
+          try {
+            this.store.flushSnapshotStrictSync();
+          } catch {
+            /* failure state stays in-memory recoverable via next_attempt_at */
+          }
+        } else if (typeof this.store.saveSnapshot === "function") {
+          this.store.saveSnapshot();
+        }
         throw err;
       }
 
       if (!bridgeRes.ok && bridgeRes.error === "WALLET_INSUFFICIENT") {
         op.status = "FAILED_INSUFFICIENT";
         op.last_error_code = "WALLET_INSUFFICIENT";
+        const becameDue = order.payment_state !== "PAYMENT_DUE";
         order.payment_state = "PAYMENT_DUE";
+        // Whenever a debit becomes PAYMENT_DUE (initial settle OR any async
+        // retry path), pause the plan's not-yet-dispatched multi-day renewals
+        // — the confirmation path is not the only place this can arise.
+        // Already-dispatched work is never deleted; only plan-level renewal
+        // stops until the user settles.
+        if (becameDue) {
+          const job = this.store.reservationJobs?.get?.(order.job_id);
+          const plan = job ? this.store.reservationPlans?.get?.(job.plan_id) : null;
+          if (plan && plan.enabled !== false) {
+            plan.enabled = false;
+            plan.remaining_days = 0;
+            plan.updated_at = new Date(nowMs).toISOString();
+          }
+        }
         if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
         return order;
       }
@@ -554,61 +640,281 @@ export class FinanceSagaService {
       op.sso_request_id = bridgeRes.ssoRequestId;
       order.payment_state = "PAID";
       order.paid_at = order.paid_at || new Date(nowMs).toISOString();
-      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        try {
+          this.store.flushSnapshotStrictSync();
+        } catch {
+          if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        }
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
       return order;
     });
   }
 
-  async issueRefundForOrder(orderId, { peachAmount, amountMicropeach, reason, actorRef, secondApproverRef }, nowMs = Date.now()) {
+  _hasFinanceApproverRole(cloudUserId) {
+    const user = this.store.users.get(cloudUserId);
+    if (!user || user.status !== "ACTIVE") return false;
+    if (user.role === "admin") return true;
+    const roles = new Set(this.store.getUserRoles?.(cloudUserId) || []);
+    return ["PLATFORM_OWNER", "FINANCE", "FINANCE_OPERATOR", "ADMIN"].some((r) =>
+      roles.has(r)
+    );
+  }
+
+  _computeRefundRequestHash({ orderId, amountMicropeach, reason, order }) {
+    return crypto
+      .createHash("sha256")
+      .update(
+        [
+          "refund-request",
+          orderId,
+          String(amountMicropeach),
+          String(reason || ""),
+          String(order?.price_micropeach ?? ""),
+          String(order?.payment_state ?? ""),
+          String(order?.paid_at ?? "")
+        ].join("|")
+      )
+      .digest("hex");
+  }
+
+  /**
+   * Create an immutable dual-approval refund request. The request records the
+   * amount, reason, order snapshot hash, the initiating admin and an expiry —
+   * it CANNOT be executed by its creator.
+   */
+  async createRefundRequest({ orderId, amountMicropeach, reason, actorRef }, nowMs = Date.now()) {
     return this.withOrderLock(orderId, async () => {
       const order = this.store.reservationOrders.get(orderId);
       if (!order) throw new ContractError("NOT_FOUND", "Order not found");
-      if (order.payment_state === "REFUNDED") {
-        return order;
-      }
       if (order.payment_state !== "PAID") {
         throw new ContractError("CONFLICT", "Only PAID orders are eligible for refund");
       }
-      const cleanActor = typeof actorRef === "string" ? actorRef.trim() : "";
-      const cleanSecond = typeof secondApproverRef === "string" ? secondApproverRef.trim() : "";
-      if (!cleanActor || !cleanSecond || cleanSecond === cleanActor) {
-        throw new ContractError("FORBIDDEN", "Dual-person approval (distinct second_approver_ref) is required for refunds");
+      if (!this._hasFinanceApproverRole(actorRef)) {
+        throw new ContractError("FORBIDDEN", "Initiator does not hold a finance approval role");
       }
-      const approverUser = Array.from(this.store.users.values()).find(
-        (u) => u.id === cleanSecond || u.subject === cleanSecond || u.username === cleanSecond
+      // Lazily expire stale requests: an un-approved request past its TTL must
+      // not block future refunds for this order forever. In-flight statuses
+      // (EXECUTING/RESULT_UNKNOWN) are never expired — money may be moving.
+      for (const r of this.store.refundRequests.values()) {
+        if (
+          r.order_id === orderId &&
+          ["PENDING_APPROVAL", "APPROVED"].includes(r.status) &&
+          Date.parse(r.expires_at) <= nowMs
+        ) {
+          r.status = "EXPIRED";
+          r.result_error = "Expired before execution";
+        }
+      }
+      // Single-refund-per-order contract: an active request or a completed
+      // refund operation for the same order must be rejected outright.
+      const activeRequest = [...this.store.refundRequests.values()].find(
+        (r) =>
+          r.order_id === orderId &&
+          ["PENDING_APPROVAL", "APPROVED", "EXECUTING", "RESULT_UNKNOWN"].includes(r.status)
       );
-      if (!approverUser || approverUser.id === cleanActor || approverUser.status !== "ACTIVE") {
+      if (activeRequest) {
         throw new ContractError(
-          "FORBIDDEN",
-          "second_approver_ref must reference a distinct, existing, ACTIVE approver account"
+          "CONFLICT",
+          "An active refund request already exists for this order; complete or expire it first"
         );
       }
-      const approverRoles = new Set(this.store.getUserRoles?.(approverUser.id) || []);
-      if (
-        !["PLATFORM_OWNER", "FINANCE", "FINANCE_OPERATOR", "ADMIN"].some((r) =>
-          approverRoles.has(r)
-        )
-      ) {
-        throw new ContractError(
-          "FORBIDDEN",
-          "second_approver_ref does not hold a finance approval role"
-        );
+      const existingOp = this.store.financeOperations.get(buildRefundEventKey(orderId));
+      if (existingOp && ["SUCCEEDED", "IN_FLIGHT"].includes(existingOp.status)) {
+        throw new ContractError("CONFLICT", "Refund for this order is already settled or in flight");
       }
       const resolvedMicro =
         typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
           ? amountMicropeach
-          : typeof peachAmount === "number"
-            ? Math.round(peachAmount * MICROPEACH_PER_PEACH)
-            : 0;
+          : 0;
+      if (!Number.isInteger(order.price_micropeach) || order.price_micropeach <= 0) {
+        throw new ContractError("CONFLICT", "Order has no valid paid price; refund requires manual review");
+      }
       if (!Number.isInteger(resolvedMicro) || resolvedMicro <= 0 || resolvedMicro > order.price_micropeach) {
+        throw new ContractError("BAD_REQUEST", "Refund amount must be between 0.01 and the paid amount");
+      }
+      const cleanReason = typeof reason === "string" && reason.trim() ? reason.trim().slice(0, 200) : "Admin approved refund";
+      const requestHash = this._computeRefundRequestHash({
+        orderId,
+        amountMicropeach: resolvedMicro,
+        reason: cleanReason,
+        order
+      });
+      const req = {
+        id: crypto.randomUUID(),
+        order_id: orderId,
+        cloud_user_id: order.cloud_user_id,
+        amount_micropeach: resolvedMicro,
+        reason: cleanReason,
+        request_hash: requestHash,
+        status: "PENDING_APPROVAL",
+        created_by: actorRef,
+        created_at: new Date(nowMs).toISOString(),
+        expires_at: new Date(nowMs + 24 * 3600 * 1000).toISOString(),
+        approved_by: null,
+        approved_at: null,
+        executed_at: null,
+        result_error: null
+      };
+      this.store.refundRequests.set(req.id, req);
+      this.store.indexUserScoped?.("refundRequests", req.id, req.cloud_user_id);
+      this.store.recordAudit({
+        actor_kind: "FINANCE_OPERATOR",
+        actor_ref: actorRef,
+        action: "REFUND_REQUEST_CREATED",
+        resource_kind: "refund_request",
+        resource_ref: req.id,
+        outcome: "PENDING_APPROVAL",
+        detail: { order_id: orderId, amount_micropeach: resolvedMicro, reason: cleanReason }
+      });
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        this.store.flushSnapshotStrictSync();
+      }
+      return req;
+    });
+  }
+
+  /**
+   * Second-person approval. The approver identity is taken from the
+   * authenticated session (approverRef), never from a request body field —
+   * filling in another admin's name grants nothing.
+   */
+  async approveRefundRequest({ requestId, approverRef }, nowMs = Date.now()) {
+    const req = this.store.refundRequests.get(requestId);
+    if (!req) throw new ContractError("NOT_FOUND", "Refund request not found");
+    // Serialize approvals on the per-order lock: two racing admins cannot
+    // both pass the PENDING_APPROVAL check.
+    return this.withOrderLock(req.order_id, async () => {
+      if (req.status !== "PENDING_APPROVAL") {
+        throw new ContractError("CONFLICT", `Refund request is ${req.status}, cannot approve`);
+      }
+      if (nowMs > Date.parse(req.expires_at)) {
+        req.status = "EXPIRED";
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+        throw new ContractError("CONFLICT", "Refund request expired; create a new one");
+      }
+      if (!approverRef || approverRef === req.created_by) {
+        throw new ContractError("FORBIDDEN", "Refund approval requires a DISTINCT second approver; self-approval is rejected");
+      }
+      if (!this._hasFinanceApproverRole(approverRef)) {
+        throw new ContractError("FORBIDDEN", "Approver does not hold a finance approval role");
+      }
+      req.status = "APPROVED";
+      req.approved_by = approverRef;
+      req.approved_at = new Date(nowMs).toISOString();
+      this.store.recordAudit({
+        actor_kind: "FINANCE_OPERATOR",
+        actor_ref: approverRef,
+        action: "REFUND_REQUEST_APPROVED",
+        resource_kind: "refund_request",
+        resource_ref: req.id,
+        outcome: "APPROVED",
+        detail: { order_id: req.order_id, created_by: req.created_by }
+      });
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      return req;
+    });
+  }
+
+  /**
+   * Execute an approved request. CAS APPROVED -> EXECUTING -> terminal. At
+   * execution time we re-verify the immutable request hash against the live
+   * order AND that both parties still hold approval roles. Any changed
+   * amount/reason/order invalidates the request — a new request is required.
+   * The SSO call keeps the deterministic refund event_key, so a timeout marks
+   * RESULT_UNKNOWN and re-execution dedupes instead of double-refunding.
+   */
+  async executeRefundRequest({ requestId, actorRef }, nowMs = Date.now()) {
+    const req = this.store.refundRequests.get(requestId);
+    if (!req) throw new ContractError("NOT_FOUND", "Refund request not found");
+    if (req.status === "REFUNDED") {
+      const order = this.store.reservationOrders.get(req.order_id);
+      return { request: req, order };
+    }
+    if (!["APPROVED", "EXECUTING", "RESULT_UNKNOWN"].includes(req.status)) {
+      throw new ContractError("CONFLICT", `Refund request is ${req.status}, cannot execute`);
+    }
+    // Service-level recheck: the executing actor must still hold a finance
+    // approval role (the HTTP route's RBAC covers real callers; this protects
+    // internal/other callers too).
+    if (req.status === "APPROVED" && !this._hasFinanceApproverRole(actorRef)) {
+      throw new ContractError("FORBIDDEN", "Executing actor does not hold a finance approval role");
+    }
+    // TTL is hard for approval-stage requests: an APPROVED request that sat
+    // past expiry cannot move money. EXECUTING/RESULT_UNKNOWN never expire —
+    // an in-flight refund must finish converging.
+    if (req.status === "APPROVED" && nowMs > Date.parse(req.expires_at)) {
+      req.status = "EXPIRED";
+      req.result_error = "Expired before execution";
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      throw new ContractError("CONFLICT", "Refund request expired; create a new one");
+    }
+    return this.withOrderLock(req.order_id, async () => {
+      const order = this.store.reservationOrders.get(req.order_id);
+      if (!order) throw new ContractError("NOT_FOUND", "Order not found");
+
+      // Idempotent convergence: a retry after a completed refund (or an order
+      // that reached REFUNDED by the same request) returns the settled state
+      // instead of failing — never produces a second refund.
+      if (req.status === "REFUNDED" || order.payment_state === "REFUNDED") {
+        if (req.status !== "REFUNDED") {
+          req.status = "REFUNDED";
+          req.result_error = null;
+          if (typeof this.store.flushSnapshotStrictSync === "function") {
+            try {
+              this.store.flushSnapshotStrictSync();
+            } catch {
+              /* convergence marker stays in memory */
+            }
+          }
+        }
+        return { request: req, order };
+      }
+
+      if (req.status !== "EXECUTING") {
+        req.status = "EXECUTING";
+        req.executed_at = new Date(nowMs).toISOString();
+      }
+      // Re-verify immutable hash against the CURRENT order snapshot.
+      const expectedHash = this._computeRefundRequestHash({
+        orderId: req.order_id,
+        amountMicropeach: req.amount_micropeach,
+        reason: req.reason,
+        order
+      });
+      if (expectedHash !== req.request_hash) {
+        req.status = "FAILED";
+        req.result_error = "REQUEST_STALE";
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
         throw new ContractError(
-          "BAD_REQUEST",
-          `Refund amount must be between 0.01 🍑 and paid amount`
+          "CONFLICT",
+          "Order state changed since approval; the refund request is stale and a new request is required"
         );
+      }
+      if (!this._hasFinanceApproverRole(req.created_by) || !this._hasFinanceApproverRole(req.approved_by)) {
+        req.status = "FAILED";
+        req.result_error = "APPROVER_ROLE_LOST";
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+        throw new ContractError("FORBIDDEN", "One of the approval parties no longer holds a finance role");
+      }
+      if (order.payment_state !== "PAID") {
+        req.status = "FAILED";
+        req.result_error = "ORDER_NOT_PAID";
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+        throw new ContractError("CONFLICT", "Order is no longer in a refundable state");
       }
 
       const eventKey = buildRefundEventKey(order.id);
+      const resolvedMicro = req.amount_micropeach;
       const resolvedPeach = resolvedMicro / MICROPEACH_PER_PEACH;
+      const payloadHash = buildFinancePayloadHash({
+        kind: "REFUND",
+        orderId: order.id,
+        eventKey,
+        amountMicropeach: resolvedMicro
+      });
       let op = this.store.financeOperations.get(eventKey);
       if (!op) {
         op = {
@@ -618,18 +924,30 @@ export class FinanceSagaService {
           event_key: eventKey,
           peach_amount: resolvedPeach,
           amount_micropeach: resolvedMicro,
+          payload_hash: payloadHash,
+          refund_request_id: req.id,
           status: "IN_FLIGHT",
           sso_request_id: null,
           last_error_code: null,
           attempt_count: 0,
+          next_attempt_at: null,
           created_at: new Date(nowMs).toISOString(),
           updated_at: new Date(nowMs).toISOString()
         };
         this.store.financeOperations.set(eventKey, op);
+      } else {
+        if (op.payload_hash && op.payload_hash !== payloadHash) {
+          throw new ContractError("CONFLICT", "Idempotency key payload mismatch for refund operation");
+        }
+        if (!op.payload_hash) op.payload_hash = payloadHash;
       }
 
       op.attempt_count += 1;
       op.updated_at = new Date(nowMs).toISOString();
+      // STRICT durable commit of request + operation BEFORE the external call.
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        this.store.flushSnapshotStrictSync();
+      }
       const user = this.store.users.get(order.cloud_user_id);
       let bridgeRes;
       try {
@@ -639,66 +957,198 @@ export class FinanceSagaService {
           deltaPeach: resolvedPeach,
           deltaMicropeach: resolvedMicro,
           eventKey,
-          reason: `日在校园预约订单退还 (${order.id}): ${reason}`,
+          reason: `日在校园预约订单退还 (${order.id}): ${req.reason}`,
           userObj: user
         });
       } catch (err) {
         op.status = "FAILED_RETRYABLE";
         op.last_error_code = err?.code || "SSO_UNAVAILABLE";
-        if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        op.next_attempt_at = new Date(nowMs + computeRetryBackoffMs(op.attempt_count)).toISOString();
+        // A timeout could mean the refund WAS applied upstream — keep the
+        // request in RESULT_UNKNOWN so reconciliation reuses the same key.
+        req.status = "RESULT_UNKNOWN";
+        req.result_error = err?.code || "SSO_UNAVAILABLE";
+        if (typeof this.store.flushSnapshotStrictSync === "function") {
+          try {
+            this.store.flushSnapshotStrictSync();
+          } catch { /* recoverable in-memory */ }
+        }
         throw err;
       }
 
       op.status = "SUCCEEDED";
       op.sso_request_id = bridgeRes.ssoRequestId;
       order.payment_state = "REFUNDED";
+      req.status = "REFUNDED";
+      req.result_error = null;
       this.store.recordAudit({
         actor_kind: "FINANCE_OPERATOR",
-        actor_ref: `${cleanActor}+${cleanSecond}`,
+        actor_ref: `${req.created_by}+${req.approved_by}`,
         action: "REFUND_ORDER",
         resource_kind: "reservation_order",
         resource_ref: order.id,
-        outcome: "REFUNDED"
+        outcome: "REFUNDED",
+        detail: { refund_request_id: req.id, amount_micropeach: resolvedMicro }
       });
-      if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
-      return order;
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        try {
+          this.store.flushSnapshotStrictSync();
+        } catch {
+          if (typeof this.store.saveSnapshot === "function") this.store.saveSnapshot();
+        }
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
+      return { request: req, order };
     });
   }
 
-  async retryPendingDebits(nowMs = Date.now()) {
-    const retried = [];
-    for (const order of this.store.reservationOrders.values()) {
-      if (!order || order.school_result !== "CONFIRMED" || order.payment_state !== "DEBIT_PENDING") {
-        continue;
-      }
-      const eventKey = buildDebitEventKey(order.id);
-      const op = this.store.financeOperations.get(eventKey);
-      if (op && op.status !== "FAILED_RETRYABLE") {
-        continue;
-      }
-      if (op && Number(op.attempt_count || 0) >= 20) {
-        continue;
-      }
-      const lastTriedMs = op?.updated_at ? new Date(op.updated_at).getTime() : 0;
-      if (lastTriedMs && nowMs - lastTriedMs < 30_000) {
-        continue;
-      }
-      try {
-        const settled = await this.executeDebitForOrder(order.id, nowMs);
-        const job = this.store.reservationJobs?.get?.(order.job_id);
-        if (job && settled?.payment_state) {
-          job.billing_state = settled.payment_state;
+  /**
+   * Back-compat executor kept for internal callers: refunds now REQUIRE an
+   * approved refund request — no direct unilateral refund remains possible.
+   */
+  async issueRefundForOrder(orderId, { refundRequestId, actorRef }, nowMs = Date.now()) {
+    const req = this.store.refundRequests.get(refundRequestId);
+    if (!req || req.order_id !== orderId) {
+      throw new ContractError(
+        "FORBIDDEN",
+        "Refunds require an approved dual-person refund request (refundRequestId)"
+      );
+    }
+    return this.executeRefundRequest({ requestId: req.id, actorRef }, nowMs);
+  }
+
+  /**
+   * Independent finance retry worker — MUST be driven by its own timer, never
+   * inside the reservation scanner's critical section. Bounded batch + bounded
+   * concurrency + per-order exponential backoff (next_attempt_at). Orders
+   * whose op exceeds the attempt ceiling are parked in MANUAL_REVIEW instead
+   * of being silently skipped forever.
+   */
+  async retryPendingDebits(nowMs = Date.now(), { batchSize = 10, concurrency = 3 } = {}) {
+    if (this._retryWorkerRunning) {
+      return { skipped: "worker_already_running", retried: [] };
+    }
+    this._retryWorkerRunning = true;
+    try {
+      const candidates = [];
+      for (const order of this.store.reservationOrders.values()) {
+        if (!order || order.school_result !== "CONFIRMED" || order.payment_state !== "DEBIT_PENDING") {
+          continue;
         }
-        for (const outEv of this.store.outboxEvents || []) {
-          if (outEv.aggregate_id === order.id && !outEv.delivered_at && settled?.payment_state === "PAID") {
-            outEv.delivered_at = new Date(nowMs).toISOString();
+        const eventKey = buildDebitEventKey(order.id);
+        const op = this.store.financeOperations.get(eventKey);
+        if (op) {
+          if (op.status === "IN_FLIGHT") {
+            // Crash-safe recovery: an op stuck IN_FLIGHT beyond the staleness
+            // window is retried with the SAME event_key (idempotent dedupe at
+            // SSO side) rather than abandoned or blindly re-charged.
+            const staleMs = nowMs - new Date(op.updated_at || 0).getTime();
+            if (staleMs > 120_000) {
+              op.status = "FAILED_RETRYABLE";
+              op.next_attempt_at =
+                op.next_attempt_at || new Date(nowMs + 1_000).toISOString();
+            } else {
+              continue;
+            }
+          }
+          if (op.status === "MANUAL_REVIEW") continue;
+          if (op.status !== "FAILED_RETRYABLE") continue;
+          if (Number(op.attempt_count || 0) >= 20) {
+            op.status = "MANUAL_REVIEW";
+            this.store.recordAudit({
+              actor_kind: "FINANCE_WORKER",
+              actor_ref: "retryPendingDebits",
+              action: "DEBIT_MANUAL_REVIEW",
+              resource_kind: "reservation_order",
+              resource_ref: order.id,
+              outcome: "RETRY_BUDGET_EXHAUSTED",
+              detail: { event_key: eventKey, attempt_count: op.attempt_count }
+            });
+            continue;
+          }
+          const nextAt = op.next_attempt_at ? new Date(op.next_attempt_at).getTime() : 0;
+          if (nextAt && nowMs < nextAt) continue;
+        }
+        candidates.push(order);
+      }
+      candidates.sort(
+        (a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+      );
+      const batch = candidates.slice(0, Math.max(1, batchSize));
+
+      const results = [];
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < batch.length) {
+          const order = batch[cursor];
+          cursor += 1;
+          try {
+            const settled = await this.executeDebitForOrder(order.id, nowMs);
+            const job = this.store.reservationJobs?.get?.(order.job_id);
+            if (job && settled?.payment_state) {
+              job.billing_state = settled.payment_state;
+            }
+            for (const outEv of this.store.outboxEvents || []) {
+              if (
+                outEv.aggregate_id === order.id &&
+                !outEv.delivered_at &&
+                settled?.payment_state === "PAID"
+              ) {
+                outEv.delivered_at = new Date(nowMs).toISOString();
+              }
+            }
+            results.push({
+              order_id: order.id,
+              payment_state: settled?.payment_state || order.payment_state
+            });
+          } catch (err) {
+            results.push({
+              order_id: order.id,
+              payment_state: "DEBIT_PENDING",
+              error: err?.code || "RETRY_FAILED"
+            });
           }
         }
-        retried.push({ order_id: order.id, payment_state: settled?.payment_state || order.payment_state });
-      } catch (err) {
-        retried.push({ order_id: order.id, payment_state: "DEBIT_PENDING", error: err?.code || "RETRY_FAILED" });
-      }
+      };
+      const lanes = Math.min(Math.max(1, concurrency), Math.max(1, batch.length));
+      await Promise.all(Array.from({ length: lanes }, () => worker()));
+      this.lastRetryRun = {
+        ran_at: new Date(nowMs).toISOString(),
+        scanned_orders: this.store.reservationOrders.size,
+        eligible: candidates.length,
+        processed: batch.length,
+        results
+      };
+      return { retried: results, eligible: candidates.length, processed: batch.length };
+    } finally {
+      this._retryWorkerRunning = false;
     }
-    return retried;
+  }
+
+  /**
+   * Operator-facing metrics for the finance worker: backlog age, retry counts,
+   * manual-review queue. Cheap to compute; safe to expose read-only.
+   */
+  getFinanceWorkerMetrics(nowMs = Date.now()) {
+    const pending = [];
+    let manualReview = 0;
+    let oldestPendingMs = null;
+    for (const order of this.store.reservationOrders.values()) {
+      if (!order || order.payment_state !== "DEBIT_PENDING") continue;
+      pending.push(order.id);
+      const createdMs = new Date(order.created_at || 0).getTime();
+      if (oldestPendingMs === null || createdMs < oldestPendingMs) oldestPendingMs = createdMs;
+      const op = this.store.financeOperations.get(buildDebitEventKey(order.id));
+      if (op?.status === "MANUAL_REVIEW") manualReview += 1;
+    }
+    return {
+      pending_debit_orders: pending.length,
+      pending_order_ids: pending.slice(0, 50),
+      manual_review_orders: manualReview,
+      oldest_pending_age_ms: oldestPendingMs === null ? 0 : Math.max(0, nowMs - oldestPendingMs),
+      worker_running: Boolean(this._retryWorkerRunning),
+      last_run: this.lastRetryRun || null
+    };
   }
 }

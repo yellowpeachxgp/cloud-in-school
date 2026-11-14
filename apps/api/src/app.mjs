@@ -15,7 +15,11 @@ import {
   redactSensitiveFields
 } from "../../../packages/contracts/src/index.mjs";
 import { CloudDatabaseStore } from "../../../packages/db/src/index.mjs";
-import { KmsEnvelopeVault } from "../../../packages/crypto/src/index.mjs";
+import {
+  KmsEnvelopeVault,
+  escrowCredentialForBindings,
+  auditCredentialRefConsistency
+} from "../../../packages/crypto/src/index.mjs";
 import { CloudIdentityService } from "../../../packages/identity/src/index.mjs";
 import {
   HautLibraryProvider,
@@ -23,7 +27,8 @@ import {
 } from "../../../packages/school-spi/src/index.mjs";
 import {
   TripleScheduleEngine,
-  addDaysToLocalDate
+  addDaysToLocalDate,
+  validateManualExecution
 } from "../../../packages/reservations/src/index.mjs";
 import {
   IsolatedFinanceBridge,
@@ -94,6 +99,33 @@ export function createCampusCloudApp(options = {}) {
     new ParcelHubService(store, kmsVault, {
       environment: options.environment || process.env.NODE_ENV || "production"
     });
+  // Production fail-closed gate: dangerous combinations must abort startup —
+  // a mock/sandbox write path, missing durable snapshot or absent KMS material
+  // can never be "test leftovers" in production.
+  const isProductionEnv = process.env.NODE_ENV === "production";
+  if (isProductionEnv) {
+    const violations = [];
+    if (schoolProvider?.mockBackend) {
+      violations.push("schoolProvider.mockBackend must not be configured in production");
+    }
+    if (schoolProvider?.allowSandboxFallback) {
+      violations.push("schoolProvider.allowSandboxFallback must be false in production");
+    }
+    if (financeBridge?.allowSandboxFallback && !financeBridge?.realDebitsEnabled) {
+      violations.push("financeBridge sandbox fallback must be disabled in production");
+    }
+    if (!store?.snapshotPath || store?.requireDurableSnapshot !== true) {
+      violations.push("durable snapshot (snapshotPath + requireDurableSnapshot) is required in production");
+    }
+    if (!options.kmsVault && !process.env.KMS_MASTER_SEED) {
+      violations.push("KMS_MASTER_SEED is required in production");
+    }
+    if (violations.length > 0) {
+      throw new Error(
+        "Refusing to start in production mode:\n - " + violations.join("\n - ")
+      );
+    }
+  }
   const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker();
   const redisBuffer =
     options.redisBuffer ||
@@ -583,7 +615,11 @@ export function createCampusCloudApp(options = {}) {
   });
 
   register("POST", "/api/v1/auth/logout-all", "logoutAllSessions", "bearer", async ({ auth, body, nowMs }) => {
-    identity.revokeAllUserSessions(auth.cloudUserId, Boolean(body?.unlink_xpeach), nowMs);
+    identity.revokeAllUserSessions(auth.cloudUserId, {
+      unlinkXpeach: Boolean(body?.unlink_xpeach),
+      reason: Boolean(body?.unlink_xpeach) ? "USER_LOGOUT_ALL_UNLINK" : "USER_LOGOUT_ALL",
+      nowMs
+    });
     return {
       status: 200,
       code: "LOGGED_OUT_ALL",
@@ -657,6 +693,52 @@ export function createCampusCloudApp(options = {}) {
     const orders = store.recordsForUser("reservationOrders", auth.cloudUserId);
     return { status: 200, code: "ORDERS_LISTED", data: { orders } };
   });
+
+  // Self-service settlement of an outstanding confirmed-order debit after the
+  // user recharges. The amount/payee ALWAYS come from the stored order — the
+  // client can never name a price or a recipient. Only DEBIT_PENDING /
+  // PAYMENT_DUE orders owned by the caller may settle; PAID/REFUNDED are
+  // rejected so a second charge can never be produced.
+  register(
+    "POST",
+    "/api/v1/me/orders/{orderId}/settle",
+    "settleMyOrder",
+    "bearer",
+    async ({ auth, params, nowMs }) => {
+      const order = store.reservationOrders.get(params.orderId);
+      if (!order || order.cloud_user_id !== auth.cloudUserId) {
+        throw new ContractError("NOT_FOUND", "Order not found");
+      }
+      if (order.school_result !== "CONFIRMED") {
+        throw new ContractError("CONFLICT", "Order has no confirmed school result to settle");
+      }
+      if (["PAID", "REFUNDED", "NOT_REQUIRED"].includes(order.payment_state)) {
+        throw new ContractError(
+          "CONFLICT",
+          "Order is already settled; a second charge is never permitted"
+        );
+      }
+      if (!["DEBIT_PENDING", "PAYMENT_DUE"].includes(order.payment_state)) {
+        throw new ContractError("CONFLICT", "Order is not awaiting settlement");
+      }
+      const settled = await financeService.executeDebitForOrder(order.id, nowMs);
+      // Paused plans are NOT auto-revived — the user re-enables them
+      // explicitly after settling (per delegation-stops-stay-stopped rule).
+      await syncUserToSso(auth.cloudUserId);
+      return {
+        status: 200,
+        code: settled.payment_state === "PAID" ? "ORDER_SETTLED" : "ORDER_SETTLE_PENDING",
+        data: {
+          order: settled,
+          payment_state: settled.payment_state,
+          message:
+            settled.payment_state === "PAID"
+              ? "欠款已结算；此前因欠款暂停的委托可在委托页手动重新开启"
+              : "余额仍不足，请先为 XPeach 钱包充值后再试"
+        }
+      };
+    }
+  );
 
   register("GET", "/api/v1/me/consents", "listMyConsents", "bearer", async ({ auth }) => {
     const consents = store.recordsForUser("consents", auth.cloudUserId);
@@ -778,7 +860,13 @@ export function createCampusCloudApp(options = {}) {
   register("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
     const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
-    identity.revokeAllUserSessions(auth.cloudUserId, true, nowMs);
+    // Plans/bindings were already halted above with the USER_DATA_DELETE audit
+    // reason; only revoke sessions here (unlinkXpeach stays false).
+    identity.revokeAllUserSessions(auth.cloudUserId, {
+      unlinkXpeach: false,
+      reason: "USER_DATA_DELETE",
+      nowMs
+    });
     const user = store.users.get(auth.cloudUserId);
     if (user) user.status = "DELETED";
     return {
@@ -970,14 +1058,20 @@ export function createCampusCloudApp(options = {}) {
           if (e instanceof ContractError) throw e;
         }
       }
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      const escrowed = escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: [binding],
+        cloudUserId: auth.cloudUserId,
         schoolId: binding.school_id,
+        studentNo: binding.student_no,
         credentialKind: body?.credential_kind || "DELEGATED_SESSION_BUNDLE",
         plaintext: secretPayload,
         expiresAt:
-          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
+      const encrypted = escrowed.get(binding.id);
       // If another active binding for the same school has a DIFFERENT student_no, revoke it first so old student's plans are invalidated!
       const targetBindSno = String(binding.student_no || "").trim();
       for (const other of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
@@ -1075,17 +1169,22 @@ export function createCampusCloudApp(options = {}) {
           );
         }
       }
-      if (binding.credential_ref && store.encryptedCredentials.has(binding.credential_ref)) {
-        store.encryptedCredentials.get(binding.credential_ref).revoked_at = new Date(nowMs).toISOString();
-      }
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      // Old credential records are revoked inside the helper only after the
+      // replacement record has been stored (no window without a usable ref).
+      const escrowed = escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: [binding],
+        cloudUserId: auth.cloudUserId,
         schoolId: binding.school_id,
+        studentNo: binding.student_no,
         credentialKind: body?.credential_kind || "DELEGATED_SESSION_BUNDLE",
         plaintext: body?.delegated_secret || "reauthorized_session_v1",
         expiresAt:
-          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
+      const encrypted = escrowed.get(binding.id);
       const userObj = store.users.get(auth.cloudUserId);
       if (userObj) {
         userObj.auth_version = Number(userObj.auth_version || 1) + 1;
@@ -1852,17 +1951,90 @@ export function createCampusCloudApp(options = {}) {
     "bearer_rbac",
     async ({ auth, params, body, nowMs }) => {
       store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
-      const order = await financeService.issueRefundForOrder(
-        params.orderId,
+      // Back-compat: a bare refund call now creates a dual-approval REQUEST and
+      // returns 202. The refund only executes after a SECOND authenticated
+      // admin approves it via /admin/refund-requests/{id}/approve + /execute.
+      const req = await financeService.createRefundRequest(
         {
+          orderId: params.orderId,
           amountMicropeach: body?.amount_micropeach,
           reason: body?.reason || "Admin approved refund",
-          actorRef: auth.cloudUserId,
-          secondApproverRef: body?.second_approver_ref
+          actorRef: auth.cloudUserId
         },
         nowMs
       );
-      return { status: 200, code: "ADMIN_ORDER_REFUNDED", data: order };
+      return { status: 202, code: "REFUND_REQUEST_CREATED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/orders/{orderId}/refund-requests",
+    "createRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, body, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const req = await financeService.createRefundRequest(
+        {
+          orderId: params.orderId,
+          amountMicropeach: body?.amount_micropeach,
+          reason: body?.reason,
+          actorRef: auth.cloudUserId
+        },
+        nowMs
+      );
+      return { status: 202, code: "REFUND_REQUEST_CREATED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/refund-requests",
+    "listRefundRequests",
+    "bearer_rbac",
+    async ({ auth }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR", "SECURITY_AUDITOR"]);
+      return {
+        status: 200,
+        code: "REFUND_REQUESTS_LISTED",
+        data: { refund_requests: Array.from(store.refundRequests.values()) }
+      };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/refund-requests/{requestId}/approve",
+    "approveRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      // Approver identity comes from the authenticated session ONLY.
+      const req = await financeService.approveRefundRequest(
+        { requestId: params.requestId, approverRef: auth.cloudUserId },
+        nowMs
+      );
+      return { status: 200, code: "REFUND_REQUEST_APPROVED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/refund-requests/{requestId}/execute",
+    "executeRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const { request, order } = await financeService.executeRefundRequest(
+        { requestId: params.requestId, actorRef: auth.cloudUserId },
+        nowMs
+      );
+      if (order?.cloud_user_id) await syncUserToSso(order.cloud_user_id);
+      return {
+        status: 200,
+        code: "ADMIN_ORDER_REFUNDED",
+        data: { refund_request: request, order }
+      };
     }
   );
 
@@ -1882,6 +2054,39 @@ export function createCampusCloudApp(options = {}) {
         code: "ADMIN_AUDIT_EVENTS_LISTED",
         data: { events: redactSensitiveFields(store.auditEvents) }
       };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/credential-integrity",
+    "auditCredentialIntegrity",
+    "bearer_rbac",
+    async ({ auth, nowMs }) => {
+      store.requireRole(auth, [
+        "PLATFORM_OWNER",
+        "OPERATIONS_ADMIN",
+        "SECURITY_AUDITOR"
+      ]);
+      // Read-only audit: reports structural violations and non-sensitive ids
+      // only — never outputs plaintext/ciphertext/credentials.
+      const report = auditCredentialRefConsistency(store, nowMs);
+      return { status: 200, code: "CREDENTIAL_INTEGRITY_AUDIT_OK", data: report };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/finance-worker/metrics",
+    "getFinanceWorkerMetrics",
+    "bearer_rbac",
+    async ({ auth, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "OPERATIONS_ADMIN", "FINANCE_OPERATOR"]);
+      const metrics =
+        typeof financeService.getFinanceWorkerMetrics === "function"
+          ? financeService.getFinanceWorkerMetrics(nowMs)
+          : { pending_debit_orders: 0 };
+      return { status: 200, code: "FINANCE_WORKER_METRICS_OK", data: metrics };
     }
   );
 
@@ -1911,7 +2116,13 @@ export function createCampusCloudApp(options = {}) {
   register("GET", "/api/v1/auth/web/logout", "logoutWebSession", "public", async ({ headers, nowMs }) => {
     const cookieAuth = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs);
     if (cookieAuth?.cloudUserId) {
-      identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+      // A plain web logout must NEVER unlink the XPeach delegation — only the
+      // explicit unlink flow may pass unlinkXpeach: true.
+      identity.revokeAllUserSessions(cookieAuth.cloudUserId, {
+        unlinkXpeach: false,
+        reason: "WEB_USER_LOGOUT",
+        nowMs
+      });
     }
     return {
       status: 302,
@@ -2363,17 +2574,19 @@ export function createCampusCloudApp(options = {}) {
         }
 
         if (cleanSecretText) {
+          escrowCredentialForBindings({
+            store,
+            kmsVault,
+            bindings: sameStudentBindings,
+            cloudUserId: auth.cloudUserId,
+            schoolId,
+            studentNo,
+            credentialKind: "DELEGATED_SESSION_BUNDLE",
+            plaintext: cleanSecretText,
+            expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+            nowMs
+          });
           for (const targetBind of sameStudentBindings) {
-            const encrypted = kmsVault.encryptSecret({
-              bindingId: targetBind.id,
-              schoolId,
-              credentialKind: "DELEGATED_SESSION_BUNDLE",
-              plaintext: cleanSecretText,
-              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-            });
-            store.encryptedCredentials.set(encrypted.id, encrypted);
-            targetBind.credential_ref = encrypted.id;
-            targetBind.credential_expires_at = encrypted.expires_at;
             targetBind.status = "DELEGATED_ACTIVE";
             targetBind.auth_version = serverAuthVersion;
           }
@@ -2654,32 +2867,25 @@ export function createCampusCloudApp(options = {}) {
       if (!targetOrder) {
         throw new ContractError("NOT_FOUND", "Order not found");
       }
-      const secondApproverRef =
-        typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
-      if (!secondApproverRef) {
-        throw new ContractError(
-          "BAD_REQUEST",
-          "second_approver_ref is required; dual-person approval cannot be synthesized"
-        );
-      }
-      const order = await financeService.issueRefundForOrder(
-        orderId,
+      // Dual-person approval can no longer be synthesized via a body field.
+      // quick-refund now creates a PENDING request (202) that a SECOND
+      // authenticated admin must approve + execute.
+      const req = await financeService.createRefundRequest(
         {
+          orderId,
           amountMicropeach:
             targetOrder.price_micropeach ||
             store.pricingMicropeach ||
             DEFAULT_RESERVATION_PRICE_MICROPEACH,
           reason: body?.reason || "站点管理员在后台发起 🍑 退还",
-          actorRef: auth.cloudUserId,
-          secondApproverRef
+          actorRef: auth.cloudUserId
         },
         nowMs
       );
-      await syncUserToSso(order.cloud_user_id);
       return {
-        status: 200,
-        code: "ADMIN_ORDER_REFUNDED",
-        data: order
+        status: 202,
+        code: "REFUND_REQUEST_CREATED",
+        data: { refund_request: req }
       };
     }
   );
@@ -2721,6 +2927,22 @@ export function createCampusCloudApp(options = {}) {
         job.external_execution_state === "DISPATCH_INTENT" ||
         Number(job.attempt_count || 0) >= 1;
       if (!isAlreadyDispatchedOrUnknown) {
+        // Validate the explicit manual window BEFORE any PRECHECK/state change:
+        // a rejected manual execution must consume nothing (task stays armed).
+        // Jobs already dispatched/RESULT_UNKNOWN skip this and proceed to the
+        // read-only reconciliation path below.
+        const manualVerdict = validateManualExecution({
+          job,
+          schoolRules: schoolProvider.getRules(),
+          nowMs
+        });
+        if (!manualVerdict.ok) {
+          throw new ContractError(
+            manualVerdict.code,
+            manualVerdict.message,
+            manualVerdict.detail
+          );
+        }
         const preRes = await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
         if (
           preRes?.job &&
@@ -2953,11 +3175,6 @@ export function createCampusCloudApp(options = {}) {
         sameStudentBindings.push(binding);
       } else {
         for (const sb of sameStudentBindings) {
-          if (sb.credential_ref && store.encryptedCredentials.has(sb.credential_ref)) {
-            store.encryptedCredentials.get(sb.credential_ref).revoked_at = new Date(
-              nowMs
-            ).toISOString();
-          }
           sb.user_name = authRes.userInfo?.userName || sb.user_name || "";
           sb.department = authRes.userInfo?.department || sb.department || "";
           sb.status = "DELEGATED_ACTIVE";
@@ -2975,18 +3192,24 @@ export function createCampusCloudApp(options = {}) {
         user_name: authRes.userInfo?.userName || "",
         department: authRes.userInfo?.department || ""
       });
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      // Per-binding credential escrow: every same-student binding gets its OWN
+      // encrypted record (independent DEK/AAD bound to that binding id). A
+      // single shared credential_ref breaks the permit's bindingId scope check
+      // for every non-owner binding and conflates credential isolation.
+      // Orphaned old records are revoked inside the helper only AFTER the new
+      // records are stored.
+      escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: sameStudentBindings,
+        cloudUserId: auth.cloudUserId,
         schoolId,
+        studentNo: resolvedStudentNo,
         credentialKind: "DELEGATED_SESSION_BUNDLE",
         plaintext: credBundleJson,
-        expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
+        expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
-      store.encryptedCredentials.set(encrypted.id, encrypted);
-      for (const sb of sameStudentBindings) {
-        sb.credential_ref = encrypted.id;
-        sb.credential_expires_at = encrypted.expires_at;
-      }
 
       let consent = store.recordsForUser("consents", auth.cloudUserId).find(
         (c) => !c.withdrawn_at && Number(c.auth_version || 1) === currentAuthVersion
@@ -3495,14 +3718,20 @@ export function createCampusCloudApp(options = {}) {
     };
   }
 
-  function normalizeContactMessages(reqItem, post) {
+  // Internal stored form: preserves idempotency_key + sender_user_id metadata.
+  // NEVER use the public projection to write back storage — the old version of
+  // this function stripped idempotency_key on every read-then-write, silently
+  // breaking send-retry dedupe.
+  function normalizeStoredMessages(reqItem, post) {
     if (!reqItem) return [];
     if (Array.isArray(reqItem.messages) && reqItem.messages.length > 0) {
       return reqItem.messages.map((m) => ({
         id: String(m.id || "mcm_legacy"),
         sender_role: m.sender_role === "OWNER" ? "OWNER" : "REQUESTER",
+        sender_user_id: m.sender_user_id || (m.sender_role === "OWNER" ? post?.owner_cloud_user_id || null : reqItem.sender_user_id || null),
         sender_name: String(m.sender_name || (m.sender_role === "OWNER" ? post?.author_name || "发起人" : reqItem.sender_name || "河工大同学")),
         content: String(m.content || ""),
+        idempotency_key: m.idempotency_key || null,
         created_at: m.created_at || reqItem.created_at
       }));
     }
@@ -3511,8 +3740,10 @@ export function createCampusCloudApp(options = {}) {
       seeded.push({
         id: `${reqItem.id}_init`,
         sender_role: "REQUESTER",
+        sender_user_id: reqItem.sender_user_id || null,
         sender_name: String(reqItem.sender_name || "河工大同学"),
         content: String(reqItem.message),
+        idempotency_key: reqItem.idempotency_key || null,
         created_at: reqItem.created_at
       });
     }
@@ -3520,12 +3751,133 @@ export function createCampusCloudApp(options = {}) {
       seeded.push({
         id: `${reqItem.id}_reply`,
         sender_role: "OWNER",
+        sender_user_id: post?.owner_cloud_user_id || null,
         sender_name: String(post?.author_name || "发起人"),
         content: String(reqItem.reply_message),
+        idempotency_key: reqItem.reply_idempotency_key || null,
         created_at: reqItem.updated_at || reqItem.created_at
       });
     }
     return seeded;
+  }
+
+  // Public projection: strips internal metadata (idempotency_key, sender_user_id)
+  function projectContactMessages(reqItem, post) {
+    return normalizeStoredMessages(reqItem, post).map((m) => ({
+      id: m.id,
+      sender_role: m.sender_role,
+      sender_name: m.sender_name,
+      content: m.content,
+      created_at: m.created_at
+    }));
+  }
+
+  function messagePayloadHash(content) {
+    return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
+  }
+
+  /**
+   * Unified private-chat write path. Every append (initial extra message,
+   * owner reply, requester reply) goes through here so participant, block /
+   * close, length, per-actor rate-limit and idempotency rules can never drift
+   * apart between entry points.
+   *
+   * Idempotency receipts live on reqItem._msgReceipts keyed by
+   * (sender_user_id, operation, key) — independent of the 50-message visible
+   * window so truncation cannot lose dedupe evidence. Same key + different
+   * payload => 409.
+   */
+  function appendThreadMessage(post, reqItem, { actorUserId, actorRole, actorName, content, idempotencyKey, nowMs, isAdminOverride = false }) {
+    const nowIso = new Date(nowMs).toISOString();
+    const senderUserId = actorUserId || (actorRole === "OWNER" ? post.owner_cloud_user_id : reqItem.sender_user_id);
+    if (!isAdminOverride) {
+      const isParticipant =
+        senderUserId &&
+        (senderUserId === post.owner_cloud_user_id || senderUserId === reqItem.sender_user_id);
+      if (!isParticipant) {
+        throw new ContractError("FORBIDDEN", "非会话参与者不能发送私信");
+      }
+    }
+    if (post.status === "RESOLVED" || post.status === "CLOSED") {
+      throw new ContractError("CONFLICT", "该失物招领帖已结案或关闭联系，无法继续发送私信");
+    }
+    if (reqItem.status === "BLOCKED" || reqItem.status === "REJECTED") {
+      throw new ContractError("CONFLICT", "当前联系申请已被拒绝或屏蔽，无法继续发送私信");
+    }
+    if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
+      throw new ContractError("FORBIDDEN", "当前会话已被屏蔽");
+    }
+    const clean = String(content || "").trim();
+    if (!clean || clean.length > 240) {
+      throw new ContractError("BAD_REQUEST", "私信内容长度需在 1–240 字之间");
+    }
+
+    // Idempotent receipt check BEFORE rate limiting: a retry must be free.
+    const receiptScope = senderUserId + "|message|" + (idempotencyKey || "");
+    if (idempotencyKey) {
+      if (!reqItem._msgReceipts || typeof reqItem._msgReceipts !== "object") {
+        reqItem._msgReceipts = {};
+      }
+      const prior = reqItem._msgReceipts[receiptScope];
+      if (prior) {
+        if (prior.payload_hash !== messagePayloadHash(clean)) {
+          throw new ContractError(
+            "CONFLICT",
+            "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+          );
+        }
+        return { appended: false, duplicate: true, message: prior.message_snapshot || null };
+      }
+    }
+
+    const stored = normalizeStoredMessages(reqItem, post);
+    const recentMine = stored.filter(
+      (m) =>
+        (m.sender_user_id || (m.sender_role === "OWNER" ? post.owner_cloud_user_id : reqItem.sender_user_id)) === senderUserId &&
+        nowMs - new Date(m.created_at).getTime() < 60_000
+    );
+    if (recentMine.length >= 6) {
+      throw new ContractError("RATE_LIMITED", "私信发送过于频繁，请稍后再试");
+    }
+
+    const msg = {
+      id: "mcm_" + crypto.randomUUID().slice(0, 8),
+      sender_role: actorRole === "OWNER" ? "OWNER" : "REQUESTER",
+      sender_user_id: senderUserId || null,
+      sender_name: String(actorName || "河工大同学").slice(0, 24),
+      content: clean,
+      idempotency_key: idempotencyKey || null,
+      created_at: nowIso
+    };
+    stored.push(msg);
+    reqItem.messages = stored.slice(-50);
+
+    if (idempotencyKey) {
+      reqItem._msgReceipts[receiptScope] = {
+        message_id: msg.id,
+        payload_hash: messagePayloadHash(clean),
+        created_at: nowIso,
+        message_snapshot: {
+          id: msg.id,
+          sender_role: msg.sender_role,
+          sender_name: msg.sender_name,
+          content: msg.content,
+          created_at: msg.created_at
+        }
+      };
+      const keys = Object.keys(reqItem._msgReceipts);
+      if (keys.length > 100) {
+        keys
+          .sort(
+            (a, b) =>
+              new Date(reqItem._msgReceipts[a].created_at || 0).getTime() -
+              new Date(reqItem._msgReceipts[b].created_at || 0).getTime()
+          )
+          .slice(0, keys.length - 100)
+          .forEach((k) => delete reqItem._msgReceipts[k]);
+      }
+    }
+    return { appended: true, duplicate: false, message: msg };
   }
 
   function projectContactRequestForViewer(reqItem, post, { canSeeInitiatorContact = false, canSeeSenderContact = true } = {}) {
@@ -3538,7 +3890,7 @@ export function createCampusCloudApp(options = {}) {
       contact_info: canSeeSenderContact ? String(reqItem.contact_info || "") : "",
       status: reqItem.status,
       reply_message: reqItem.reply_message || null,
-      messages: normalizeContactMessages(reqItem, post),
+      messages: projectContactMessages(reqItem, post),
       initiator_contact: canSeeInitiatorContact ? post?.contact || null : null,
       created_at: reqItem.created_at,
       updated_at: reqItem.updated_at
@@ -3738,7 +4090,11 @@ export function createCampusCloudApp(options = {}) {
       }
       const contactInfo = String(body?.contact_info || body?.contact_hint || "").trim().slice(0, 64);
       const idempotencyKey = String(
-        headers?.["idempotency-key"] || headers?.["Idempotency-Key"] || body?.client_request_id || ""
+        headers?.["idempotency-key"] ||
+          headers?.["Idempotency-Key"] ||
+          body?.client_request_id ||
+          body?.idempotency_key ||
+          ""
       ).trim();
 
       if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
@@ -3750,6 +4106,16 @@ export function createCampusCloudApp(options = {}) {
               (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey)))
         );
         if (dup) {
+          // Same Idempotency-Key with a DIFFERENT payload is a contract
+          // violation — identical to the append path semantics (409).
+          const keyedMsg = (dup.messages || []).find((m) => m.idempotency_key === idempotencyKey);
+          const keyedPayload = keyedMsg ? keyedMsg.content : dup.message;
+          if (keyedPayload != null && String(keyedPayload).trim() !== message) {
+            throw new ContractError(
+              "CONFLICT",
+              "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+            );
+          }
           return {
             status: 200,
             code: "CONTACT_REQUEST_DUPLICATE",
@@ -3773,22 +4139,24 @@ export function createCampusCloudApp(options = {}) {
         (r) => r.sender_user_id === auth.cloudUserId && (r.status === "PENDING" || r.status === "APPROVED")
       );
       if (existingThread) {
-        const existingMsgs = normalizeContactMessages(existingThread, post);
-        const recentThreadMsgs = existingMsgs.filter(
-          (m) => m.sender_role === "REQUESTER" && nowMs - new Date(m.created_at).getTime() < 60_000
-        );
-        if (recentThreadMsgs.length >= 6) {
-          throw new ContractError("RATE_LIMITED", "私信发送过于频繁，请稍后再试");
-        }
-        existingMsgs.push({
-          id: "mcm_" + crypto.randomUUID().slice(0, 8),
-          sender_role: "REQUESTER",
-          sender_name: resolvedSenderName,
+        const appendRes = appendThreadMessage(post, existingThread, {
+          actorUserId: auth.cloudUserId,
+          actorRole: "REQUESTER",
+          actorName: resolvedSenderName,
           content: message,
-          idempotency_key: idempotencyKey || null,
-          created_at: nowIso
+          idempotencyKey: idempotencyKey || null,
+          nowMs
         });
-        existingThread.messages = existingMsgs.slice(-50);
+        if (appendRes.duplicate) {
+          return {
+            status: 200,
+            code: "CONTACT_REQUEST_DUPLICATE",
+            data: projectContactRequestForViewer(existingThread, post, {
+              canSeeInitiatorContact: existingThread.status === "APPROVED",
+              canSeeSenderContact: true
+            })
+          };
+        }
         existingThread.message = message;
         if (contactInfo) existingThread.contact_info = contactInfo;
         existingThread.updated_at = nowIso;
@@ -3916,7 +4284,7 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/moments/posts/{postId}/contact-requests/{requestId}/action",
     "handleMomentsContactRequestAction",
     "bearer",
-    async ({ auth, params, body, nowMs }) => {
+    async ({ auth, params, body, headers, nowMs }) => {
       const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
       if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
       const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
@@ -3936,7 +4304,7 @@ export function createCampusCloudApp(options = {}) {
         if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
         }
-        const existingMsgs = normalizeContactMessages(reqItem, post);
+        const existingMsgs = normalizeStoredMessages(reqItem, post);
         reqItem.status = "APPROVED";
         if (body?.reply_message) {
           const cleanReply = String(body.reply_message).trim().slice(0, 240);
@@ -3977,49 +4345,57 @@ export function createCampusCloudApp(options = {}) {
         if (!canManageRequests && !isSender) {
           throw new ContractError("FORBIDDEN", "仅发起人或申请人本人可在该私信会话中回复");
         }
-        if (reqItem.status === "BLOCKED" || reqItem.status === "REJECTED") {
-          throw new ContractError("CONFLICT", "当前联系申请已被拒绝或屏蔽，无法继续发送私信");
-        }
-        if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
-          throw new ContractError("FORBIDDEN", "当前会话已被屏蔽");
-        }
         const replyMsg = String(body?.reply_message || body?.message || "").trim();
-        if (!replyMsg || replyMsg.length > 240) {
-          throw new ContractError("BAD_REQUEST", "私信回复内容长度需在 1–240 字之间");
-        }
-        const existingMsgs = normalizeContactMessages(reqItem, post);
+        const replyIdemKey = String(
+          headers?.["idempotency-key"] ||
+            headers?.["Idempotency-Key"] ||
+            body?.idempotency_key ||
+            body?.client_message_id ||
+            ""
+        ).trim();
         const actorRole = canManageRequests && !isSender ? "OWNER" : "REQUESTER";
         const actorUser = store.users.get(auth.cloudUserId);
         const actorName =
           actorRole === "OWNER"
             ? String(post.author_name || actorUser?.display_name || "发起人").slice(0, 24)
             : String(reqItem.sender_name || actorUser?.display_name || "河工大同学").slice(0, 24);
-        existingMsgs.push({
-          id: "mcm_" + crypto.randomUUID().slice(0, 8),
-          sender_role: actorRole,
-          sender_name: actorName,
+        // Unified write path: participant / block / CLOSED post / length /
+        // per-actor rate-limit / idempotent dedupe — previously REPLY skipped
+        // the closed-post and rate-limit checks entirely.
+        const appendRes = appendThreadMessage(post, reqItem, {
+          actorUserId: auth.cloudUserId,
+          actorRole,
+          actorName,
           content: replyMsg,
-          created_at: nowIso
+          idempotencyKey: replyIdemKey || null,
+          nowMs,
+          isAdminOverride: Boolean(isAdmin && !isOwner && !isSender)
         });
-        reqItem.messages = existingMsgs.slice(-50);
+        if (appendRes.duplicate) {
+          return {
+            status: 200,
+            code: "CONTACT_MESSAGE_DUPLICATE",
+            data: { duplicated: true, message: appendRes.message }
+          };
+        }
         if (actorRole === "OWNER") {
-          reqItem.reply_message = replyMsg;
+          reqItem.reply_message = appendRes.message.content;
           if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
             store.addNotification({
               cloudUserId: reqItem.sender_user_id,
               category: "MOMENTS_CONTACT_REPLY",
               title: `发起人回复了您在「${post.title}」的私信`,
-              body: `${actorName}：${replyMsg}`
+              body: `${actorName}：${appendRes.message.content}`
             });
           }
         } else {
-          reqItem.message = replyMsg;
+          reqItem.message = appendRes.message.content;
           if (post.owner_cloud_user_id && post.owner_cloud_user_id !== auth.cloudUserId) {
             store.addNotification({
               cloudUserId: post.owner_cloud_user_id,
               category: "MOMENTS_CONTACT_MESSAGE",
               title: `收到「${post.title}」的新认领私信`,
-              body: `${actorName}：${replyMsg}`
+              body: `${actorName}：${appendRes.message.content}`
             });
           }
         }

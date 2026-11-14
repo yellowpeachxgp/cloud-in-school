@@ -1249,6 +1249,12 @@ export class HautLibraryProvider {
         regionName
       });
     }
+    // Defense-in-depth: re-check the unified authorization/kill-switch fence
+    // immediately before the addbooking write — the await after onBeforeExternalWrite
+    // is a real interleaving point for revocation/kill-switch flips.
+    if (typeof assertStillAuthorized === "function") {
+      assertStillAuthorized();
+    }
     let addRes;
     try {
       addRes = await this.wslibGetJson(
@@ -2203,6 +2209,12 @@ export class HautLibraryProvider {
           regionId: 7,
           regionName: plan.preferences_json?.preferred_area_ids?.[0] || "北四楼自习区"
         });
+      }
+      // Re-check the unified authorization/kill-switch fence immediately
+      // before the actual write — the await gap after intent persistence is a
+      // real interleaving point for revocation/kill-switch flips.
+      if (typeof assertStillAuthorized === "function") {
+        assertStillAuthorized();
       }
       const mockRes = await this.mockBackend.handleCreateReservation({ job, plan, binding, nowInstant });
       if (typeof onAfterExternalWrite === "function") {
