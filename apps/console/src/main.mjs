@@ -2520,10 +2520,12 @@ export function renderConsoleHtml(ctx = {}) {
             var walletRes = pair[1];
             if (walletRes && walletRes.data) {
               var microBal =
-                walletRes.data.available_micropeach != null
-                  ? Number(walletRes.data.available_micropeach)
-                  : Math.round(Number(walletRes.data.peach_balance || 0) * 1000000);
-              if (microBal < 1000000) {
+                walletRes.data.micropeach_balance != null
+                  ? Number(walletRes.data.micropeach_balance)
+                  : walletRes.data.available_micropeach != null
+                    ? Number(walletRes.data.available_micropeach)
+                    : Math.round(Number(walletRes.data.peach_balance || 0) * ${MICROPEACH_PER_PEACH});
+              if (microBal < ${DEFAULT_RESERVATION_PRICE_MICROPEACH}) {
                 throw new Error(
                   "当前 XPeach 账户余额不足 " + PRICE_PEACH_TEXT + " 🍑，请先前往 XPeach 主站补充后再开启云端抢座"
                 );
