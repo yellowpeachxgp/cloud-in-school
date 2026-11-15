@@ -839,6 +839,10 @@ export class CloudDatabaseStore {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
       loadMap(this.notifications, raw.notifications);
+      // Restore durable idempotency receipts (R5-C2); absent in legacy
+      // snapshots — replaying an old retry then falls back to first-create
+      // semantics with payload-hash protection, never a silent duplicate.
+      loadMap(this.idempotencyRecords, raw.idempotencyRecords);
       if (raw.momentsState && typeof raw.momentsState === "object") {
         this.momentsState = {
           ...createDefaultHautMomentsState(),
@@ -961,6 +965,9 @@ export class CloudDatabaseStore {
         campusContent: Array.from(this.campusContent.entries()),
         momentsState: this.momentsState,
         notifications: Array.from(this.notifications.entries()),
+        // Durable idempotency receipts (R5-C2): a created plan must replay its
+        // original result after restart — never a duplicate, never lost.
+        idempotencyRecords: Array.from(this.idempotencyRecords.entries()).slice(-2000),
         auditEvents: this.auditEvents.slice(-500)
       };
       this._snapshotTmpSeq = (this._snapshotTmpSeq || 0) + 1;

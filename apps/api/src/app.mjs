@@ -1308,16 +1308,31 @@ export function createCampusCloudApp(options = {}) {
           }
           return { status: 200, code: "REQUEST_DUPLICATE", data: existing.data };
         }
-        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
+        // Receipt pruning happens before the commit — the engine writes the
+        // durable receipt INSIDE the same atomic commit as plan/job/events/
+        // quote-consumption (R5-C2), so a post-create crash can never strand a
+        // committed plan with no recoverable receipt.
         if (store.idempotencyRecords.size > 2000) {
           for (const [k, r] of store.idempotencyRecords) {
             if (!r.createdAtMs || nowMs - r.createdAtMs > 86400_000) store.idempotencyRecords.delete(k);
           }
           if (store.idempotencyRecords.size > 2000) store.idempotencyRecords.clear();
         }
-        store.idempotencyRecords.set(cacheKey, { bodyHash, data: created, createdAtMs: nowMs });
-        await syncUserToSso(auth.cloudUserId);
-        return { status: 201, code: "RESERVATION_PLAN_CREATED", data: created };
+        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs, {
+          idempotencyCacheKey: cacheKey,
+          idempotencyBodyHash: bodyHash
+        });
+        let ssoSyncFailed = false;
+        try {
+          await syncUserToSso(auth.cloudUserId);
+        } catch {
+          ssoSyncFailed = true;
+        }
+        return {
+          status: 201,
+          code: "RESERVATION_PLAN_CREATED",
+          data: { ...created, pending_sso_sync: ssoSyncFailed }
+        };
       }
       const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
       await syncUserToSso(auth.cloudUserId);

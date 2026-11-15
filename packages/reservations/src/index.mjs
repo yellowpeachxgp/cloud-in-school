@@ -232,7 +232,7 @@ export class TripleScheduleEngine {
     }
   }
 
-  createPlanAndJob(cloudUserId, payload, nowMs = Date.now()) {
+  createPlanAndJob(cloudUserId, payload, nowMs = Date.now(), commitOpts = {}) {
     const binding = this.store.schoolBindings.get(payload.school_binding_id);
     if (!binding || binding.cloud_user_id !== cloudUserId) {
       throw new ContractError("CAMPUS_BINDING_REQUIRED", "School binding not found or not owned by user");
@@ -582,23 +582,79 @@ export class TripleScheduleEngine {
       created_at: new Date(nowMs).toISOString()
     };
 
-    this.store.reservationPlans.set(planId, plan);
-    this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
-    this.store.reservationJobs.set(jobId, job);
-    // Quote consumed atomically with the commit — only here, after every
-    // failure path above is past.
-    if (acceptedQuote) {
-      this.store.priceQuotes.delete(acceptedQuote.quote_id);
-    }
-    this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
-    for (const ev of events) {
-      this.store.scheduleEvents.set(ev.id, ev);
-      this.store.indexScheduleEvent?.(ev.id, ev);
-    }
-    if (typeof this.store.flushSnapshotSync === "function") {
-      this.store.flushSnapshotSync();
-    } else if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
+    const createdResult = {
+      plan_id: planId,
+      job_id: jobId,
+      execution_mode: "CLOUD_HOSTED",
+      target_local_date: schedule.targetLocalDate,
+      target_local_time: schedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: remainingDays,
+      end_local_date: endLocalDate,
+      target_at: schedule.targetAtIso,
+      precheck_at: schedule.precheckAtIso,
+      final_check_at: schedule.finalCheckAtIso,
+      school_window: {
+        start: rules.window_start,
+        end_exclusive: rules.window_end_exclusive,
+        time_zone: rules.time_zone
+      },
+      status: job.state,
+      capability: executionPath,
+      schedule_events: events
+    };
+
+    // R5-C2 single recoverable commit: plan + job + events + quote
+    // consumption + idempotency receipt either ALL become durable or NONE
+    // becomes visible. Applies first, then one STRICT flush; on any
+    // persistence failure the live maps are rolled back exactly, so no
+    // half-committed plan can leak through an in-memory-only success.
+    const quotePresent = acceptedQuote
+      ? this.store.priceQuotes.has(acceptedQuote.quote_id)
+      : false;
+    const appliedReceipt = Boolean(commitOpts.idempotencyCacheKey);
+    try {
+      this.store.reservationPlans.set(planId, plan);
+      this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
+      this.store.reservationJobs.set(jobId, job);
+      this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
+      // Quote consumed inside the same commit — only durable success burns it.
+      if (acceptedQuote) {
+        this.store.priceQuotes.delete(acceptedQuote.quote_id);
+      }
+      for (const ev of events) {
+        this.store.scheduleEvents.set(ev.id, ev);
+        this.store.indexScheduleEvent?.(ev.id, ev);
+      }
+      if (appliedReceipt) {
+        this.store.idempotencyRecords.set(commitOpts.idempotencyCacheKey, {
+          bodyHash: commitOpts.idempotencyBodyHash,
+          data: createdResult,
+          createdAtMs: nowMs
+        });
+      }
+      // STRICT persist — a silent non-strict failure would fabricate a
+      // durable-commit that restarts cannot recover.
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        this.store.flushSnapshotStrictSync();
+      } else if (typeof this.store.flushSnapshotSync === "function") {
+        this.store.flushSnapshotSync();
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
+    } catch (commitErr) {
+      // Full rollback — exact inverse of every mutation above.
+      this.store.reservationPlans.delete(planId);
+      this.store.reservationJobs.delete(jobId);
+      for (const ev of events) this.store.scheduleEvents.delete(ev.id);
+      if (appliedReceipt) this.store.idempotencyRecords.delete(commitOpts.idempotencyCacheKey);
+      if (acceptedQuote && quotePresent) {
+        this.store.priceQuotes.set(acceptedQuote.quote_id, acceptedQuote);
+      }
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态"
+      );
     }
 
     // Asynchronously prewarm target region & candidate seat IDs on job creation when live credentials exist
@@ -649,27 +705,7 @@ export class TripleScheduleEngine {
         .catch(() => {});
     }
 
-    return {
-      plan_id: planId,
-      job_id: jobId,
-      execution_mode: "CLOUD_HOSTED",
-      target_local_date: schedule.targetLocalDate,
-      target_local_time: schedule.targetLocalTime,
-      repeat_days: repeatDays,
-      remaining_days: remainingDays,
-      end_local_date: endLocalDate,
-      target_at: schedule.targetAtIso,
-      precheck_at: schedule.precheckAtIso,
-      final_check_at: schedule.finalCheckAtIso,
-      school_window: {
-        start: rules.window_start,
-        end_exclusive: rules.window_end_exclusive,
-        time_zone: rules.time_zone
-      },
-      status: job.state,
-      capability: executionPath,
-      schedule_events: events
-    };
+    return createdResult;
   }
 
   casJobState(jobId, expectedVersion, nextState, patch = {}) {
