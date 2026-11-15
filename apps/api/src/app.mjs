@@ -3812,6 +3812,37 @@ export function createCampusCloudApp(options = {}) {
     return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
   }
 
+  // Canonical payload v2: structured serialization with a fixed key order —
+  // separator-joining was ambiguous ("a|b"+"c" collides with "a"+"b|c") and
+  // the create path used a different formula than the append path, so a lost
+  // response retried through another entry 409'd a legitimate retry.
+  const CONTACT_CANONICAL_VERSION = 2;
+  function canonicalContactMessage({ scope, actorUserId, operation, content, contact }) {
+    return JSON.stringify({
+      v: CONTACT_CANONICAL_VERSION,
+      scope: String(scope),
+      actor: String(actorUserId || ""),
+      op: String(operation),
+      content: String(content || ""),
+      contact: String(contact || "")
+    });
+  }
+
+  // Legacy receipt verification: pre-v2 entries only prove the key was used —
+  // verify under BOTH historical formulas before deciding; unverifiable
+  // payload stays a conservative dedupe, never a silent new write.
+  function verifyReceiptPayload(prior, canonicalV2, legacyInitialConcat, legacyContentOnly) {
+    if (prior.canonical_version === CONTACT_CANONICAL_VERSION) {
+      return prior.payload_hash === messagePayloadHash(canonicalV2) ? "MATCH" : "CONFLICT";
+    }
+    // v1 / unknown-version receipt: try every old formula.
+    const candidates = [legacyInitialConcat, legacyContentOnly].filter((x) => x != null);
+    for (const c of candidates) {
+      if (prior.payload_hash === messagePayloadHash(c)) return "MATCH_LEGACY";
+    }
+    return "LEGACY_UNPROVABLE";
+  }
+
   /**
    * Unified private-chat write path. Every append (initial extra message,
    * owner reply, requester reply) goes through here so participant, block /
@@ -4134,13 +4165,8 @@ export function createCampusCloudApp(options = {}) {
       ).trim();
 
       if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
-      // Canonical payload for the initial contact message includes every
-      // semantically meaningful field (content + contact info) — changing any
-      // of them under the same key is a contract violation.
-      const initialCanonical = `${message}|${contactInfo}`;
       if (idempotencyKey) {
         const initialScope = auth.cloudUserId + "|message|" + idempotencyKey;
-        const canonicalHash = messagePayloadHash(initialCanonical);
         const dup = post.contact_requests.find((r) => {
           if (r.sender_user_id !== auth.cloudUserId) return false;
           // Authoritative source: per-(actor|op|key) receipts survive the
@@ -4157,7 +4183,22 @@ export function createCampusCloudApp(options = {}) {
         if (dup) {
           const receipt = dup._msgReceipts?.[initialScope];
           if (receipt) {
-            if (receipt.payload_hash !== canonicalHash) {
+            // Same canonical helper as the append path — one wire formula for
+            // every entry point (C1/C2).
+            const dupCanonical = canonicalContactMessage({
+              scope: "p:" + post.id + "|t:" + dup.id,
+              actorUserId: auth.cloudUserId,
+              operation: "message",
+              content: message,
+              contact: contactInfo
+            });
+            const verdict = verifyReceiptPayload(
+              receipt,
+              dupCanonical,
+              `${message}|${contactInfo}`,
+              message
+            );
+            if (verdict === "CONFLICT") {
               throw new ContractError(
                 "CONFLICT",
                 "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
@@ -4206,6 +4247,7 @@ export function createCampusCloudApp(options = {}) {
           actorRole: "REQUESTER",
           actorName: resolvedSenderName,
           content: message,
+          contactInfo,
           idempotencyKey: idempotencyKey || null,
           nowMs
         });
@@ -4253,8 +4295,16 @@ export function createCampusCloudApp(options = {}) {
       }
 
       const initialMsgId = "mcm_" + crypto.randomUUID().slice(0, 8);
+      const newReqId = "mcr_" + crypto.randomUUID().slice(0, 10);
+      const initialCanonicalV2 = canonicalContactMessage({
+        scope: "p:" + post.id + "|t:" + newReqId,
+        actorUserId: auth.cloudUserId,
+        operation: "message",
+        content: message,
+        contact: contactInfo
+      });
       const reqItem = {
-        id: "mcr_" + crypto.randomUUID().slice(0, 10),
+        id: newReqId,
         post_id: post.id,
         sender_user_id: auth.cloudUserId,
         sender_name: resolvedSenderName,
@@ -4279,7 +4329,8 @@ export function createCampusCloudApp(options = {}) {
           ? {
               [auth.cloudUserId + "|message|" + idempotencyKey]: {
                 message_id: initialMsgId,
-                payload_hash: messagePayloadHash(initialCanonical),
+                canonical_version: CONTACT_CANONICAL_VERSION,
+                payload_hash: messagePayloadHash(initialCanonicalV2),
                 created_at: nowIso,
                 message_snapshot: {
                   id: initialMsgId,
