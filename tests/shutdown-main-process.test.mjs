@@ -11,7 +11,8 @@ for (const scenario of ['normal', 'hung', 'finance', 'socket', 'slow-save', 'rep
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shutdown-main-'));
     const child = fork('apps/api/src/main.mjs', [], {
       execArgv: ['--import', './tests/helpers/main-scenario.mjs'],
-      env: { PATH: process.env.PATH, HOME: dir, PORT: '0', HOST: '127.0.0.1', CLOUD_SNAPSHOT_PATH: path.join(dir, 'state.json'), CLOUD_REQUIRE_DURABLE_SNAPSHOT: 'true', SHUTDOWN_TIMEOUT_MS: '150', TEST_SHUTDOWN_SCENARIO: scenario },
+      // 正常路径允许真实 fsync 的主机抖动；故障路径仍用 150ms 验证严格超时。
+      env: { PATH: process.env.PATH, HOME: dir, PORT: '0', HOST: '127.0.0.1', CLOUD_SNAPSHOT_PATH: path.join(dir, 'state.json'), CLOUD_REQUIRE_DURABLE_SNAPSHOT: 'true', SHUTDOWN_TIMEOUT_MS: ['normal', 'repeat'].includes(scenario) ? '4000' : '150', TEST_SHUTDOWN_SCENARIO: scenario },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc']
     });
     let output = '', errors = '';

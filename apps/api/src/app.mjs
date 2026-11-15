@@ -490,7 +490,15 @@ export function createCampusCloudApp(options = {}) {
   });
 
   register("GET", "/readyz", "getReadyz", "none", async () => {
+    // HTTP 状态是负载均衡器的准入依据，不能只在 200 响应体里写 ready=false。
+    if (isDraining || !kmsVault.kmsOnline) {
+      throw new ContractError("READINESS_UNAVAILABLE", "服务正在排空或密钥服务不可用，请稍后重试");
+    }
     const redisTelemetry = await redisBuffer.getTelemetrySnapshot();
+    // 读取遥测期间也可能收到停机信号。
+    if (isDraining || !kmsVault.kmsOnline) {
+      throw new ContractError("READINESS_UNAVAILABLE", "服务就绪状态已变化，请稍后重试");
+    }
     return {
       status: 200,
       code: "READY_OK",

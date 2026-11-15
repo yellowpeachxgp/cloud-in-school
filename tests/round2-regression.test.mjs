@@ -267,58 +267,50 @@ test("R2-4: drain fence rejects new writes with SERVER_DRAINING but keeps reads"
 // R2-C4b: real SIGTERM — spawned server must exit within a bounded window and
 // stop accepting work (pre-fix: signal only cleared one timer; process ran on).
 // ---------------------------------------------------------------------------
-test("R2-5: SIGTERM drains and exits the API process within bound", async () => {
-  const port = 18347;
-  const tmpState = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "r2-sig-")), "state.json");
-  const nodeBin =
-    ["/opt/homebrew/opt/node@24/bin/node", "/usr/local/bin/node", "/usr/bin/node", process.execPath].find((p) => {
-      try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; }
-    }) || "node";
-  const child = spawn(nodeBin, ["apps/api/src/main.mjs"], {
+test("R2-5：真实 HTTP 入口正常停机退出，临时端口且无残留看门狗", { timeout: 12000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r2-sig-"));
+  const child = spawn(process.execPath, ["apps/api/src/main.mjs"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
-    env: {
-      ...process.env,
-      PORT: String(port),
-      CLOUD_SNAPSHOT_PATH: tmpState,
-      CLOUD_REQUIRE_DURABLE_SNAPSHOT: "false"
-    },
+    env: { PATH: process.env.PATH, HOME: dir, HOST: "127.0.0.1", PORT: "0",
+      CLOUD_SNAPSHOT_PATH: path.join(dir, "state.json"), CLOUD_REQUIRE_DURABLE_SNAPSHOT: "true",
+      SHUTDOWN_TIMEOUT_MS: "2000" },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  let out = "";
-  child.stdout.on("data", (d) => (out += d));
-  child.stderr.on("data", (d) => (out += d));
-  try {
-    // wait for listen
-    const deadline = Date.now() + 15_000;
-    let up = false;
-    while (Date.now() < deadline) {
-      try {
-        await new Promise((resolve, reject) => {
-          const req = http.get({ host: "127.0.0.1", port, path: "/healthz", timeout: 500 }, (res) => {
-            res.resume();
-            res.statusCode < 500 ? resolve() : reject(new Error("status " + res.statusCode));
-          });
-          req.on("error", reject);
-          req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-        });
-        up = true;
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 150));
-      }
+  let out = "", startupTimer, shutdownTimer;
+  const exited = new Promise(resolve => child.once("exit", (code, signal) => resolve({ code, signal })));
+  const listening = new Promise(resolve => child.stdout.on("data", data => {
+    out += data;
+    for (const line of out.split("\n")) {
+      try { const event = JSON.parse(line); if (event.status === "listening") resolve(event.port); } catch {}
     }
-    assert.equal(up, true, "server did not come up: " + out.slice(-500));
-
-    const exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  }));
+  child.stderr.on("data", data => { out += data; });
+  try {
+    const port = await Promise.race([listening,
+      exited.then(result => { throw new Error("入口在监听前退出：" + JSON.stringify(result) + out); }),
+      new Promise((_, reject) => { startupTimer = setTimeout(() => reject(new Error("监听超时：" + out)), 5000); })]);
+    clearTimeout(startupTimer);
+    await new Promise((resolve, reject) => {
+      const req = http.get({ host: "127.0.0.1", port, path: "/healthz", timeout: 500 }, res => {
+        res.resume(); res.statusCode === 200 ? resolve() : reject(new Error("探针失败：" + res.statusCode));
+      });
+      req.on("error", reject);
+      req.on("timeout", () => req.destroy(new Error("探针超时")));
+    });
     child.kill("SIGTERM");
-    const code = await Promise.race([
-      exited,
-      new Promise((_, rej) => setTimeout(() => rej(new Error("process did not exit within 18s of SIGTERM")), 18_000))
-    ]);
-    assert.equal(code, 0, "clean shutdown must exit 0, got " + code);
-    assert.match(out, /shutdown_complete/);
+    const result = await Promise.race([exited,
+      new Promise((_, reject) => { shutdownTimer = setTimeout(() => reject(new Error("进程停机超时：" + out)), 8000); })]);
+    assert.deepEqual(result, { code: 0, signal: null }, out);
+    const final = out.split("\n").flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } })
+      .filter(event => event.phase === "shutdown_complete");
+    assert.equal(final.length, 1, out);
+    assert.equal(final[0].drained, true, out);
+    assert.equal(final[0].deadlineExceeded, false, out);
   } finally {
+    clearTimeout(startupTimer); clearTimeout(shutdownTimer);
     child.kill("SIGKILL");
+    await exited;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -775,4 +767,58 @@ test("R2-12: kill-switch flipped during dispatch-intent persist blocks the write
       "/" +
       finalJob?.external_execution_state
   );
+});
+
+test("存储在派发意图落盘后变成未知时，真实学校写边界必须拒绝后续派发", async () => {
+  const app = createCampusCloudApp({
+    requireAdminAccess: false,
+    schoolProviderOptions: { mockBackend: new DeterministicMockSchoolBackend() }
+  });
+  const nowMs = Date.parse("2026-11-16T07:00:00+08:00");
+  const { user, authHeaders } = setupBoundUser(app, nowMs);
+  const c = await app.inject({ method: "POST", url: "/api/v1/me/consents", headers: authHeaders, body: { school_id: "haut" }, nowMs });
+  const b = await app.inject({ method: "POST", url: "/api/v1/school-bindings", headers: authHeaders, body: { school_id: "haut", student_no: "20247777" }, nowMs });
+  await app.inject({
+    method: "POST",
+    url: `/api/v1/school-bindings/${b.body.data.id}/complete`,
+    headers: authHeaders,
+    body: { consent_id: c.body.data.id, delegated_secret: "r2_secret" },
+    nowMs
+  });
+  const planRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/reservation-plans",
+    headers: authHeaders,
+    body: {
+      school_binding_id: b.body.data.id,
+      consent_id: c.body.data.id,
+      target_local_date: "2026-11-16",
+      target_local_time: "07:00:00"
+    },
+    nowMs
+  });
+  const jobId = planRes.body.data.job_id;
+
+  const backend = app.schoolProvider.mockBackend;
+  let writes = 0, interleaves = 0;
+  const origCreate = backend.handleCreateReservation.bind(backend);
+  backend.handleCreateReservation = async args => { writes++; return origCreate(args); };
+  const origFlush = app.store.flushSnapshotStrictSync.bind(app.store);
+  app.store.flushSnapshotStrictSync = () => {
+    origFlush();
+    if (app.store.reservationJobs.get(jobId)?.external_execution_state === "DISPATCH_INTENT") {
+      // 模拟另一提交在当前意图提交完成、provider 最终写入复核前进入未知状态。
+      app.store.storageCommitUnknown = true;
+      interleaves++;
+    }
+  };
+  try {
+    await app.reservationEngine.runScheduleEvent(jobId, "FIRE", nowMs, {}).catch(() => {});
+    assert.ok(interleaves > 0, "必须实际经过交错窗口");
+    assert.equal(writes, 0, "未知存储状态不能继续写学校");
+    assert.equal(app.store.storageCommitUnknown, true);
+  } finally {
+    app.store.flushSnapshotStrictSync = origFlush;
+    backend.handleCreateReservation = origCreate;
+  }
 });

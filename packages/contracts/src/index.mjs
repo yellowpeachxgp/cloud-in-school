@@ -19,6 +19,7 @@ export function formatPeachFromMicropeach(micropeach = DEFAULT_RESERVATION_PRICE
 }
 
 export const ERROR_CODES = Object.freeze({
+  READINESS_UNAVAILABLE: { status: 503, retryable: true, userAction: "RETRY_AFTER_SERVICE_RECOVERY" },
   CLOUD_AUTH_REQUIRED: { status: 401, retryable: false, userAction: "RECONNECT_XPEACH_BROWSER" },
   SESSION_REPLAY_DETECTED: { status: 401, retryable: false, userAction: "REAUTHENTICATE_ALL" },
   SSO_UNAVAILABLE: { status: 503, retryable: true, userAction: "KEEP_LOCAL_MODE_OR_RETRY_LATER" },

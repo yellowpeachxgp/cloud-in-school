@@ -1732,6 +1732,9 @@ export class TripleScheduleEngine {
         };
 
         const assertStillAuthorized = () => {
+          // 派发意图持久化的 await 期间，其他提交也可能使存储进入未知隔离。
+          // provider 在真正写学校前调用同一个围栏，不能只在任务开始时检查。
+          this.store.assertStorageWritable?.();
           assertKillSwitchOff();
           if (!isStillAuthorized()) {
             throw new ContractError(

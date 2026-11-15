@@ -8,7 +8,7 @@ const configuredDrainMs = Number(process.env.SHUTDOWN_TIMEOUT_MS);
 const app = createCampusCloudApp({
   storeOptions: {
     snapshotPath:
-      process.env.CLOUD_SNAPSHOT_PATH || "/opt/cloud-in-school/.data/cloud-state.json",
+      process.env.CLOUD_SNAPSHOT_PATH || process.env.DIS_PERSIST_PATH || "/opt/cloud-in-school/.data/cloud-state.json",
     requireDurableSnapshot: process.env.CLOUD_REQUIRE_DURABLE_SNAPSHOT !== "false"
   }
 });
