@@ -59,7 +59,9 @@ let financeWorkerStopped = false;
 const financeWorkerTimer = setInterval(async () => {
   if (financeWorkerStopped || isFinanceWorkerTickRunning) return;
   if (typeof app.financeService?.retryPendingDebits !== "function") return;
+  if (typeof app.isDraining === "function" && app.isDraining()) return;
   isFinanceWorkerTickRunning = true;
+  const task = app.registerLifecycleTask("finance");
   try {
     const res = await app.financeService.retryPendingDebits(Date.now(), {
       batchSize: Number(process.env.FINANCE_RETRY_BATCH_SIZE) || 10,
@@ -88,14 +90,19 @@ const financeWorkerTimer = setInterval(async () => {
 }, 5_000);
 financeWorkerTimer.unref?.();
 
-// Unified graceful shutdown: drain in one idempotent promise. A signal must
-// stop intake AND close the listener — previously only the finance timer was
-// cleared, leaving HTTP + scanner fully alive.
+// Unified graceful shutdown: drain in one idempotent promise covering
+// HTTP mutations AND background scanner/finance tasks under a single absolute
+// deadline (the deadline also bounds server.close — no unbounded waits).
 let shutdownPromise = null;
+let shutdownDeadlineMs = Infinity;
 function shutdown(signal) {
-  if (shutdownPromise) return shutdownPromise;
+  if (shutdownPromise) {
+    // A repeated signal accelerates the deadline, never starts a second flow.
+    shutdownDeadlineMs = Math.min(shutdownDeadlineMs, Date.now() + 2_000);
+    return shutdownPromise;
+  }
+  shutdownDeadlineMs = Date.now() + 15_000;
   shutdownPromise = (async () => {
-    const drainDeadlineMs = Date.now() + 15_000;
     const log = (extra) =>
       console.log(
         JSON.stringify({
@@ -113,49 +120,60 @@ function shutdown(signal) {
     clearInterval(scannerTimer);
     if (typeof app.setDraining === "function") app.setDraining(true);
 
-    // 2) Bounded drain: let in-flight dispatch/debit attempts finish; never
-    //    mark unresolved work as cancelled or failed — RESULT_UNKNOWN stays
-    //    RESULT_UNKNOWN for post-restart reconciliation.
+    // 2) Bounded drain over ALL registered task kinds under ONE deadline.
     const settle = async () => {
-      while (Date.now() < drainDeadlineMs) {
-        const pending = typeof app.getInFlightWrites === "function" ? app.getInFlightWrites() : 0;
-        if (pending <= 0) return true;
+      while (Date.now() < shutdownDeadlineMs) {
+        const counts = typeof app.getInFlightTasks === "function" ? app.getInFlightTasks() : {};
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        if (total <= 0) return { drained: true, counts };
         await new Promise((r) => setTimeout(r, 100));
       }
-      return false;
+      const counts = typeof app.getInFlightTasks === "function" ? app.getInFlightTasks() : {};
+      return { drained: false, counts };
     };
-    const drained = await settle();
+    const { drained, counts: remaining } = await settle();
     if (!drained) {
-      log({ phase: "drain_deadline", note: "in-flight work kept in RESULT_UNKNOWN for reconcile" });
+      // Honest state: unresolved work stays RESULT_UNKNOWN/in-flight — NEVER
+      // fake-cancel, NEVER report drained.
+      log({ phase: "drain_deadline", drained: false, remaining });
+    } else {
+      log({ phase: "drained", drained: true });
     }
 
-    // 3) Strict persistence of recovery state before sockets close.
+    // 3) Strict persistence of recovery state before sockets close; a failure
+    // is a non-success shutdown — never claim recovery state is guaranteed.
+    let persisted = false;
     try {
       if (typeof app.store.flushSnapshotStrictSync === "function") {
         app.store.flushSnapshotStrictSync();
       } else {
         app.store.saveSnapshot();
       }
+      persisted = true;
     } catch (err) {
-      log({ phase: "persist_failed", error: err?.message || String(err) });
+      log({ phase: "persist_failed", drained: false, error: err?.message || String(err) });
     }
 
-    // 4) Close the HTTP server (stops accepting; lets open sockets end).
-    await new Promise((resolve) => {
-      try {
-        server.close(() => resolve());
-        // closeAllConnections keeps the deadline honest on keep-alive sockets
-        if (typeof server.closeAllConnections === "function") {
-          setTimeout(() => {
-            try { server.closeAllConnections(); } catch { /* ignore */ }
-          }, 2_000).unref?.();
+    // 4) Close the HTTP server under the SAME remaining deadline.
+    const serverWaitMs = Math.max(500, shutdownDeadlineMs - Date.now());
+    await Promise.race([
+      new Promise((resolve) => {
+        try {
+          server.close(() => resolve());
+          if (typeof server.closeAllConnections === "function") {
+            setTimeout(() => {
+              try { server.closeAllConnections(); } catch { /* ignore */ }
+            }, Math.min(2_000, serverWaitMs)).unref?.();
+          }
+        } catch {
+          resolve();
         }
-      } catch {
-        resolve();
-      }
-    });
-    log({ phase: "shutdown_complete", drained });
-    process.exitCode = 0;
+      }),
+      new Promise((resolve) => setTimeout(resolve, serverWaitMs))
+    ]);
+    log({ phase: "shutdown_complete", drained, persisted });
+    // Exit honestly: anything unfinished means a non-zero signal to the runner.
+    process.exitCode = drained && persisted ? 0 : 3;
   })();
   return shutdownPromise;
 }

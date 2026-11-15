@@ -4988,8 +4988,32 @@ export function createCampusCloudApp(options = {}) {
     };
   });
 
+  // Unified task lifecycle registry (S1): EVERY kind of in-flight work is
+  // registered — HTTP mutations, scheduler scans, finance retry batches —
+  // so graceful shutdown can actually wait for the real work, not just the
+  // HTTP subset.
   let isDraining = false;
-  let inFlightMutations = 0;
+  const lifecycleTasks = new Map(); // kind -> Set<taskId>
+  let lifecycleSeq = 0;
+  function registerLifecycleTask(kind) {
+    const id = ++lifecycleSeq;
+    const k = String(kind || "task");
+    if (!lifecycleTasks.has(k)) lifecycleTasks.set(k, new Set());
+    lifecycleTasks.get(k).add(id);
+    return { kind: k, id };
+  }
+  function unregisterLifecycleTask(token) {
+    const set = lifecycleTasks.get(token?.kind);
+    if (set) {
+      set.delete(token.id);
+      if (set.size === 0) lifecycleTasks.delete(token.kind);
+    }
+  }
+  function lifecycleTaskCounts() {
+    const counts = {};
+    for (const [kind, set] of lifecycleTasks) counts[kind] = set.size;
+    return counts;
+  }
 
   async function inject({
     method = "GET",
@@ -5015,7 +5039,8 @@ export function createCampusCloudApp(options = {}) {
         }
       };
     }
-    if (upperMethodEarly !== "GET") inFlightMutations += 1;
+    let httpTask = null;
+    if (upperMethodEarly !== "GET") httpTask = registerLifecycleTask("http");
     try {
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
@@ -5515,7 +5540,7 @@ export function createCampusCloudApp(options = {}) {
         body: errEnv.body
       };
     } finally {
-      if (upperMethodEarly !== "GET") inFlightMutations = Math.max(0, inFlightMutations - 1);
+      if (httpTask) unregisterLifecycleTask(httpTask);
     }
   }
 
@@ -5626,6 +5651,10 @@ export function createCampusCloudApp(options = {}) {
     setDraining: (v) => {
       isDraining = Boolean(v);
     },
-    getInFlightWrites: () => inFlightMutations
+    isDraining: () => isDraining,
+    registerLifecycleTask,
+    unregisterLifecycleTask,
+    getInFlightTasks: () => lifecycleTaskCounts(),
+    getInFlightWrites: () => lifecycleTasks.get("http")?.size || 0
   };
 }
