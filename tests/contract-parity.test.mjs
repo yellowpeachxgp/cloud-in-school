@@ -16,8 +16,8 @@ test("Contract Parity: 100% bidirectional parity between registered HTTP routes,
   const inventory = loadEndpointInventory();
   const openApiText = loadOpenApiText();
 
-  assert.equal(inventory.length, 95, "endpoint-inventory.yaml must declare 95 operations");
-  assert.equal(registered.length, 95, "CampusCloudApp must register all 95 operations");
+  assert.equal(inventory.length, 96, "endpoint-inventory.yaml must declare 96 operations");
+  assert.equal(registered.length, 96, "CampusCloudApp must register all 96 operations");
 
   const regByKey = new Map(registered.map((r) => [`${r.method} ${r.path}`, r]));
   const invByKey = new Map(inventory.map((e) => [`${e.method} ${e.path}`, e]));
