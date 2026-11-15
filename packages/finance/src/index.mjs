@@ -243,48 +243,116 @@ export class IsolatedFinanceBridge {
 
   /**
    * Read-only reconciliation probe for a deterministic idempotency key.
-   * NEVER dispatches a write. Outcomes:
-   *  - SUCCEEDED: upstream recorded the same event key as applied
-   *  - NOT_FOUND: query succeeded and the key provably never applied
-   *  - UNKNOWN: cannot prove either way (caller must keep reconciling)
+   * NEVER dispatches a write. Evidence-typed outcomes:
+   *  - APPLIED: verified upstream record for THIS eventKey matching the local
+   *    operation's amount + target account.
+   *  - PROVEN_NOT_APPLIED: verified upstream business contract semantics that
+   *    the operation was never received AND will not late-post. "The query
+   *    returned nothing" is NEVER sufficient — a bare HTTP 404 proves only
+   *    that some route/record lookup failed.
+   *  - UNKNOWN: anything else — every ambiguous transport/parse/auth/timeout
+   *    result fails CLOSED into manual review, never into a refund unlock.
+   * Returned evidence is auditable: outcome, eventKey, provider, protocol
+   * version, probed_at, and the matched amount/account linkage.
    */
-  async queryOperationResult(eventKey) {
+  async queryOperationResult(eventKey, { expectedMicropeach = null, cloudUserId = null } = {}) {
     if (!eventKey || !/^dis:reservation:[0-9a-fA-F-]{36}:(debit|refund):v1$/.test(eventKey)) {
       throw new ContractError("BAD_REQUEST", "Invalid Finance Bridge idempotency event_key");
     }
-    // Sandbox ledger: absence of the key IS proof it was never applied —
-    // everything lives in this process.
+    const evidence = (outcome, extra = {}) => ({
+      outcome,
+      event_key: eventKey,
+      provider: "xpeach-sso-finance-bridge",
+      protocol_version: "v1",
+      probed_at: new Date().toISOString(),
+      ...extra
+    });
+    // Sandbox ledger: the full operation ledger lives in-process — presence IS
+    // proof applied; verified absence IS proof not-received.
     const cached = this.processedIdempotencyKeys.get(eventKey);
     if (cached) {
-      return { outcome: "SUCCEEDED", result: { ...cached } };
-    }
-    if (this.realDebitsEnabled) {
-      // The real SSO read-back contract is unverified — do NOT claim a
-      // proven-negative from an endpoint we cannot confirm exists. Unknown
-      // is the honest answer until the contract is verified.
-      try {
-        const resp = await fetch(
-          `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/finance/operations/${encodeURIComponent(eventKey)}`,
-          {
-            method: "GET",
-            headers: { "X-Internal-Service-Key": this.internalServiceKey || "" },
-            signal: AbortSignal.timeout(this.httpTimeoutMs)
-          }
-        );
-        if (resp.status === 404) return { outcome: "NOT_FOUND" };
-        if (resp.ok) {
-          const body = await resp.json().catch(() => ({}));
-          if (body?.data?.status === "applied" || body?.data?.applied === true) {
-            return { outcome: "SUCCEEDED", result: body.data };
-          }
-          return { outcome: "UNKNOWN", reason: "unparseable_probe_response" };
-        }
-        return { outcome: "UNKNOWN", reason: "probe_http_" + resp.status };
-      } catch (err) {
-        return { outcome: "UNKNOWN", reason: "probe_error:" + (err?.code || err?.message || "error") };
+      if (
+        expectedMicropeach != null &&
+        Number.isInteger(cached.delta_micropeach) &&
+        cached.delta_micropeach !== expectedMicropeach
+      ) {
+        return evidence("UNKNOWN", { reason: "amount_mismatch_vs_recorded" });
       }
+      return evidence("APPLIED", { result: { ...cached } });
     }
-    return { outcome: "NOT_FOUND" };
+    if (!this.realDebitsEnabled) {
+      // Sandbox is authoritative — absence means never received.
+      return evidence("PROVEN_NOT_APPLIED", { result: null });
+    }
+    // Real SSO path: the read-back contract is only trustworthy when the
+    // deployment verifies it. An unverified endpoint can 404 for route,
+    // retention or gateway reasons — none of which prove money never moved.
+    if (process.env.FINANCE_SSO_READBACK_VERIFIED !== "true") {
+      return evidence("UNKNOWN", { reason: "readback_contract_unverified" });
+    }
+    try {
+      const resp = await fetch(
+        `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/finance/operations/${encodeURIComponent(eventKey)}`,
+        {
+          method: "GET",
+          headers: { "X-Internal-Service-Key": this.internalServiceKey || "" },
+          signal: AbortSignal.timeout(this.httpTimeoutMs)
+        }
+      );
+      const body = await resp.json().catch(() => null);
+      if (resp.status === 404) {
+        // A verified contract MAY expose an explicit never-received marker —
+        // distinguish it from a generic route 404 by requiring the structured
+        // business payload.
+        if (
+          body &&
+          typeof body === "object" &&
+          body.data &&
+          body.data.event_key === eventKey &&
+          body.data.status === "NOT_RECEIVED" &&
+          Number.isInteger(body.data.protocol_version)
+        ) {
+          return evidence("PROVEN_NOT_APPLIED", { result: body.data });
+        }
+        return evidence("UNKNOWN", { reason: "probe_http_404_without_business_proof" });
+      }
+      if (!resp.ok || !body || typeof body !== "object" || !body.data) {
+        return evidence("UNKNOWN", { reason: "probe_unparseable_or_http_" + resp.status });
+      }
+      const rec = body.data;
+      // Only a same-key + same-amount + same-account record counts as applied.
+      if (rec.event_key !== eventKey) return evidence("UNKNOWN", { reason: "key_mismatch" });
+      if (
+        expectedMicropeach != null &&
+        Number.isInteger(rec.amount_micropeach) &&
+        rec.amount_micropeach !== expectedMicropeach
+      ) {
+        return evidence("UNKNOWN", { reason: "amount_mismatch" });
+      }
+      if (cloudUserId && rec.cloud_user_id && rec.cloud_user_id !== cloudUserId) {
+        return evidence("UNKNOWN", { reason: "account_mismatch" });
+      }
+      if (rec.status === "applied" || rec.applied === true) {
+        return evidence("APPLIED", { result: rec });
+      }
+      if (rec.status === "NOT_RECEIVED" && Number.isInteger(rec.protocol_version)) {
+        return evidence("PROVEN_NOT_APPLIED", { result: rec });
+      }
+      return evidence("UNKNOWN", { reason: "unrecognized_status_" + String(rec.status) });
+    } catch (err) {
+      return evidence("UNKNOWN", { reason: "probe_error:" + (err?.code || err?.message || "error") });
+    }
+  }
+
+    /**
+   * Whether re-issuing a write under a previously-dispatched eventKey is
+   * PROVEN safe (upstream persists keys durably + dedupes identical payloads).
+   * Sandbox: provably true (in-process ledger). Real SSO: only after the
+   * contract is verified — until then resume paths must stay read-only.
+   */
+  get supportsProvenKeyReuse() {
+    if (!this.realDebitsEnabled) return true;
+    return process.env.FINANCE_SSO_IDEMPOTENT_VERIFIED === "true";
   }
 
   async adjustBalanceIdempotent({
@@ -964,8 +1032,10 @@ export class FinanceSagaService {
         // Resume reconcile (EXECUTING / RESULT_UNKNOWN): the intent already
         // dispatched or was durably committed. The original approver losing
         // their role must NEVER freeze this lane — any currently-qualified
-        // operator finishes it with the SAME event key.
-        const existingOp = this.store.financeOperations.get(buildRefundEventKey(order.id));
+        // operator finishes it. Read-back FIRST: a same-key POST is only
+        // legal after proven-safe key reuse; without it, query-only.
+        const resumeEventKey = buildRefundEventKey(order.id);
+        const existingOp = this.store.financeOperations.get(resumeEventKey);
         if (!existingOp) {
           req.result_error = "MANUAL_REVIEW: dispatch evidence missing; do not reissue under a new key";
           if (typeof this.store.flushSnapshotStrictSync === "function") {
@@ -985,6 +1055,39 @@ export class FinanceSagaService {
           if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
           return { request: req, order };
         }
+        const probe =
+          typeof this.financeBridge.queryOperationResult === "function"
+            ? await this.financeBridge.queryOperationResult(resumeEventKey, {
+                expectedMicropeach: existingOp.amount_micropeach,
+                cloudUserId: order.cloud_user_id
+              })
+            : { outcome: "UNKNOWN", reason: "no_readback_probe" };
+        existingOp.last_reconcile_evidence = probe;
+        if (probe.outcome === "APPLIED") {
+          existingOp.status = "SUCCEEDED";
+          existingOp.reconcile_evidence = probe;
+          existingOp.updated_at = new Date(nowMs).toISOString();
+          order.payment_state = "REFUNDED";
+          order.refunded_at = order.refunded_at || new Date(nowMs).toISOString();
+          req.status = "REFUNDED";
+          req.result_error = null;
+          if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+          return { request: req, order };
+        }
+        if (probe.outcome !== "PROVEN_NOT_APPLIED" && !this.financeBridge.supportsProvenKeyReuse) {
+          // Cannot prove the write landed AND cannot safely re-POST — keep the
+          // lane open for manual reconcile; never guess or mint a new key.
+          req.result_error = "MANUAL_REVIEW: upstream result unresolved; key reuse unverified";
+          if (typeof this.store.flushSnapshotStrictSync === "function") {
+            try { this.store.flushSnapshotStrictSync(); } catch { /* recoverable */ }
+          }
+          throw new ContractError(
+            "CONFLICT",
+            "退款结果无法核实且上游幂等合同未验证 —— 进入人工核对，不重复发起资金写入"
+          );
+        }
+        // PROVEN_NOT_APPLIED, or unverifiable but key reuse is proven safe:
+        // the shared dispatch below re-issues the ORIGINAL event key.
       }
 
       const eventKey = buildRefundEventKey(order.id);
@@ -1109,69 +1212,90 @@ export class FinanceSagaService {
     if (!this._hasFinanceApproverRole(actorRef)) {
       throw new ContractError("FORBIDDEN", "Reconciling actor does not hold a finance approval role");
     }
-    const order = this.store.reservationOrders.get(orderId);
-    if (!order) throw new ContractError("NOT_FOUND", "Order not found");
-    const eventKey = buildRefundEventKey(orderId);
-    const op = this.store.financeOperations.get(eventKey);
-    if (!op) {
-      throw new ContractError("NOT_FOUND", "No refund operation exists for this order");
-    }
-    if (op.refund_request_id && this.store.refundRequests.get(op.refund_request_id)) {
-      throw new ContractError(
-        "CONFLICT",
-        "This refund is governed by a dual-person request — use the request execute path"
-      );
-    }
-    if (!["IN_FLIGHT", "FAILED_RETRYABLE"].includes(op.status)) {
-      throw new ContractError("CONFLICT", `Refund operation is ${op.status}; nothing to reconcile`);
-    }
     if (typeof this.financeBridge.queryOperationResult !== "function") {
       throw new ContractError(
         "CONFLICT",
         "Finance bridge exposes no read-back probe — manual reconciliation required, no re-dispatch"
       );
     }
-    const probe = await this.financeBridge.queryOperationResult(eventKey);
-    if (probe.outcome === "SUCCEEDED") {
-      op.status = "SUCCEEDED";
+    // Phase 1 (read-only, outside the lock): query the upstream by the ORIGINAL
+    // event key with the expected amount/account as evidence requirements.
+    const preOrder = this.store.reservationOrders.get(orderId);
+    if (!preOrder) throw new ContractError("NOT_FOUND", "Order not found");
+    const eventKey = buildRefundEventKey(orderId);
+    const preOp = this.store.financeOperations.get(eventKey);
+    if (!preOp) throw new ContractError("NOT_FOUND", "No refund operation exists for this order");
+    const probe = await this.financeBridge.queryOperationResult(eventKey, {
+      expectedMicropeach: preOp.amount_micropeach,
+      cloudUserId: preOrder.cloud_user_id
+    });
+
+    // Phase 2 (serialized per order): re-validate the operation inside the
+    // order lock — a concurrent reconcile/converge may already have settled it.
+    return this.withOrderLock(orderId, async () => {
+      const order = this.store.reservationOrders.get(orderId);
+      const op = this.store.financeOperations.get(eventKey);
+      if (!order || !op) throw new ContractError("NOT_FOUND", "Order or operation vanished");
+      if (op.refund_request_id && this.store.refundRequests.get(op.refund_request_id)) {
+        throw new ContractError(
+          "CONFLICT",
+          "This refund is governed by a dual-person request — use the request execute path"
+        );
+      }
+      if (!["IN_FLIGHT", "FAILED_RETRYABLE"].includes(op.status)) {
+        // Already reconciled/settled by a racing reconcile — report idempotently.
+        if (op.status === "SUCCEEDED" && order.payment_state === "REFUNDED") {
+          return { reconciled: "SUCCEEDED", op, order, idempotent_replay: true };
+        }
+        throw new ContractError("CONFLICT", `Refund operation is ${op.status}; nothing to reconcile`);
+      }
+
+      if (probe.outcome === "APPLIED") {
+        op.status = "SUCCEEDED";
+        op.updated_at = new Date(nowMs).toISOString();
+        op.reconcile_evidence = probe;
+        order.payment_state = "REFUNDED";
+        order.refunded_at = order.refunded_at || new Date(nowMs).toISOString();
+        this.store.recordAudit({
+          actor_kind: "FINANCE_OPERATOR",
+          actor_ref: actorRef,
+          action: "LEGACY_REFUND_RECONCILED",
+          resource_kind: "reservation_order",
+          resource_ref: orderId,
+          outcome: "REFUNDED",
+          detail: { event_key: eventKey, evidence: probe }
+        });
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+        return { reconciled: "SUCCEEDED", op, order, evidence: probe };
+      }
+      if (probe.outcome === "PROVEN_NOT_APPLIED") {
+        // Only now may the operation be safely terminated — with the evidence
+        // persisted on the record itself (survives restart + audit).
+        op.status = "FAILED";
+        op.last_error_code = "LEGACY_NEVER_RECEIVED";
+        op.reconcile_evidence = probe;
+        op.updated_at = new Date(nowMs).toISOString();
+        this.store.recordAudit({
+          actor_kind: "FINANCE_OPERATOR",
+          actor_ref: actorRef,
+          action: "LEGACY_REFUND_RECONCILED",
+          resource_kind: "reservation_order",
+          resource_ref: orderId,
+          outcome: "NEVER_RECEIVED",
+          detail: { event_key: eventKey, evidence: probe }
+        });
+        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+        return { reconciled: "NEVER_RECEIVED", op, order, evidence: probe };
+      }
+      // UNKNOWN — keep queued, persist the failed evidence attempt. NEVER
+      // re-dispatch, NEVER mark FAILED, NEVER mint a new key.
+      op.legacy_reconcile_required = true;
+      op.last_error_code = probe.reason || "UPSTREAM_PROBE_UNRESOLVED";
+      op.last_reconcile_evidence = probe;
       op.updated_at = new Date(nowMs).toISOString();
-      op.sso_request_id = op.sso_request_id || probe.result?.sso_request_id || null;
-      order.payment_state = "REFUNDED";
-      order.refunded_at = order.refunded_at || new Date(nowMs).toISOString();
-      this.store.recordAudit({
-        actor_kind: "FINANCE_OPERATOR",
-        actor_ref: actorRef,
-        action: "LEGACY_REFUND_RECONCILED",
-        resource_kind: "reservation_order",
-        resource_ref: orderId,
-        outcome: "REFUNDED",
-        detail: { event_key: eventKey, source: "upstream_probe" }
-      });
       if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-      return { reconciled: "SUCCEEDED", op, order };
-    }
-    if (probe.outcome === "NOT_FOUND") {
-      op.status = "FAILED";
-      op.last_error_code = "LEGACY_NEVER_RECEIVED";
-      op.updated_at = new Date(nowMs).toISOString();
-      this.store.recordAudit({
-        actor_kind: "FINANCE_OPERATOR",
-        actor_ref: actorRef,
-        action: "LEGACY_REFUND_RECONCILED",
-        resource_kind: "reservation_order",
-        resource_ref: orderId,
-        outcome: "NEVER_RECEIVED",
-        detail: { event_key: eventKey, source: "upstream_probe" }
-      });
-      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-      return { reconciled: "NEVER_RECEIVED", op, order };
-    }
-    // UNKNOWN: keep the operation in the reconcile queue — never guess.
-    op.legacy_reconcile_required = true;
-    op.last_error_code = probe.reason || "UPSTREAM_PROBE_UNRESOLVED";
-    op.updated_at = new Date(nowMs).toISOString();
-    if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-    return { reconciled: "UNKNOWN", reason: probe.reason || null, op };
+      return { reconciled: "UNKNOWN", reason: probe.reason || null, op, evidence: probe };
+    });
   }
 
   /**
