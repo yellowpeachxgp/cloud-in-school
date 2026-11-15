@@ -363,6 +363,7 @@ export class TripleScheduleEngine {
         );
       }
     }
+    const replacedSnapshots = [];
 
     const rules = this.schoolProvider.getRules();
     const defaultLatenessSec = rules.max_lateness_seconds_limit || 1800;
@@ -401,8 +402,34 @@ export class TripleScheduleEngine {
 
     // Only after full schedule, capability, and slot_window validation succeeds do we replace existing queued jobs!
     if (matchingJobsForDate.length > 0 && payload.replace_existing === true) {
+      // R6-C2: these old-state mutations belong to the same commit unit —
+      // snapshot them so a failed persist restores the original plan/job/
+      // events exactly instead of leaving the user with neither.
       const ts = new Date(nowMs).toISOString();
       for (const dupJob of matchingJobsForDate) {
+        replacedSnapshots.push({
+          job: dupJob,
+          jobState: {
+            user_intent_state: dupJob.user_intent_state,
+            external_execution_state: dupJob.external_execution_state,
+            state: dupJob.state,
+            state_version: dupJob.state_version,
+            display_status: dupJob.display_status
+          },
+          events: this.store.eventsForJob(dupJob.id).map((ev) => ({
+            ev,
+            status: ev.status,
+            actual_at: ev.actual_at
+          })),
+          oldPlan: this.store.reservationPlans.get(dupJob.plan_id) || null,
+          oldPlanState: this.store.reservationPlans.get(dupJob.plan_id)
+            ? {
+                enabled: this.store.reservationPlans.get(dupJob.plan_id).enabled,
+                user_intent_state: this.store.reservationPlans.get(dupJob.plan_id)
+                  .user_intent_state
+              }
+            : null
+        });
         dupJob.user_intent_state = "STOP_REQUESTED";
         dupJob.external_execution_state = "NOT_DISPATCHED";
         dupJob.state = "CANCELLED";
@@ -643,17 +670,43 @@ export class TripleScheduleEngine {
         this.store.saveSnapshot();
       }
     } catch (commitErr) {
-      // Full rollback — exact inverse of every mutation above.
-      this.store.reservationPlans.delete(planId);
-      this.store.reservationJobs.delete(jobId);
-      for (const ev of events) this.store.scheduleEvents.delete(ev.id);
-      if (appliedReceipt) this.store.idempotencyRecords.delete(commitOpts.idempotencyCacheKey);
-      if (acceptedQuote && quotePresent) {
-        this.store.priceQuotes.set(acceptedQuote.quote_id, acceptedQuote);
+      const stage = commitErr?.persistStage || null;
+      const PRE_RENAME = new Set(["tmp_open", "tmp_write", "tmp_fsync", "tmp_close", "rename"]);
+      if (!stage || PRE_RENAME.has(stage)) {
+        // Never published — exact inverse of every mutation is safe.
+        this.store.reservationPlans.delete(planId);
+        this.store.reservationJobs.delete(jobId);
+        for (const ev of events) this.store.scheduleEvents.delete(ev.id);
+        if (appliedReceipt) this.store.idempotencyRecords.delete(commitOpts.idempotencyCacheKey);
+        if (acceptedQuote && quotePresent) {
+          this.store.priceQuotes.set(acceptedQuote.quote_id, acceptedQuote);
+        }
+        // Restore the replaced old plan/job/events exactly — the commit
+        // either contains the replacement fully or the original stays whole.
+        for (const snap of replacedSnapshots) {
+          Object.assign(snap.job, snap.jobState);
+          this.store.syncJobDisplayStatus?.(snap.job);
+          for (const { ev, status, actual_at } of snap.events) {
+            ev.status = status;
+            ev.actual_at = actual_at;
+          }
+          if (snap.oldPlan && snap.oldPlanState) {
+            Object.assign(snap.oldPlan, snap.oldPlanState);
+          }
+        }
+        throw new ContractError(
+          "STORAGE_PERSISTENCE_FAILED",
+          "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态"
+        );
       }
+      // Post-rename failure: the snapshot may already contain this commit —
+      // rolling memory back would diverge from what a restart reloads.
+      // Keep state live, report honestly UNKNOWN, let the persisted receipt
+      // reconcile any client retry under the same key.
       throw new ContractError(
-        "STORAGE_PERSISTENCE_FAILED",
-        "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态"
+        "STORAGE_COMMIT_UNKNOWN",
+        "提交结果未知：快照已发布但目录核验失败。请携带原 Idempotency-Key 重试以对账，不要另起新键",
+        { persist_stage: stage }
       );
     }
 

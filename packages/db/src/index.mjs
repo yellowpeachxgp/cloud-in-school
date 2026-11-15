@@ -974,14 +974,40 @@ export class CloudDatabaseStore {
       tmp = `${this.snapshotPath}.tmp.${process.pid}.${this._snapshotTmpSeq}`;
       const serialized = JSON.stringify(data);
       const expectedBytes = Buffer.byteLength(serialized, "utf8");
-      const fd = fs.openSync(tmp, "w");
+      // Stage-tagged failures (R6-C2): callers must distinguish "never
+      // published" (pre-rename — in-memory rollback is safe) from "published
+      // but unverified" (post-rename — rolling back memory would diverge
+      // from the durable snapshot the next restart loads).
+      const _inject = (stage) => {
+        if (this._persistFaultInject === stage) {
+          const e = new Error("injected persistence failure at " + stage);
+          e.persistStage = stage;
+          throw e;
+        }
+      };
+      let persistStage = "tmp_open";
+      _inject("tmp_open");
       try {
-        fs.writeFileSync(fd, serialized, "utf8");
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
+        const fd = fs.openSync(tmp, "w");
+        try {
+          persistStage = "tmp_write";
+          _inject("tmp_write");
+          fs.writeFileSync(fd, serialized, "utf8");
+          persistStage = "tmp_fsync";
+          _inject("tmp_fsync");
+          fs.fsyncSync(fd);
+        } finally {
+          persistStage = "tmp_close";
+          fs.closeSync(fd);
+        }
+        persistStage = "rename";
+        _inject("rename");
+        fs.renameSync(tmp, this.snapshotPath);
+      } catch (stageErr) {
+        stageErr.persistStage = persistStage;
+        throw stageErr;
       }
-      fs.renameSync(tmp, this.snapshotPath);
+      persistStage = "post_rename";
       if (strict) {
         const isUnsupportedDirFsyncError = (err, stage) => {
           const code = String(err?.code || "").toUpperCase();
@@ -998,16 +1024,19 @@ export class CloudDatabaseStore {
         };
 
         let dirFd = null;
+        _inject("dir_open");
         try {
           dirFd = fs.openSync(dir, "r");
         } catch (openErr) {
           if (!isUnsupportedDirFsyncError(openErr, "open")) {
+            openErr.persistStage = "dir_open";
             throw openErr;
           }
         }
         if (dirFd !== null) {
           let fsyncErr = null;
           try {
+            _inject("dir_fsync");
             fs.fsyncSync(dirFd);
           } catch (err) {
             if (!isUnsupportedDirFsyncError(err, "fsync")) {
@@ -1020,12 +1049,24 @@ export class CloudDatabaseStore {
           } catch (err) {
             closeErr = err;
           }
-          if (fsyncErr) throw fsyncErr;
-          if (closeErr) throw closeErr;
+          if (fsyncErr) {
+            fsyncErr.persistStage = "dir_fsync";
+            throw fsyncErr;
+          }
+          if (closeErr) {
+            closeErr.persistStage = "dir_close";
+            throw closeErr;
+          }
         }
-        const st = fs.statSync(this.snapshotPath);
-        if (!st || !st.isFile() || st.size !== expectedBytes) {
-          throw new Error("Persisted snapshot verification failed (missing file or byte-size mismatch)");
+        try {
+          _inject("verify_stat");
+          const st = fs.statSync(this.snapshotPath);
+          if (!st || !st.isFile() || st.size !== expectedBytes) {
+            throw new Error("Persisted snapshot verification failed (missing file or byte-size mismatch)");
+          }
+        } catch (statErr) {
+          statErr.persistStage = statErr.persistStage || "verify_stat";
+          throw statErr;
         }
       }
       for (const p of this.reservationPlans.values()) {
@@ -1043,10 +1084,14 @@ export class CloudDatabaseStore {
         }
       }
       if (strict) {
-        throw new ContractError(
+        const ce = new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
           `Failed to durably persist reservation state: ${err?.message || "I/O error"}`
         );
+        // R6-C2: propagate the failure stage so callers can distinguish
+        // pre-rename (safe to roll back) from post-rename (commit unknown).
+        ce.persistStage = err?.persistStage || null;
+        throw ce;
       }
     }
   }

@@ -66,6 +66,11 @@ export const ERROR_CODES = Object.freeze({
     status: 503,
     retryable: true,
     userAction: "RETRY_AFTER_STORAGE_RECOVERY"
+  },
+  STORAGE_COMMIT_UNKNOWN: {
+    status: 503,
+    retryable: true,
+    userAction: "RETRY_WITH_SAME_IDEMPOTENCY_KEY_TO_RECONCILE"
   }
 });
 
