@@ -1664,6 +1664,11 @@ export class CloudDatabaseStore {
       const rec = this.encryptedCredentials.get(b.credential_ref);
       if (rec && rec.binding_id !== b.id && !b.credential_needs_reconfirmation) {
         b.credential_needs_reconfirmation = true;
+        // Structured cause: the bug produced a credential_ref pointing at a
+        // record bound to a DIFFERENT binding — an integrity defect, provably
+        // re-keyable. Authorization reasons (risk/revoked/reverify) are set
+        // elsewhere and must never be cleared by migration.
+        b.credential_reconfirm_reason = "INTEGRITY_MISMATCH";
         mutated = true;
       }
     }

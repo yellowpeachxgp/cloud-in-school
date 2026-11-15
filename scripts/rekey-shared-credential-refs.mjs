@@ -39,6 +39,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { KmsEnvelopeVault } from "../packages/crypto/src/index.mjs";
 
+// Reconfirmation causes this migration is allowed to clear — the shared-ref
+// bug's own integrity defects ONLY. Anything resembling an authorization or
+// risk decision (revoked, risk-review, reverify, unknown, blank) is NEVER
+// cleared by a credential migration.
+const INTEGRITY_CLEARABLE_REASONS = new Set([
+  "INTEGRITY_MISMATCH",
+  "SHARED_CREDENTIAL_REF",
+  "MISMATCHED_RECORD_BINDING",
+  "CREDENTIAL_REF_SHARED_DETECTED"
+]);
+
 const ALLOWED_CREDENTIAL_KINDS = new Set([
   "DELEGATED_SESSION_BUNDLE",
   "LIVE_SESSION_BUNDLE",
@@ -212,13 +223,31 @@ export function rekeySharedCredentialRefs(rawState, kmsVault, { nowMs = Date.now
     if (list.length > 1) report.shared_ref_groups += 1;
     for (const b of list) {
       const mismatched = !rec || rec.binding_id !== b.id;
-      if (mismatched || b.credential_needs_reconfirmation) {
+      // Eligibility gate (M1): a binding enters the migration candidate set
+      // only if (a) its ref is provably broken (mismatched/shared — the bug's
+      // own symptom, authorization-independent), or (b) it was flagged with a
+      // reason the migration is licensed to clear. Flags set for any other
+      // reason (risk/revoke/reverify/unknown) are never touched.
+      const reason = typeof b.credential_reconfirm_reason === "string" ? b.credential_reconfirm_reason : null;
+      const flaggedForIntegrity = Boolean(b.credential_needs_reconfirmation) && reason && INTEGRITY_CLEARABLE_REASONS.has(reason);
+      const flaggedForOther = Boolean(b.credential_needs_reconfirmation) && !flaggedForIntegrity;
+      if (flaggedForOther) {
+        // Report, never decrypt, never clear — authorization decisions are
+        // outside a credential migration's remit.
+        report.skipped.push({
+          binding_id: b.id,
+          reason: "RECONFIRM_REASON_NOT_CLEARABLE:" + (reason || "UNKNOWN")
+        });
+        continue;
+      }
+      if (mismatched || flaggedForIntegrity) {
         candidateSet.add(b.id);
         report.mismatched_bindings.push({
           binding_id: b.id,
           credential_ref: b.credential_ref,
           record_binding_id: rec?.binding_id ?? null,
-          shared_group_size: list.length
+          shared_group_size: list.length,
+          reconfirm_reason: reason
         });
       }
     }
@@ -296,10 +325,13 @@ export function rekeySharedCredentialRefs(rawState, kmsVault, { nowMs = Date.now
       if (b) {
         b.credential_ref = upd.credential_ref;
         b.credential_expires_at = upd.credential_expires_at;
-        // Only the integrity-mismatch cause is cleared by a successful rekey —
-        // a flag set for revocation/risk/reverify reasons is NOT cleared here.
-        b.credential_needs_reconfirmation = false;
-        b.credential_reconfirm_reason = null;
+        // Cleared cause is provably integrity-only: eligibility gating above
+        // guarantees authorization reasons never reached this branch. If a
+        // binding somehow still carries an unknown reason, keep it.
+        if (!b.credential_reconfirm_reason || INTEGRITY_CLEARABLE_REASONS.has(b.credential_reconfirm_reason)) {
+          b.credential_needs_reconfirmation = false;
+          b.credential_reconfirm_reason = null;
+        }
       }
     }
     staged.schoolBindings = [...bindings.entries()];
