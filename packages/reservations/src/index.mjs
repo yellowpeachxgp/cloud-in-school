@@ -1519,18 +1519,12 @@ export class TripleScheduleEngine {
         }
         const shTodayStr = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
         const isPastBookingDate = Boolean(job.booking_local_date && job.booking_local_date < shTodayStr);
-        if (options.manualExecuteNow ? isPastBookingDate : nowMs > effectiveExpiresAtMs) {
-          event.status = "MISSED_WINDOW";
-          event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
-          this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
-          return { job, event };
-        }
 
-        // Engine-side defence-in-depth for explicit manual dispatch: re-run the
-        // same pure validation as the API layer. Thrown BEFORE any CAS so a
-        // rejected manual execution consumes nothing (no attempt, no state
-        // change, schedule events stay ARMED).
+        // Engine-side defence-in-depth for explicit manual dispatch: re-run
+        // the same pure validation as the API layer BEFORE any expiry/rollover
+        // mutation — a rejected manual execution must consume nothing: no
+        // attempt, no CAS, no EXPIRED, no multi-day rollover, schedule events
+        // stay ARMED.
         if (options.manualExecuteNow) {
           const verdict = validateManualExecution({
             job,
@@ -1540,6 +1534,13 @@ export class TripleScheduleEngine {
           if (!verdict.ok) {
             throw new ContractError(verdict.code, verdict.message, verdict.detail);
           }
+        }
+        if (options.manualExecuteNow ? isPastBookingDate : nowMs > effectiveExpiresAtMs) {
+          event.status = "MISSED_WINDOW";
+          event.actual_at = new Date(nowMs).toISOString();
+          this.casJobState(jobId, job.state_version, "EXPIRED", { last_error_code: "MISSED_WINDOW" });
+          this.rolloverMultiDayPlanIfEligible(plan, job, "错过开抢窗口", nowMs);
+          return { job, event };
         }
 
         // Re-verify authorization version & consent immediately before acquiring execution lock and writing
