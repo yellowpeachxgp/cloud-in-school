@@ -52,3 +52,24 @@ test("R6-QUOTE: handler output matches the shared cross-repo contract fixture sh
   assert.equal(typeof d.quote_hash, "string");
   assert.match(d.quote_hash, /^[0-9a-f]{64}$/);
 });
+
+import { captureReservationFixtures } from '../tools/contract-ci/generate-reservation-fixtures.mjs';
+
+test('完整 handler 响应与共享 fixture 一致，仅归一化随机标识和摘要', async () => {
+  const captured = await captureReservationFixtures();
+  const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+  const errors = JSON.parse(fs.readFileSync(new URL('./fixtures/reservation-error-envelopes.json', import.meta.url), 'utf8'));
+  const stableQuote = value => {
+    const copy = structuredClone(value);
+    delete copy._meta;
+    copy.body.data.quote_id = '<随机报价标识>';
+    copy.body.data.cloud_user_id = '<假身份标识>';
+    copy.body.data.quote_hash = '<摘要>';
+    return copy;
+  };
+  assert.deepEqual(stableQuote(captured.quote), stableQuote(fixture));
+  assert.deepEqual(captured.errors.cases, errors.cases);
+  assert.equal(fixture._meta.handler_sha256, captured.quote._meta.handler_sha256, 'handler 更新后必须重新生成 fixture 并同步 Day');
+  assert.equal(captured.errors.cases[1].body.code, 'STORAGE_COMMIT_UNKNOWN');
+  assert.equal(captured.errors.cases[2].http_status, 503);
+});

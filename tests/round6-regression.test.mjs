@@ -116,7 +116,10 @@ test("R6-2: post-rename failure keeps state + reports UNKNOWN; retry reconciles 
   assert.equal(app.store.reservationPlans.size, 1);
   assert.equal(app.store.idempotencyRecords.size, 1, "receipt survives the unknown commit");
 
-  // Retry with the same key — the receipt dedupes instead of creating a second plan.
+  // 故障持续时保持未知；只有恢复耐久性核验后才可以重放回执。
+  const stillUnknown = await app.inject({ method: "POST", url: "/api/v1/reservation-plans", headers: { ...authHeaders, "idempotency-key": "r6-c2b" }, body: planBody(binding, consent), nowMs: nowMs + 500 });
+  assert.equal(stillUnknown.status, 503);
+  app.store._persistFaultInject = null;
   const retry = await app.inject({
     method: "POST", url: "/api/v1/reservation-plans",
     headers: { ...authHeaders, "idempotency-key": "r6-c2b" },

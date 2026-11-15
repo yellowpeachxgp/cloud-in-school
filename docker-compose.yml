@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: dis-campus-cloud-api
+    init: true
+    stop_grace_period: 25s
     restart: unless-stopped
     env_file:
       - .env
@@ -11,7 +13,9 @@ services:
       NODE_ENV: production
       PORT: 8080
       HOST: 0.0.0.0
-      DIS_PERSIST_PATH: /app/.data/cloud-state.json
+      CLOUD_SNAPSHOT_PATH: /app/.data/cloud-state.json
+      SHUTDOWN_TIMEOUT_MS: 15000
+      SHUTDOWN_HARD_TIMEOUT_MS: 20000
     volumes:
       - campus_cloud_data:/app/.data
     ports:

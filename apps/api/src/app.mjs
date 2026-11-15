@@ -1252,8 +1252,7 @@ export function createCampusCloudApp(options = {}) {
 
   // Server-issued price quote (cross-end contract §5): a client displays this
   // quote and pins it at plan creation — drift/expiry conflicts honestly.
-  // Volatile by design (in-memory, 10-min TTL, one-shot) — a restart simply
-  // forces a fresh fetch, never silently re-prices.
+  // 报价有效期十分钟且仅消费一次，消费状态与计划、回执一起落盘。
   const PRICE_QUOTE_TTL_MS = 10 * 60 * 1000;
   register("GET", "/api/v1/reservation-quote", "getReservationQuote", "bearer", async ({ auth, nowMs }) => {
     const quoteId = "q_" + crypto.randomUUID().slice(0, 12);
@@ -1285,6 +1284,12 @@ export function createCampusCloudApp(options = {}) {
       }
     }
     store.priceQuotes.set(quoteId, quote);
+    try {
+      store.flushSnapshotStrictSync?.();
+    } catch (err) {
+      if (err.commitPublished === false) store.priceQuotes.delete(quoteId);
+      throw err;
+    }
     return { status: 200, code: "RESERVATION_QUOTE_ISSUED", data: quote };
   });
 
@@ -1297,10 +1302,15 @@ export function createCampusCloudApp(options = {}) {
       const idemKey = headers["idempotency-key"] || headers["Idempotency-Key"] || null;
       if (idemKey) {
         const cacheKey = `createReservationPlan|${auth.cloudUserId}|${idemKey}`;
-        const bodyHash = crypto.createHash("sha256").update(JSON.stringify(body || {})).digest("hex");
+        const canonical = value => Array.isArray(value) ? value.map(canonical)
+          : value && typeof value === "object"
+            ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+        const hash = value => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const bodyHash = hash(body || {});
+        const canonicalBodyHash = hash(canonical(body || {}));
         if (store.idempotencyRecords.has(cacheKey)) {
           const existing = store.idempotencyRecords.get(cacheKey);
-          if (existing.bodyHash !== bodyHash) {
+          if (existing.hashVersion === 2 ? existing.canonicalHash !== canonicalBodyHash : existing.bodyHash !== bodyHash) {
             throw new ContractError(
               "CONFLICT",
               "Idempotency-Key reused with different request payload"
@@ -1308,19 +1318,11 @@ export function createCampusCloudApp(options = {}) {
           }
           return { status: 200, code: "REQUEST_DUPLICATE", data: existing.data };
         }
-        // Receipt pruning happens before the commit — the engine writes the
-        // durable receipt INSIDE the same atomic commit as plan/job/events/
-        // quote-consumption (R5-C2), so a post-create crash can never strand a
-        // committed plan with no recoverable receipt.
-        if (store.idempotencyRecords.size > 2000) {
-          for (const [k, r] of store.idempotencyRecords) {
-            if (!r.createdAtMs || nowMs - r.createdAtMs > 86400_000) store.idempotencyRecords.delete(k);
-          }
-          if (store.idempotencyRecords.size > 2000) store.idempotencyRecords.clear();
-        }
+        // 回执与业务对象同寿命；不能清空回执后允许旧键再次创建。
         const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs, {
           idempotencyCacheKey: cacheKey,
-          idempotencyBodyHash: bodyHash
+          idempotencyBodyHash: bodyHash,
+          idempotencyCanonicalHash: canonicalBodyHash
         });
         let ssoSyncFailed = false;
         try {
@@ -1350,65 +1352,78 @@ export function createCampusCloudApp(options = {}) {
       if (!plan || plan.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
-      const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
-      const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
-      if (nextSeats || nextAreas || body?.slot_window !== undefined) {
-        const hasInFlightOrAmbiguousJob = Array.from(store.reservationJobs.values()).some(
-          (j) =>
-            j.plan_id === plan.id &&
-            ([
-              "EXECUTING",
-              "RESULT_UNKNOWN",
-              "DELEGATION_STOPPED_RESULT_UNKNOWN",
-              "CANCEL_RESULT_UNKNOWN"
-            ].includes(j.state) ||
-              ["DISPATCH_INTENT", "RESULT_UNKNOWN"].includes(j.external_execution_state))
-        );
-        if (hasInFlightOrAmbiguousJob) {
-          throw new ContractError(
-            "CONFLICT",
-            "当前计划存在执行中或结果待核对的任务，禁止在核实前原地修改目标区域或候选座位"
+      const records = [plan, ...Array.from(store.reservationJobs.values()).filter(job => job.plan_id === plan.id)];
+      const before = records.map(record => [record, structuredClone(record)]);
+      try {
+        const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
+        const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
+        if (nextSeats || nextAreas || body?.slot_window !== undefined) {
+          const hasInFlightOrAmbiguousJob = Array.from(store.reservationJobs.values()).some(
+            (j) =>
+              j.plan_id === plan.id &&
+              ([
+                "EXECUTING",
+                "RESULT_UNKNOWN",
+                "DELEGATION_STOPPED_RESULT_UNKNOWN",
+                "CANCEL_RESULT_UNKNOWN"
+              ].includes(j.state) ||
+                ["DISPATCH_INTENT", "RESULT_UNKNOWN"].includes(j.external_execution_state))
           );
-        }
-      }
-      if (Array.isArray(nextSeats) && nextSeats.length > 0) {
-        const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
-        plan.candidate_seats = cleanSeats;
-        plan.preferences_json.preferred_seat_ids = cleanSeats;
-      }
-      if (Array.isArray(nextAreas) && nextAreas.length > 0) {
-        const cleanArea = String(nextAreas[0]).trim();
-        plan.area_name = cleanArea;
-        plan.area_code = cleanArea;
-        plan.preferences_json.preferred_area_ids = [cleanArea];
-      }
-      if (nextSeats || nextAreas) {
-        for (const j of store.reservationJobs.values()) {
-          if (
-            j.plan_id === plan.id &&
-            ["ARMED", "PRECHECK_OK", "FINAL_CHECK_OK", "NEEDS_RECONFIRMATION"].includes(j.state)
-          ) {
-            j.prewarmed_targets = null;
+          if (hasInFlightOrAmbiguousJob) {
+            throw new ContractError(
+              "CONFLICT",
+              "当前计划存在执行中或结果待核对的任务，禁止在核实前原地修改目标区域或候选座位"
+            );
           }
         }
-      }
-      if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
-        const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
-        plan.repeat_days = nextRepeat;
-        plan.remaining_days = Math.min(
-          Math.max(Number(body.remaining_days ?? body.remainingDays ?? nextRepeat) || nextRepeat, 1),
-          nextRepeat
-        );
-        plan.end_local_date = addDaysToLocalDate(plan.target_local_date, plan.remaining_days - 1);
-        for (const j of store.reservationJobs.values()) {
-          if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
-            j.repeat_days = plan.repeat_days;
-            j.remaining_days = plan.remaining_days;
-            j.end_local_date = plan.end_local_date;
+        if (Array.isArray(nextSeats) && nextSeats.length > 0) {
+          const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
+          plan.candidate_seats = cleanSeats;
+          plan.preferences_json.preferred_seat_ids = cleanSeats;
+        }
+        if (Array.isArray(nextAreas) && nextAreas.length > 0) {
+          const cleanArea = String(nextAreas[0]).trim();
+          plan.area_name = cleanArea;
+          plan.area_code = cleanArea;
+          plan.preferences_json.preferred_area_ids = [cleanArea];
+        }
+        if (nextSeats || nextAreas) {
+          for (const j of store.reservationJobs.values()) {
+            if (
+              j.plan_id === plan.id &&
+              ["ARMED", "PRECHECK_OK", "FINAL_CHECK_OK", "NEEDS_RECONFIRMATION"].includes(j.state)
+            ) {
+              j.prewarmed_targets = null;
+            }
           }
         }
+        if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
+          const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
+          plan.repeat_days = nextRepeat;
+          plan.remaining_days = Math.min(
+            Math.max(Number(body.remaining_days ?? body.remainingDays ?? nextRepeat) || nextRepeat, 1),
+            nextRepeat
+          );
+          plan.end_local_date = addDaysToLocalDate(plan.target_local_date, plan.remaining_days - 1);
+          for (const j of store.reservationJobs.values()) {
+            if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+              j.repeat_days = plan.repeat_days;
+              j.remaining_days = plan.remaining_days;
+              j.end_local_date = plan.end_local_date;
+            }
+          }
+        }
+        plan.generation += 1;
+        store.flushSnapshotStrictSync?.();
+      } catch (err) {
+        if (err.commitPublished !== true && err.code !== "STORAGE_COMMIT_UNKNOWN") {
+          for (const [record, previous] of before) {
+            for (const key of Object.keys(record)) delete record[key];
+            Object.assign(record, previous);
+          }
+        }
+        throw err;
       }
-      plan.generation += 1;
       await syncUserToSso(auth.cloudUserId);
       return { status: 200, code: "RESERVATION_PLAN_UPDATED", data: plan };
     }
@@ -5170,6 +5185,8 @@ export function createCampusCloudApp(options = {}) {
     let httpTask = null;
     if (upperMethodEarly !== "GET") httpTask = registerLifecycleTask("http");
     try {
+      store.recoverDurabilitySync?.();
+      store.assertStorageWritable?.();
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
       const upperMethod = upperMethodEarly;
@@ -5631,6 +5648,7 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      store.assertStorageWritable?.();
       const result = await matchedRoute.handler({
         method: upperMethod,
         pathname,
@@ -5687,67 +5705,72 @@ export function createCampusCloudApp(options = {}) {
 
   function createHttpServer() {
     return http.createServer(async (req, res) => {
-      const chunks = [];
-      let totalBytes = 0;
-      for await (const chunk of req) {
-        totalBytes += chunk.length;
-        if (totalBytes > MAX_HTTP_BODY_BYTES) {
-          res.writeHead(413, {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8"
-          });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: {
-                code: "PAYLOAD_TOO_LARGE",
-                message: "Request body exceeds 1 MB limit"
-              }
-            })
-          );
-          req.destroy();
-          return;
+      try {
+        const chunks = [];
+        let totalBytes = 0;
+        for await (const chunk of req) {
+          totalBytes += chunk.length;
+          if (totalBytes > MAX_HTTP_BODY_BYTES) {
+            res.writeHead(413, {
+              ...SECURITY_HEADERS,
+              "content-type": "application/json; charset=utf-8"
+            });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: {
+                  code: "PAYLOAD_TOO_LARGE",
+                  message: "Request body exceeds 1 MB limit"
+                }
+              })
+            );
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
         }
-        chunks.push(chunk);
-      }
-      const rawBody = Buffer.concat(chunks).toString("utf8");
-      let parsedBody = undefined;
-      if (rawBody && rawBody.trim().length > 0) {
-        try {
-          parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
-        } catch {
-          res.writeHead(400, {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8"
-          });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              code: "BAD_REQUEST",
-              error: {
+        const rawBody = Buffer.concat(chunks).toString("utf8");
+        let parsedBody = undefined;
+        if (rawBody && rawBody.trim().length > 0) {
+          try {
+            parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
+          } catch {
+            res.writeHead(400, {
+              ...SECURITY_HEADERS,
+              "content-type": "application/json; charset=utf-8"
+            });
+            res.end(
+              JSON.stringify({
+                ok: false,
                 code: "BAD_REQUEST",
-                message: "Malformed JSON request body"
-              }
-            })
-          );
-          return;
+                error: {
+                  code: "BAD_REQUEST",
+                  message: "Malformed JSON request body"
+                }
+              })
+            );
+            return;
+          }
         }
-      }
-      const response = await inject({
-        method: req.method,
-        url: req.url,
-        headers: req.headers,
-        body: parsedBody,
-        remoteAddr: req.socket?.remoteAddress || null
-      });
-      res.writeHead(response.status, {
-        ...SECURITY_HEADERS,
-        ...(response.headers || {})
-      });
-      if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
-        res.end(response.rawBody);
-      } else {
-        res.end(JSON.stringify(response.body));
+        const response = await inject({
+          method: req.method,
+          url: req.url,
+          headers: req.headers,
+          body: parsedBody,
+          remoteAddr: req.socket?.remoteAddress || null
+        });
+        res.writeHead(response.status, {
+          ...SECURITY_HEADERS,
+          ...(response.headers || {})
+        });
+        if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
+          res.end(response.rawBody);
+        } else {
+          res.end(JSON.stringify(response.body));
+        }
+      } catch (err) {
+        // 停机强制关闭未读完的请求会抛 ECONNRESET，必须由 HTTP 边界消化。
+        if (!res.destroyed) res.destroy(err);
       }
     });
   }

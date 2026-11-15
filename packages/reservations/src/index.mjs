@@ -219,6 +219,7 @@ export class TripleScheduleEngine {
     while (this.inFlightJobs.has(jobId)) {
       await this.inFlightJobs.get(jobId);
     }
+    this.store.assertStorageWritable?.();
     let release;
     const p = new Promise((resolve) => {
       release = resolve;
@@ -233,6 +234,7 @@ export class TripleScheduleEngine {
   }
 
   createPlanAndJob(cloudUserId, payload, nowMs = Date.now(), commitOpts = {}) {
+    this.store.assertStorageWritable?.();
     const binding = this.store.schoolBindings.get(payload.school_binding_id);
     if (!binding || binding.cloud_user_id !== cloudUserId) {
       throw new ContractError("CAMPUS_BINDING_REQUIRED", "School binding not found or not owned by user");
@@ -656,7 +658,9 @@ export class TripleScheduleEngine {
       if (appliedReceipt) {
         this.store.idempotencyRecords.set(commitOpts.idempotencyCacheKey, {
           bodyHash: commitOpts.idempotencyBodyHash,
-          data: createdResult,
+          data: structuredClone(createdResult),
+          hashVersion: 2,
+          canonicalHash: commitOpts.idempotencyCanonicalHash,
           createdAtMs: nowMs
         });
       }
@@ -672,7 +676,7 @@ export class TripleScheduleEngine {
     } catch (commitErr) {
       const stage = commitErr?.persistStage || null;
       const PRE_RENAME = new Set(["tmp_open", "tmp_write", "tmp_fsync", "tmp_close", "rename"]);
-      if (!stage || PRE_RENAME.has(stage)) {
+      if (commitErr.commitPublished === false || (commitErr.commitPublished !== true && (!stage || PRE_RENAME.has(stage)))) {
         // Never published — exact inverse of every mutation is safe.
         this.store.reservationPlans.delete(planId);
         this.store.reservationJobs.delete(jobId);
@@ -694,6 +698,7 @@ export class TripleScheduleEngine {
             Object.assign(snap.oldPlan, snap.oldPlanState);
           }
         }
+        this.store._rebuildIndexes?.();
         throw new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
           "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态"
@@ -706,7 +711,7 @@ export class TripleScheduleEngine {
       throw new ContractError(
         "STORAGE_COMMIT_UNKNOWN",
         "提交结果未知：快照已发布但目录核验失败。请携带原 Idempotency-Key 重试以对账，不要另起新键",
-        { persist_stage: stage }
+        { persist_stage: stage, durability: "UNKNOWN", retry_same_key: true }
       );
     }
 
@@ -2184,6 +2189,7 @@ export class TripleScheduleEngine {
     reason = "用户停止预约计划委托",
     nowMs = Date.now()
   } = {}) {
+    this.store.assertStorageWritable?.();
     const targetJob = jobId ? this.store.reservationJobs.get(jobId) : null;
     if (jobId && !targetJob) {
       throw new ContractError("NOT_FOUND", "Reservation job not found");

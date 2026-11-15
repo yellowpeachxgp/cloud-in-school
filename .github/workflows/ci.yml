@@ -18,6 +18,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: 准备隔离 PostgreSQL 17 测试镜像
+        run: docker pull postgres:17-alpine
+
+      - name: 检查全部 JavaScript 模块语法
+        run: git ls-files -z '*.mjs' | xargs -0 -n1 node --check
+
       - name: Secret & Credential Leak Gate
         run: |
           if grep -RInE "(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|SSO_INTERNAL_SERVICE_KEY=[^<\s])" \

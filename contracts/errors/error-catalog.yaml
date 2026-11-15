@@ -110,3 +110,13 @@ errors:
     retryable: false
     user_action: REVIEW_PLUGIN_PERMISSIONS
     description: Plugin attempted an undeclared or forbidden capability via PluginBroker.
+  - code: STORAGE_PERSISTENCE_FAILED
+    http_status: 503
+    retryable: true
+    user_action: RETRY_AFTER_STORAGE_RECOVERY
+    description: 快照确定未发布，修复存储后按原请求重试。
+  - code: STORAGE_COMMIT_UNKNOWN
+    http_status: 503
+    retryable: true
+    user_action: RETRY_WITH_SAME_IDEMPOTENCY_KEY_TO_RECONCILE
+    description: 快照提交耐久性待核验；保持原键和原请求，禁止换键重建。

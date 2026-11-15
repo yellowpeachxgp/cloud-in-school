@@ -54,7 +54,8 @@ test("R5-1a: close callback never arrives -> serverClosed:false, exit 3, no floo
   });
   const res = await shutdown("SIGTERM");
   const elapsed = Date.now() - started;
-  assert.equal(res.drained, true);
+  assert.equal(res.drained, false);
+  assert.equal(res.tasksDrained, true);
   assert.equal(res.serverClosed, false);
   assert.equal(exitCode, 3);
   assert.ok(elapsed < 1500, `no 500ms+ floor past deadline (elapsed=${elapsed})`);

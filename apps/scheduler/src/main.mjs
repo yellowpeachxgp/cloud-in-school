@@ -5,6 +5,7 @@ const KIND_PRIORITY = {
 };
 
 export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
+  app.store.assertStorageWritable?.();
   const executed = [];
   // Single pass: collect due events and a job_id -> events index (avoids nested find per unknown job)
   const eventsByJobAll = new Map();

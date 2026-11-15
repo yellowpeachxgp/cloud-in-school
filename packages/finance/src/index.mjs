@@ -570,6 +570,7 @@ export class FinanceSagaService {
     while (this.orderLocks.has(lockKey)) {
       await this.orderLocks.get(lockKey);
     }
+    this.store.assertStorageWritable?.();
     let release;
     const p = new Promise((resolve) => {
       release = resolve;
@@ -584,12 +585,14 @@ export class FinanceSagaService {
   }
 
   async getWalletSnapshot(cloudUserId) {
+    this.store.assertStorageWritable?.();
     const user = this.store.users.get(cloudUserId);
     const snapshot = await this.financeBridge.readWallet(cloudUserId, user?.subject, user);
     return snapshot;
   }
 
   async createAndSettleOrderForConfirmedJob({ job, plan, nowMs = Date.now() }) {
+    this.store.assertStorageWritable?.();
     const existingOrderId = this.store._idxOrderByJob?.get(job.id);
     let order = existingOrderId ? this.store.reservationOrders.get(existingOrderId) : null;
     if (!order) {
@@ -698,6 +701,29 @@ export class FinanceSagaService {
         if (!op.payload_hash) op.payload_hash = payloadHash;
       }
 
+      if (this.financeBridge.realDebitsEnabled && Number(op.attempt_count || 0) > 0 &&
+          ["IN_FLIGHT", "FAILED_RETRYABLE", "RESULT_UNKNOWN", "SUCCEEDED"].includes(op.status)) {
+        // 崩溃/存储未知之后只做原键只读核验，任何不确定结果都不能触发真实重扣。
+        const probe = op.status === "SUCCEEDED" ? { outcome: "APPLIED", ssoRequestId: op.sso_request_id }
+          : await this.financeBridge.queryOperationResult?.(eventKey, {
+            expectedMicropeach: op.amount_micropeach, cloudUserId: order.cloud_user_id
+          }) || { outcome: "UNKNOWN" };
+        op.last_reconcile_evidence = probe;
+        if (probe.outcome === "APPLIED") {
+          op.status = "SUCCEEDED";
+          op.sso_request_id = probe.ssoRequestId || op.sso_request_id;
+          order.payment_state = "PAID";
+          order.paid_at = order.paid_at || new Date(nowMs).toISOString();
+          this.store.flushSnapshotStrictSync?.();
+          return order;
+        }
+        op.status = "RESULT_UNKNOWN";
+        op.last_error_code = "PAYMENT_RECONCILING";
+        op.next_attempt_at = new Date(nowMs + computeRetryBackoffMs(op.attempt_count)).toISOString();
+        this.store.flushSnapshotStrictSync?.();
+        throw new ContractError("PAYMENT_RECONCILING", "扣款结果待核验，已保留原事件键，仅回查账本，不自动重发资金请求");
+      }
+
       op.attempt_count += 1;
       op.updated_at = new Date(nowMs).toISOString();
       // STRICT durable commit of the immutable order+operation+eventKey+payload
@@ -783,6 +809,7 @@ export class FinanceSagaService {
   }
 
   _hasFinanceApproverRole(cloudUserId) {
+    this.store.assertStorageWritable?.();
     const user = this.store.users.get(cloudUserId);
     if (!user || user.status !== "ACTIVE") return false;
     if (user.role === "admin") return true;
@@ -914,6 +941,7 @@ export class FinanceSagaService {
    * filling in another admin's name grants nothing.
    */
   async approveRefundRequest({ requestId, approverRef }, nowMs = Date.now()) {
+    this.store.assertStorageWritable?.();
     const req = this.store.refundRequests.get(requestId);
     if (!req) throw new ContractError("NOT_FOUND", "Refund request not found");
     // Serialize approvals on the per-order lock: two racing admins cannot
@@ -959,6 +987,7 @@ export class FinanceSagaService {
    * RESULT_UNKNOWN and re-execution dedupes instead of double-refunding.
    */
   async executeRefundRequest({ requestId, actorRef }, nowMs = Date.now()) {
+    this.store.assertStorageWritable?.();
     const req = this.store.refundRequests.get(requestId);
     if (!req) throw new ContractError("NOT_FOUND", "Refund request not found");
     if (req.status === "REFUNDED") {
@@ -1089,7 +1118,7 @@ export class FinanceSagaService {
           if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
           return { request: req, order };
         }
-        if (probe.outcome !== "PROVEN_NOT_APPLIED" && !this.financeBridge.supportsProvenKeyReuse) {
+        if (this.financeBridge.realDebitsEnabled || (probe.outcome !== "PROVEN_NOT_APPLIED" && !this.financeBridge.supportsProvenKeyReuse)) {
           // Cannot prove the write landed AND cannot safely re-POST — keep the
           // lane open for manual reconcile; never guess or mint a new key.
           req.result_error = "MANUAL_REVIEW: upstream result unresolved; key reuse unverified";
@@ -1321,6 +1350,7 @@ export class FinanceSagaService {
    * of being silently skipped forever.
    */
   async retryPendingDebits(nowMs = Date.now(), { batchSize = 10, concurrency = 3 } = {}) {
+    this.store.assertStorageWritable?.();
     if (this._retryWorkerRunning) {
       return { skipped: "worker_already_running", retried: [] };
     }
@@ -1348,7 +1378,7 @@ export class FinanceSagaService {
             }
           }
           if (op.status === "MANUAL_REVIEW") continue;
-          if (op.status !== "FAILED_RETRYABLE") continue;
+          if (!["FAILED_RETRYABLE", "RESULT_UNKNOWN"].includes(op.status)) continue;
           if (Number(op.attempt_count || 0) >= 20) {
             op.status = "MANUAL_REVIEW";
             this.store.recordAudit({

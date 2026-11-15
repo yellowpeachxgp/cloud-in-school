@@ -659,6 +659,18 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '200':
+          description: 已确认耐久提交的原幂等结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationPlanEnvelope'
   /api/v1/reservation-plans/{planId}:
     patch:
       operationId: updateReservationPlan
@@ -685,6 +697,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
     delete:
       operationId: cancelReservationPlan
       tags: [reservations]
@@ -702,6 +720,12 @@ paths:
                 $ref: '#/components/schemas/ActionAckEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/reservation-jobs:
     get:
       operationId: listReservationJobs
@@ -760,6 +784,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/reservation-jobs/{jobId}/evidence:
     get:
       operationId: getReservationJobEvidence
@@ -1763,8 +1793,18 @@ paths:
       responses:
         '200':
           description: Quote issued (amount, price_version, expires_at, quote_hash)
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/reservation-quote-v1.schema.json'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 components:
   securitySchemes:
     bearerAuth:

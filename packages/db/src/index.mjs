@@ -594,9 +594,14 @@ export class CloudDatabaseStore {
     requireDurableSnapshot =
       process.env.NODE_ENV === "production" || process.env.CLOUD_REQUIRE_DURABLE_SNAPSHOT === "1",
     pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
-    adminSsoSubjects = null
+    adminSsoSubjects = null,
+    snapshotFs = fs,
+    onPersistStage = null
   } = {}) {
     this.snapshotPath = snapshotPath;
+    this.snapshotFs = snapshotFs;
+    this.onPersistStage = onPersistStage;
+    this.storageCommitUnknown = false;
     this.requireDurableSnapshot = Boolean(requireDurableSnapshot);
     this.pricingMicropeach = pricingMicropeach;
     this.adminSsoSubjects = new Set(
@@ -650,10 +655,12 @@ export class CloudDatabaseStore {
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
+    this.priceQuotes = new Map();
     this.idempotencyRecords = new Map(); // `${scope}|${actor}|${key}` -> { requestHash, status, body }
 
     this._seedDefaults();
     this.runMigrations();
+    this.recoverDurabilitySync({ startup: true });
     this._loadSnapshot();
     this._rebuildIndexes();
     this.migrateAndRecoverState();
@@ -797,8 +804,8 @@ export class CloudDatabaseStore {
   _loadSnapshot() {
     if (!this.snapshotPath) return;
     try {
-      if (!fs.existsSync(this.snapshotPath)) return;
-      const raw = JSON.parse(fs.readFileSync(this.snapshotPath, "utf8"));
+      if (!this.snapshotFs.existsSync(this.snapshotPath)) return;
+      const raw = JSON.parse(this.snapshotFs.readFileSync(this.snapshotPath, "utf8"));
       const loadMap = (map, arr) => {
         if (!Array.isArray(arr)) return;
         for (const [k, v] of arr) map.set(k, v);
@@ -843,12 +850,14 @@ export class CloudDatabaseStore {
       // snapshots — replaying an old retry then falls back to first-create
       // semantics with payload-hash protection, never a silent duplicate.
       loadMap(this.idempotencyRecords, raw.idempotencyRecords);
+      loadMap(this.priceQuotes, raw.priceQuotes);
       if (raw.momentsState && typeof raw.momentsState === "object") {
         this.momentsState = {
           ...createDefaultHautMomentsState(),
           ...raw.momentsState
         };
       }
+      if (Array.isArray(raw.outboxEvents)) this.outboxEvents = raw.outboxEvents;
       if (Array.isArray(raw.auditEvents)) {
         this.auditEvents = raw.auditEvents.slice(-500);
       }
@@ -863,11 +872,14 @@ export class CloudDatabaseStore {
   }
 
   saveSnapshot() {
+    this.assertStorageWritable();
     if (!this.snapshotPath) return;
     if (this._snapshotFlushTimer) return;
     this._snapshotFlushTimer = setTimeout(() => {
       this._snapshotFlushTimer = null;
-      this._flushSnapshotSync({ strict: false });
+      try { this._flushSnapshotSync({ strict: true }); } catch (err) {
+        this.lastPersistenceError = err;
+      }
     }, 200);
     this._snapshotFlushTimer.unref?.();
   }
@@ -908,7 +920,97 @@ export class CloudDatabaseStore {
     }
   }
 
+  _persistStage(stage) {
+    this.onPersistStage?.(stage);
+    if (this._persistFaultInject === stage) {
+      const err = new Error(`测试注入存储故障：${stage}`);
+      err.persistStage = stage;
+      throw err;
+    }
+  }
+
+  assertStorageWritable() {
+    if (this.storageCommitUnknown) {
+      throw new ContractError("STORAGE_COMMIT_UNKNOWN", "快照耐久性待核验，已暂停写入；请保留原幂等键和请求，稍后重试", {
+        durability: "UNKNOWN", retry_same_key: true
+      });
+    }
+  }
+
+  _syncSnapshotDirectory(stage = "dir_fsync") {
+    const io = this.snapshotFs;
+    this._persistStage("dir_open");
+    const fd = io.openSync(path.dirname(this.snapshotPath), "r");
+    try {
+      this._persistStage(stage);
+      io.fsyncSync(fd);
+    } finally { io.closeSync(fd); }
+  }
+
+  _validateCommitUnit(raw) {
+    const plans = new Map(raw.reservationPlans || []);
+    const jobs = new Map(raw.reservationJobs || []);
+    const events = new Map(raw.scheduleEvents || []);
+    const quotes = new Map(raw.priceQuotes || []);
+    const consumed = new Set();
+    for (const plan of plans.values()) {
+      if (!plan.accepted_quote_id) continue;
+      if (quotes.has(plan.accepted_quote_id) || consumed.has(plan.accepted_quote_id)) {
+        throw new Error("报价消费与计划快照不一致");
+      }
+      consumed.add(plan.accepted_quote_id);
+    }
+    for (const [, receipt] of raw.idempotencyRecords || []) {
+      // 其他业务的回执保持兼容；预约回执必须指向同一快照内的完整提交单元。
+      const d = receipt.data;
+      if (!d?.plan_id || !d?.job_id) continue;
+      if (!plans.has(d.plan_id) || jobs.get(d.job_id)?.plan_id !== d.plan_id ||
+          !Array.isArray(d.schedule_events) || d.schedule_events.some(e => events.get(e.id)?.job_id !== d.job_id)) {
+        throw new Error("预约幂等回执与计划、任务、事件不一致");
+      }
+    }
+  }
+
+  recoverDurabilitySync({ startup = false } = {}) {
+    if (!this.snapshotPath) return;
+    const io = this.snapshotFs;
+    const intentPath = `${this.snapshotPath}.intent`;
+    if (!startup && !this.storageCommitUnknown) return;
+    try {
+      const intent = io.existsSync(intentPath) ? JSON.parse(io.readFileSync(intentPath, "utf8")) : null;
+      const bytes = io.existsSync(this.snapshotPath) ? io.readFileSync(this.snapshotPath) : null;
+      const digest = bytes ? crypto.createHash("sha256").update(bytes).digest("hex") : null;
+      if (!startup && this._unknownSnapshotHash !== undefined && digest !== this._unknownSnapshotHash) {
+        throw new Error("已发布快照在恢复前被替换或丢失");
+      }
+      if (intent && (intent.version !== 1 || !intent.nextHash ||
+          (digest !== intent.nextHash && digest !== intent.previousHash))) {
+        throw new Error("快照与提交意图摘要不符，必须隔离并人工核验");
+      }
+      if (bytes) {
+        this._validateCommitUnit(JSON.parse(bytes.toString("utf8")));
+        const fd = io.openSync(this.snapshotPath, "r");
+        try { this._persistStage("recovery_file_fsync"); io.fsyncSync(fd); }
+        finally { io.closeSync(fd); }
+      }
+      if (intent || bytes) this._syncSnapshotDirectory();
+      if (intent) {
+        io.unlinkSync(intentPath);
+        this._syncSnapshotDirectory("intent_clear_fsync");
+      }
+      this.storageCommitUnknown = false;
+      this._unknownSnapshotHash = undefined;
+      this.lastPersistenceError = null;
+    } catch (cause) {
+      this.storageCommitUnknown = true;
+      throw new ContractError("STORAGE_COMMIT_UNKNOWN", "无法确认快照耐久性，保持隔离；禁止换键重建或覆盖快照", {
+        durability: "UNKNOWN", retry_same_key: true, reason: cause.message
+      });
+    }
+  }
+
   _flushSnapshotSync({ strict = false } = {}) {
+    this.assertStorageWritable();
     if (!this.snapshotPath) {
       if (strict && this.requireDurableSnapshot) {
         throw new ContractError(
@@ -928,9 +1030,27 @@ export class CloudDatabaseStore {
     }
     this.pruneAuthEphemera();
     let tmp = null;
+    let published = false;
+    let intentWritten = false;
+    let previousHash = null;
+    const io = this.snapshotFs;
+    const intentPath = `${this.snapshotPath}.intent`;
     try {
       const dir = path.dirname(this.snapshotPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      if (!io.existsSync(dir)) {
+        const missing = [];
+        for (let cursor = dir; !io.existsSync(cursor); cursor = path.dirname(cursor)) {
+          missing.push(cursor);
+          if (path.dirname(cursor) === cursor) throw new Error("存储根目录不可用");
+        }
+        io.mkdirSync(dir, { recursive: true });
+        // 新建目录本身也必须在各级父目录中耐久，不能只同步最深一层。
+        for (const created of missing.reverse()) {
+          const parentFd = io.openSync(path.dirname(created), "r");
+          try { this._persistStage("mkdir_parent_fsync"); io.fsyncSync(parentFd); }
+          finally { io.closeSync(parentFd); }
+        }
+      }
       const serializeRecord = ([k, v]) => {
         if (v && typeof v === "object" && "_stopPersistencePending" in v) {
           const { _stopPersistencePending, ...rest } = v;
@@ -939,6 +1059,7 @@ export class CloudDatabaseStore {
         return [k, v];
       };
       const data = {
+        storage_protocol: 2,
         users: Array.from(this.users.entries()),
         userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
         userSsoRoles: Array.from(this.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
@@ -967,108 +1088,51 @@ export class CloudDatabaseStore {
         notifications: Array.from(this.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
         // original result after restart — never a duplicate, never lost.
-        idempotencyRecords: Array.from(this.idempotencyRecords.entries()).slice(-2000),
+        idempotencyRecords: Array.from(this.idempotencyRecords.entries()),
+        priceQuotes: Array.from(this.priceQuotes.entries()),
+        outboxEvents: this.outboxEvents,
         auditEvents: this.auditEvents.slice(-500)
       };
       this._snapshotTmpSeq = (this._snapshotTmpSeq || 0) + 1;
       tmp = `${this.snapshotPath}.tmp.${process.pid}.${this._snapshotTmpSeq}`;
       const serialized = JSON.stringify(data);
-      const expectedBytes = Buffer.byteLength(serialized, "utf8");
-      // Stage-tagged failures (R6-C2): callers must distinguish "never
-      // published" (pre-rename — in-memory rollback is safe) from "published
-      // but unverified" (post-rename — rolling back memory would diverge
-      // from the durable snapshot the next restart loads).
-      const _inject = (stage) => {
-        if (this._persistFaultInject === stage) {
-          const e = new Error("injected persistence failure at " + stage);
-          e.persistStage = stage;
-          throw e;
-        }
-      };
-      let persistStage = "tmp_open";
-      _inject("tmp_open");
+      const nextHash = crypto.createHash("sha256").update(serialized).digest("hex");
+      previousHash = io.existsSync(this.snapshotPath)
+        ? crypto.createHash("sha256").update(io.readFileSync(this.snapshotPath)).digest("hex") : null;
+      this._validateCommitUnit(data);
+      let stage = "tmp_open";
       try {
-        const fd = fs.openSync(tmp, "w");
+        this._persistStage(stage);
+        const fd = io.openSync(tmp, "wx", 0o600);
         try {
-          persistStage = "tmp_write";
-          _inject("tmp_write");
-          fs.writeFileSync(fd, serialized, "utf8");
-          persistStage = "tmp_fsync";
-          _inject("tmp_fsync");
-          fs.fsyncSync(fd);
-        } finally {
-          persistStage = "tmp_close";
-          fs.closeSync(fd);
-        }
-        persistStage = "rename";
-        _inject("rename");
-        fs.renameSync(tmp, this.snapshotPath);
-      } catch (stageErr) {
-        stageErr.persistStage = persistStage;
-        throw stageErr;
-      }
-      persistStage = "post_rename";
-      if (strict) {
-        const isUnsupportedDirFsyncError = (err, stage) => {
-          const code = String(err?.code || "").toUpperCase();
-          if (stage === "open") {
-            return (
-              process.platform === "win32" &&
-              (code === "EISDIR" || code === "EPERM" || code === "EINVAL")
-            );
-          }
-          if (stage === "fsync") {
-            return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP";
-          }
-          return false;
-        };
-
-        let dirFd = null;
-        _inject("dir_open");
+          stage = "tmp_write"; this._persistStage(stage);
+          io.writeFileSync(fd, serialized, "utf8");
+          stage = "tmp_fsync"; this._persistStage(stage); io.fsyncSync(fd);
+        } finally { io.closeSync(fd); }
+        // 意图先落盘，发布后任何失败均保留候选状态，不能回滚到旧内存。
+        stage = "intent_write"; this._persistStage(stage);
+        const intentFd = io.openSync(intentPath, "wx", 0o600);
+        intentWritten = true;
         try {
-          dirFd = fs.openSync(dir, "r");
-        } catch (openErr) {
-          if (!isUnsupportedDirFsyncError(openErr, "open")) {
-            openErr.persistStage = "dir_open";
-            throw openErr;
-          }
+          io.writeFileSync(intentFd, JSON.stringify({ version: 1, nextHash, previousHash }));
+          stage = "intent_fsync"; this._persistStage(stage); io.fsyncSync(intentFd);
+        } finally { io.closeSync(intentFd); }
+        stage = "intent_dir_fsync";
+        this._syncSnapshotDirectory(stage);
+        stage = "rename"; this._persistStage(stage);
+        io.renameSync(tmp, this.snapshotPath);
+        published = true;
+        this._unknownSnapshotHash = nextHash;
+        stage = "post_rename"; this._persistStage(stage);
+        stage = "dir_fsync"; this._syncSnapshotDirectory();
+        stage = "verify_content"; this._persistStage(stage);
+        if (crypto.createHash("sha256").update(io.readFileSync(this.snapshotPath)).digest("hex") !== nextHash) {
+          throw new Error("已发布快照内容摘要不一致");
         }
-        if (dirFd !== null) {
-          let fsyncErr = null;
-          try {
-            _inject("dir_fsync");
-            fs.fsyncSync(dirFd);
-          } catch (err) {
-            if (!isUnsupportedDirFsyncError(err, "fsync")) {
-              fsyncErr = err;
-            }
-          }
-          let closeErr = null;
-          try {
-            fs.closeSync(dirFd);
-          } catch (err) {
-            closeErr = err;
-          }
-          if (fsyncErr) {
-            fsyncErr.persistStage = "dir_fsync";
-            throw fsyncErr;
-          }
-          if (closeErr) {
-            closeErr.persistStage = "dir_close";
-            throw closeErr;
-          }
-        }
-        try {
-          _inject("verify_stat");
-          const st = fs.statSync(this.snapshotPath);
-          if (!st || !st.isFile() || st.size !== expectedBytes) {
-            throw new Error("Persisted snapshot verification failed (missing file or byte-size mismatch)");
-          }
-        } catch (statErr) {
-          statErr.persistStage = statErr.persistStage || "verify_stat";
-          throw statErr;
-        }
-      }
+        stage = "intent_clear"; this._persistStage(stage); io.unlinkSync(intentPath);
+        stage = "intent_clear_fsync"; this._syncSnapshotDirectory(stage);
+      } catch (err) { err.persistStage = err.persistStage || stage; throw err; }
+      this._unknownSnapshotHash = undefined;
       for (const p of this.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;
       }
@@ -1077,22 +1141,22 @@ export class CloudDatabaseStore {
       }
     } catch (err) {
       if (tmp) {
-        try {
-          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-        } catch {
-          // Best-effort cleanup of temp snapshot file
-        }
+        try { if (io.existsSync(tmp)) io.unlinkSync(tmp); } catch { /* 孤立临时文件不参与恢复 */ }
       }
-      if (strict) {
-        const ce = new ContractError(
-          "STORAGE_PERSISTENCE_FAILED",
-          `Failed to durably persist reservation state: ${err?.message || "I/O error"}`
-        );
-        // R6-C2: propagate the failure stage so callers can distinguish
-        // pre-rename (safe to roll back) from post-rename (commit unknown).
-        ce.persistStage = err?.persistStage || null;
-        throw ce;
+      if (!published && intentWritten) {
+        try { io.unlinkSync(intentPath); this._syncSnapshotDirectory("intent_clear_fsync"); }
+        catch { this.storageCommitUnknown = true; this._unknownSnapshotHash = previousHash; }
       }
+      if (published) this.storageCommitUnknown = true;
+      const ce = new ContractError(
+        published ? "STORAGE_COMMIT_UNKNOWN" : "STORAGE_PERSISTENCE_FAILED",
+        published ? "快照已发布，耐久性待核验；保留原幂等键重试" : `快照未发布：${err.message}`,
+        { durability: published ? "UNKNOWN" : "NOT_COMMITTED", retry_same_key: true }
+      );
+      ce.persistStage = err.persistStage || null;
+      ce.commitPublished = published;
+      this.lastPersistenceError = ce;
+      if (strict || published) throw ce;
     }
   }
 

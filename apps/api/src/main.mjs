@@ -4,6 +4,7 @@ import { scanDueScheduleEvents } from "../../scheduler/src/main.mjs";
 
 const port = Number(process.env.PORT || 8080);
 const host = process.env.HOST || "0.0.0.0";
+const configuredDrainMs = Number(process.env.SHUTDOWN_TIMEOUT_MS);
 const app = createCampusCloudApp({
   storeOptions: {
     snapshotPath:
@@ -110,7 +111,7 @@ const shutdownController = createShutdownController({
   setExitCode: (code) => {
     process.exitCode = code;
   },
-  maxDrainMs: 15_000,
+  maxDrainMs: Number.isFinite(configuredDrainMs) && configuredDrainMs > 0 ? configuredDrainMs : 15_000,
   // Bounded shutdown: after the final verdict the process MUST exit —
   // surviving handles (lingering sockets, timers) may not extend its life.
   terminate: (code) => {
@@ -127,8 +128,11 @@ server.listen(port, host, () => {
       service: "cloud-in-school-api",
       status: "listening",
       host,
-      port,
+      port: server.address().port,
       registered_operations: app.getRegisteredRoutes().length
     })
   );
 });
+
+// 隔离子进程测试使用真实入口对象，不替换生产接线。
+export { app, server };

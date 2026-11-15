@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 // Unified graceful-shutdown controller — extracted so the real drain logic
 // is unit-testable with fake apps/servers/clock. main.mjs wires its live
 // objects; tests wire fakes. Both share this one implementation.
@@ -10,7 +12,7 @@ export function createShutdownController({
     process.exitCode = code;
   },
   maxDrainMs = 15_000,
-  now = () => Date.now(),
+  now = () => performance.now(),
   // R6-C1: exitCode alone does NOT end a process — a live socket/timer handle
   // keeps it alive. main wires process.exit; tests leave the no-op default.
   terminate = () => {}
@@ -24,7 +26,8 @@ export function createShutdownController({
       deadlineMs = Math.min(deadlineMs, now() + 2_000);
       return shutdownPromise;
     }
-    deadlineMs = now() + maxDrainMs;
+    const startedAt = now();
+    deadlineMs = startedAt + maxDrainMs;
     shutdownPromise = (async () => {
       const log = (extra) =>
         logLine({ service: "cloud-api-shutdown", timestamp: new Date().toISOString(), signal, ...extra });
@@ -33,6 +36,25 @@ export function createShutdownController({
       // 1) Stop ALL intake: background timers first, then new HTTP writes.
       stopBackgroundTasks();
       if (typeof app.setDraining === "function") app.setDraining(true);
+
+      // 停止监听先于排空任务；既有连接仍可完成回执。
+      let serverClosed = false;
+      let closeError = null;
+      let closeRejected = false;
+      try {
+        server.close((err) => {
+          if (err) {
+            // An errored close is NOT a confirmed close — report honestly.
+            closeError = err?.message || String(err);
+            serverClosed = false;
+          } else {
+            serverClosed = true;
+          }
+        });
+      } catch (err) {
+        closeRejected = true;
+        closeError = err?.message || String(err);
+      }
 
       // 2) Bounded drain over ALL registered task kinds under ONE deadline —
       // the same deadline also bounds the socket close below.
@@ -46,7 +68,8 @@ export function createShutdownController({
         const counts = typeof app.getInFlightTasks === "function" ? app.getInFlightTasks() : {};
         return { drained: false, counts };
       };
-      const { drained, counts: remaining } = await settle();
+      const { drained: tasksDrained, counts: remaining } = await settle();
+      const drained = tasksDrained;
       if (drained) {
         log({ phase: "drained", drained: true });
       } else {
@@ -72,23 +95,6 @@ export function createShutdownController({
       // 500ms floor: if the deadline already passed, we do not wait at all.
       // The wait loop reads deadlineMs dynamically — a second signal during
       // close still accelerates it (R5-C1).
-      let serverClosed = false;
-      let closeError = null;
-      let closeRejected = false;
-      try {
-        server.close((err) => {
-          if (err) {
-            // An errored close is NOT a confirmed close — report honestly.
-            closeError = err?.message || String(err);
-            serverClosed = false;
-          } else {
-            serverClosed = true;
-          }
-        });
-      } catch (err) {
-        closeRejected = true;
-        closeError = err?.message || String(err);
-      }
       if (!closeRejected && typeof server.closeAllConnections === "function") {
         setTimeout(() => {
           try {
@@ -111,14 +117,22 @@ export function createShutdownController({
           reason: closeError || (deadlineExceededInClose ? "close_deadline_exceeded" : "close_rejected")
         });
       }
-      const finalExit = drained && persisted && serverClosed ? 0 : 3;
+      const finishedAt = now();
+      const elapsedMs = finishedAt - startedAt;
+      const deadlineExceeded = finishedAt >= deadlineMs;
+      const finalCounts = app.getInFlightTasks?.() || remaining;
+      const workDrained = Object.values(finalCounts).every(count => count === 0);
+      const completed = tasksDrained && workDrained && persisted && serverClosed && !deadlineExceeded;
+      const finalExit = completed ? 0 : 3;
       log({
         phase: "shutdown_complete",
-        drained,
+        drained: completed,
+        tasksDrained: workDrained,
+        elapsedMs,
         persisted,
         serverClosed,
         closeError: closeError || null,
-        deadlineExceeded: !drained || deadlineExceededInClose,
+        deadlineExceeded,
         exit_code: finalExit
       });
       setExitCode(finalExit);
@@ -126,12 +140,14 @@ export function createShutdownController({
       // handles must not keep the process alive past this point.
       terminate(finalExit);
       return {
-        drained,
+        drained: completed,
+        tasksDrained: workDrained,
+        elapsedMs,
         persisted,
         serverClosed,
         closeError: closeError || null,
-        deadlineExceeded: !drained || deadlineExceededInClose,
-        remaining: drained ? {} : remaining
+        deadlineExceeded,
+        remaining: workDrained ? {} : finalCounts
       };
     })();
     return shutdownPromise;
