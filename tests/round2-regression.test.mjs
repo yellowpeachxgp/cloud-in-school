@@ -212,7 +212,13 @@ test("R2-3: legacy reconcile converges SUCCEEDED via recorded upstream result", 
   const eventKey = `dis:reservation:${order.id}:refund:v1`;
 
   // Sandbox bridge "remembers" the key — upstream actually applied it.
-  app.financeBridge.processedIdempotencyKeys.set(eventKey, { ok: true, sso_request_id: "sso_abc" });
+  // R4-F1: linkage-complete upstream record — same key + amount + account.
+  app.financeBridge.processedIdempotencyKeys.set(eventKey, {
+    ok: true,
+    sso_request_id: "sso_abc",
+    cloud_user_id: student.user.id,
+    delta_micropeach: 10_000
+  });
   app.store.financeOperations.set(eventKey, {
     id: crypto.randomUUID(),
     order_id: order.id,
