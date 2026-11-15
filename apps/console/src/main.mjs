@@ -2709,6 +2709,10 @@ export function renderConsoleHtml(ctx = {}) {
                 target_local_time: targetTime,
                 repeat_days: repeatDays,
                 remaining_days: repeatDays,
+                // Quote contract (C8): the price the UI displayed when the user
+                // clicked — server 409s if the global price drifted, forcing an
+                // honest re-confirm instead of a silent re-price.
+                expected_price_micropeach: ${DEFAULT_RESERVATION_PRICE_MICROPEACH},
                 replace_existing: true
               })
             });

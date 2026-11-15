@@ -245,6 +245,26 @@ export class TripleScheduleEngine {
     if (!consent || consent.cloud_user_id !== cloudUserId || consent.withdrawn_at) {
       throw new ContractError("CONSENT_WITHDRAWN", "Active consent record is required");
     }
+
+    // Client-seen quote contract (C8): when the caller pins an expected price,
+    // a drift between their displayed quote and the server's current price is
+    // an explicit conflict — never silently accept a different price on the
+    // user's behalf. Re-display + re-confirm is required.
+    if (
+      payload.expected_price_micropeach !== undefined &&
+      payload.expected_price_micropeach !== null &&
+      Number.isInteger(this.store.pricingMicropeach) &&
+      Number(payload.expected_price_micropeach) !== this.store.pricingMicropeach
+    ) {
+      throw new ContractError(
+        "CONFLICT",
+        `显示价格已变更：当前为 ${this.store.pricingMicropeach / 10000} 🍑，请重新确认价格后再创建`,
+        {
+          expected_price_micropeach: Number(payload.expected_price_micropeach),
+          current_price_micropeach: this.store.pricingMicropeach
+        }
+      );
+    }
     if ((consent.school_id || binding.school_id) !== binding.school_id) {
       throw new ContractError("FORBIDDEN", "Consent school_id does not match binding school_id");
     }
