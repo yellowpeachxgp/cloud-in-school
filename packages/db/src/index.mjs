@@ -1963,6 +1963,30 @@ export class CloudDatabaseStore {
       }
     }
 
+    // 5. Legacy refund operations predating the dual-approval request model:
+    // an in-flight/retryable REFUND op with no matching request record has no
+    // recovery path — flag it for the read-only reconcile queue. Never
+    // fabricate a request, never delete the op, never mint a new event key.
+    for (const op of this.financeOperations.values()) {
+      if (op.kind !== "REFUND") continue;
+      if (!["IN_FLIGHT", "FAILED_RETRYABLE"].includes(op.status)) continue;
+      const hasRequest =
+        op.refund_request_id && this.refundRequests.get(op.refund_request_id);
+      if (!hasRequest && !op.legacy_reconcile_required) {
+        op.legacy_reconcile_required = true;
+        mutated = true;
+        this.recordAudit({
+          actor_kind: "SYSTEM",
+          actor_ref: "migrateAndRecoverState",
+          action: "LEGACY_REFUND_NEEDS_RECONCILE",
+          resource_kind: "reservation_order",
+          resource_ref: op.order_id,
+          outcome: "QUEUED_FOR_RECONCILE",
+          detail: { event_key: op.event_key, status: op.status }
+        });
+      }
+    }
+
     if (mutated) {
       this.saveSnapshot();
     }

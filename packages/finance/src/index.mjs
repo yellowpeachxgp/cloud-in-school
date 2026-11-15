@@ -241,6 +241,52 @@ export class IsolatedFinanceBridge {
     };
   }
 
+  /**
+   * Read-only reconciliation probe for a deterministic idempotency key.
+   * NEVER dispatches a write. Outcomes:
+   *  - SUCCEEDED: upstream recorded the same event key as applied
+   *  - NOT_FOUND: query succeeded and the key provably never applied
+   *  - UNKNOWN: cannot prove either way (caller must keep reconciling)
+   */
+  async queryOperationResult(eventKey) {
+    if (!eventKey || !/^dis:reservation:[0-9a-fA-F-]{36}:(debit|refund):v1$/.test(eventKey)) {
+      throw new ContractError("BAD_REQUEST", "Invalid Finance Bridge idempotency event_key");
+    }
+    // Sandbox ledger: absence of the key IS proof it was never applied —
+    // everything lives in this process.
+    const cached = this.processedIdempotencyKeys.get(eventKey);
+    if (cached) {
+      return { outcome: "SUCCEEDED", result: { ...cached } };
+    }
+    if (this.realDebitsEnabled) {
+      // The real SSO read-back contract is unverified — do NOT claim a
+      // proven-negative from an endpoint we cannot confirm exists. Unknown
+      // is the honest answer until the contract is verified.
+      try {
+        const resp = await fetch(
+          `${this.ssoBaseUrl.replace(/\/+$/, "")}/api/v1/finance/operations/${encodeURIComponent(eventKey)}`,
+          {
+            method: "GET",
+            headers: { "X-Internal-Service-Key": this.internalServiceKey || "" },
+            signal: AbortSignal.timeout(this.httpTimeoutMs)
+          }
+        );
+        if (resp.status === 404) return { outcome: "NOT_FOUND" };
+        if (resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          if (body?.data?.status === "applied" || body?.data?.applied === true) {
+            return { outcome: "SUCCEEDED", result: body.data };
+          }
+          return { outcome: "UNKNOWN", reason: "unparseable_probe_response" };
+        }
+        return { outcome: "UNKNOWN", reason: "probe_http_" + resp.status };
+      } catch (err) {
+        return { outcome: "UNKNOWN", reason: "probe_error:" + (err?.code || err?.message || "error") };
+      }
+    }
+    return { outcome: "NOT_FOUND" };
+  }
+
   async adjustBalanceIdempotent({
     cloudUserId,
     ssoSubject,
@@ -722,8 +768,11 @@ export class FinanceSagaService {
         );
       }
       const existingOp = this.store.financeOperations.get(buildRefundEventKey(orderId));
-      if (existingOp && ["SUCCEEDED", "IN_FLIGHT"].includes(existingOp.status)) {
-        throw new ContractError("CONFLICT", "Refund for this order is already settled or in flight");
+      if (existingOp && ["SUCCEEDED", "IN_FLIGHT", "FAILED_RETRYABLE"].includes(existingOp.status)) {
+        throw new ContractError(
+          "CONFLICT",
+          "Refund for this order is settled or unresolved — reconcile the existing operation first"
+        );
       }
       const resolvedMicro =
         typeof amountMicropeach === "number" && Number.isInteger(amountMicropeach)
@@ -836,10 +885,12 @@ export class FinanceSagaService {
     if (!["APPROVED", "EXECUTING", "RESULT_UNKNOWN"].includes(req.status)) {
       throw new ContractError("CONFLICT", `Refund request is ${req.status}, cannot execute`);
     }
-    // Service-level recheck: the executing actor must still hold a finance
-    // approval role (the HTTP route's RBAC covers real callers; this protects
-    // internal/other callers too).
-    if (req.status === "APPROVED" && !this._hasFinanceApproverRole(actorRef)) {
+    // Service-level recheck: the executing/reconciling actor must still hold
+    // a finance approval role (the HTTP route's RBAC covers real callers;
+    // this protects internal/other callers too). Applies to first dispatch
+    // AND resume-reconcile — any currently-qualified operator may finish
+    // converging an in-flight refund.
+    if (!this._hasFinanceApproverRole(actorRef)) {
       throw new ContractError("FORBIDDEN", "Executing actor does not hold a finance approval role");
     }
     // TTL is hard for approval-stage requests: an APPROVED request that sat
@@ -873,37 +924,67 @@ export class FinanceSagaService {
         return { request: req, order };
       }
 
-      if (req.status !== "EXECUTING") {
+      // Split semantics: "permission to dispatch for the first time" vs
+      // "reconcile an already-dispatched result".
+      const isFirstDispatch = req.status === "APPROVED";
+      if (isFirstDispatch) {
+        // First dispatch: re-verify the immutable hash AND that both approval
+        // parties still hold roles — an un-dispatched request must die
+        // honestly rather than move money nobody can vouch for anymore.
+        const expectedHash = this._computeRefundRequestHash({
+          orderId: req.order_id,
+          amountMicropeach: req.amount_micropeach,
+          reason: req.reason,
+          order
+        });
+        if (expectedHash !== req.request_hash) {
+          req.status = "FAILED";
+          req.result_error = "REQUEST_STALE";
+          if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+          throw new ContractError(
+            "CONFLICT",
+            "Order state changed since approval; the refund request is stale and a new request is required"
+          );
+        }
+        if (!this._hasFinanceApproverRole(req.created_by) || !this._hasFinanceApproverRole(req.approved_by)) {
+          req.status = "FAILED";
+          req.result_error = "APPROVER_ROLE_LOST";
+          if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+          throw new ContractError("FORBIDDEN", "One of the approval parties no longer holds a finance role");
+        }
+        if (order.payment_state !== "PAID") {
+          req.status = "FAILED";
+          req.result_error = "ORDER_NOT_PAID";
+          if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+          throw new ContractError("CONFLICT", "Order is no longer in a refundable state");
+        }
         req.status = "EXECUTING";
         req.executed_at = new Date(nowMs).toISOString();
-      }
-      // Re-verify immutable hash against the CURRENT order snapshot.
-      const expectedHash = this._computeRefundRequestHash({
-        orderId: req.order_id,
-        amountMicropeach: req.amount_micropeach,
-        reason: req.reason,
-        order
-      });
-      if (expectedHash !== req.request_hash) {
-        req.status = "FAILED";
-        req.result_error = "REQUEST_STALE";
-        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-        throw new ContractError(
-          "CONFLICT",
-          "Order state changed since approval; the refund request is stale and a new request is required"
-        );
-      }
-      if (!this._hasFinanceApproverRole(req.created_by) || !this._hasFinanceApproverRole(req.approved_by)) {
-        req.status = "FAILED";
-        req.result_error = "APPROVER_ROLE_LOST";
-        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-        throw new ContractError("FORBIDDEN", "One of the approval parties no longer holds a finance role");
-      }
-      if (order.payment_state !== "PAID") {
-        req.status = "FAILED";
-        req.result_error = "ORDER_NOT_PAID";
-        if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
-        throw new ContractError("CONFLICT", "Order is no longer in a refundable state");
+      } else {
+        // Resume reconcile (EXECUTING / RESULT_UNKNOWN): the intent already
+        // dispatched or was durably committed. The original approver losing
+        // their role must NEVER freeze this lane — any currently-qualified
+        // operator finishes it with the SAME event key.
+        const existingOp = this.store.financeOperations.get(buildRefundEventKey(order.id));
+        if (!existingOp) {
+          req.result_error = "MANUAL_REVIEW: dispatch evidence missing; do not reissue under a new key";
+          if (typeof this.store.flushSnapshotStrictSync === "function") {
+            try { this.store.flushSnapshotStrictSync(); } catch { /* recoverable */ }
+          }
+          throw new ContractError(
+            "CONFLICT",
+            "Refund marked dispatched but no operation record exists — route to manual reconciliation instead of re-dispatching"
+          );
+        }
+        if (existingOp.status === "SUCCEEDED") {
+          // Upstream applied it but the local convergence was lost.
+          order.payment_state = "REFUNDED";
+          order.refunded_at = order.refunded_at || new Date(nowMs).toISOString();
+          req.status = "REFUNDED";
+          req.result_error = null;
+          if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+          return { request: req, order };
+        }
       }
 
       const eventKey = buildRefundEventKey(order.id);
@@ -1016,6 +1097,81 @@ export class FinanceSagaService {
       );
     }
     return this.executeRefundRequest({ requestId: req.id, actorRef }, nowMs);
+  }
+
+  /**
+   * Read-only reconciliation for a LEGACY refund operation that predates the
+   * dual-approval request model (in-flight at upgrade, no request record).
+   * Uses the ORIGINAL event key — never fabricates a request, never mints a
+   * new key, never marks a result the upstream cannot confirm.
+   */
+  async reconcileLegacyRefundOperation(orderId, { actorRef }, nowMs = Date.now()) {
+    if (!this._hasFinanceApproverRole(actorRef)) {
+      throw new ContractError("FORBIDDEN", "Reconciling actor does not hold a finance approval role");
+    }
+    const order = this.store.reservationOrders.get(orderId);
+    if (!order) throw new ContractError("NOT_FOUND", "Order not found");
+    const eventKey = buildRefundEventKey(orderId);
+    const op = this.store.financeOperations.get(eventKey);
+    if (!op) {
+      throw new ContractError("NOT_FOUND", "No refund operation exists for this order");
+    }
+    if (op.refund_request_id && this.store.refundRequests.get(op.refund_request_id)) {
+      throw new ContractError(
+        "CONFLICT",
+        "This refund is governed by a dual-person request — use the request execute path"
+      );
+    }
+    if (!["IN_FLIGHT", "FAILED_RETRYABLE"].includes(op.status)) {
+      throw new ContractError("CONFLICT", `Refund operation is ${op.status}; nothing to reconcile`);
+    }
+    if (typeof this.financeBridge.queryOperationResult !== "function") {
+      throw new ContractError(
+        "CONFLICT",
+        "Finance bridge exposes no read-back probe — manual reconciliation required, no re-dispatch"
+      );
+    }
+    const probe = await this.financeBridge.queryOperationResult(eventKey);
+    if (probe.outcome === "SUCCEEDED") {
+      op.status = "SUCCEEDED";
+      op.updated_at = new Date(nowMs).toISOString();
+      op.sso_request_id = op.sso_request_id || probe.result?.sso_request_id || null;
+      order.payment_state = "REFUNDED";
+      order.refunded_at = order.refunded_at || new Date(nowMs).toISOString();
+      this.store.recordAudit({
+        actor_kind: "FINANCE_OPERATOR",
+        actor_ref: actorRef,
+        action: "LEGACY_REFUND_RECONCILED",
+        resource_kind: "reservation_order",
+        resource_ref: orderId,
+        outcome: "REFUNDED",
+        detail: { event_key: eventKey, source: "upstream_probe" }
+      });
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      return { reconciled: "SUCCEEDED", op, order };
+    }
+    if (probe.outcome === "NOT_FOUND") {
+      op.status = "FAILED";
+      op.last_error_code = "LEGACY_NEVER_RECEIVED";
+      op.updated_at = new Date(nowMs).toISOString();
+      this.store.recordAudit({
+        actor_kind: "FINANCE_OPERATOR",
+        actor_ref: actorRef,
+        action: "LEGACY_REFUND_RECONCILED",
+        resource_kind: "reservation_order",
+        resource_ref: orderId,
+        outcome: "NEVER_RECEIVED",
+        detail: { event_key: eventKey, source: "upstream_probe" }
+      });
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      return { reconciled: "NEVER_RECEIVED", op, order };
+    }
+    // UNKNOWN: keep the operation in the reconcile queue — never guess.
+    op.legacy_reconcile_required = true;
+    op.last_error_code = probe.reason || "UPSTREAM_PROBE_UNRESOLVED";
+    op.updated_at = new Date(nowMs).toISOString();
+    if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+    return { reconciled: "UNKNOWN", reason: probe.reason || null, op };
   }
 
   /**

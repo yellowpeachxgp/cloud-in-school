@@ -1994,11 +1994,47 @@ export function createCampusCloudApp(options = {}) {
     "bearer_rbac",
     async ({ auth }) => {
       store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR", "SECURITY_AUDITOR"]);
+      // Legacy operations (pre-dual-approval) that are parked in the reconcile
+      // queue are surfaced alongside requests — ops staff must SEE them.
+      const legacyOps = Array.from(store.financeOperations.values()).filter(
+        (op) => op.kind === "REFUND" && op.legacy_reconcile_required
+      );
       return {
         status: 200,
         code: "REFUND_REQUESTS_LISTED",
-        data: { refund_requests: Array.from(store.refundRequests.values()) }
+        data: {
+          refund_requests: Array.from(store.refundRequests.values()),
+          legacy_reconcile_queue: legacyOps.map((op) => ({
+            order_id: op.order_id,
+            event_key: op.event_key,
+            status: op.status,
+            attempt_count: op.attempt_count,
+            last_error_code: op.last_error_code,
+            created_at: op.created_at,
+            updated_at: op.updated_at
+          }))
+        }
       };
+    }
+  );
+
+  // Read-only reconcile of a LEGACY refund operation (no dual-approval request
+  // exists). Queries the upstream by the ORIGINAL event key — never mints a
+  // new key, never fabricates an approval.
+  register(
+    "POST",
+    "/api/v1/admin/orders/{orderId}/refund-reconcile",
+    "reconcileLegacyRefund",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const result = await financeService.reconcileLegacyRefundOperation(
+        params.orderId,
+        { actorRef: auth.cloudUserId },
+        nowMs
+      );
+      if (result.order?.cloud_user_id) await syncUserToSso(result.order.cloud_user_id);
+      return { status: 200, code: "LEGACY_REFUND_RECONCILED", data: result };
     }
   );
 
