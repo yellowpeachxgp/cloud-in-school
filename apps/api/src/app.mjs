@@ -4988,6 +4988,9 @@ export function createCampusCloudApp(options = {}) {
     };
   });
 
+  let isDraining = false;
+  let inFlightMutations = 0;
+
   async function inject({
     method = "GET",
     url = "/healthz",
@@ -4997,10 +5000,26 @@ export function createCampusCloudApp(options = {}) {
     remoteAddr = null
   }) {
     const requestId = generateRequestId(headers["x-request-id"] || headers["X-Request-Id"]);
+    const upperMethodEarly = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+    // Graceful shutdown fence: once draining, refuse new mutating work with a
+    // retryable 503 — clients see an honest state, never a half-applied write.
+    if (isDraining && upperMethodEarly !== "GET") {
+      return {
+        status: 503,
+        headers: { "retry-after": "2" },
+        body: {
+          ok: false,
+          code: "SERVER_DRAINING",
+          request_id: requestId,
+          error: { code: "SERVER_DRAINING", message: "服务正在停机维护，请稍后重试" }
+        }
+      };
+    }
+    if (upperMethodEarly !== "GET") inFlightMutations += 1;
     try {
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
-      const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+      const upperMethod = upperMethodEarly;
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
       // In-memory buffer cache (5s stat freshness) + weak ETag so repeat loads
@@ -5495,6 +5514,8 @@ export function createCampusCloudApp(options = {}) {
         },
         body: errEnv.body
       };
+    } finally {
+      if (upperMethodEarly !== "GET") inFlightMutations = Math.max(0, inFlightMutations - 1);
     }
   }
 
@@ -5601,6 +5622,10 @@ export function createCampusCloudApp(options = {}) {
     redisBuffer,
     inject,
     createHttpServer,
-    getRegisteredRoutes
+    getRegisteredRoutes,
+    setDraining: (v) => {
+      isDraining = Boolean(v);
+    },
+    getInFlightWrites: () => inFlightMutations
   };
 }

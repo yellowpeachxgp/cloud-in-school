@@ -88,14 +88,79 @@ const financeWorkerTimer = setInterval(async () => {
 }, 5_000);
 financeWorkerTimer.unref?.();
 
-// Graceful shutdown: stop pulling new work; let in-flight debits finish within
-// a bounded window so recovery markers stay consistent on restart.
-function shutdownFinanceWorker() {
-  financeWorkerStopped = true;
-  clearInterval(financeWorkerTimer);
+// Unified graceful shutdown: drain in one idempotent promise. A signal must
+// stop intake AND close the listener — previously only the finance timer was
+// cleared, leaving HTTP + scanner fully alive.
+let shutdownPromise = null;
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const drainDeadlineMs = Date.now() + 15_000;
+    const log = (extra) =>
+      console.log(
+        JSON.stringify({
+          service: "cloud-api-shutdown",
+          timestamp: new Date().toISOString(),
+          signal,
+          ...extra
+        })
+      );
+    log({ phase: "draining_started" });
+
+    // 1) Stop all intake: scheduler scanner + finance worker + new HTTP writes.
+    financeWorkerStopped = true;
+    clearInterval(financeWorkerTimer);
+    clearInterval(scannerTimer);
+    if (typeof app.setDraining === "function") app.setDraining(true);
+
+    // 2) Bounded drain: let in-flight dispatch/debit attempts finish; never
+    //    mark unresolved work as cancelled or failed — RESULT_UNKNOWN stays
+    //    RESULT_UNKNOWN for post-restart reconciliation.
+    const settle = async () => {
+      while (Date.now() < drainDeadlineMs) {
+        const pending = typeof app.getInFlightWrites === "function" ? app.getInFlightWrites() : 0;
+        if (pending <= 0) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return false;
+    };
+    const drained = await settle();
+    if (!drained) {
+      log({ phase: "drain_deadline", note: "in-flight work kept in RESULT_UNKNOWN for reconcile" });
+    }
+
+    // 3) Strict persistence of recovery state before sockets close.
+    try {
+      if (typeof app.store.flushSnapshotStrictSync === "function") {
+        app.store.flushSnapshotStrictSync();
+      } else {
+        app.store.saveSnapshot();
+      }
+    } catch (err) {
+      log({ phase: "persist_failed", error: err?.message || String(err) });
+    }
+
+    // 4) Close the HTTP server (stops accepting; lets open sockets end).
+    await new Promise((resolve) => {
+      try {
+        server.close(() => resolve());
+        // closeAllConnections keeps the deadline honest on keep-alive sockets
+        if (typeof server.closeAllConnections === "function") {
+          setTimeout(() => {
+            try { server.closeAllConnections(); } catch { /* ignore */ }
+          }, 2_000).unref?.();
+        }
+      } catch {
+        resolve();
+      }
+    });
+    log({ phase: "shutdown_complete", drained });
+    process.exitCode = 0;
+  })();
+  return shutdownPromise;
 }
-process.on("SIGTERM", shutdownFinanceWorker);
-process.on("SIGINT", shutdownFinanceWorker);
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 server.listen(port, host, () => {
   console.log(
