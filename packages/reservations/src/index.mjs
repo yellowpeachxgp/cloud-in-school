@@ -268,8 +268,8 @@ export class TripleScheduleEngine {
         });
       }
       acceptedQuote = q;
-      // One-shot quote: consumption prevents replay across plans.
-      this.store.priceQuotes.delete(String(payload.quote_id));
+      // One-shot quote: consumption happens only at the commit point below —
+      // a validation failure must not burn the user's quote.
     }
     if (
       payload.expected_price_micropeach !== undefined &&
@@ -585,6 +585,11 @@ export class TripleScheduleEngine {
     this.store.reservationPlans.set(planId, plan);
     this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
     this.store.reservationJobs.set(jobId, job);
+    // Quote consumed atomically with the commit — only here, after every
+    // failure path above is past.
+    if (acceptedQuote) {
+      this.store.priceQuotes.delete(acceptedQuote.quote_id);
+    }
     this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
     for (const ev of events) {
       this.store.scheduleEvents.set(ev.id, ev);
