@@ -13,9 +13,9 @@ services:
       NODE_ENV: production
       PORT: 8080
       HOST: 0.0.0.0
-      CLOUD_SNAPSHOT_PATH: /app/.data/cloud-state.json
-      SHUTDOWN_TIMEOUT_MS: 15000
-      SHUTDOWN_HARD_TIMEOUT_MS: 20000
+      CLOUD_SNAPSHOT_PATH: ${CLOUD_SNAPSHOT_PATH:-/app/.data/cloud-state.json}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-15000}
+      SHUTDOWN_HARD_TIMEOUT_MS: ${SHUTDOWN_HARD_TIMEOUT_MS:-20000}
     volumes:
       - campus_cloud_data:/app/.data
     ports:
