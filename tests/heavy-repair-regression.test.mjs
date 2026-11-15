@@ -150,7 +150,12 @@ test("REPAIR-2: execute-now rejects closed window & non-today dates without cons
   });
   assert.equal(tooEarly.status, 422);
   assert.equal(tooEarly.body.code, "BOOKING_NOT_OPEN");
-  assert.ok(tooEarly.body.detail?.next_allowed_at || tooEarly.body.data?.next_allowed_at !== undefined || true);
+  assert.ok(
+    tooEarly.body.error?.detail?.next_allowed_at ||
+      tooEarly.body.detail?.next_allowed_at ||
+      tooEarly.body.data?.next_allowed_at !== undefined,
+    "rejection must carry the next-allowed window hint for the client"
+  );
   const jobAfter = app.store.reservationJobs.get(jobId);
   assert.equal(jobAfter.state, before.state, "rejected manual exec must not change job state");
   assert.equal(jobAfter.attempt_count, before.attempt_count, "must not consume attempts");
