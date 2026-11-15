@@ -5250,6 +5250,12 @@ export function createCampusCloudApp(options = {}) {
                     sso_subject: u?.subject || "-"
                   };
                 });
+                // Dual-person refund workflow visibility: pending requests +
+                // the legacy reconcile queue must be visible to finance staff.
+                viewData.refundRequests = Array.from(store.refundRequests.values());
+                viewData.legacyRefundOps = Array.from(store.financeOperations.values()).filter(
+                  (op) => op.kind === "REFUND" && op.legacy_reconcile_required
+                );
                 viewData.financeMatrix = getFinanceMatrixCached(nowMs);
               } else if (activeNav === "audit") {
                 viewData.auditEvents = store.auditEvents.slice(-200).reverse();
