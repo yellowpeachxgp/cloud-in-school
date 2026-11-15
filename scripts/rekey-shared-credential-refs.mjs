@@ -262,6 +262,30 @@ export function rekeySharedCredentialRefs(rawState, kmsVault, { nowMs = Date.now
     const b = bindings.get(bindId);
     const rec = creds.get(b?.credential_ref);
     const owner = rec?.binding_id ? bindings.get(rec.binding_id) : null;
+
+    // R4-M1: source-owner gate — a record owned by a binding flagged for a
+    // non-integrity reason (risk review, revoked, reverify, unknown) is NOT a
+    // proven source; re-hosting its plaintext onto a new record would launder
+    // an authorization decision. Target gets reconfirmation, never a permit.
+    const ownerReason =
+      typeof owner?.credential_reconfirm_reason === "string"
+        ? owner.credential_reconfirm_reason
+        : null;
+    if (
+      owner &&
+      owner.credential_needs_reconfirmation &&
+      !INTEGRITY_CLEARABLE_REASONS.has(ownerReason)
+    ) {
+      b.credential_needs_reconfirmation = true;
+      b.credential_reconfirm_reason = "SOURCE_OWNER_NOT_CLEARABLE:" + (ownerReason || "UNKNOWN");
+      report.needs_reconfirmation.push({
+        binding_id: b.id,
+        credential_ref: b.credential_ref,
+        reason: b.credential_reconfirm_reason,
+        source_owner_binding_id: owner.id
+      });
+      continue;
+    }
     const verdict = classifyMigrationCandidate({ binding: b, owner, record: rec, nowMs });
 
     if (verdict.decision === "SKIP") {
