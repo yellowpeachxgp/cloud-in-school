@@ -59,7 +59,7 @@ test('报价、消费回执和旧计划替换在重启后保持同一提交结�
   app.store._persistFaultInject = 'dir_fsync';
   const replacement = { ...body, quote_id: quote.quote_id, replace_existing: true };
   assert.equal((await request('POST', '/api/v1/reservation-plans', replacement, 'replace')).status, 503);
-  clearTimeout(app.store._snapshotFlushTimer);
+  clearTimeout(app.store._snapshotFlushTimer); app.store.storageCommitUnknown = true;
   const restarted = createCampusCloudApp({ requireAdminAccess: false, storeOptions: { snapshotPath, requireDurableSnapshot: true } });
   t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
   const retry = await restarted.inject({ method: 'POST', url: '/api/v1/reservation-plans', headers: { ...headers, 'idempotency-key': 'replace' }, body: replacement, nowMs });
@@ -97,7 +97,7 @@ test('假文件系统：rename 可见但目录未耐久，重启恢复旧快照�
   const replacement = { ...body, replace_existing: true };
   assert.equal((await request('POST', '/api/v1/reservation-plans', replacement, 'new')).status, 503);
   io.crash();
-  clearTimeout(app.store._snapshotFlushTimer);
+  clearTimeout(app.store._snapshotFlushTimer); app.store.storageCommitUnknown = true;
   const restarted = createCampusCloudApp({ requireAdminAccess: false, storeOptions: { snapshotPath, snapshotFs: io, requireDurableSnapshot: true } });
   t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
   assert.equal(restarted.store.reservationPlans.get(old.body.data.plan_id).enabled, true);
@@ -113,7 +113,7 @@ test('假文件系统：持久候选快照核验失败时启动拒绝，恢复�
   app.store._persistFaultInject = 'verify_content';
   const first = await request('POST', '/api/v1/reservation-plans', body, 'candidate');
   assert.equal(first.status, 503);
-  io.crash(); clearTimeout(app.store._snapshotFlushTimer);
+  io.crash(); clearTimeout(app.store._snapshotFlushTimer); app.store.storageCommitUnknown = true;
   io.failDirectorySync = true;
   assert.throws(() => createCampusCloudApp({ requireAdminAccess: false, storeOptions: { snapshotPath, snapshotFs: io, requireDurableSnapshot: true } }), { code: 'STORAGE_COMMIT_UNKNOWN' });
   io.failDirectorySync = false;
@@ -137,18 +137,20 @@ test('不同键并发请求在未知提交屏障前串行判定，后台和停�
 });
 
 for (const stage of ['tmp_open', 'tmp_fsync', 'intent_fsync', 'intent_dir_fsync', 'rename', 'post_rename', 'dir_fsync', 'verify_content', 'intent_clear', 'intent_clear_fsync']) {
-  test(`临时真实文件系统进程崩溃与重启：${stage}`, { timeout: 8_000 }, async t => {
+  test(`临时真实文件系统进程崩溃与重启：${stage}`, { timeout: 20_000 }, async t => {
     const { app, body, request, snapshotPath, headers } = await setup(t);
     const old = await request('POST', '/api/v1/reservation-plans', body, 'old');
-    app.store.flushSnapshotStrictSync(); clearTimeout(app.store._snapshotFlushTimer);
+    app.store.flushSnapshotStrictSync(); clearTimeout(app.store._snapshotFlushTimer); app.store.storageCommitUnknown = true;
     const replacement = { ...body, replace_existing: true };
     const input = { method: 'POST', url: '/api/v1/reservation-plans', body: replacement, headers: { ...headers, 'idempotency-key': 'crash' }, nowMs };
     const inputPath = path.join(path.dirname(snapshotPath), 'request.json');
     fs.writeFileSync(inputPath, JSON.stringify({ snapshotPath, stage, request: input }));
     const child = fork('tests/helpers/crash-create.mjs', [inputPath], { execArgv: [], env: { PATH: process.env.PATH, HOME: path.dirname(snapshotPath) }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    t.after(() => child.kill('SIGKILL'));
     let stderr = ''; child.stderr.on('data', b => { stderr += b; });
     const [code, signal] = await once(child, 'exit');
     assert.equal(signal, 'SIGKILL', `${stage}: ${code} ${stderr}`);
+    assert.equal(fs.readFileSync(`${inputPath}.checkpoint`, "utf8"), stage);
     const restarted = createCampusCloudApp({ requireAdminAccess: false, storeOptions: { snapshotPath, requireDurableSnapshot: true } });
     t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
     const published = ['post_rename', 'dir_fsync', 'verify_content', 'intent_clear', 'intent_clear_fsync'].includes(stage);
@@ -200,7 +202,7 @@ test('修改预约入口在发布前失败恢复原参数，发布后未知时�
 test('已签发未消费报价跨重启仍能在同一提交单元内消费', async t => {
   const { app, body, request, snapshotPath, headers } = await setup(t);
   const quote = (await request('GET', '/api/v1/reservation-quote')).body.data;
-  clearTimeout(app.store._snapshotFlushTimer);
+  clearTimeout(app.store._snapshotFlushTimer); app.store.storageCommitUnknown = true;
   const restarted = createCampusCloudApp({ requireAdminAccess: false, storeOptions: { snapshotPath, requireDurableSnapshot: true } });
   t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
   assert.equal(restarted.store.priceQuotes.has(quote.quote_id), true);

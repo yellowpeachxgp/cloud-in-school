@@ -931,7 +931,7 @@ export class HautLibraryProvider {
 
     // When queried late at night (after 21:50), wslib returns startDate = now+5min >= endDate (22:00:00),
     // which causes /seatbook/layout/query to return code 500 (seat.10058). Clamp to standard 07:30..22:00.
-    if (startFull >= endFull || rawStartTime >= "21:50" || !startFull.startsWith(bookingDate)) {
+    if (startFull >= endFull || rawStartTime >= "21:50" || !startFull.startsWith(`${bookingDate} `) || !endFull.startsWith(`${bookingDate} `)) {
       rawStartTime = "07:30";
       rawEndTime = "22:00";
       startFull = `${bookingDate} 07:30:00`;
@@ -957,9 +957,8 @@ export class HautLibraryProvider {
   }
 
   async fetchLiveStudyRegions(rawToken, bookingDate) {
-    const shanghaiToday = this.getShanghaiTodayDateString();
-    const isFutureDate = Boolean(bookingDate && String(bookingDate) > shanghaiToday);
-    const queryDate = isFutureDate ? shanghaiToday : bookingDate || shanghaiToday;
+    const queryDate = bookingDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(queryDate || "")) throw new ContractError("BAD_REQUEST", "必须提供明确的预约日期");
     const windowInfo = await this.resolveDefaultBookingWindow(rawToken, 7, queryDate);
     const bJson = await this.wslibGetJson("/seatbook/layout/building", rawToken);
     const buildings = bJson?.builderInfo || bJson?.data?.builderInfo || [{ id: "1", buildingName: "莲花街图书馆" }];
@@ -967,27 +966,16 @@ export class HautLibraryProvider {
     for (const b of buildings) {
       const bId = cleanSpiText(b?.id, "1") || "1";
       const bName = cleanSpiText(b?.buildingName, "莲花街图书馆") || "莲花街图书馆";
-      let rJson = await this.wslibGetJson(
+      const rJson = await this.wslibGetJson(
         `/seatbook/layout/region?buildingId=${encodeURIComponent(
           bId
         )}&layerid=&starttime=${encodeURIComponent(windowInfo.startFull)}&endtime=${encodeURIComponent(
           windowInfo.endFull
         )}`,
         rawToken
-      ).catch(() => null);
-      let list = rJson?.regionList || rJson?.data?.regionList || [];
-      if (list.length === 0 && queryDate !== shanghaiToday) {
-        const fallbackWindow = await this.resolveDefaultBookingWindow(rawToken, 7, shanghaiToday);
-        rJson = await this.wslibGetJson(
-          `/seatbook/layout/region?buildingId=${encodeURIComponent(
-            bId
-          )}&layerid=&starttime=${encodeURIComponent(fallbackWindow.startFull)}&endtime=${encodeURIComponent(
-            fallbackWindow.endFull
-          )}`,
-          rawToken
-        ).catch(() => null);
-        list = rJson?.regionList || rJson?.data?.regionList || [];
-      }
+      );
+      if (Number(rJson?.code) !== 200) throw new ContractError("SCHOOL_CAPABILITY_UNVERIFIED", `学校尚未提供 ${queryDate} 的区域查询，请稍后重试`);
+      const list = rJson?.regionList || rJson?.data?.regionList || [];
       for (const r of list) {
         const regionName = cleanSpiText(r?.regionName, "");
         if (!r?.id || !regionName) continue;
@@ -1003,41 +991,31 @@ export class HautLibraryProvider {
           open_time: cleanSpiText(r.openDate, "07:30") || "07:30",
           close_time: cleanSpiText(r.closeDate, "22:00") || "22:00",
           total_seats: totalSeats,
-          available_seats: isFutureDate && totalSeats > 0 ? totalSeats : rawAvailable,
+          available_seats: rawAvailable,
           is_open: Number(r.isOpen ?? 1) !== 0
         });
       }
     }
     return {
-      booking_date: bookingDate || shanghaiToday,
-      start_full: isFutureDate ? `${bookingDate} 07:30:00` : windowInfo.startFull,
-      end_full: isFutureDate ? `${bookingDate} 22:00:00` : windowInfo.endFull,
+      booking_date: bookingDate,
+      start_full: windowInfo.startFull,
+      end_full: windowInfo.endFull,
       regions
     };
   }
 
   async fetchLiveRegionSeats(rawToken, regionId, bookingDate) {
-    const shanghaiToday = this.getShanghaiTodayDateString();
-    const isFutureDate = Boolean(bookingDate && String(bookingDate) > shanghaiToday);
-    const initialDate = isFutureDate ? shanghaiToday : bookingDate || shanghaiToday;
+    const initialDate = bookingDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(initialDate || "")) throw new ContractError("BAD_REQUEST", "必须提供明确的预约日期");
     const windowInfo = await this.resolveDefaultBookingWindow(rawToken, regionId, initialDate);
-    let qJson = await this.wslibGetJson(
+    const qJson = await this.wslibGetJson(
       `/seatbook/layout/query?starttime=${encodeURIComponent(
         windowInfo.startFull
       )}&endtime=${encodeURIComponent(windowInfo.endFull)}&regionid=${encodeURIComponent(regionId)}`,
       rawToken
-    ).catch(() => null);
-    let rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
-    if (rawSeats.length === 0 && initialDate !== shanghaiToday) {
-      const todayWindow = await this.resolveDefaultBookingWindow(rawToken, regionId, shanghaiToday);
-      qJson = await this.wslibGetJson(
-        `/seatbook/layout/query?starttime=${encodeURIComponent(
-          todayWindow.startFull
-        )}&endtime=${encodeURIComponent(todayWindow.endFull)}&regionid=${encodeURIComponent(regionId)}`,
-        rawToken
-      ).catch(() => null);
-      rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
-    }
+    );
+    if (Number(qJson?.code) !== 200) throw new ContractError("SCHOOL_CAPABILITY_UNVERIFIED", `学校尚未提供 ${initialDate} 的座位查询，请稍后重试`);
+    const rawSeats = qJson?.seatList || qJson?.data?.seatList || [];
     const regionName = cleanSpiText(qJson?.layout?.regionName, "");
     const seats = rawSeats
       .filter((s) => s?.id && cleanSpiText(s?.seatName, ""))
@@ -1048,7 +1026,7 @@ export class HautLibraryProvider {
             ? fullName.slice(regionName.length).trim()
             : fullName;
         const rawStatus = Number(s.seatStatus ?? 1);
-        const seatStatus = isFutureDate ? 2 : rawStatus;
+        const seatStatus = rawStatus;
         return {
           id: Number(s.id),
           seat_id: Number(s.id),
@@ -1061,9 +1039,9 @@ export class HautLibraryProvider {
     return {
       region_id: Number(regionId),
       region_name: regionName,
-      booking_date: bookingDate || shanghaiToday,
-      start_full: isFutureDate ? `${bookingDate} 07:30:00` : windowInfo.startFull,
-      end_full: isFutureDate ? `${bookingDate} 22:00:00` : windowInfo.endFull,
+      booking_date: bookingDate,
+      start_full: windowInfo.startFull,
+      end_full: windowInfo.endFull,
       seats
     };
   }
@@ -2244,11 +2222,8 @@ export class HautLibraryProvider {
         rawToken = auth.rawToken;
       }
 
-      const shanghaiToday = formatLocalDateInShanghai(nowInstant);
-      const datesToTry =
-        allowDateFallbackToToday && job.booking_local_date !== shanghaiToday
-          ? [job.booking_local_date, shanghaiToday]
-          : [job.booking_local_date];
+      // 旧调用方的回退选项已停用，任何执行都只允许计划绑定的绝对日期。
+      const datesToTry = [job.booking_local_date];
 
       const preferredArea =
         plan.area_name ||
