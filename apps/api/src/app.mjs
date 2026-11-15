@@ -4098,23 +4098,49 @@ export function createCampusCloudApp(options = {}) {
       ).trim();
 
       if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
+      // Canonical payload for the initial contact message includes every
+      // semantically meaningful field (content + contact info) — changing any
+      // of them under the same key is a contract violation.
+      const initialCanonical = `${message}|${contactInfo}`;
       if (idempotencyKey) {
-        const dup = post.contact_requests.find(
-          (r) =>
-            r.sender_user_id === auth.cloudUserId &&
-            (r.idempotency_key === idempotencyKey ||
-              (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey)))
-        );
+        const initialScope = auth.cloudUserId + "|message|" + idempotencyKey;
+        const canonicalHash = messagePayloadHash(initialCanonical);
+        const dup = post.contact_requests.find((r) => {
+          if (r.sender_user_id !== auth.cloudUserId) return false;
+          // Authoritative source: per-(actor|op|key) receipts survive the
+          // 50-message visible window, so a truncated-away initial message
+          // still dedupes correctly.
+          if (r._msgReceipts && r._msgReceipts[initialScope]) return true;
+          // Legacy evidence (pre-receipt records): only the request-level key
+          // or a still-visible keyed message proves the key was used here.
+          return (
+            r.idempotency_key === idempotencyKey ||
+            (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey))
+          );
+        });
         if (dup) {
-          // Same Idempotency-Key with a DIFFERENT payload is a contract
-          // violation — identical to the append path semantics (409).
-          const keyedMsg = (dup.messages || []).find((m) => m.idempotency_key === idempotencyKey);
-          const keyedPayload = keyedMsg ? keyedMsg.content : dup.message;
-          if (keyedPayload != null && String(keyedPayload).trim() !== message) {
-            throw new ContractError(
-              "CONFLICT",
-              "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
-            );
+          const receipt = dup._msgReceipts?.[initialScope];
+          if (receipt) {
+            if (receipt.payload_hash !== canonicalHash) {
+              throw new ContractError(
+                "CONFLICT",
+                "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+              );
+            }
+          } else {
+            // LEGACY_RECEIPT_UNKNOWN: key is provably used by this thread but
+            // the original payload hash is unrecoverable (message truncated or
+            // written before receipts existed). Conservative dedupe — return
+            // the existing thread rather than 409 a legitimate retry or create
+            // a duplicate thread.
+            const keyedMsg = (dup.messages || []).find((m) => m.idempotency_key === idempotencyKey);
+            const keyedPayload = keyedMsg ? keyedMsg.content : null;
+            if (keyedPayload != null && String(keyedPayload).trim() !== message) {
+              throw new ContractError(
+                "CONFLICT",
+                "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+              );
+            }
           }
           return {
             status: 200,
@@ -4190,6 +4216,7 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("RATE_LIMITED", "发送过于频繁，请稍后再试");
       }
 
+      const initialMsgId = "mcm_" + crypto.randomUUID().slice(0, 8);
       const reqItem = {
         id: "mcr_" + crypto.randomUUID().slice(0, 10),
         post_id: post.id,
@@ -4202,7 +4229,7 @@ export function createCampusCloudApp(options = {}) {
         reply_message: null,
         messages: [
           {
-            id: "mcm_" + crypto.randomUUID().slice(0, 8),
+            id: initialMsgId,
             sender_role: "REQUESTER",
             sender_name: resolvedSenderName,
             content: message,
@@ -4210,6 +4237,24 @@ export function createCampusCloudApp(options = {}) {
             created_at: nowIso
           }
         ],
+        // Seed the durable receipt for the initial message: dedupe evidence
+        // must survive the 50-message visible window (C7).
+        _msgReceipts: idempotencyKey
+          ? {
+              [auth.cloudUserId + "|message|" + idempotencyKey]: {
+                message_id: initialMsgId,
+                payload_hash: messagePayloadHash(initialCanonical),
+                created_at: nowIso,
+                message_snapshot: {
+                  id: initialMsgId,
+                  sender_role: "REQUESTER",
+                  sender_name: resolvedSenderName,
+                  content: message,
+                  created_at: nowIso
+                }
+              }
+            }
+          : {},
         created_at: nowIso,
         updated_at: nowIso
       };
@@ -4304,42 +4349,64 @@ export function createCampusCloudApp(options = {}) {
         if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
         }
-        const existingMsgs = normalizeStoredMessages(reqItem, post);
-        reqItem.status = "APPROVED";
-        if (body?.reply_message) {
-          const cleanReply = String(body.reply_message).trim().slice(0, 240);
-          if (cleanReply) {
-            reqItem.reply_message = cleanReply;
-            existingMsgs.push({
-              id: "mcm_" + crypto.randomUUID().slice(0, 8),
-              sender_role: "OWNER",
-              sender_name: String(post.author_name || "发起人").slice(0, 24),
-              content: cleanReply,
-              created_at: nowIso
+        // Idempotent status transition with an explicit allowed-state table:
+        // only PENDING may flip to APPROVED; a repeat APPROVE on an already
+        // approved thread is a no-op — never re-append, never re-notify.
+        const wasApproved = reqItem.status === "APPROVED";
+        const approveKey = String(
+          headers?.["idempotency-key"] ||
+            headers?.["Idempotency-Key"] ||
+            body?.idempotency_key ||
+            body?.client_message_id ||
+            ""
+        ).trim();
+        let appendedReply = null;
+        const cleanReply = String(body?.reply_message || "").trim();
+        if (cleanReply) {
+          // Any attached text goes through the ONE write path FIRST —
+          // closed-post / rate-limit / payload-hash rules gate the append
+          // before the status is allowed to change. A failed append must
+          // never leave a half-applied APPROVED transition behind.
+          const actorUser = store.users.get(auth.cloudUserId);
+          const appendRes = appendThreadMessage(post, reqItem, {
+            actorUserId: auth.cloudUserId,
+            actorRole: "OWNER",
+            actorName: String(post.author_name || actorUser?.display_name || "发起人").slice(0, 24),
+            content: cleanReply,
+            idempotencyKey: approveKey || null,
+            nowMs,
+            isAdminOverride: Boolean(isAdmin && !isOwner && !isSender)
+          });
+          appendedReply = appendRes.message?.content || null;
+        }
+        if (!wasApproved) {
+          reqItem.status = "APPROVED";
+          if (appendedReply) reqItem.reply_message = appendedReply;
+          if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
+            store.addNotification({
+              cloudUserId: reqItem.sender_user_id,
+              category: "MOMENTS_CONTACT_APPROVED",
+              title: `发起人已同意公开「${post.title}」的联系方式`,
+              body: reqItem.reply_message
+                ? `发起人附言：${reqItem.reply_message}`
+                : "您现在可在该帖详情中查看发起人联系方式或继续私信沟通"
             });
           }
-        }
-        reqItem.messages = existingMsgs.slice(-50);
-        if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
-          store.addNotification({
-            cloudUserId: reqItem.sender_user_id,
-            category: "MOMENTS_CONTACT_APPROVED",
-            title: `发起人已同意公开「${post.title}」的联系方式`,
-            body: reqItem.reply_message
-              ? `发起人附言：${reqItem.reply_message}`
-              : "您现在可在该帖详情中查看发起人联系方式或继续私信沟通"
-          });
-        }
-        if (isAdmin && !isOwner) {
-          store.recordAudit({
-            actor_kind: "ADMIN",
-            actor_ref: auth.cloudUserId,
-            action: "ADMIN_APPROVE_LEGACY_POST_CONTACT_REQUEST",
-            resource_kind: "moments_contact_request",
-            resource_ref: reqItem.id,
-            outcome: "APPROVED",
-            detail: { post_id: post.id }
-          });
+          if (isAdmin && !isOwner) {
+            store.recordAudit({
+              actor_kind: "ADMIN",
+              actor_ref: auth.cloudUserId,
+              action: "ADMIN_APPROVE_LEGACY_POST_CONTACT_REQUEST",
+              resource_kind: "moments_contact_request",
+              resource_ref: reqItem.id,
+              outcome: "APPROVED",
+              detail: { post_id: post.id }
+            });
+          }
+        } else if (appendedReply) {
+          // Already APPROVED + a (non-duplicate) follow-up note — keep the
+          // latest owner note for display but never re-notify.
+          reqItem.reply_message = appendedReply;
         }
       } else if (action === "REPLY") {
         if (!canManageRequests && !isSender) {
