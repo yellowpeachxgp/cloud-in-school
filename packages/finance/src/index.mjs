@@ -267,16 +267,30 @@ export class IsolatedFinanceBridge {
       probed_at: new Date().toISOString(),
       ...extra
     });
+    // R4-F1: APPLIED is only reachable with COMPLETE linkage expectations —
+    // a probe asked to verify an operation without its expected amount and
+    // account can never produce "applied"; missing linkage fails closed.
+    const linkageComplete =
+      Number.isInteger(expectedMicropeach) && typeof cloudUserId === "string" && cloudUserId.length > 0;
     // Sandbox ledger: the full operation ledger lives in-process — presence IS
     // proof applied; verified absence IS proof not-received.
     const cached = this.processedIdempotencyKeys.get(eventKey);
     if (cached) {
-      if (
-        expectedMicropeach != null &&
-        Number.isInteger(cached.delta_micropeach) &&
-        cached.delta_micropeach !== expectedMicropeach
-      ) {
+      if (!linkageComplete) {
+        return evidence("UNKNOWN", { reason: "expected_linkage_fields_missing" });
+      }
+      // Same-key + same-amount + same-account — every leg must hold.
+      const recordedAmount = Number.isInteger(cached.delta_micropeach)
+        ? Math.abs(cached.delta_micropeach)
+        : null;
+      if (recordedAmount !== Math.abs(expectedMicropeach)) {
         return evidence("UNKNOWN", { reason: "amount_mismatch_vs_recorded" });
+      }
+      if (cached.cloud_user_id && cached.cloud_user_id !== cloudUserId) {
+        return evidence("UNKNOWN", { reason: "account_mismatch_vs_recorded" });
+      }
+      if (!cached.cloud_user_id) {
+        return evidence("UNKNOWN", { reason: "recorded_account_missing" });
       }
       return evidence("APPLIED", { result: { ...cached } });
     }
@@ -321,15 +335,12 @@ export class IsolatedFinanceBridge {
       }
       const rec = body.data;
       // Only a same-key + same-amount + same-account record counts as applied.
+      if (!linkageComplete) return evidence("UNKNOWN", { reason: "expected_linkage_fields_missing" });
       if (rec.event_key !== eventKey) return evidence("UNKNOWN", { reason: "key_mismatch" });
-      if (
-        expectedMicropeach != null &&
-        Number.isInteger(rec.amount_micropeach) &&
-        rec.amount_micropeach !== expectedMicropeach
-      ) {
+      if (!Number.isInteger(rec.amount_micropeach) || Math.abs(rec.amount_micropeach) !== Math.abs(expectedMicropeach)) {
         return evidence("UNKNOWN", { reason: "amount_mismatch" });
       }
-      if (cloudUserId && rec.cloud_user_id && rec.cloud_user_id !== cloudUserId) {
+      if (!rec.cloud_user_id || rec.cloud_user_id !== cloudUserId) {
         return evidence("UNKNOWN", { reason: "account_mismatch" });
       }
       if (rec.status === "applied" || rec.applied === true) {
@@ -482,6 +493,8 @@ export class IsolatedFinanceBridge {
           ok: true,
           deduplicated: Boolean(body.deduplicated),
           ssoRequestId: body.request_id || `sso_req_${crypto.randomUUID().slice(0, 12)}`,
+          cloud_user_id: cloudUserId,
+          delta_micropeach: resolvedMicro,
           peachBalanceAfter: nextPeach,
           balanceAfterMicropeach: Math.round(nextPeach * MICROPEACH_PER_PEACH)
         };
@@ -509,6 +522,8 @@ export class IsolatedFinanceBridge {
         ok: true,
         deduplicated: false,
         ssoRequestId: `sso_sim_${crypto.randomUUID().slice(0, 12)}`,
+        cloud_user_id: cloudUserId,
+        delta_micropeach: resolvedMicro,
         peachBalanceAfter: nextMicro / MICROPEACH_PER_PEACH,
         balanceAfterMicropeach: nextMicro
       };
