@@ -758,7 +758,7 @@ export function renderConsoleHtml(ctx = {}) {
       FAILED: "已失败",
       EXPIRED: "已过期"
     }[req.status] || req.status;
-    const peach = (Number(req.amount_micropeach || 0) / MICROPEACH_PER_PEACH).toFixed(0);
+    const peach = formatPeachFromMicropeach(req.amount_micropeach, 4).replace(/\.?0+$/, "");
     const mine = req.created_by === viewerUserId;
     const parts = [];
     parts.push('<article class="xp-row-card" data-refund-request="' + escapeHtml(req.id) + '">');
@@ -1765,7 +1765,7 @@ export function renderConsoleHtml(ctx = {}) {
             }
             btn.disabled = true;
             btn.textContent = "提交中…";
-            apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/refund-requests", {
+            apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/quick-refund", {
               method: "POST",
               body: JSON.stringify({ reason: reason.trim() })
             })
