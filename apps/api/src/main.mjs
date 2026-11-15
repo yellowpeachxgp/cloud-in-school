@@ -110,7 +110,12 @@ const shutdownController = createShutdownController({
   setExitCode: (code) => {
     process.exitCode = code;
   },
-  maxDrainMs: 15_000
+  maxDrainMs: 15_000,
+  // Bounded shutdown: after the final verdict the process MUST exit —
+  // surviving handles (lingering sockets, timers) may not extend its life.
+  terminate: (code) => {
+    setImmediate(() => process.exit(code));
+  }
 });
 const shutdown = shutdownController.shutdown;
 process.on("SIGTERM", () => void shutdown("SIGTERM"));

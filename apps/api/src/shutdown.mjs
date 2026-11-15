@@ -10,7 +10,10 @@ export function createShutdownController({
     process.exitCode = code;
   },
   maxDrainMs = 15_000,
-  now = () => Date.now()
+  now = () => Date.now(),
+  // R6-C1: exitCode alone does NOT end a process — a live socket/timer handle
+  // keeps it alive. main wires process.exit; tests leave the no-op default.
+  terminate = () => {}
 }) {
   let shutdownPromise = null;
   let deadlineMs = Infinity;
@@ -108,15 +111,20 @@ export function createShutdownController({
           reason: closeError || (deadlineExceededInClose ? "close_deadline_exceeded" : "close_rejected")
         });
       }
+      const finalExit = drained && persisted && serverClosed ? 0 : 3;
       log({
         phase: "shutdown_complete",
         drained,
         persisted,
         serverClosed,
         closeError: closeError || null,
-        deadlineExceeded: !drained || deadlineExceededInClose
+        deadlineExceeded: !drained || deadlineExceededInClose,
+        exit_code: finalExit
       });
-      setExitCode(drained && persisted && serverClosed ? 0 : 3);
+      setExitCode(finalExit);
+      // Bounded finality: the controller owns the last word — surviving
+      // handles must not keep the process alive past this point.
+      terminate(finalExit);
       return {
         drained,
         persisted,
