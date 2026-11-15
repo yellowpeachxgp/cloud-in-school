@@ -212,3 +212,23 @@ test('已签发未消费报价跨重启仍能在同一提交单元内消费', as
   assert.equal(raw.reservationPlans[0][1].accepted_quote_id, quote.quote_id);
   assert.equal(raw.idempotencyRecords.length, 1);
 });
+
+import { scanDueScheduleEvents } from '../apps/scheduler/src/main.mjs';
+import { ContractError } from '../packages/contracts/src/index.mjs';
+
+test('在途任务遇到存储隔离时不改写任务状态或把待执行事件误标为失败', async t => {
+  const { app, body, request } = await setup(t);
+  await request('POST', '/api/v1/reservation-plans', body, 'in-flight');
+  const job = [...app.store.reservationJobs.values()][0];
+  const before = structuredClone(job);
+  app.store.storageCommitUnknown = true;
+  assert.throws(() => app.reservationEngine.casJobState(job.id, job.state_version, 'FAILED'), { code: 'STORAGE_COMMIT_UNKNOWN' });
+  assert.deepEqual(job, before);
+  assert.throws(() => app.reservationEngine.rolloverMultiDayPlanIfEligible([...app.store.reservationPlans.values()][0], job, '测试'), { code: 'STORAGE_COMMIT_UNKNOWN' });
+  app.store.storageCommitUnknown = false;
+  const event = [...app.store.scheduleEvents.values()][0];
+  event.due_at = new Date(nowMs - 1).toISOString();
+  app.reservationEngine.runScheduleEvent = async () => { app.store.storageCommitUnknown = true; throw new ContractError('STORAGE_COMMIT_UNKNOWN', '测试隔离'); };
+  await scanDueScheduleEvents(app, nowMs);
+  assert.equal(event.status, 'ARMED');
+});

@@ -767,6 +767,7 @@ export class TripleScheduleEngine {
   }
 
   casJobState(jobId, expectedVersion, nextState, patch = {}) {
+    this.store.assertStorageWritable?.();
     const job = this.store.reservationJobs.get(jobId);
     if (!job || job.state_version !== expectedVersion) {
       return false;
@@ -2659,6 +2660,7 @@ export class TripleScheduleEngine {
       let revokedDuringCancelFlow = false;
 
       const assertCancelStillAuthorized = () => {
+        this.store.assertStorageWritable?.();
         if (!isCancelAuthorizationStillValid()) {
           revokedDuringCancelFlow = true;
           throw new ContractError(
@@ -2766,6 +2768,7 @@ export class TripleScheduleEngine {
   }
 
   rolloverMultiDayPlanIfEligible(plan, finishedJob, outcomeSummary, nowMs = Date.now()) {
+    this.store.assertStorageWritable?.();
     if (!plan || !plan.enabled) return null;
     if (plan.user_intent_state && plan.user_intent_state !== "ACTIVE") return null;
     if (
