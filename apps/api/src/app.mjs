@@ -1250,6 +1250,44 @@ export function createCampusCloudApp(options = {}) {
     return { status: 200, code: "RESERVATION_PLANS_LISTED", data: { plans } };
   });
 
+  // Server-issued price quote (cross-end contract §5): a client displays this
+  // quote and pins it at plan creation — drift/expiry conflicts honestly.
+  // Volatile by design (in-memory, 10-min TTL, one-shot) — a restart simply
+  // forces a fresh fetch, never silently re-prices.
+  const PRICE_QUOTE_TTL_MS = 10 * 60 * 1000;
+  register("GET", "/api/v1/reservation-quote", "getReservationQuote", "bearer", async ({ auth, nowMs }) => {
+    const quoteId = "q_" + crypto.randomUUID().slice(0, 12);
+    const quote = {
+      quote_id: quoteId,
+      cloud_user_id: auth.cloudUserId,
+      amount_micropeach: Number.isInteger(store.pricingMicropeach) ? store.pricingMicropeach : 10_000,
+      price_version: "price-library-cloud-2026-11-v1",
+      unit: "PER_CONFIRMED_RESERVATION",
+      issued_at: new Date(nowMs).toISOString(),
+      expires_at: new Date(nowMs + PRICE_QUOTE_TTL_MS).toISOString()
+    };
+    quote.quote_hash = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify({
+          quote_id: quoteId,
+          user: auth.cloudUserId,
+          amount: quote.amount_micropeach,
+          version: quote.price_version,
+          expires: quote.expires_at
+        })
+      )
+      .digest("hex");
+    store.priceQuotes = store.priceQuotes || new Map();
+    if (store.priceQuotes.size > 10_000) {
+      for (const [k, q] of store.priceQuotes) {
+        if (Date.parse(q.expires_at) <= nowMs) store.priceQuotes.delete(k);
+      }
+    }
+    store.priceQuotes.set(quoteId, quote);
+    return { status: 200, code: "RESERVATION_QUOTE_ISSUED", data: quote };
+  });
+
   register(
     "POST",
     "/api/v1/reservation-plans",

@@ -246,10 +246,31 @@ export class TripleScheduleEngine {
       throw new ContractError("CONSENT_WITHDRAWN", "Active consent record is required");
     }
 
-    // Client-seen quote contract (C8): when the caller pins an expected price,
-    // a drift between their displayed quote and the server's current price is
-    // an explicit conflict — never silently accept a different price on the
-    // user's behalf. Re-display + re-confirm is required.
+    // Client-seen quote contract (C8/§5): the caller may pin either a
+    // server-issued quote_id or a direct expected_price_micropeach. A drift
+    // between the displayed quote and the current price is an explicit
+    // conflict — never silently re-price on the user's behalf. A legacy
+    // client that pins NEITHER is still allowed but marked honestly as an
+    // unquoted acceptance (no silent "auto-agree at latest price").
+    let acceptedQuote = null;
+    if (payload.quote_id) {
+      const q = this.store.priceQuotes?.get(String(payload.quote_id));
+      if (!q || q.cloud_user_id !== cloudUserId) {
+        throw new ContractError("CONFLICT", "报价不存在或不属于当前用户，请重新获取报价");
+      }
+      if (Date.parse(q.expires_at) <= nowMs) {
+        throw new ContractError("CONFLICT", "报价已过期，请重新获取价格并确认");
+      }
+      if (Number.isInteger(this.store.pricingMicropeach) && q.amount_micropeach !== this.store.pricingMicropeach) {
+        throw new ContractError("CONFLICT", "报价已失效：价格已变更，请重新获取报价", {
+          quoted_price_micropeach: q.amount_micropeach,
+          current_price_micropeach: this.store.pricingMicropeach
+        });
+      }
+      acceptedQuote = q;
+      // One-shot quote: consumption prevents replay across plans.
+      this.store.priceQuotes.delete(String(payload.quote_id));
+    }
     if (
       payload.expected_price_micropeach !== undefined &&
       payload.expected_price_micropeach !== null &&
@@ -448,6 +469,13 @@ export class TripleScheduleEngine {
         : 10_000,
       accepted_at: new Date(nowMs).toISOString(),
       acceptance_scope: "PER_CONFIRMED_RESERVATION",
+      acceptance_source: acceptedQuote
+        ? "SERVER_QUOTE"
+        : payload.expected_price_micropeach != null
+          ? "CLIENT_PINNED_PRICE"
+          : "LEGACY_NO_QUOTE",
+      accepted_quote_id: acceptedQuote?.quote_id || null,
+      accepted_quote_hash: acceptedQuote?.quote_hash || null,
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
       area_name:
         payload.area_name ||

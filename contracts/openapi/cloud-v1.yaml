@@ -1753,6 +1753,18 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/reservation-quote:
+    get:
+      operationId: getReservationQuote
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Issue a short-lived server price quote to pin at plan creation
+      responses:
+        '200':
+          description: Quote issued (amount, price_version, expires_at, quote_hash)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 components:
   securitySchemes:
     bearerAuth:
