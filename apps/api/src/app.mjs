@@ -3892,7 +3892,7 @@ export function createCampusCloudApp(options = {}) {
    * window so truncation cannot lose dedupe evidence. Same key + different
    * payload => 409.
    */
-  function appendThreadMessage(post, reqItem, { actorUserId, actorRole, actorName, content, idempotencyKey, nowMs, isAdminOverride = false }) {
+  function appendThreadMessage(post, reqItem, { actorUserId, actorRole, actorName, content, contactInfo = "", idempotencyKey, nowMs, isAdminOverride = false }) {
     const nowIso = new Date(nowMs).toISOString();
     const senderUserId = actorUserId || (actorRole === "OWNER" ? post.owner_cloud_user_id : reqItem.sender_user_id);
     if (!isAdminOverride) {
@@ -3918,20 +3918,43 @@ export function createCampusCloudApp(options = {}) {
     }
 
     // Idempotent receipt check BEFORE rate limiting: a retry must be free.
+    // Canonical v2 (R4-C1): the same fixed-key-order formula as every other
+    // entry — append no longer hashes raw content under a v1 receipt.
     const receiptScope = senderUserId + "|message|" + (idempotencyKey || "");
+    const canonicalV2 = canonicalContactMessage({
+      scope: "p:" + post.id + "|t:" + reqItem.id,
+      actorUserId: senderUserId,
+      operation: "message",
+      content: clean,
+      contact: contactInfo || ""
+    });
     if (idempotencyKey) {
       if (!reqItem._msgReceipts || typeof reqItem._msgReceipts !== "object") {
         reqItem._msgReceipts = {};
       }
       const prior = reqItem._msgReceipts[receiptScope];
       if (prior) {
-        if (prior.payload_hash !== messagePayloadHash(clean)) {
+        const verdict = verifyReceiptPayload(
+          prior,
+          canonicalV2,
+          // legacy create-path concat formula
+          clean + "|" + String(contactInfo || ""),
+          // legacy append content-only formula
+          clean
+        );
+        if (verdict === "CONFLICT") {
           throw new ContractError(
             "CONFLICT",
             "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
           );
         }
-        return { appended: false, duplicate: true, message: prior.message_snapshot || null };
+        // MATCH / MATCH_LEGACY / LEGACY_UNPROVABLE → conservative dedupe.
+        return {
+          appended: false,
+          duplicate: true,
+          message: prior.message_snapshot || null,
+          legacy_unprovable: verdict === "LEGACY_UNPROVABLE"
+        };
       }
     }
 
@@ -3960,7 +3983,8 @@ export function createCampusCloudApp(options = {}) {
     if (idempotencyKey) {
       reqItem._msgReceipts[receiptScope] = {
         message_id: msg.id,
-        payload_hash: messagePayloadHash(clean),
+        canonical_version: CONTACT_CANONICAL_VERSION,
+        payload_hash: messagePayloadHash(canonicalV2),
         created_at: nowIso,
         message_snapshot: {
           id: msg.id,
