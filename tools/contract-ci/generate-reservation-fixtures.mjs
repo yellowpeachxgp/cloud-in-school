@@ -20,6 +20,8 @@ export async function captureReservationFixtures() {
     const consent = (await request('consent', 'POST', '/api/v1/me/consents', { school_id: 'haut' })).body.data.id;
     const binding = (await request('binding', 'POST', '/api/v1/school-bindings', { school_id: 'haut', student_no: '2026998888' })).body.data.id;
     await request('complete', 'POST', `/api/v1/school-bindings/${binding}/complete`, { consent_id: consent, delegated_secret: 'test-fixture-secret' });
+    app.store._persistFaultInject = 'tmp_open';
+    const createUncommitted = await request('create_uncommitted', 'POST', '/api/v1/reservation-plans', { school_binding_id: binding, consent_id: consent, target_local_date: '2026-11-16', target_local_time: '07:00:00', quote_id: quote.body.data.quote_id });
     app.store._persistFaultInject = 'dir_fsync';
     const createUnknown = await request('create_unknown', 'POST', '/api/v1/reservation-plans', { school_binding_id: binding, consent_id: consent, target_local_date: '2026-11-16', target_local_time: '07:00:00', quote_id: quote.body.data.quote_id });
     const quoteUnknown = await request('quote_unknown', 'GET', '/api/v1/reservation-quote');
@@ -31,7 +33,8 @@ export async function captureReservationFixtures() {
     return { quote: { _meta: meta, ...wrap(quote) }, errors: { _meta: meta, cases: [
       { name: 'quote_auth', ...wrap(unauthorized) },
       { name: 'create_unknown', ...wrap(createUnknown) },
-      { name: 'quote_unknown', ...wrap(quoteUnknown) }
+      { name: 'quote_unknown', ...wrap(quoteUnknown) },
+      { name: 'create_uncommitted', ...wrap(createUncommitted) }
     ] } };
   } finally {
     clearTimeout(app.store._snapshotFlushTimer);

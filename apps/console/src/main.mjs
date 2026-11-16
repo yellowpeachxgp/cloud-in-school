@@ -1818,7 +1818,7 @@ export function renderConsoleHtml(ctx = {}) {
               body: JSON.stringify({})
             })
               .then(function (res) {
-                var st = (res && res.data && res.data.request && res.data.request.status) || "";
+                var st = (res && res.data && res.data.refund_request && res.data.refund_request.status) || "";
                 showToast(st === "REFUNDED" ? "退还已到账，账单已同步。" : "已提交核对，当前状态：" + (st || "执行中"));
                 setTimeout(function () { window.location.reload(); }, 800);
               })

@@ -72,4 +72,5 @@ test('完整 handler 响应与共享 fixture 一致，仅归一化随机标识�
   assert.equal(fixture._meta.handler_sha256, captured.quote._meta.handler_sha256, 'handler 更新后必须重新生成 fixture 并同步 Day');
   assert.equal(captured.errors.cases[1].body.code, 'STORAGE_COMMIT_UNKNOWN');
   assert.equal(captured.errors.cases[2].http_status, 503);
+  assert.equal(captured.errors.cases[3].body.code, 'STORAGE_PERSISTENCE_FAILED');
 });

@@ -1188,6 +1188,9 @@ export class FinanceSagaService {
           reason: `日在校园预约订单退还 (${order.id}): ${req.reason}`,
           userObj: user
         });
+        if (!bridgeRes.ok) {
+          throw new ContractError("PAYMENT_RECONCILING", "上游未确认退款成功，已保留原订单及原事件键，等待核对");
+        }
       } catch (err) {
         op.status = "FAILED_RETRYABLE";
         op.last_error_code = err?.code || "SSO_UNAVAILABLE";

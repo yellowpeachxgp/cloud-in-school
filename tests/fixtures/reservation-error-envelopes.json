@@ -73,6 +73,26 @@
           "next_cursor": null
         }
       }
+    },
+    {
+      "name": "create_uncommitted",
+      "http_status": 503,
+      "body": {
+        "ok": false,
+        "code": "STORAGE_PERSISTENCE_FAILED",
+        "request_id": "req_fixture_create_uncommitted",
+        "error": {
+          "code": "STORAGE_PERSISTENCE_FAILED",
+          "message": "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态",
+          "user_action": "RETRY_AFTER_STORAGE_RECOVERY",
+          "retryable": true
+        },
+        "meta": {
+          "request_id": "req_fixture_create_uncommitted",
+          "api_version": "v1",
+          "next_cursor": null
+        }
+      }
     }
   ]
 }
