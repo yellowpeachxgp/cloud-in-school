@@ -2087,7 +2087,9 @@ export class HautLibraryProvider {
         r.region_name.includes(cleanWantedArea) ||
         cleanWantedArea.includes(r.region_name)
     );
-    const primaryRegion = matchedRegions[0] || allRegions[0];
+    const primaryRegion = matchedRegions[0];
+    // 布局次日可能变化，不能把其他自习室的同号座位当成用户选定的偏好。
+    if (!primaryRegion) return { auth, prewarmed: null };
     const seatSnap = await this.fetchLiveRegionSeats(rawToken, primaryRegion.id, targetDate);
     const allSeatsInRegion = seatSnap.seats || [];
 
@@ -2246,8 +2248,14 @@ export class HautLibraryProvider {
       const expectedTargetDate = String(datesToTry[0] || "").trim();
       const expectedSlotWindow =
         plan?.has_explicit_slot_window && plan?.slot_window ? String(plan.slot_window).trim() : null;
+      const expectedRegion = String(preferredArea).replace(/^[1-9]F_[A-Z]+$/i, "").trim();
+      const cachedRegionName = String(rawPrewarmed?.region_name || "").trim();
+      const cachedRegionMatches = String(rawPrewarmed?.region_id) === expectedRegion ||
+        (cachedRegionName && (cachedRegionName === expectedRegion ||
+          cachedRegionName.includes(expectedRegion) || expectedRegion.includes(cachedRegionName)));
       const isPrewarmedValid = Boolean(
         rawPrewarmed &&
+          cachedRegionMatches &&
           Array.isArray(rawPrewarmed.candidate_seats) &&
           rawPrewarmed.candidate_seats.length > 0 &&
           typeof rawPrewarmed.binding_id === "string" &&

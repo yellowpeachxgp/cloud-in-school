@@ -30,3 +30,51 @@ test('Cloud 目标日期未开放时不退回今天查询', async () => {
   await assert.rejects(p.fetchLiveRegionSeats('test', 7, target));
   assert.ok(urls.every(url => !url.includes('starttime=') || url.includes(`starttime=${target} `)));
 });
+
+test('提前选择的自习室次日消失时，预热不能换到其他自习室的同号座位', async () => {
+  const p = provider();
+  p.parseCredentialBundle = () => ({ isLiveCredential: true });
+  p.authenticateHautSession = async () => ({ rawToken: 'isolated-preference-token' });
+  p.fetchLiveStudyRegions = async (_, date) => {
+    assert.equal(date, target);
+    return { regions: [{ id: 8, region_name: '其他自习室', open_time: '07:30', close_time: '22:00' }] };
+  };
+  let seatQueries = 0;
+  p.fetchLiveRegionSeats = async () => {
+    seatQueries++;
+    return { seats: [{ id: 18, seat_name: '01', short_name: '01' }] };
+  };
+  const result = await p.prewarmJobTargetSeats({
+    job: { booking_local_date: target },
+    plan: { area_name: '指定自习室', candidate_seats: ['01'] },
+    binding: { id: 'isolated-binding', student_no: 'isolated-student' },
+    decryptedSecret: 'isolated-only'
+  });
+  assert.equal(result.prewarmed, null);
+  assert.equal(seatQueries, 0);
+});
+
+test('已有预热缓存属于另一自习室时，到点也不能提交那个自习室的同号座位', async () => {
+  const p = provider();
+  const now = new Date('2030-01-02T09:00:00+08:00');
+  p.parseCredentialBundle = () => ({ isLiveCredential: true, raw_token: 'isolated-only' });
+  p.fetchActiveBookings = async () => [];
+  let writes = 0;
+  p.submitCandidateSeatAndVerify = async () => {
+    writes++;
+    return { action: 'RETURN_FINAL', result: { outcome: 'SUBMITTED' } };
+  };
+  p.fetchLiveStudyRegions = async () => { const error = new Error('隔离测试终止，未提交'); error.code = 'CONSENT_WITHDRAWN'; throw error; };
+  const job = { school_id: 'haut', booking_local_date: target, auth_version: 1,
+    prewarmed_targets: { binding_id: 'isolated-binding', student_no: 'isolated-student', auth_version: 1,
+      plan_generation: 1, target_local_date: target, region_id: 8, region_name: '其他自习室',
+      start_full: `${target} 07:30:00`, end_full: `${target} 22:00:00`,
+      candidate_seats: [{ id: 18, seat_name: '01' }], expires_at: new Date(now.getTime() + 60000).toISOString() } };
+  try {
+    await p.executeMockOrAuthorizedCreate({ job,
+      plan: { area_name: '指定自习室', candidate_seats: ['01'], generation: 1 },
+      binding: { id: 'isolated-binding', student_no: 'isolated-student', status: 'DELEGATED_ACTIVE' }, nowInstant: now });
+  } catch (error) { assert.equal(error.code, 'CONSENT_WITHDRAWN'); }
+  assert.equal(writes, 0);
+  assert.equal(job.prewarmed_targets, null);
+});
