@@ -7,7 +7,7 @@ import path from 'node:path';
 import { once } from 'node:events';
 
 for (const scenario of ['normal', 'hung', 'finance', 'socket', 'slow-save', 'repeat']) {
-  test(`真实 main 子进程关闭：${scenario}`, { timeout: 8_000 }, async t => {
+  test(`真实 main 子进程关闭：${scenario}`, { timeout: 25_000 }, async t => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shutdown-main-'));
     const child = fork('apps/api/src/main.mjs', [], {
       execArgv: ['--import', './tests/helpers/main-scenario.mjs'],
@@ -18,10 +18,12 @@ for (const scenario of ['normal', 'hung', 'finance', 'socket', 'slow-save', 'rep
     let output = '', errors = '';
     child.stdout.on('data', data => { output += data; });
     child.stderr.on('data', data => { errors += data; });
-    const hardKill = setTimeout(() => child.kill('SIGKILL'), 5_000);
+    let hardKill;
     t.after(() => { clearTimeout(hardKill); child.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); });
     const exited = once(child, 'exit');
     await once(child, 'message');
+    // 硬超时从开始关闭计时，不能把慢启动误记成关闭挂起。
+    hardKill = setTimeout(() => child.kill('SIGKILL'), 5_000);
     child.kill('SIGTERM');
     if (scenario === 'repeat') setTimeout(() => child.kill('SIGINT'), 10).unref();
     const [code, signal] = await exited;
@@ -37,7 +39,7 @@ for (const scenario of ['normal', 'hung', 'finance', 'socket', 'slow-save', 'rep
   });
 }
 
-test('独立 supervisor 对永久阻塞的真实 main 强制退出并记录未知关闭结果', { timeout: 8_000 }, async t => {
+test('独立 supervisor 对永久阻塞的真实 main 强制退出并记录未知关闭结果', { timeout: 25_000 }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-'));
   const child = fork('tests/helpers/supervisor-scenario.mjs', [], {
     execArgv: [], env: { PATH: process.env.PATH, HOME: dir, PORT: '0', HOST: '127.0.0.1', CLOUD_SNAPSHOT_PATH: path.join(dir, 'state.json'), CLOUD_REQUIRE_DURABLE_SNAPSHOT: 'true', SHUTDOWN_TIMEOUT_MS: '100', SHUTDOWN_HARD_TIMEOUT_MS: '300' },

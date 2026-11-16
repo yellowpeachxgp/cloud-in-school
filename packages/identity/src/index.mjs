@@ -727,6 +727,7 @@ export class CloudIdentityService {
     if (!txn) {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Missing web login transaction");
     }
+    const previousStatus = txn.status;
     ticket.consumedAtMs = nowMs;
     txn.status = "COMPLETED";
 
@@ -750,7 +751,7 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
     }
     const targetFlow = ticket.flowKind || txn.flowKind || "WEB_CONSOLE";
-    return this.issueDeviceSession(
+    return this.issueTicketSession(ticket, txn, previousStatus, () => this.issueDeviceSession(
       user,
       txn.deviceLabel ||
         (targetFlow === "WEB_PORTAL" ? "Campus Cloud Web Portal" : "Campus Cloud Web Console"),
@@ -758,7 +759,7 @@ export class CloudIdentityService {
       1,
       nowMs,
       targetFlow
-    );
+    ));
   }
 
   exchangeMobileTicket({ loginTxn, appTicket, codeVerifier }, nowMs = Date.now()) {
@@ -785,6 +786,7 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Mobile PKCE code_verifier verification failed");
     }
 
+    const previousStatus = txn.status;
     ticket.consumedAtMs = nowMs;
     txn.status = "COMPLETED";
 
@@ -809,7 +811,25 @@ export class CloudIdentityService {
       throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is disabled");
     }
 
-    return this.issueDeviceSession(user, txn.deviceLabel, null, 1, nowMs, "MOBILE_APP");
+    return this.issueTicketSession(ticket, txn, previousStatus,
+      () => this.issueDeviceSession(user, txn.deviceLabel, null, 1, nowMs, "MOBILE_APP"));
+  }
+
+  issueTicketSession(ticket, txn, previousStatus, issue) {
+    try {
+      return issue();
+    } catch (error) {
+      if (error?.commitPublished === false) {
+        // 确定未发布时恢复原票；快照构建可能已经清理了临时表与索引。
+        ticket.consumedAtMs = null;
+        txn.status = previousStatus;
+        this.store.exchangeTickets.set(ticket.appTicket, ticket);
+        this.store.authTransactions.set(txn.loginTxn, txn);
+        this.store.indexAuthTransaction?.(txn.loginTxn, txn);
+      }
+      // 已发布但耐久性未知时保留存储栅栏，不允许换票重做。
+      throw error;
+    }
   }
 
   issueDeviceSession(user, deviceLabel, existingFamilyId = null, generation = 1, nowMs = Date.now(), flow = "WEB_CONSOLE") {
@@ -855,8 +875,16 @@ export class CloudIdentityService {
     };
     this.store.deviceSessions.set(sessionId, sessionRecord);
     this.store.indexDeviceSession?.(sessionId, sessionRecord);
-    if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
+    try {
+      // 客户端收到令牌前，会话及旧令牌消费状态必须一起耐久提交。
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      else this.store.saveSnapshot?.();
+    } catch (error) {
+      if (error.commitPublished === false) {
+        this.store.unindexDeviceSession?.(sessionId, sessionRecord);
+        this.store.deviceSessions.delete(sessionId);
+      }
+      throw error;
     }
 
     const accessToken = this.signAccessToken({
@@ -1135,14 +1163,16 @@ export class CloudIdentityService {
     }
 
     session.consumed_at = new Date(nowMs).toISOString();
-    return this.issueDeviceSession(
-      user,
-      session.device_label,
-      session.family_id,
-      session.generation + 1,
-      nowMs,
-      session.flow || "MOBILE_APP"
-    );
+    try {
+      return this.issueDeviceSession(
+        user, session.device_label, session.family_id, session.generation + 1,
+        nowMs, session.flow || "MOBILE_APP"
+      );
+    } catch (error) {
+      // 只有确定未发布的失败才恢复旧令牌；rename 后未知保持存储围栏。
+      if (error.commitPublished === false) session.consumed_at = null;
+      throw error;
+    }
   }
 
   revokeSessionFamily(familyId, reason = "USER_LOGOUT", nowMs = Date.now()) {
@@ -1162,6 +1192,7 @@ export class CloudIdentityService {
       resource_ref: familyId,
       outcome: reason
     });
+    this.store.flushSnapshotStrictSync?.();
   }
 
   /**

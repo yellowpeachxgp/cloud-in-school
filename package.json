@@ -10,7 +10,7 @@
   },
   "scripts": {
     "contract:check": "node tools/contract-ci/validate-contracts.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs",
     "test:unit": "node --test tests/unit.test.mjs",
     "test:contract": "node --test tests/contract-parity.test.mjs",
     "test:saga": "node --test tests/finance-saga-concurrency.test.mjs",

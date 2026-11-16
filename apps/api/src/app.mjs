@@ -628,6 +628,7 @@ export function createCampusCloudApp(options = {}) {
       reason: Boolean(body?.unlink_xpeach) ? "USER_LOGOUT_ALL_UNLINK" : "USER_LOGOUT_ALL",
       nowMs
     });
+    store.flushSnapshotStrictSync?.();
     return {
       status: 200,
       code: "LOGGED_OUT_ALL",
@@ -877,6 +878,7 @@ export function createCampusCloudApp(options = {}) {
     });
     const user = store.users.get(auth.cloudUserId);
     if (user) user.status = "DELETED";
+    store.flushSnapshotStrictSync?.();
     return {
       status: 202,
       code: "DATA_DELETE_ACCEPTED",
@@ -2230,11 +2232,22 @@ export function createCampusCloudApp(options = {}) {
     if (cookieAuth?.cloudUserId) {
       // A plain web logout must NEVER unlink the XPeach delegation — only the
       // explicit unlink flow may pass unlinkXpeach: true.
+      const sessions = [...store.deviceSessions.values()].filter(session => session.cloud_user_id === cookieAuth.cloudUserId);
+      const previousRevocations = sessions.map(session => [session, session.revoked_at]);
       identity.revokeAllUserSessions(cookieAuth.cloudUserId, {
         unlinkXpeach: false,
         reason: "WEB_USER_LOGOUT",
         nowMs
       });
+      try {
+        store.flushSnapshotStrictSync?.();
+      } catch (error) {
+        // 确定未发布时恢复原撤销标记，使同 Cookie 可重试；未知提交保持栅栏。
+        if (error?.commitPublished === false) {
+          for (const [session, revokedAt] of previousRevocations) session.revoked_at = revokedAt;
+        }
+        throw error;
+      }
     }
     return {
       status: 302,
