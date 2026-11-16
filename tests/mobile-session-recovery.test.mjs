@@ -137,3 +137,61 @@ test('实际 main 收到续期成功后 SIGKILL 并重启，新令牌可继续�
   assert.equal(revoked.status, 401);
   await kill(running.child);
 });
+
+for (const flow of ['MOBILE_APP', 'WEB_PORTAL']) {
+  test(`${flow} 登录票据在确定未提交时可重试，成功后不可重放`, async t => {
+    const { computeS256Challenge } = await import('../packages/identity/src/index.mjs');
+    const { app } = fixture(t);
+    const time = Date.now();
+    const verifier = 'isolated-valid-pkce-verifier-that-is-at-least-43-characters';
+    const start = flow === 'MOBILE_APP'
+      ? app.identity.startMobileTransaction({ installEphemeralId: 'isolated-device', codeChallenge: computeS256Challenge(verifier), codeChallengeMethod: 'S256' }, time)
+      : app.identity.startWebTransaction({ flowKind: flow, returnTo: '/reservations' }, time);
+    const txn = app.store.authTransactions.get(start.login_txn);
+    const callback = await app.identity.handleOidcCallback({ state: txn.serverState, code: 'sub:isolated-ticket-user' }, time + 1);
+    app.store.flushSnapshotStrictSync();
+    const url = flow === 'MOBILE_APP' ? '/api/v1/auth/mobile/exchange' : '/api/v1/auth/web/exchange';
+    const body = flow === 'MOBILE_APP'
+      ? { login_txn: txn.loginTxn, app_ticket: callback.appTicket, code_verifier: verifier }
+      : { login_txn: txn.loginTxn, web_ticket: callback.appTicket };
+    app.store._persistFaultInject = 'tmp_write';
+    const failed = await app.inject({ method: 'POST', url, body, nowMs: time + 2 });
+    assert.equal(failed.status, 503);
+    assert.equal(app.store.authTransactions.get(txn.loginTxn)?.status, 'CALLBACK_VERIFIED');
+    assert.equal(app.store.exchangeTickets.get(callback.appTicket)?.consumedAtMs, null);
+    assert.equal(app.store._idxTxnByServerState.get(txn.serverState), txn.loginTxn);
+    app.store._persistFaultInject = null;
+    assert.equal((await app.inject({ method: 'POST', url, body, nowMs: time + 3 })).status, 200);
+    assert.equal((await app.inject({ method: 'POST', url, body, nowMs: time + 4 })).status, 401);
+  });
+}
+
+test('数据删除的最终状态在实际接口确认后持久化，而非仅保存撤销会话', async t => {
+  const { app, user, options } = fixture(t);
+  const session = app.identity.issueDeviceSession(user, '隔离设备', null, 1, nowMs, 'MOBILE_APP');
+  const response = await app.inject({ method: 'POST', url: '/api/v1/me/data-delete', headers: { authorization: `Bearer ${session.access_token}` }, nowMs: nowMs + 1 });
+  assert.equal(response.status, 202);
+  clearTimeout(app.store._snapshotFlushTimer);
+  const restarted = createCampusCloudApp(options);
+  t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
+  assert.equal(restarted.store.users.get(user.id).status, 'DELETED');
+});
+
+test('网页退出首次保存失败后，重试必须确认撤销落盘才可跳转成功', async t => {
+  const { app, user, options } = fixture(t);
+  const session = app.identity.issueDeviceSession(user, '隔离网页', null, 1, nowMs, 'WEB_PORTAL');
+  const cookie = `dis_web_session=${app.identity.signWebSessionCookie({ cloudUserId: user.id, accessToken: session.access_token, refreshToken: session.refresh_token })}`;
+  app.store._persistFaultInject = 'tmp_write';
+  const failed = await app.inject({ method: 'GET', url: '/api/v1/auth/web/logout', headers: { cookie }, nowMs: nowMs + 1 });
+  assert.equal(failed.status, 503);
+  const stillFailed = await app.inject({ method: 'GET', url: '/api/v1/auth/web/logout', headers: { cookie }, nowMs: nowMs + 2 });
+  assert.equal(stillFailed.status, 503);
+  app.store._persistFaultInject = null;
+  const retry = await app.inject({ method: 'GET', url: '/api/v1/auth/web/logout', headers: { cookie }, nowMs: nowMs + 3 });
+  assert.equal(retry.status, 302);
+  clearTimeout(app.store._snapshotFlushTimer);
+  const restarted = createCampusCloudApp(options);
+  t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
+  const me = await restarted.inject({ method: 'GET', url: '/api/v1/me', headers: { authorization: `Bearer ${session.access_token}` }, nowMs: nowMs + 4 });
+  assert.equal(me.status, 401);
+});

@@ -1,7 +1,7 @@
 {
   "_meta": {
     "generated_by": "cloud-in-school 实际 apps/api handler；工具仅使用假身份和临时存储",
-    "handler_sha256": "33b76f2566870e7dc608a1308064b71fcb4f26291fb8d36eaa2821bf21de8bea"
+    "handler_sha256": "bef84e803f6407672a3cd36a0aad95b3e3d156d56bf84a1ad8d56969375fbf43"
   },
   "http_status": 200,
   "body": {
@@ -9,14 +9,14 @@
     "code": "RESERVATION_QUOTE_ISSUED",
     "request_id": "req_fixture_quote_ok",
     "data": {
-      "quote_id": "q_d4463d2f-ab1",
-      "cloud_user_id": "0922261f-7ed6-495f-8821-7fac53235e56",
+      "quote_id": "q_5d57b23b-578",
+      "cloud_user_id": "2bcc8c60-9efa-4cd5-8f6f-5768ed245744",
       "amount_micropeach": 10000,
       "price_version": "price-library-cloud-2026-11-v1",
       "unit": "PER_CONFIRMED_RESERVATION",
       "issued_at": "2026-11-15T02:00:00.000Z",
       "expires_at": "2026-11-15T02:10:00.000Z",
-      "quote_hash": "76e4811ef36992f9e2cbbd5ae6275405d7dda1aca41acd47fd440381ce36e595"
+      "quote_hash": "9898b1d581b104e9525769f85f98324cbcabfda99ae25945158e4f8f61e04540"
     },
     "meta": {
       "request_id": "req_fixture_quote_ok",

@@ -628,6 +628,7 @@ export function createCampusCloudApp(options = {}) {
       reason: Boolean(body?.unlink_xpeach) ? "USER_LOGOUT_ALL_UNLINK" : "USER_LOGOUT_ALL",
       nowMs
     });
+    store.flushSnapshotStrictSync?.();
     return {
       status: 200,
       code: "LOGGED_OUT_ALL",
@@ -877,6 +878,7 @@ export function createCampusCloudApp(options = {}) {
     });
     const user = store.users.get(auth.cloudUserId);
     if (user) user.status = "DELETED";
+    store.flushSnapshotStrictSync?.();
     return {
       status: 202,
       code: "DATA_DELETE_ACCEPTED",
@@ -2236,6 +2238,8 @@ export function createCampusCloudApp(options = {}) {
         nowMs
       });
     }
+    // 首次退出保存失败后，内存会话已撤销；重试仍须确认落盘才返回成功。
+    store.flushSnapshotStrictSync?.();
     return {
       status: 302,
       headers: {
