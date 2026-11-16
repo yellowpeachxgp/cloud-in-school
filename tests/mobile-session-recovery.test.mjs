@@ -195,3 +195,13 @@ test('网页退出首次保存失败后，重试必须确认撤销落盘才可�
   const me = await restarted.inject({ method: 'GET', url: '/api/v1/me', headers: { authorization: `Bearer ${session.access_token}` }, nowMs: nowMs + 4 });
   assert.equal(me.status, 401);
 });
+
+test('匿名网页退出不触发整份快照同步重写', async t => {
+  const { app } = fixture(t);
+  app.store.flushSnapshotStrictSync();
+  let writes = 0;
+  app.store.onPersistStage = () => writes++;
+  const response = await app.inject({ method: 'GET', url: '/api/v1/auth/web/logout', nowMs });
+  assert.equal(response.status, 302);
+  assert.equal(writes, 0);
+});
