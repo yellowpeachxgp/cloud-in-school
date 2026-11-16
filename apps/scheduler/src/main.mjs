@@ -5,6 +5,7 @@ const KIND_PRIORITY = {
 };
 
 export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
+  app.store.assertStorageWritable?.();
   const executed = [];
   // Single pass: collect due events and a job_id -> events index (avoids nested find per unknown job)
   const eventsByJobAll = new Map();
@@ -65,6 +66,11 @@ export async function scanDueScheduleEvents(app, nowMs = Date.now()) {
           status: res.event.status
         });
       } catch (err) {
+        if (err?.code === "STORAGE_COMMIT_UNKNOWN") {
+          // 隔离不是业务失败；保留原事件，恢复后才能继续判定。
+          jobResults.push({ event_id: ev.id, job_id: ev.job_id, kind: ev.kind, status: "STORAGE_COMMIT_UNKNOWN" });
+          continue;
+        }
         ev.status = "ERROR";
         ev.actual_at = new Date(nowMs).toISOString();
         ev.diagnostic_code = err?.code || "SCHEDULER_EVENT_ERROR";

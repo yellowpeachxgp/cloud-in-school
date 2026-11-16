@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "预约报价响应 v1",
+  "type": "object",
+  "required": ["ok", "code", "request_id", "data", "meta"],
+  "properties": {
+    "ok": { "const": true },
+    "code": { "const": "RESERVATION_QUOTE_ISSUED" },
+    "request_id": { "type": "string" },
+    "meta": { "type": "object" },
+    "data": {
+      "type": "object",
+      "required": ["quote_id", "cloud_user_id", "amount_micropeach", "price_version", "unit", "issued_at", "expires_at", "quote_hash"],
+      "properties": {
+        "quote_id": { "type": "string", "minLength": 1 },
+        "cloud_user_id": { "type": "string", "minLength": 1 },
+        "amount_micropeach": { "type": "integer", "minimum": 0, "maximum": 100000000000 },
+        "price_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "unit": { "const": "PER_CONFIRMED_RESERVATION" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "quote_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

@@ -17,7 +17,7 @@
     "test:scheduler": "node --test tests/triple-schedule.test.mjs",
     "test:plugin": "node --test tests/plugin-zero-host-change.test.mjs",
     "test:security": "node --test tests/security-redteam.test.mjs",
-    "start": "node apps/api/src/main.mjs",
+    "start": "node apps/api/src/supervisor.mjs",
     "start:console": "node apps/console/src/main.mjs",
     "start:finance-bridge": "node apps/finance-bridge/src/main.mjs",
     "start:mock-school": "node apps/mock-school/src/main.mjs",

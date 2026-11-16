@@ -659,6 +659,18 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '200':
+          description: 已确认耐久提交的原幂等结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationPlanEnvelope'
   /api/v1/reservation-plans/{planId}:
     patch:
       operationId: updateReservationPlan
@@ -685,6 +697,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
     delete:
       operationId: cancelReservationPlan
       tags: [reservations]
@@ -702,6 +720,12 @@ paths:
                 $ref: '#/components/schemas/ActionAckEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/reservation-jobs:
     get:
       operationId: listReservationJobs
@@ -760,6 +784,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/reservation-jobs/{jobId}/evidence:
     get:
       operationId: getReservationJobEvidence
@@ -1363,7 +1393,7 @@ paths:
       tags: [admin]
       security:
         - bearerAuth: []
-      summary: Issue an idempotent refund for a PAID order (`dis:reservation:<orderUUID>:refund:v1`, capped at paid amount)
+      summary: Create a dual-approval refund request for a PAID order (executes only after a distinct second admin approves)
       parameters:
         - name: orderId
           in: path
@@ -1469,10 +1499,10 @@ paths:
       tags: [admin]
       security:
         - bearerAuth: []
-      summary: Issue an immediate admin 1-click refund to the user's XPeach wallet
+      summary: Create a dual-approval refund request (legacy 1-click refunds no longer execute unilaterally)
       responses:
-        '200':
-          description: Order refunded
+        '202':
+          description: Refund request created pending second-admin approval
   /api/v1/reservation-jobs/{jobId}/execute-now:
     post:
       operationId: executeReservationJobNow
@@ -1610,6 +1640,171 @@ paths:
       responses:
         '200':
           description: Updated competition catalog
+  /api/v1/me/orders/{orderId}/settle:
+    post:
+      operationId: settleMyOrder
+      tags: [finance]
+      security:
+        - bearerAuth: []
+      summary: Self-service settlement of a DEBIT_PENDING or PAYMENT_DUE confirmed order at the stored accepted price (no client-supplied amount)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order settled or still pending
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/orders/{orderId}/refund-requests:
+    post:
+      operationId: createRefundRequest
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Create an immutable dual-person refund request (PENDING_APPROVAL, 24h expiry)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '202':
+          description: Refund request created
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/refund-requests:
+    get:
+      operationId: listRefundRequests
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: List dual-approval refund requests and their lifecycle status
+      responses:
+        '200':
+          description: Refund requests
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/refund-requests/{requestId}/approve:
+    post:
+      operationId: approveRefundRequest
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Approve a pending refund request as the DISTINCT second authenticated finance admin (self-approval rejected)
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Refund request approved
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/refund-requests/{requestId}/execute:
+    post:
+      operationId: executeRefundRequest
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Execute an approved refund request with immutable-hash and role re-verification (idempotent event key)
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Refund executed (order REFUNDED)
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/credential-integrity:
+    get:
+      operationId: auditCredentialIntegrity
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Read-only audit of binding to credential_ref integrity (shared/mismatched/missing refs; no plaintext)
+      responses:
+        '200':
+          description: Credential integrity report
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/finance-worker/metrics:
+    get:
+      operationId: getFinanceWorkerMetrics
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Finance retry worker metrics (pending debits, backlog age, manual-review queue, last run)
+      responses:
+        '200':
+          description: Finance worker metrics
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/orders/{orderId}/refund-reconcile:
+    post:
+      operationId: reconcileLegacyRefund
+      tags: [admin]
+      security:
+        - bearerAuth: []
+      summary: Read-only reconcile of a legacy (pre-dual-approval) refund operation via its original idempotency key — never dispatches a new write
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Legacy refund reconciled or still unresolved
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/reservation-quote:
+    get:
+      operationId: getReservationQuote
+      tags: [reservations]
+      security:
+        - bearerAuth: []
+      summary: Issue a short-lived server price quote to pin at plan creation
+      responses:
+        '200':
+          description: Quote issued (amount, price_version, expires_at, quote_hash)
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/reservation-quote-v1.schema.json'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 存储未提交或耐久性未知；保持原请求和幂等键等待恢复核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 components:
   securitySchemes:
     bearerAuth:

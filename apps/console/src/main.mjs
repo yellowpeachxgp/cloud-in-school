@@ -331,6 +331,9 @@ export function renderConsoleHtml(ctx = {}) {
   const allJobs = Array.isArray(ctx.allJobs) ? ctx.allJobs : [];
   const allEvents = Array.isArray(ctx.allEvents) ? ctx.allEvents : null;
   const allOrders = Array.isArray(ctx.allOrders) ? ctx.allOrders : [];
+  const refundRequests = Array.isArray(ctx.refundRequests) ? ctx.refundRequests : [];
+  const legacyRefundOps = Array.isArray(ctx.legacyRefundOps) ? ctx.legacyRefundOps : [];
+  const viewerUserId = ctx.user?.id || ctx.user?.subject || null;
   const allUsers = Array.isArray(ctx.allUsers) ? ctx.allUsers : [];
   const schools = Array.isArray(ctx.schools) ? ctx.schools : [];
   const auditEvents = Array.isArray(ctx.auditEvents) ? ctx.auditEvents : [];
@@ -745,14 +748,98 @@ export function renderConsoleHtml(ctx = {}) {
       }`;
   }
 
+  function renderRefundRequestRow(req) {
+    const statusLabel = {
+      PENDING_APPROVAL: "待第二管理员审批",
+      APPROVED: "已审批 · 待执行",
+      EXECUTING: "执行中",
+      RESULT_UNKNOWN: "结果待核对",
+      REFUNDED: "已退还",
+      FAILED: "已失败",
+      EXPIRED: "已过期"
+    }[req.status] || req.status;
+    const peach = formatPeachFromMicropeach(req.amount_micropeach, 4).replace(/\.?0+$/, "");
+    const mine = req.created_by === viewerUserId;
+    const parts = [];
+    parts.push('<article class="xp-row-card" data-refund-request="' + escapeHtml(req.id) + '">');
+    parts.push('<div class="xp-row-card-main"><div class="xp-icon-box xp-icon-box--sm xp-icon-box--peach" aria-hidden="true">🧾</div>');
+    parts.push('<div class="xp-entity-title-col"><div class="xp-badge-flow">');
+    parts.push('<span class="xp-row-card-title">退还申请 ' + escapeHtml(peach) + ' 🍑</span>');
+    parts.push(xpeachBadge(statusLabel, req.status === "REFUNDED" ? "success" : req.status === "FAILED" ? "danger" : "neutral"));
+    parts.push('</div><div class="xp-row-card-meta">');
+    parts.push('<span>申请号：<code>' + escapeHtml(String(req.id).slice(-8)) + '</code></span>');
+    parts.push('<span>账单：<code>' + escapeHtml(String(req.order_id || "").slice(-8)) + '</code></span>');
+    parts.push('<span>原因：' + escapeHtml(req.reason || "-") + '</span>');
+    parts.push('</div></div></div><div class="xp-row-card-actions">');
+    if (req.status === "PENDING_APPROVAL" && !mine) {
+      parts.push('<button type="button" class="xp-pill xp-pill--compact" data-approve-refund="' + escapeHtml(req.id) + '">审批（第二人）</button>');
+    }
+    if (req.status === "PENDING_APPROVAL" && mine) {
+      parts.push('<span class="xp-meta-highlight">等待另一管理员审批</span>');
+    }
+    if (req.status === "APPROVED") {
+      parts.push('<button type="button" class="xp-pill xp-pill--compact" data-execute-refund="' + escapeHtml(req.id) + '">执行退还</button>');
+    }
+    if (req.status === "EXECUTING" || req.status === "RESULT_UNKNOWN") {
+      parts.push('<button type="button" class="xp-pill xp-pill--compact" data-execute-refund="' + escapeHtml(req.id) + '">核对/重试</button>');
+    }
+    parts.push('</div></article>');
+    return parts.join("");
+  }
+
+  function renderLegacyRefundRow(op) {
+    return [
+      '<article class="xp-row-card" data-legacy-refund="' + escapeHtml(op.order_id) + '">',
+      '<div class="xp-row-card-main"><div class="xp-icon-box xp-icon-box--sm" aria-hidden="true">⚠️</div>',
+      '<div class="xp-entity-title-col"><div class="xp-badge-flow">',
+      '<span class="xp-row-card-title">账单 <code>' + escapeHtml(String(op.order_id || "").slice(-8)) + '</code></span>',
+      xpeachBadge("待人工核对", "neutral"),
+      '</div><div class="xp-row-card-meta">',
+      '<span>事件键：<code>' + escapeHtml(String(op.event_key || "").slice(-16)) + '</code></span>',
+      '<span>状态：' + escapeHtml(op.status) + ' · 尝试 ' + escapeHtml(String(op.attempt_count || 0)) + ' 次</span>',
+      '</div></div></div>',
+      '<div class="xp-row-card-actions"><button type="button" class="xp-pill xp-pill--compact" data-reconcile-legacy="' + escapeHtml(op.order_id) + '">按原键查单核对</button></div>',
+      '</article>'
+    ].join("");
+  }
+
   function renderOrdersAdminView() {
+    const activeRequests = refundRequests
+      .filter((r) => r.status !== "REFUNDED")
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    const pendingReqOrderIds = new Set(
+      refundRequests
+        .filter((r) => ["PENDING_APPROVAL", "APPROVED", "EXECUTING", "RESULT_UNKNOWN"].includes(r.status))
+        .map((r) => r.order_id)
+    );
     return `
+      <section class="xp-card" style="margin-bottom: 18px;">
+        <div class="xp-entity-header" style="margin-bottom: 14px;">
+          <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🧾</div>
+          <div class="xp-entity-title-col">
+            <h2 class="xp-entity-title">退还申请（双人审批）(${activeRequests.length})</h2>
+            <p class="xp-entity-summary" style="margin-top: 2px;">发起申请后须由另一名财务管理员审批，再执行退还；执行结果真实同步 XPeach 主站。</p>
+          </div>
+        </div>
+        <div class="xp-row-list">
+          ${activeRequests.length === 0
+            ? xpeachEmptyState({ icon: "🧾", title: "暂无进行中的退还申请" })
+            : activeRequests.map(renderRefundRequestRow).join("")}
+        </div>
+        ${legacyRefundOps.length > 0 ? `
+          <div class="xp-entity-title-col" style="margin-top: 14px;">
+            <h3 class="xp-entity-title" style="font-size: 15px;">历史遗留退还待人工核对 (${legacyRefundOps.length})</h3>
+            <p class="xp-entity-summary" style="margin-top: 2px;">升级前已发起但无双人审批记录的退还，须按原幂等键向 XPeach 主站查单确认后才能继续。</p>
+          </div>
+          <div class="xp-row-list">${legacyRefundOps.map(renderLegacyRefundRow).join("")}</div>` : ""}
+      </section>
+
       <section class="xp-card" style="margin-bottom: 18px;">
         <div class="xp-entity-header" style="margin-bottom: 14px;">
           <div class="xp-icon-box xp-icon-box--peach" aria-hidden="true">🍑</div>
           <div class="xp-entity-title-col">
-            <h2 class="xp-entity-title">全站消费账单对账与一键退还</h2>
-            <p class="xp-entity-summary" style="margin-top: 2px;">每一笔扣费与退还均通过幂等密钥实时同步至 XPeach 主站用户钱包与跨站财务大盘。</p>
+            <h2 class="xp-entity-title">全站消费账单对账</h2>
+            <p class="xp-entity-summary" style="margin-top: 2px;">每一笔扣费与退还均通过幂等密钥实时同步至 XPeach 主站用户钱包与跨站财务大盘；退还须双人审批。</p>
           </div>
         </div>
         <div class="xp-row-list">
@@ -767,7 +854,8 @@ export function renderConsoleHtml(ctx = {}) {
                     xpeachOrderRowCard(o, {
                       isAdmin: true,
                       pricingMicropeach,
-                      micropeachPerPeach: MICROPEACH_PER_PEACH
+                      micropeachPerPeach: MICROPEACH_PER_PEACH,
+                      pendingRefund: pendingReqOrderIds.has(o.id)
                     })
                   )
                   .join("")
@@ -1660,35 +1748,112 @@ export function renderConsoleHtml(ctx = {}) {
           });
         });
 
-        // Admin: 1-click order refund (requires explicit dual-person approval reference)
+        // Admin: dual-person refund workflow — this admin only CREATES the
+        // request; a SECOND finance admin must approve, then execute. The UI
+        // never claims money has moved until the order shows REFUNDED.
         document.querySelectorAll("[data-refund-order]").forEach(function (btn) {
           if (btn.dataset.disBound) return;
           btn.dataset.disBound = "1";
           btn.addEventListener("click", function () {
             var orderId = btn.getAttribute("data-refund-order");
-            var secondRef = window.prompt(
-              "请输入二次复核审批单号或复核管理员标识（双人复核必填）：",
-              ""
+            var reason = window.prompt(
+              "创建退还申请（将由第二名管理员审批后执行）。退还原因：",
+              "管理员在站点后台申请退还 🍑"
             );
-            if (!secondRef || !secondRef.trim()) {
+            if (!reason || !reason.trim()) {
               return;
             }
             btn.disabled = true;
-            btn.textContent = "退还中…";
+            btn.textContent = "提交中…";
             apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/quick-refund", {
               method: "POST",
-              body: JSON.stringify({
-                reason: "管理员在站点后台执行退还 🍑",
-                second_approver_ref: secondRef.trim()
+              body: JSON.stringify({ reason: reason.trim() })
+            })
+              .then(function (res) {
+                var reqId = (res && res.data && res.data.refund_request && res.data.refund_request.id) || "";
+                showToast("退还申请已创建（" + reqId.slice(-8) + "），待第二管理员审批后执行，尚未实际退款。");
+                setTimeout(function () { window.location.reload(); }, 800);
               })
+              .catch(function (err) {
+                btn.disabled = false;
+                btn.textContent = "申请退还";
+                showToast(err.message, true);
+              });
+          });
+        });
+
+        // Second-admin approval of a pending refund request.
+        document.querySelectorAll("[data-approve-refund]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
+          btn.addEventListener("click", function () {
+            var reqId = btn.getAttribute("data-approve-refund");
+            if (!window.confirm("以当前管理员身份审批该退还申请？")) return;
+            btn.disabled = true;
+            apiFetch("/api/v1/admin/refund-requests/" + encodeURIComponent(reqId) + "/approve", {
+              method: "POST",
+              body: JSON.stringify({})
             })
               .then(function () {
-                showToast("已将 " + PRICE_PEACH_TEXT + " 🍑 原路退还至用户 XPeach 账户！");
+                showToast("已审批，等待执行退还。");
                 setTimeout(function () { window.location.reload(); }, 600);
               })
               .catch(function (err) {
                 btn.disabled = false;
-                btn.textContent = "退还 🍑";
+                showToast(err.message, true);
+              });
+          });
+        });
+
+        // Execute an approved request / reconcile an in-flight one.
+        document.querySelectorAll("[data-execute-refund]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
+          btn.addEventListener("click", function () {
+            var reqId = btn.getAttribute("data-execute-refund");
+            if (!window.confirm("按原幂等键执行/核对该退还？")) return;
+            btn.disabled = true;
+            apiFetch("/api/v1/admin/refund-requests/" + encodeURIComponent(reqId) + "/execute", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(function (res) {
+                var st = (res && res.data && res.data.refund_request && res.data.refund_request.status) || "";
+                showToast(st === "REFUNDED" ? "退还已到账，账单已同步。" : "已提交核对，当前状态：" + (st || "执行中"));
+                setTimeout(function () { window.location.reload(); }, 800);
+              })
+              .catch(function (err) {
+                btn.disabled = false;
+                showToast(err.message, true);
+              });
+          });
+        });
+
+        // Legacy (pre-dual-approval) refund reconcile by original event key.
+        document.querySelectorAll("[data-reconcile-legacy]").forEach(function (btn) {
+          if (btn.dataset.disBound) return;
+          btn.dataset.disBound = "1";
+          btn.addEventListener("click", function () {
+            var orderId = btn.getAttribute("data-reconcile-legacy");
+            if (!window.confirm("按原事件键向上游查单核对此笔历史退还？")) return;
+            btn.disabled = true;
+            apiFetch("/api/v1/admin/orders/" + encodeURIComponent(orderId) + "/refund-reconcile", {
+              method: "POST",
+              body: JSON.stringify({})
+            })
+              .then(function (res) {
+                var rec = (res && res.data && res.data.reconciled) || "UNKNOWN";
+                showToast(
+                  rec === "SUCCEEDED"
+                    ? "上游确认已退还，账单状态已同步。"
+                    : rec === "NEVER_RECEIVED"
+                      ? "上游确认未收到该操作，可创建新的双人退还申请。"
+                      : "查单无法确认结果，保持人工核对队列。"
+                );
+                setTimeout(function () { window.location.reload(); }, 800);
+              })
+              .catch(function (err) {
+                btn.disabled = false;
                 showToast(err.message, true);
               });
           });
@@ -2544,6 +2709,10 @@ export function renderConsoleHtml(ctx = {}) {
                 target_local_time: targetTime,
                 repeat_days: repeatDays,
                 remaining_days: repeatDays,
+                // Quote contract (C8): the price the UI displayed when the user
+                // clicked — server 409s if the global price drifted, forcing an
+                // honest re-confirm instead of a silent re-price.
+                expected_price_micropeach: ${DEFAULT_RESERVATION_PRICE_MICROPEACH},
                 replace_existing: true
               })
             });

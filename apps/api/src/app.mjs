@@ -15,7 +15,11 @@ import {
   redactSensitiveFields
 } from "../../../packages/contracts/src/index.mjs";
 import { CloudDatabaseStore } from "../../../packages/db/src/index.mjs";
-import { KmsEnvelopeVault } from "../../../packages/crypto/src/index.mjs";
+import {
+  KmsEnvelopeVault,
+  escrowCredentialForBindings,
+  auditCredentialRefConsistency
+} from "../../../packages/crypto/src/index.mjs";
 import { CloudIdentityService } from "../../../packages/identity/src/index.mjs";
 import {
   HautLibraryProvider,
@@ -23,7 +27,8 @@ import {
 } from "../../../packages/school-spi/src/index.mjs";
 import {
   TripleScheduleEngine,
-  addDaysToLocalDate
+  addDaysToLocalDate,
+  validateManualExecution
 } from "../../../packages/reservations/src/index.mjs";
 import {
   IsolatedFinanceBridge,
@@ -94,6 +99,33 @@ export function createCampusCloudApp(options = {}) {
     new ParcelHubService(store, kmsVault, {
       environment: options.environment || process.env.NODE_ENV || "production"
     });
+  // Production fail-closed gate: dangerous combinations must abort startup —
+  // a mock/sandbox write path, missing durable snapshot or absent KMS material
+  // can never be "test leftovers" in production.
+  const isProductionEnv = process.env.NODE_ENV === "production";
+  if (isProductionEnv) {
+    const violations = [];
+    if (schoolProvider?.mockBackend) {
+      violations.push("schoolProvider.mockBackend must not be configured in production");
+    }
+    if (schoolProvider?.allowSandboxFallback) {
+      violations.push("schoolProvider.allowSandboxFallback must be false in production");
+    }
+    if (financeBridge?.allowSandboxFallback && !financeBridge?.realDebitsEnabled) {
+      violations.push("financeBridge sandbox fallback must be disabled in production");
+    }
+    if (!store?.snapshotPath || store?.requireDurableSnapshot !== true) {
+      violations.push("durable snapshot (snapshotPath + requireDurableSnapshot) is required in production");
+    }
+    if (!options.kmsVault && !process.env.KMS_MASTER_SEED) {
+      violations.push("KMS_MASTER_SEED is required in production");
+    }
+    if (violations.length > 0) {
+      throw new Error(
+        "Refusing to start in production mode:\n - " + violations.join("\n - ")
+      );
+    }
+  }
   const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker();
   const redisBuffer =
     options.redisBuffer ||
@@ -458,7 +490,15 @@ export function createCampusCloudApp(options = {}) {
   });
 
   register("GET", "/readyz", "getReadyz", "none", async () => {
+    // HTTP 状态是负载均衡器的准入依据，不能只在 200 响应体里写 ready=false。
+    if (isDraining || !kmsVault.kmsOnline) {
+      throw new ContractError("READINESS_UNAVAILABLE", "服务正在排空或密钥服务不可用，请稍后重试");
+    }
     const redisTelemetry = await redisBuffer.getTelemetrySnapshot();
+    // 读取遥测期间也可能收到停机信号。
+    if (isDraining || !kmsVault.kmsOnline) {
+      throw new ContractError("READINESS_UNAVAILABLE", "服务就绪状态已变化，请稍后重试");
+    }
     return {
       status: 200,
       code: "READY_OK",
@@ -583,7 +623,11 @@ export function createCampusCloudApp(options = {}) {
   });
 
   register("POST", "/api/v1/auth/logout-all", "logoutAllSessions", "bearer", async ({ auth, body, nowMs }) => {
-    identity.revokeAllUserSessions(auth.cloudUserId, Boolean(body?.unlink_xpeach), nowMs);
+    identity.revokeAllUserSessions(auth.cloudUserId, {
+      unlinkXpeach: Boolean(body?.unlink_xpeach),
+      reason: Boolean(body?.unlink_xpeach) ? "USER_LOGOUT_ALL_UNLINK" : "USER_LOGOUT_ALL",
+      nowMs
+    });
     return {
       status: 200,
       code: "LOGGED_OUT_ALL",
@@ -657,6 +701,52 @@ export function createCampusCloudApp(options = {}) {
     const orders = store.recordsForUser("reservationOrders", auth.cloudUserId);
     return { status: 200, code: "ORDERS_LISTED", data: { orders } };
   });
+
+  // Self-service settlement of an outstanding confirmed-order debit after the
+  // user recharges. The amount/payee ALWAYS come from the stored order — the
+  // client can never name a price or a recipient. Only DEBIT_PENDING /
+  // PAYMENT_DUE orders owned by the caller may settle; PAID/REFUNDED are
+  // rejected so a second charge can never be produced.
+  register(
+    "POST",
+    "/api/v1/me/orders/{orderId}/settle",
+    "settleMyOrder",
+    "bearer",
+    async ({ auth, params, nowMs }) => {
+      const order = store.reservationOrders.get(params.orderId);
+      if (!order || order.cloud_user_id !== auth.cloudUserId) {
+        throw new ContractError("NOT_FOUND", "Order not found");
+      }
+      if (order.school_result !== "CONFIRMED") {
+        throw new ContractError("CONFLICT", "Order has no confirmed school result to settle");
+      }
+      if (["PAID", "REFUNDED", "NOT_REQUIRED"].includes(order.payment_state)) {
+        throw new ContractError(
+          "CONFLICT",
+          "Order is already settled; a second charge is never permitted"
+        );
+      }
+      if (!["DEBIT_PENDING", "PAYMENT_DUE"].includes(order.payment_state)) {
+        throw new ContractError("CONFLICT", "Order is not awaiting settlement");
+      }
+      const settled = await financeService.executeDebitForOrder(order.id, nowMs);
+      // Paused plans are NOT auto-revived — the user re-enables them
+      // explicitly after settling (per delegation-stops-stay-stopped rule).
+      await syncUserToSso(auth.cloudUserId);
+      return {
+        status: 200,
+        code: settled.payment_state === "PAID" ? "ORDER_SETTLED" : "ORDER_SETTLE_PENDING",
+        data: {
+          order: settled,
+          payment_state: settled.payment_state,
+          message:
+            settled.payment_state === "PAID"
+              ? "欠款已结算；此前因欠款暂停的委托可在委托页手动重新开启"
+              : "余额仍不足，请先为 XPeach 钱包充值后再试"
+        }
+      };
+    }
+  );
 
   register("GET", "/api/v1/me/consents", "listMyConsents", "bearer", async ({ auth }) => {
     const consents = store.recordsForUser("consents", auth.cloudUserId);
@@ -778,7 +868,13 @@ export function createCampusCloudApp(options = {}) {
   register("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
     const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
-    identity.revokeAllUserSessions(auth.cloudUserId, true, nowMs);
+    // Plans/bindings were already halted above with the USER_DATA_DELETE audit
+    // reason; only revoke sessions here (unlinkXpeach stays false).
+    identity.revokeAllUserSessions(auth.cloudUserId, {
+      unlinkXpeach: false,
+      reason: "USER_DATA_DELETE",
+      nowMs
+    });
     const user = store.users.get(auth.cloudUserId);
     if (user) user.status = "DELETED";
     return {
@@ -970,14 +1066,20 @@ export function createCampusCloudApp(options = {}) {
           if (e instanceof ContractError) throw e;
         }
       }
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      const escrowed = escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: [binding],
+        cloudUserId: auth.cloudUserId,
         schoolId: binding.school_id,
+        studentNo: binding.student_no,
         credentialKind: body?.credential_kind || "DELEGATED_SESSION_BUNDLE",
         plaintext: secretPayload,
         expiresAt:
-          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
+      const encrypted = escrowed.get(binding.id);
       // If another active binding for the same school has a DIFFERENT student_no, revoke it first so old student's plans are invalidated!
       const targetBindSno = String(binding.student_no || "").trim();
       for (const other of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
@@ -1075,17 +1177,22 @@ export function createCampusCloudApp(options = {}) {
           );
         }
       }
-      if (binding.credential_ref && store.encryptedCredentials.has(binding.credential_ref)) {
-        store.encryptedCredentials.get(binding.credential_ref).revoked_at = new Date(nowMs).toISOString();
-      }
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      // Old credential records are revoked inside the helper only after the
+      // replacement record has been stored (no window without a usable ref).
+      const escrowed = escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: [binding],
+        cloudUserId: auth.cloudUserId,
         schoolId: binding.school_id,
+        studentNo: binding.student_no,
         credentialKind: body?.credential_kind || "DELEGATED_SESSION_BUNDLE",
         plaintext: body?.delegated_secret || "reauthorized_session_v1",
         expiresAt:
-          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
+          body?.expires_at || new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
+      const encrypted = escrowed.get(binding.id);
       const userObj = store.users.get(auth.cloudUserId);
       if (userObj) {
         userObj.auth_version = Number(userObj.auth_version || 1) + 1;
@@ -1151,6 +1258,49 @@ export function createCampusCloudApp(options = {}) {
     return { status: 200, code: "RESERVATION_PLANS_LISTED", data: { plans } };
   });
 
+  // Server-issued price quote (cross-end contract §5): a client displays this
+  // quote and pins it at plan creation — drift/expiry conflicts honestly.
+  // 报价有效期十分钟且仅消费一次，消费状态与计划、回执一起落盘。
+  const PRICE_QUOTE_TTL_MS = 10 * 60 * 1000;
+  register("GET", "/api/v1/reservation-quote", "getReservationQuote", "bearer", async ({ auth, nowMs }) => {
+    const quoteId = "q_" + crypto.randomUUID().slice(0, 12);
+    const quote = {
+      quote_id: quoteId,
+      cloud_user_id: auth.cloudUserId,
+      amount_micropeach: Number.isInteger(store.pricingMicropeach) ? store.pricingMicropeach : 10_000,
+      price_version: "price-library-cloud-2026-11-v1",
+      unit: "PER_CONFIRMED_RESERVATION",
+      issued_at: new Date(nowMs).toISOString(),
+      expires_at: new Date(nowMs + PRICE_QUOTE_TTL_MS).toISOString()
+    };
+    quote.quote_hash = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify({
+          quote_id: quoteId,
+          user: auth.cloudUserId,
+          amount: quote.amount_micropeach,
+          version: quote.price_version,
+          expires: quote.expires_at
+        })
+      )
+      .digest("hex");
+    store.priceQuotes = store.priceQuotes || new Map();
+    if (store.priceQuotes.size > 10_000) {
+      for (const [k, q] of store.priceQuotes) {
+        if (Date.parse(q.expires_at) <= nowMs) store.priceQuotes.delete(k);
+      }
+    }
+    store.priceQuotes.set(quoteId, quote);
+    try {
+      store.flushSnapshotStrictSync?.();
+    } catch (err) {
+      if (err.commitPublished === false) store.priceQuotes.delete(quoteId);
+      throw err;
+    }
+    return { status: 200, code: "RESERVATION_QUOTE_ISSUED", data: quote };
+  });
+
   register(
     "POST",
     "/api/v1/reservation-plans",
@@ -1160,10 +1310,15 @@ export function createCampusCloudApp(options = {}) {
       const idemKey = headers["idempotency-key"] || headers["Idempotency-Key"] || null;
       if (idemKey) {
         const cacheKey = `createReservationPlan|${auth.cloudUserId}|${idemKey}`;
-        const bodyHash = crypto.createHash("sha256").update(JSON.stringify(body || {})).digest("hex");
+        const canonical = value => Array.isArray(value) ? value.map(canonical)
+          : value && typeof value === "object"
+            ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+        const hash = value => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const bodyHash = hash(body || {});
+        const canonicalBodyHash = hash(canonical(body || {}));
         if (store.idempotencyRecords.has(cacheKey)) {
           const existing = store.idempotencyRecords.get(cacheKey);
-          if (existing.bodyHash !== bodyHash) {
+          if (existing.hashVersion === 2 ? existing.canonicalHash !== canonicalBodyHash : existing.bodyHash !== bodyHash) {
             throw new ContractError(
               "CONFLICT",
               "Idempotency-Key reused with different request payload"
@@ -1171,16 +1326,23 @@ export function createCampusCloudApp(options = {}) {
           }
           return { status: 200, code: "REQUEST_DUPLICATE", data: existing.data };
         }
-        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
-        if (store.idempotencyRecords.size > 2000) {
-          for (const [k, r] of store.idempotencyRecords) {
-            if (!r.createdAtMs || nowMs - r.createdAtMs > 86400_000) store.idempotencyRecords.delete(k);
-          }
-          if (store.idempotencyRecords.size > 2000) store.idempotencyRecords.clear();
+        // 回执与业务对象同寿命；不能清空回执后允许旧键再次创建。
+        const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs, {
+          idempotencyCacheKey: cacheKey,
+          idempotencyBodyHash: bodyHash,
+          idempotencyCanonicalHash: canonicalBodyHash
+        });
+        let ssoSyncFailed = false;
+        try {
+          await syncUserToSso(auth.cloudUserId);
+        } catch {
+          ssoSyncFailed = true;
         }
-        store.idempotencyRecords.set(cacheKey, { bodyHash, data: created, createdAtMs: nowMs });
-        await syncUserToSso(auth.cloudUserId);
-        return { status: 201, code: "RESERVATION_PLAN_CREATED", data: created };
+        return {
+          status: 201,
+          code: "RESERVATION_PLAN_CREATED",
+          data: { ...created, pending_sso_sync: ssoSyncFailed }
+        };
       }
       const created = reservationEngine.createPlanAndJob(auth.cloudUserId, body || {}, nowMs);
       await syncUserToSso(auth.cloudUserId);
@@ -1198,65 +1360,78 @@ export function createCampusCloudApp(options = {}) {
       if (!plan || plan.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Reservation plan not found");
       }
-      const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
-      const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
-      if (nextSeats || nextAreas || body?.slot_window !== undefined) {
-        const hasInFlightOrAmbiguousJob = Array.from(store.reservationJobs.values()).some(
-          (j) =>
-            j.plan_id === plan.id &&
-            ([
-              "EXECUTING",
-              "RESULT_UNKNOWN",
-              "DELEGATION_STOPPED_RESULT_UNKNOWN",
-              "CANCEL_RESULT_UNKNOWN"
-            ].includes(j.state) ||
-              ["DISPATCH_INTENT", "RESULT_UNKNOWN"].includes(j.external_execution_state))
-        );
-        if (hasInFlightOrAmbiguousJob) {
-          throw new ContractError(
-            "CONFLICT",
-            "当前计划存在执行中或结果待核对的任务，禁止在核实前原地修改目标区域或候选座位"
+      const records = [plan, ...Array.from(store.reservationJobs.values()).filter(job => job.plan_id === plan.id)];
+      const before = records.map(record => [record, structuredClone(record)]);
+      try {
+        const nextSeats = body?.candidate_seats || body?.preferred_seat_ids;
+        const nextAreas = body?.preferred_area_ids || (body?.area_name ? [body.area_name] : null);
+        if (nextSeats || nextAreas || body?.slot_window !== undefined) {
+          const hasInFlightOrAmbiguousJob = Array.from(store.reservationJobs.values()).some(
+            (j) =>
+              j.plan_id === plan.id &&
+              ([
+                "EXECUTING",
+                "RESULT_UNKNOWN",
+                "DELEGATION_STOPPED_RESULT_UNKNOWN",
+                "CANCEL_RESULT_UNKNOWN"
+              ].includes(j.state) ||
+                ["DISPATCH_INTENT", "RESULT_UNKNOWN"].includes(j.external_execution_state))
           );
-        }
-      }
-      if (Array.isArray(nextSeats) && nextSeats.length > 0) {
-        const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
-        plan.candidate_seats = cleanSeats;
-        plan.preferences_json.preferred_seat_ids = cleanSeats;
-      }
-      if (Array.isArray(nextAreas) && nextAreas.length > 0) {
-        const cleanArea = String(nextAreas[0]).trim();
-        plan.area_name = cleanArea;
-        plan.area_code = cleanArea;
-        plan.preferences_json.preferred_area_ids = [cleanArea];
-      }
-      if (nextSeats || nextAreas) {
-        for (const j of store.reservationJobs.values()) {
-          if (
-            j.plan_id === plan.id &&
-            ["ARMED", "PRECHECK_OK", "FINAL_CHECK_OK", "NEEDS_RECONFIRMATION"].includes(j.state)
-          ) {
-            j.prewarmed_targets = null;
+          if (hasInFlightOrAmbiguousJob) {
+            throw new ContractError(
+              "CONFLICT",
+              "当前计划存在执行中或结果待核对的任务，禁止在核实前原地修改目标区域或候选座位"
+            );
           }
         }
-      }
-      if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
-        const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
-        plan.repeat_days = nextRepeat;
-        plan.remaining_days = Math.min(
-          Math.max(Number(body.remaining_days ?? body.remainingDays ?? nextRepeat) || nextRepeat, 1),
-          nextRepeat
-        );
-        plan.end_local_date = addDaysToLocalDate(plan.target_local_date, plan.remaining_days - 1);
-        for (const j of store.reservationJobs.values()) {
-          if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
-            j.repeat_days = plan.repeat_days;
-            j.remaining_days = plan.remaining_days;
-            j.end_local_date = plan.end_local_date;
+        if (Array.isArray(nextSeats) && nextSeats.length > 0) {
+          const cleanSeats = nextSeats.map((s) => String(s).trim()).filter(Boolean);
+          plan.candidate_seats = cleanSeats;
+          plan.preferences_json.preferred_seat_ids = cleanSeats;
+        }
+        if (Array.isArray(nextAreas) && nextAreas.length > 0) {
+          const cleanArea = String(nextAreas[0]).trim();
+          plan.area_name = cleanArea;
+          plan.area_code = cleanArea;
+          plan.preferences_json.preferred_area_ids = [cleanArea];
+        }
+        if (nextSeats || nextAreas) {
+          for (const j of store.reservationJobs.values()) {
+            if (
+              j.plan_id === plan.id &&
+              ["ARMED", "PRECHECK_OK", "FINAL_CHECK_OK", "NEEDS_RECONFIRMATION"].includes(j.state)
+            ) {
+              j.prewarmed_targets = null;
+            }
           }
         }
+        if (body?.repeat_days !== undefined || body?.repeatDays !== undefined) {
+          const nextRepeat = Math.min(Math.max(Number(body.repeat_days ?? body.repeatDays) || 1, 1), 30);
+          plan.repeat_days = nextRepeat;
+          plan.remaining_days = Math.min(
+            Math.max(Number(body.remaining_days ?? body.remainingDays ?? nextRepeat) || nextRepeat, 1),
+            nextRepeat
+          );
+          plan.end_local_date = addDaysToLocalDate(plan.target_local_date, plan.remaining_days - 1);
+          for (const j of store.reservationJobs.values()) {
+            if (j.plan_id === plan.id && !["CONFIRMED", "FAILED", "CANCELLED", "EXPIRED"].includes(j.state)) {
+              j.repeat_days = plan.repeat_days;
+              j.remaining_days = plan.remaining_days;
+              j.end_local_date = plan.end_local_date;
+            }
+          }
+        }
+        plan.generation += 1;
+        store.flushSnapshotStrictSync?.();
+      } catch (err) {
+        if (err.commitPublished !== true && err.code !== "STORAGE_COMMIT_UNKNOWN") {
+          for (const [record, previous] of before) {
+            for (const key of Object.keys(record)) delete record[key];
+            Object.assign(record, previous);
+          }
+        }
+        throw err;
       }
-      plan.generation += 1;
       await syncUserToSso(auth.cloudUserId);
       return { status: 200, code: "RESERVATION_PLAN_UPDATED", data: plan };
     }
@@ -1852,17 +2027,126 @@ export function createCampusCloudApp(options = {}) {
     "bearer_rbac",
     async ({ auth, params, body, nowMs }) => {
       store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
-      const order = await financeService.issueRefundForOrder(
-        params.orderId,
+      // Back-compat: a bare refund call now creates a dual-approval REQUEST and
+      // returns 202. The refund only executes after a SECOND authenticated
+      // admin approves it via /admin/refund-requests/{id}/approve + /execute.
+      const req = await financeService.createRefundRequest(
         {
+          orderId: params.orderId,
           amountMicropeach: body?.amount_micropeach,
           reason: body?.reason || "Admin approved refund",
-          actorRef: auth.cloudUserId,
-          secondApproverRef: body?.second_approver_ref
+          actorRef: auth.cloudUserId
         },
         nowMs
       );
-      return { status: 200, code: "ADMIN_ORDER_REFUNDED", data: order };
+      return { status: 202, code: "REFUND_REQUEST_CREATED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/orders/{orderId}/refund-requests",
+    "createRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, body, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const req = await financeService.createRefundRequest(
+        {
+          orderId: params.orderId,
+          amountMicropeach: body?.amount_micropeach,
+          reason: body?.reason,
+          actorRef: auth.cloudUserId
+        },
+        nowMs
+      );
+      return { status: 202, code: "REFUND_REQUEST_CREATED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/refund-requests",
+    "listRefundRequests",
+    "bearer_rbac",
+    async ({ auth }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR", "SECURITY_AUDITOR"]);
+      // Legacy operations (pre-dual-approval) that are parked in the reconcile
+      // queue are surfaced alongside requests — ops staff must SEE them.
+      const legacyOps = Array.from(store.financeOperations.values()).filter(
+        (op) => op.kind === "REFUND" && op.legacy_reconcile_required
+      );
+      return {
+        status: 200,
+        code: "REFUND_REQUESTS_LISTED",
+        data: {
+          refund_requests: Array.from(store.refundRequests.values()),
+          legacy_reconcile_queue: legacyOps.map((op) => ({
+            order_id: op.order_id,
+            event_key: op.event_key,
+            status: op.status,
+            attempt_count: op.attempt_count,
+            last_error_code: op.last_error_code,
+            created_at: op.created_at,
+            updated_at: op.updated_at
+          }))
+        }
+      };
+    }
+  );
+
+  // Read-only reconcile of a LEGACY refund operation (no dual-approval request
+  // exists). Queries the upstream by the ORIGINAL event key — never mints a
+  // new key, never fabricates an approval.
+  register(
+    "POST",
+    "/api/v1/admin/orders/{orderId}/refund-reconcile",
+    "reconcileLegacyRefund",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const result = await financeService.reconcileLegacyRefundOperation(
+        params.orderId,
+        { actorRef: auth.cloudUserId },
+        nowMs
+      );
+      if (result.order?.cloud_user_id) await syncUserToSso(result.order.cloud_user_id);
+      return { status: 200, code: "LEGACY_REFUND_RECONCILED", data: result };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/refund-requests/{requestId}/approve",
+    "approveRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      // Approver identity comes from the authenticated session ONLY.
+      const req = await financeService.approveRefundRequest(
+        { requestId: params.requestId, approverRef: auth.cloudUserId },
+        nowMs
+      );
+      return { status: 200, code: "REFUND_REQUEST_APPROVED", data: { refund_request: req } };
+    }
+  );
+
+  register(
+    "POST",
+    "/api/v1/admin/refund-requests/{requestId}/execute",
+    "executeRefundRequest",
+    "bearer_rbac",
+    async ({ auth, params, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "FINANCE_OPERATOR"]);
+      const { request, order } = await financeService.executeRefundRequest(
+        { requestId: params.requestId, actorRef: auth.cloudUserId },
+        nowMs
+      );
+      if (order?.cloud_user_id) await syncUserToSso(order.cloud_user_id);
+      return {
+        status: 200,
+        code: "ADMIN_ORDER_REFUNDED",
+        data: { refund_request: request, order }
+      };
     }
   );
 
@@ -1882,6 +2166,39 @@ export function createCampusCloudApp(options = {}) {
         code: "ADMIN_AUDIT_EVENTS_LISTED",
         data: { events: redactSensitiveFields(store.auditEvents) }
       };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/credential-integrity",
+    "auditCredentialIntegrity",
+    "bearer_rbac",
+    async ({ auth, nowMs }) => {
+      store.requireRole(auth, [
+        "PLATFORM_OWNER",
+        "OPERATIONS_ADMIN",
+        "SECURITY_AUDITOR"
+      ]);
+      // Read-only audit: reports structural violations and non-sensitive ids
+      // only — never outputs plaintext/ciphertext/credentials.
+      const report = auditCredentialRefConsistency(store, nowMs);
+      return { status: 200, code: "CREDENTIAL_INTEGRITY_AUDIT_OK", data: report };
+    }
+  );
+
+  register(
+    "GET",
+    "/api/v1/admin/finance-worker/metrics",
+    "getFinanceWorkerMetrics",
+    "bearer_rbac",
+    async ({ auth, nowMs }) => {
+      store.requireRole(auth, ["PLATFORM_OWNER", "OPERATIONS_ADMIN", "FINANCE_OPERATOR"]);
+      const metrics =
+        typeof financeService.getFinanceWorkerMetrics === "function"
+          ? financeService.getFinanceWorkerMetrics(nowMs)
+          : { pending_debit_orders: 0 };
+      return { status: 200, code: "FINANCE_WORKER_METRICS_OK", data: metrics };
     }
   );
 
@@ -1911,7 +2228,13 @@ export function createCampusCloudApp(options = {}) {
   register("GET", "/api/v1/auth/web/logout", "logoutWebSession", "public", async ({ headers, nowMs }) => {
     const cookieAuth = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs);
     if (cookieAuth?.cloudUserId) {
-      identity.revokeAllUserSessions(cookieAuth.cloudUserId, "WEB_USER_LOGOUT", nowMs);
+      // A plain web logout must NEVER unlink the XPeach delegation — only the
+      // explicit unlink flow may pass unlinkXpeach: true.
+      identity.revokeAllUserSessions(cookieAuth.cloudUserId, {
+        unlinkXpeach: false,
+        reason: "WEB_USER_LOGOUT",
+        nowMs
+      });
     }
     return {
       status: 302,
@@ -2363,17 +2686,19 @@ export function createCampusCloudApp(options = {}) {
         }
 
         if (cleanSecretText) {
+          escrowCredentialForBindings({
+            store,
+            kmsVault,
+            bindings: sameStudentBindings,
+            cloudUserId: auth.cloudUserId,
+            schoolId,
+            studentNo,
+            credentialKind: "DELEGATED_SESSION_BUNDLE",
+            plaintext: cleanSecretText,
+            expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
+            nowMs
+          });
           for (const targetBind of sameStudentBindings) {
-            const encrypted = kmsVault.encryptSecret({
-              bindingId: targetBind.id,
-              schoolId,
-              credentialKind: "DELEGATED_SESSION_BUNDLE",
-              plaintext: cleanSecretText,
-              expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString()
-            });
-            store.encryptedCredentials.set(encrypted.id, encrypted);
-            targetBind.credential_ref = encrypted.id;
-            targetBind.credential_expires_at = encrypted.expires_at;
             targetBind.status = "DELEGATED_ACTIVE";
             targetBind.auth_version = serverAuthVersion;
           }
@@ -2654,32 +2979,25 @@ export function createCampusCloudApp(options = {}) {
       if (!targetOrder) {
         throw new ContractError("NOT_FOUND", "Order not found");
       }
-      const secondApproverRef =
-        typeof body?.second_approver_ref === "string" ? body.second_approver_ref.trim() : "";
-      if (!secondApproverRef) {
-        throw new ContractError(
-          "BAD_REQUEST",
-          "second_approver_ref is required; dual-person approval cannot be synthesized"
-        );
-      }
-      const order = await financeService.issueRefundForOrder(
-        orderId,
+      // Dual-person approval can no longer be synthesized via a body field.
+      // quick-refund now creates a PENDING request (202) that a SECOND
+      // authenticated admin must approve + execute.
+      const req = await financeService.createRefundRequest(
         {
+          orderId,
           amountMicropeach:
             targetOrder.price_micropeach ||
             store.pricingMicropeach ||
             DEFAULT_RESERVATION_PRICE_MICROPEACH,
           reason: body?.reason || "站点管理员在后台发起 🍑 退还",
-          actorRef: auth.cloudUserId,
-          secondApproverRef
+          actorRef: auth.cloudUserId
         },
         nowMs
       );
-      await syncUserToSso(order.cloud_user_id);
       return {
-        status: 200,
-        code: "ADMIN_ORDER_REFUNDED",
-        data: order
+        status: 202,
+        code: "REFUND_REQUEST_CREATED",
+        data: { refund_request: req }
       };
     }
   );
@@ -2721,6 +3039,22 @@ export function createCampusCloudApp(options = {}) {
         job.external_execution_state === "DISPATCH_INTENT" ||
         Number(job.attempt_count || 0) >= 1;
       if (!isAlreadyDispatchedOrUnknown) {
+        // Validate the explicit manual window BEFORE any PRECHECK/state change:
+        // a rejected manual execution must consume nothing (task stays armed).
+        // Jobs already dispatched/RESULT_UNKNOWN skip this and proceed to the
+        // read-only reconciliation path below.
+        const manualVerdict = validateManualExecution({
+          job,
+          schoolRules: schoolProvider.getRules(),
+          nowMs
+        });
+        if (!manualVerdict.ok) {
+          throw new ContractError(
+            manualVerdict.code,
+            manualVerdict.message,
+            manualVerdict.detail
+          );
+        }
         const preRes = await reservationEngine.runScheduleEvent(jobId, "PRECHECK", nowMs);
         if (
           preRes?.job &&
@@ -2953,11 +3287,6 @@ export function createCampusCloudApp(options = {}) {
         sameStudentBindings.push(binding);
       } else {
         for (const sb of sameStudentBindings) {
-          if (sb.credential_ref && store.encryptedCredentials.has(sb.credential_ref)) {
-            store.encryptedCredentials.get(sb.credential_ref).revoked_at = new Date(
-              nowMs
-            ).toISOString();
-          }
           sb.user_name = authRes.userInfo?.userName || sb.user_name || "";
           sb.department = authRes.userInfo?.department || sb.department || "";
           sb.status = "DELEGATED_ACTIVE";
@@ -2975,18 +3304,24 @@ export function createCampusCloudApp(options = {}) {
         user_name: authRes.userInfo?.userName || "",
         department: authRes.userInfo?.department || ""
       });
-      const encrypted = kmsVault.encryptSecret({
-        bindingId: binding.id,
+      // Per-binding credential escrow: every same-student binding gets its OWN
+      // encrypted record (independent DEK/AAD bound to that binding id). A
+      // single shared credential_ref breaks the permit's bindingId scope check
+      // for every non-owner binding and conflates credential isolation.
+      // Orphaned old records are revoked inside the helper only AFTER the new
+      // records are stored.
+      escrowCredentialForBindings({
+        store,
+        kmsVault,
+        bindings: sameStudentBindings,
+        cloudUserId: auth.cloudUserId,
         schoolId,
+        studentNo: resolvedStudentNo,
         credentialKind: "DELEGATED_SESSION_BUNDLE",
         plaintext: credBundleJson,
-        expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString()
+        expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString(),
+        nowMs
       });
-      store.encryptedCredentials.set(encrypted.id, encrypted);
-      for (const sb of sameStudentBindings) {
-        sb.credential_ref = encrypted.id;
-        sb.credential_expires_at = encrypted.expires_at;
-      }
 
       let consent = store.recordsForUser("consents", auth.cloudUserId).find(
         (c) => !c.withdrawn_at && Number(c.auth_version || 1) === currentAuthVersion
@@ -3495,14 +3830,20 @@ export function createCampusCloudApp(options = {}) {
     };
   }
 
-  function normalizeContactMessages(reqItem, post) {
+  // Internal stored form: preserves idempotency_key + sender_user_id metadata.
+  // NEVER use the public projection to write back storage — the old version of
+  // this function stripped idempotency_key on every read-then-write, silently
+  // breaking send-retry dedupe.
+  function normalizeStoredMessages(reqItem, post) {
     if (!reqItem) return [];
     if (Array.isArray(reqItem.messages) && reqItem.messages.length > 0) {
       return reqItem.messages.map((m) => ({
         id: String(m.id || "mcm_legacy"),
         sender_role: m.sender_role === "OWNER" ? "OWNER" : "REQUESTER",
+        sender_user_id: m.sender_user_id || (m.sender_role === "OWNER" ? post?.owner_cloud_user_id || null : reqItem.sender_user_id || null),
         sender_name: String(m.sender_name || (m.sender_role === "OWNER" ? post?.author_name || "发起人" : reqItem.sender_name || "河工大同学")),
         content: String(m.content || ""),
+        idempotency_key: m.idempotency_key || null,
         created_at: m.created_at || reqItem.created_at
       }));
     }
@@ -3511,8 +3852,10 @@ export function createCampusCloudApp(options = {}) {
       seeded.push({
         id: `${reqItem.id}_init`,
         sender_role: "REQUESTER",
+        sender_user_id: reqItem.sender_user_id || null,
         sender_name: String(reqItem.sender_name || "河工大同学"),
         content: String(reqItem.message),
+        idempotency_key: reqItem.idempotency_key || null,
         created_at: reqItem.created_at
       });
     }
@@ -3520,12 +3863,188 @@ export function createCampusCloudApp(options = {}) {
       seeded.push({
         id: `${reqItem.id}_reply`,
         sender_role: "OWNER",
+        sender_user_id: post?.owner_cloud_user_id || null,
         sender_name: String(post?.author_name || "发起人"),
         content: String(reqItem.reply_message),
+        idempotency_key: reqItem.reply_idempotency_key || null,
         created_at: reqItem.updated_at || reqItem.created_at
       });
     }
     return seeded;
+  }
+
+  // Public projection: strips internal metadata (idempotency_key, sender_user_id)
+  function projectContactMessages(reqItem, post) {
+    return normalizeStoredMessages(reqItem, post).map((m) => ({
+      id: m.id,
+      sender_role: m.sender_role,
+      sender_name: m.sender_name,
+      content: m.content,
+      created_at: m.created_at
+    }));
+  }
+
+  function messagePayloadHash(content) {
+    return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
+  }
+
+  // Canonical payload v2: structured serialization with a fixed key order —
+  // separator-joining was ambiguous ("a|b"+"c" collides with "a"+"b|c") and
+  // the create path used a different formula than the append path, so a lost
+  // response retried through another entry 409'd a legitimate retry.
+  const CONTACT_CANONICAL_VERSION = 2;
+  function canonicalContactMessage({ scope, actorUserId, operation, content, contact }) {
+    return JSON.stringify({
+      v: CONTACT_CANONICAL_VERSION,
+      scope: String(scope),
+      actor: String(actorUserId || ""),
+      op: String(operation),
+      content: String(content || ""),
+      contact: String(contact || "")
+    });
+  }
+
+  // Legacy receipt verification: pre-v2 entries only prove the key was used —
+  // verify under BOTH historical formulas before deciding; unverifiable
+  // payload stays a conservative dedupe, never a silent new write.
+  function verifyReceiptPayload(prior, canonicalV2, legacyInitialConcat, legacyContentOnly) {
+    if (prior.canonical_version === CONTACT_CANONICAL_VERSION) {
+      return prior.payload_hash === messagePayloadHash(canonicalV2) ? "MATCH" : "CONFLICT";
+    }
+    // v1 / unknown-version receipt: try every old formula.
+    const candidates = [legacyInitialConcat, legacyContentOnly].filter((x) => x != null);
+    for (const c of candidates) {
+      if (prior.payload_hash === messagePayloadHash(c)) return "MATCH_LEGACY";
+    }
+    return "LEGACY_UNPROVABLE";
+  }
+
+  /**
+   * Unified private-chat write path. Every append (initial extra message,
+   * owner reply, requester reply) goes through here so participant, block /
+   * close, length, per-actor rate-limit and idempotency rules can never drift
+   * apart between entry points.
+   *
+   * Idempotency receipts live on reqItem._msgReceipts keyed by
+   * (sender_user_id, operation, key) — independent of the 50-message visible
+   * window so truncation cannot lose dedupe evidence. Same key + different
+   * payload => 409.
+   */
+  function appendThreadMessage(post, reqItem, { actorUserId, actorRole, actorName, content, contactInfo = "", idempotencyKey, nowMs, isAdminOverride = false }) {
+    const nowIso = new Date(nowMs).toISOString();
+    const senderUserId = actorUserId || (actorRole === "OWNER" ? post.owner_cloud_user_id : reqItem.sender_user_id);
+    if (!isAdminOverride) {
+      const isParticipant =
+        senderUserId &&
+        (senderUserId === post.owner_cloud_user_id || senderUserId === reqItem.sender_user_id);
+      if (!isParticipant) {
+        throw new ContractError("FORBIDDEN", "非会话参与者不能发送私信");
+      }
+    }
+    if (post.status === "RESOLVED" || post.status === "CLOSED") {
+      throw new ContractError("CONFLICT", "该失物招领帖已结案或关闭联系，无法继续发送私信");
+    }
+    if (reqItem.status === "BLOCKED" || reqItem.status === "REJECTED") {
+      throw new ContractError("CONFLICT", "当前联系申请已被拒绝或屏蔽，无法继续发送私信");
+    }
+    if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
+      throw new ContractError("FORBIDDEN", "当前会话已被屏蔽");
+    }
+    const clean = String(content || "").trim();
+    if (!clean || clean.length > 240) {
+      throw new ContractError("BAD_REQUEST", "私信内容长度需在 1–240 字之间");
+    }
+
+    // Idempotent receipt check BEFORE rate limiting: a retry must be free.
+    // Canonical v2 (R4-C1): the same fixed-key-order formula as every other
+    // entry — append no longer hashes raw content under a v1 receipt.
+    const receiptScope = senderUserId + "|message|" + (idempotencyKey || "");
+    const canonicalV2 = canonicalContactMessage({
+      scope: "p:" + post.id + "|t:" + reqItem.id,
+      actorUserId: senderUserId,
+      operation: "message",
+      content: clean,
+      contact: contactInfo || ""
+    });
+    if (idempotencyKey) {
+      if (!reqItem._msgReceipts || typeof reqItem._msgReceipts !== "object") {
+        reqItem._msgReceipts = {};
+      }
+      const prior = reqItem._msgReceipts[receiptScope];
+      if (prior) {
+        const verdict = verifyReceiptPayload(
+          prior,
+          canonicalV2,
+          // legacy create-path concat formula
+          clean + "|" + String(contactInfo || ""),
+          // legacy append content-only formula
+          clean
+        );
+        if (verdict === "CONFLICT") {
+          throw new ContractError(
+            "CONFLICT",
+            "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+          );
+        }
+        // MATCH / MATCH_LEGACY / LEGACY_UNPROVABLE → conservative dedupe.
+        return {
+          appended: false,
+          duplicate: true,
+          message: prior.message_snapshot || null,
+          legacy_unprovable: verdict === "LEGACY_UNPROVABLE"
+        };
+      }
+    }
+
+    const stored = normalizeStoredMessages(reqItem, post);
+    const recentMine = stored.filter(
+      (m) =>
+        (m.sender_user_id || (m.sender_role === "OWNER" ? post.owner_cloud_user_id : reqItem.sender_user_id)) === senderUserId &&
+        nowMs - new Date(m.created_at).getTime() < 60_000
+    );
+    if (recentMine.length >= 6) {
+      throw new ContractError("RATE_LIMITED", "私信发送过于频繁，请稍后再试");
+    }
+
+    const msg = {
+      id: "mcm_" + crypto.randomUUID().slice(0, 8),
+      sender_role: actorRole === "OWNER" ? "OWNER" : "REQUESTER",
+      sender_user_id: senderUserId || null,
+      sender_name: String(actorName || "河工大同学").slice(0, 24),
+      content: clean,
+      idempotency_key: idempotencyKey || null,
+      created_at: nowIso
+    };
+    stored.push(msg);
+    reqItem.messages = stored.slice(-50);
+
+    if (idempotencyKey) {
+      reqItem._msgReceipts[receiptScope] = {
+        message_id: msg.id,
+        canonical_version: CONTACT_CANONICAL_VERSION,
+        payload_hash: messagePayloadHash(canonicalV2),
+        created_at: nowIso,
+        message_snapshot: {
+          id: msg.id,
+          sender_role: msg.sender_role,
+          sender_name: msg.sender_name,
+          content: msg.content,
+          created_at: msg.created_at
+        }
+      };
+      const keys = Object.keys(reqItem._msgReceipts);
+      if (keys.length > 100) {
+        keys
+          .sort(
+            (a, b) =>
+              new Date(reqItem._msgReceipts[a].created_at || 0).getTime() -
+              new Date(reqItem._msgReceipts[b].created_at || 0).getTime()
+          )
+          .slice(0, keys.length - 100)
+          .forEach((k) => delete reqItem._msgReceipts[k]);
+      }
+    }
+    return { appended: true, duplicate: false, message: msg };
   }
 
   function projectContactRequestForViewer(reqItem, post, { canSeeInitiatorContact = false, canSeeSenderContact = true } = {}) {
@@ -3538,7 +4057,7 @@ export function createCampusCloudApp(options = {}) {
       contact_info: canSeeSenderContact ? String(reqItem.contact_info || "") : "",
       status: reqItem.status,
       reply_message: reqItem.reply_message || null,
-      messages: normalizeContactMessages(reqItem, post),
+      messages: projectContactMessages(reqItem, post),
       initiator_contact: canSeeInitiatorContact ? post?.contact || null : null,
       created_at: reqItem.created_at,
       updated_at: reqItem.updated_at
@@ -3738,18 +4257,68 @@ export function createCampusCloudApp(options = {}) {
       }
       const contactInfo = String(body?.contact_info || body?.contact_hint || "").trim().slice(0, 64);
       const idempotencyKey = String(
-        headers?.["idempotency-key"] || headers?.["Idempotency-Key"] || body?.client_request_id || ""
+        headers?.["idempotency-key"] ||
+          headers?.["Idempotency-Key"] ||
+          body?.client_request_id ||
+          body?.idempotency_key ||
+          ""
       ).trim();
 
       if (!Array.isArray(post.contact_requests)) post.contact_requests = [];
       if (idempotencyKey) {
-        const dup = post.contact_requests.find(
-          (r) =>
-            r.sender_user_id === auth.cloudUserId &&
-            (r.idempotency_key === idempotencyKey ||
-              (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey)))
-        );
+        const initialScope = auth.cloudUserId + "|message|" + idempotencyKey;
+        const dup = post.contact_requests.find((r) => {
+          if (r.sender_user_id !== auth.cloudUserId) return false;
+          // Authoritative source: per-(actor|op|key) receipts survive the
+          // 50-message visible window, so a truncated-away initial message
+          // still dedupes correctly.
+          if (r._msgReceipts && r._msgReceipts[initialScope]) return true;
+          // Legacy evidence (pre-receipt records): only the request-level key
+          // or a still-visible keyed message proves the key was used here.
+          return (
+            r.idempotency_key === idempotencyKey ||
+            (Array.isArray(r.messages) && r.messages.some((m) => m.idempotency_key === idempotencyKey))
+          );
+        });
         if (dup) {
+          const receipt = dup._msgReceipts?.[initialScope];
+          if (receipt) {
+            // Same canonical helper as the append path — one wire formula for
+            // every entry point (C1/C2).
+            const dupCanonical = canonicalContactMessage({
+              scope: "p:" + post.id + "|t:" + dup.id,
+              actorUserId: auth.cloudUserId,
+              operation: "message",
+              content: message,
+              contact: contactInfo
+            });
+            const verdict = verifyReceiptPayload(
+              receipt,
+              dupCanonical,
+              `${message}|${contactInfo}`,
+              message
+            );
+            if (verdict === "CONFLICT") {
+              throw new ContractError(
+                "CONFLICT",
+                "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+              );
+            }
+          } else {
+            // LEGACY_RECEIPT_UNKNOWN: key is provably used by this thread but
+            // the original payload hash is unrecoverable (message truncated or
+            // written before receipts existed). Conservative dedupe — return
+            // the existing thread rather than 409 a legitimate retry or create
+            // a duplicate thread.
+            const keyedMsg = (dup.messages || []).find((m) => m.idempotency_key === idempotencyKey);
+            const keyedPayload = keyedMsg ? keyedMsg.content : null;
+            if (keyedPayload != null && String(keyedPayload).trim() !== message) {
+              throw new ContractError(
+                "CONFLICT",
+                "同一 Idempotency-Key 被用于不同的消息内容，已拒绝"
+              );
+            }
+          }
           return {
             status: 200,
             code: "CONTACT_REQUEST_DUPLICATE",
@@ -3773,22 +4342,25 @@ export function createCampusCloudApp(options = {}) {
         (r) => r.sender_user_id === auth.cloudUserId && (r.status === "PENDING" || r.status === "APPROVED")
       );
       if (existingThread) {
-        const existingMsgs = normalizeContactMessages(existingThread, post);
-        const recentThreadMsgs = existingMsgs.filter(
-          (m) => m.sender_role === "REQUESTER" && nowMs - new Date(m.created_at).getTime() < 60_000
-        );
-        if (recentThreadMsgs.length >= 6) {
-          throw new ContractError("RATE_LIMITED", "私信发送过于频繁，请稍后再试");
-        }
-        existingMsgs.push({
-          id: "mcm_" + crypto.randomUUID().slice(0, 8),
-          sender_role: "REQUESTER",
-          sender_name: resolvedSenderName,
+        const appendRes = appendThreadMessage(post, existingThread, {
+          actorUserId: auth.cloudUserId,
+          actorRole: "REQUESTER",
+          actorName: resolvedSenderName,
           content: message,
-          idempotency_key: idempotencyKey || null,
-          created_at: nowIso
+          contactInfo,
+          idempotencyKey: idempotencyKey || null,
+          nowMs
         });
-        existingThread.messages = existingMsgs.slice(-50);
+        if (appendRes.duplicate) {
+          return {
+            status: 200,
+            code: "CONTACT_REQUEST_DUPLICATE",
+            data: projectContactRequestForViewer(existingThread, post, {
+              canSeeInitiatorContact: existingThread.status === "APPROVED",
+              canSeeSenderContact: true
+            })
+          };
+        }
         existingThread.message = message;
         if (contactInfo) existingThread.contact_info = contactInfo;
         existingThread.updated_at = nowIso;
@@ -3822,8 +4394,17 @@ export function createCampusCloudApp(options = {}) {
         throw new ContractError("RATE_LIMITED", "发送过于频繁，请稍后再试");
       }
 
+      const initialMsgId = "mcm_" + crypto.randomUUID().slice(0, 8);
+      const newReqId = "mcr_" + crypto.randomUUID().slice(0, 10);
+      const initialCanonicalV2 = canonicalContactMessage({
+        scope: "p:" + post.id + "|t:" + newReqId,
+        actorUserId: auth.cloudUserId,
+        operation: "message",
+        content: message,
+        contact: contactInfo
+      });
       const reqItem = {
-        id: "mcr_" + crypto.randomUUID().slice(0, 10),
+        id: newReqId,
         post_id: post.id,
         sender_user_id: auth.cloudUserId,
         sender_name: resolvedSenderName,
@@ -3834,7 +4415,7 @@ export function createCampusCloudApp(options = {}) {
         reply_message: null,
         messages: [
           {
-            id: "mcm_" + crypto.randomUUID().slice(0, 8),
+            id: initialMsgId,
             sender_role: "REQUESTER",
             sender_name: resolvedSenderName,
             content: message,
@@ -3842,6 +4423,25 @@ export function createCampusCloudApp(options = {}) {
             created_at: nowIso
           }
         ],
+        // Seed the durable receipt for the initial message: dedupe evidence
+        // must survive the 50-message visible window (C7).
+        _msgReceipts: idempotencyKey
+          ? {
+              [auth.cloudUserId + "|message|" + idempotencyKey]: {
+                message_id: initialMsgId,
+                canonical_version: CONTACT_CANONICAL_VERSION,
+                payload_hash: messagePayloadHash(initialCanonicalV2),
+                created_at: nowIso,
+                message_snapshot: {
+                  id: initialMsgId,
+                  sender_role: "REQUESTER",
+                  sender_name: resolvedSenderName,
+                  content: message,
+                  created_at: nowIso
+                }
+              }
+            }
+          : {},
         created_at: nowIso,
         updated_at: nowIso
       };
@@ -3916,7 +4516,7 @@ export function createCampusCloudApp(options = {}) {
     "/api/v1/moments/posts/{postId}/contact-requests/{requestId}/action",
     "handleMomentsContactRequestAction",
     "bearer",
-    async ({ auth, params, body, nowMs }) => {
+    async ({ auth, params, body, headers, nowMs }) => {
       const post = (store.momentsState.posts || []).find((p) => p.id === params.postId);
       if (!post) throw new ContractError("NOT_FOUND", "未找到该寻物/招领帖");
       const allReqs = Array.isArray(post.contact_requests) ? post.contact_requests : [];
@@ -3936,90 +4536,120 @@ export function createCampusCloudApp(options = {}) {
         if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
           throw new ContractError("CONFLICT", "该申请人已被拉黑，请先解除屏蔽");
         }
-        const existingMsgs = normalizeContactMessages(reqItem, post);
-        reqItem.status = "APPROVED";
-        if (body?.reply_message) {
-          const cleanReply = String(body.reply_message).trim().slice(0, 240);
-          if (cleanReply) {
-            reqItem.reply_message = cleanReply;
-            existingMsgs.push({
-              id: "mcm_" + crypto.randomUUID().slice(0, 8),
-              sender_role: "OWNER",
-              sender_name: String(post.author_name || "发起人").slice(0, 24),
-              content: cleanReply,
-              created_at: nowIso
+        // Idempotent status transition with an explicit allowed-state table:
+        // only PENDING may flip to APPROVED; a repeat APPROVE on an already
+        // approved thread is a no-op — never re-append, never re-notify.
+        const wasApproved = reqItem.status === "APPROVED";
+        const approveKey = String(
+          headers?.["idempotency-key"] ||
+            headers?.["Idempotency-Key"] ||
+            body?.idempotency_key ||
+            body?.client_message_id ||
+            ""
+        ).trim();
+        let appendedReply = null;
+        const cleanReply = String(body?.reply_message || "").trim();
+        if (cleanReply) {
+          // Any attached text goes through the ONE write path FIRST —
+          // closed-post / rate-limit / payload-hash rules gate the append
+          // before the status is allowed to change. A failed append must
+          // never leave a half-applied APPROVED transition behind.
+          const actorUser = store.users.get(auth.cloudUserId);
+          const appendRes = appendThreadMessage(post, reqItem, {
+            actorUserId: auth.cloudUserId,
+            actorRole: "OWNER",
+            actorName: String(post.author_name || actorUser?.display_name || "发起人").slice(0, 24),
+            content: cleanReply,
+            idempotencyKey: approveKey || null,
+            nowMs,
+            isAdminOverride: Boolean(isAdmin && !isOwner && !isSender)
+          });
+          appendedReply = appendRes.message?.content || null;
+        }
+        if (!wasApproved) {
+          reqItem.status = "APPROVED";
+          if (appendedReply) reqItem.reply_message = appendedReply;
+          if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
+            store.addNotification({
+              cloudUserId: reqItem.sender_user_id,
+              category: "MOMENTS_CONTACT_APPROVED",
+              title: `发起人已同意公开「${post.title}」的联系方式`,
+              body: reqItem.reply_message
+                ? `发起人附言：${reqItem.reply_message}`
+                : "您现在可在该帖详情中查看发起人联系方式或继续私信沟通"
             });
           }
-        }
-        reqItem.messages = existingMsgs.slice(-50);
-        if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
-          store.addNotification({
-            cloudUserId: reqItem.sender_user_id,
-            category: "MOMENTS_CONTACT_APPROVED",
-            title: `发起人已同意公开「${post.title}」的联系方式`,
-            body: reqItem.reply_message
-              ? `发起人附言：${reqItem.reply_message}`
-              : "您现在可在该帖详情中查看发起人联系方式或继续私信沟通"
-          });
-        }
-        if (isAdmin && !isOwner) {
-          store.recordAudit({
-            actor_kind: "ADMIN",
-            actor_ref: auth.cloudUserId,
-            action: "ADMIN_APPROVE_LEGACY_POST_CONTACT_REQUEST",
-            resource_kind: "moments_contact_request",
-            resource_ref: reqItem.id,
-            outcome: "APPROVED",
-            detail: { post_id: post.id }
-          });
+          if (isAdmin && !isOwner) {
+            store.recordAudit({
+              actor_kind: "ADMIN",
+              actor_ref: auth.cloudUserId,
+              action: "ADMIN_APPROVE_LEGACY_POST_CONTACT_REQUEST",
+              resource_kind: "moments_contact_request",
+              resource_ref: reqItem.id,
+              outcome: "APPROVED",
+              detail: { post_id: post.id }
+            });
+          }
+        } else if (appendedReply) {
+          // Already APPROVED + a (non-duplicate) follow-up note — keep the
+          // latest owner note for display but never re-notify.
+          reqItem.reply_message = appendedReply;
         }
       } else if (action === "REPLY") {
         if (!canManageRequests && !isSender) {
           throw new ContractError("FORBIDDEN", "仅发起人或申请人本人可在该私信会话中回复");
         }
-        if (reqItem.status === "BLOCKED" || reqItem.status === "REJECTED") {
-          throw new ContractError("CONFLICT", "当前联系申请已被拒绝或屏蔽，无法继续发送私信");
-        }
-        if (Array.isArray(post.blocked_user_ids) && post.blocked_user_ids.includes(reqItem.sender_user_id)) {
-          throw new ContractError("FORBIDDEN", "当前会话已被屏蔽");
-        }
         const replyMsg = String(body?.reply_message || body?.message || "").trim();
-        if (!replyMsg || replyMsg.length > 240) {
-          throw new ContractError("BAD_REQUEST", "私信回复内容长度需在 1–240 字之间");
-        }
-        const existingMsgs = normalizeContactMessages(reqItem, post);
+        const replyIdemKey = String(
+          headers?.["idempotency-key"] ||
+            headers?.["Idempotency-Key"] ||
+            body?.idempotency_key ||
+            body?.client_message_id ||
+            ""
+        ).trim();
         const actorRole = canManageRequests && !isSender ? "OWNER" : "REQUESTER";
         const actorUser = store.users.get(auth.cloudUserId);
         const actorName =
           actorRole === "OWNER"
             ? String(post.author_name || actorUser?.display_name || "发起人").slice(0, 24)
             : String(reqItem.sender_name || actorUser?.display_name || "河工大同学").slice(0, 24);
-        existingMsgs.push({
-          id: "mcm_" + crypto.randomUUID().slice(0, 8),
-          sender_role: actorRole,
-          sender_name: actorName,
+        // Unified write path: participant / block / CLOSED post / length /
+        // per-actor rate-limit / idempotent dedupe — previously REPLY skipped
+        // the closed-post and rate-limit checks entirely.
+        const appendRes = appendThreadMessage(post, reqItem, {
+          actorUserId: auth.cloudUserId,
+          actorRole,
+          actorName,
           content: replyMsg,
-          created_at: nowIso
+          idempotencyKey: replyIdemKey || null,
+          nowMs,
+          isAdminOverride: Boolean(isAdmin && !isOwner && !isSender)
         });
-        reqItem.messages = existingMsgs.slice(-50);
+        if (appendRes.duplicate) {
+          return {
+            status: 200,
+            code: "CONTACT_MESSAGE_DUPLICATE",
+            data: { duplicated: true, message: appendRes.message }
+          };
+        }
         if (actorRole === "OWNER") {
-          reqItem.reply_message = replyMsg;
+          reqItem.reply_message = appendRes.message.content;
           if (reqItem.sender_user_id && reqItem.sender_user_id !== auth.cloudUserId) {
             store.addNotification({
               cloudUserId: reqItem.sender_user_id,
               category: "MOMENTS_CONTACT_REPLY",
               title: `发起人回复了您在「${post.title}」的私信`,
-              body: `${actorName}：${replyMsg}`
+              body: `${actorName}：${appendRes.message.content}`
             });
           }
         } else {
-          reqItem.message = replyMsg;
+          reqItem.message = appendRes.message.content;
           if (post.owner_cloud_user_id && post.owner_cloud_user_id !== auth.cloudUserId) {
             store.addNotification({
               cloudUserId: post.owner_cloud_user_id,
               category: "MOMENTS_CONTACT_MESSAGE",
               title: `收到「${post.title}」的新认领私信`,
-              body: `${actorName}：${replyMsg}`
+              body: `${actorName}：${appendRes.message.content}`
             });
           }
         }
@@ -4509,6 +5139,33 @@ export function createCampusCloudApp(options = {}) {
     };
   });
 
+  // Unified task lifecycle registry (S1): EVERY kind of in-flight work is
+  // registered — HTTP mutations, scheduler scans, finance retry batches —
+  // so graceful shutdown can actually wait for the real work, not just the
+  // HTTP subset.
+  let isDraining = false;
+  const lifecycleTasks = new Map(); // kind -> Set<taskId>
+  let lifecycleSeq = 0;
+  function registerLifecycleTask(kind) {
+    const id = ++lifecycleSeq;
+    const k = String(kind || "task");
+    if (!lifecycleTasks.has(k)) lifecycleTasks.set(k, new Set());
+    lifecycleTasks.get(k).add(id);
+    return { kind: k, id };
+  }
+  function unregisterLifecycleTask(token) {
+    const set = lifecycleTasks.get(token?.kind);
+    if (set) {
+      set.delete(token.id);
+      if (set.size === 0) lifecycleTasks.delete(token.kind);
+    }
+  }
+  function lifecycleTaskCounts() {
+    const counts = {};
+    for (const [kind, set] of lifecycleTasks) counts[kind] = set.size;
+    return counts;
+  }
+
   async function inject({
     method = "GET",
     url = "/healthz",
@@ -4518,10 +5175,29 @@ export function createCampusCloudApp(options = {}) {
     remoteAddr = null
   }) {
     const requestId = generateRequestId(headers["x-request-id"] || headers["X-Request-Id"]);
+    const upperMethodEarly = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+    // Graceful shutdown fence: once draining, refuse new mutating work with a
+    // retryable 503 — clients see an honest state, never a half-applied write.
+    if (isDraining && upperMethodEarly !== "GET") {
+      return {
+        status: 503,
+        headers: { "retry-after": "2" },
+        body: {
+          ok: false,
+          code: "SERVER_DRAINING",
+          request_id: requestId,
+          error: { code: "SERVER_DRAINING", message: "服务正在停机维护，请稍后重试" }
+        }
+      };
+    }
+    let httpTask = null;
+    if (upperMethodEarly !== "GET") httpTask = registerLifecycleTask("http");
     try {
+      store.recoverDurabilitySync?.();
+      store.assertStorageWritable?.();
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
-      const upperMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+      const upperMethod = upperMethodEarly;
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
       // In-memory buffer cache (5s stat freshness) + weak ETag so repeat loads
@@ -4771,6 +5447,12 @@ export function createCampusCloudApp(options = {}) {
                     sso_subject: u?.subject || "-"
                   };
                 });
+                // Dual-person refund workflow visibility: pending requests +
+                // the legacy reconcile queue must be visible to finance staff.
+                viewData.refundRequests = Array.from(store.refundRequests.values());
+                viewData.legacyRefundOps = Array.from(store.financeOperations.values()).filter(
+                  (op) => op.kind === "REFUND" && op.legacy_reconcile_required
+                );
                 viewData.financeMatrix = getFinanceMatrixCached(nowMs);
               } else if (activeNav === "audit") {
                 viewData.auditEvents = store.auditEvents.slice(-200).reverse();
@@ -4974,6 +5656,7 @@ export function createCampusCloudApp(options = {}) {
         }
       }
 
+      store.assertStorageWritable?.();
       const result = await matchedRoute.handler({
         method: upperMethod,
         pathname,
@@ -5010,6 +5693,8 @@ export function createCampusCloudApp(options = {}) {
         },
         body: errEnv.body
       };
+    } finally {
+      if (httpTask) unregisterLifecycleTask(httpTask);
     }
   }
 
@@ -5028,67 +5713,72 @@ export function createCampusCloudApp(options = {}) {
 
   function createHttpServer() {
     return http.createServer(async (req, res) => {
-      const chunks = [];
-      let totalBytes = 0;
-      for await (const chunk of req) {
-        totalBytes += chunk.length;
-        if (totalBytes > MAX_HTTP_BODY_BYTES) {
-          res.writeHead(413, {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8"
-          });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              error: {
-                code: "PAYLOAD_TOO_LARGE",
-                message: "Request body exceeds 1 MB limit"
-              }
-            })
-          );
-          req.destroy();
-          return;
+      try {
+        const chunks = [];
+        let totalBytes = 0;
+        for await (const chunk of req) {
+          totalBytes += chunk.length;
+          if (totalBytes > MAX_HTTP_BODY_BYTES) {
+            res.writeHead(413, {
+              ...SECURITY_HEADERS,
+              "content-type": "application/json; charset=utf-8"
+            });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: {
+                  code: "PAYLOAD_TOO_LARGE",
+                  message: "Request body exceeds 1 MB limit"
+                }
+              })
+            );
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
         }
-        chunks.push(chunk);
-      }
-      const rawBody = Buffer.concat(chunks).toString("utf8");
-      let parsedBody = undefined;
-      if (rawBody && rawBody.trim().length > 0) {
-        try {
-          parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
-        } catch {
-          res.writeHead(400, {
-            ...SECURITY_HEADERS,
-            "content-type": "application/json; charset=utf-8"
-          });
-          res.end(
-            JSON.stringify({
-              ok: false,
-              code: "BAD_REQUEST",
-              error: {
+        const rawBody = Buffer.concat(chunks).toString("utf8");
+        let parsedBody = undefined;
+        if (rawBody && rawBody.trim().length > 0) {
+          try {
+            parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
+          } catch {
+            res.writeHead(400, {
+              ...SECURITY_HEADERS,
+              "content-type": "application/json; charset=utf-8"
+            });
+            res.end(
+              JSON.stringify({
+                ok: false,
                 code: "BAD_REQUEST",
-                message: "Malformed JSON request body"
-              }
-            })
-          );
-          return;
+                error: {
+                  code: "BAD_REQUEST",
+                  message: "Malformed JSON request body"
+                }
+              })
+            );
+            return;
+          }
         }
-      }
-      const response = await inject({
-        method: req.method,
-        url: req.url,
-        headers: req.headers,
-        body: parsedBody,
-        remoteAddr: req.socket?.remoteAddress || null
-      });
-      res.writeHead(response.status, {
-        ...SECURITY_HEADERS,
-        ...(response.headers || {})
-      });
-      if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
-        res.end(response.rawBody);
-      } else {
-        res.end(JSON.stringify(response.body));
+        const response = await inject({
+          method: req.method,
+          url: req.url,
+          headers: req.headers,
+          body: parsedBody,
+          remoteAddr: req.socket?.remoteAddress || null
+        });
+        res.writeHead(response.status, {
+          ...SECURITY_HEADERS,
+          ...(response.headers || {})
+        });
+        if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
+          res.end(response.rawBody);
+        } else {
+          res.end(JSON.stringify(response.body));
+        }
+      } catch (err) {
+        // 停机强制关闭未读完的请求会抛 ECONNRESET，必须由 HTTP 边界消化。
+        if (!res.destroyed) res.destroy(err);
       }
     });
   }
@@ -5116,6 +5806,14 @@ export function createCampusCloudApp(options = {}) {
     redisBuffer,
     inject,
     createHttpServer,
-    getRegisteredRoutes
+    getRegisteredRoutes,
+    setDraining: (v) => {
+      isDraining = Boolean(v);
+    },
+    isDraining: () => isDraining,
+    registerLifecycleTask,
+    unregisterLifecycleTask,
+    getInFlightTasks: () => lifecycleTaskCounts(),
+    getInFlightWrites: () => lifecycleTasks.get("http")?.size || 0
   };
 }

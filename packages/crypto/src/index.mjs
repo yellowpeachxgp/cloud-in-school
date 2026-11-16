@@ -227,6 +227,180 @@ export class KmsEnvelopeVault {
 }
 
 /**
+ * Escrow one plaintext credential bundle for every target binding, ONE
+ * independently encrypted record per binding (own UUID/DEK/nonce/AAD).
+ *
+ * Regression guard: previously the school-login path encrypted a single record
+ * bound to ONE binding's AAD context and then assigned the same credential_ref
+ * to every same-student binding. Any other binding resolving that ref fails
+ * the permit's bindingId scope check — or worse, would share a credential
+ * scope across bindings. Every write entry point must go through this helper.
+ *
+ * Order of operations: all new records are encrypted + stored first; only
+ * afterwards are records that became unreferenced revoked. A mid-way failure
+ * therefore can never leave a binding pointing at a record that does not
+ * exist, and never destroys the last usable credential before its
+ * replacement is durable.
+ *
+ * @returns {Map<string, object>} bindingId -> newly created credential record
+ */
+export function escrowCredentialForBindings({
+  store,
+  kmsVault,
+  bindings,
+  cloudUserId,
+  schoolId,
+  studentNo = null,
+  credentialKind = "DELEGATED_SESSION_BUNDLE",
+  plaintext,
+  expiresAt,
+  nowMs = Date.now()
+}) {
+  if (!plaintext || typeof plaintext !== "string") {
+    throw new ContractError("BAD_REQUEST", "Plaintext credential payload must be a non-empty string");
+  }
+  const targets = [...new Map((bindings || []).filter(Boolean).map((b) => [b.id, b])).values()];
+  if (targets.length === 0) {
+    throw new ContractError("BAD_REQUEST", "escrowCredentialForBindings requires at least one target binding");
+  }
+  for (const b of targets) {
+    if (cloudUserId && b.cloud_user_id !== cloudUserId) {
+      throw new ContractError("FORBIDDEN", "Credential escrow target binding belongs to another user");
+    }
+    if (b.school_id !== schoolId) {
+      throw new ContractError("FORBIDDEN", "Credential escrow target binding belongs to another school");
+    }
+    if (studentNo != null && String(b.student_no || "").trim() !== String(studentNo).trim()) {
+      throw new ContractError(
+        "FORBIDDEN",
+        "Credential escrow target binding student_no does not match the verified student identity"
+      );
+    }
+  }
+
+  // 1) Encrypt a fresh record per binding (independent DEK + AAD scope)
+  const newRecords = new Map();
+  for (const b of targets) {
+    newRecords.set(
+      b.id,
+      kmsVault.encryptSecret({
+        bindingId: b.id,
+        schoolId,
+        credentialKind,
+        plaintext,
+        expiresAt
+      })
+    );
+  }
+
+  // 2) Persist + atomically re-point each binding to ITS OWN record
+  const previousRefs = targets.map((b) => b.credential_ref).filter(Boolean);
+  for (const b of targets) {
+    const rec = newRecords.get(b.id);
+    store.encryptedCredentials.set(rec.id, rec);
+    b.credential_ref = rec.id;
+    b.credential_expires_at = rec.expires_at;
+  }
+
+  // 3) Only after the new records exist: revoke previous records that are no
+  //    longer referenced by ANY binding (shared legacy refs stay readable).
+  const stillReferenced = new Set(
+    [...store.schoolBindings.values()].map((x) => x.credential_ref).filter(Boolean)
+  );
+  const revokedOldRefIds = [];
+  for (const ref of previousRefs) {
+    if (!stillReferenced.has(ref) && store.encryptedCredentials.has(ref)) {
+      const old = store.encryptedCredentials.get(ref);
+      if (!old.revoked_at) {
+        old.revoked_at = new Date(nowMs).toISOString();
+      }
+      revokedOldRefIds.push(ref);
+    }
+  }
+  return newRecords;
+}
+
+/**
+ * Read-only consistency audit of binding -> credential_ref integrity.
+ * Reports structural violations only; never outputs plaintext or ciphertext.
+ */
+export function auditCredentialRefConsistency(store, nowMs = Date.now()) {
+  const issues = [];
+  const refUsage = new Map();
+  for (const b of store.schoolBindings.values()) {
+    if (!b?.credential_ref) continue;
+    refUsage.set(b.credential_ref, (refUsage.get(b.credential_ref) || 0) + 1);
+    const rec = store.encryptedCredentials.get(b.credential_ref);
+    if (!rec) {
+      issues.push({
+        type: "MISSING_CREDENTIAL_RECORD",
+        binding_id: b.id,
+        credential_ref: b.credential_ref
+      });
+      continue;
+    }
+    if (rec.binding_id !== b.id) {
+      issues.push({
+        type: "BINDING_ID_MISMATCH",
+        binding_id: b.id,
+        credential_ref: b.credential_ref,
+        record_binding_id: rec.binding_id
+      });
+    }
+    if (rec.school_id !== b.school_id) {
+      issues.push({
+        type: "SCHOOL_MISMATCH",
+        binding_id: b.id,
+        credential_ref: b.credential_ref,
+        record_school_id: rec.school_id
+      });
+    }
+    const recordOwner = rec.binding_id ? store.schoolBindings.get(rec.binding_id) : null;
+    if (recordOwner && recordOwner.cloud_user_id !== b.cloud_user_id) {
+      issues.push({
+        type: "CROSS_USER_REFERENCE",
+        binding_id: b.id,
+        credential_ref: b.credential_ref,
+        record_binding_id: rec.binding_id
+      });
+    }
+    if (rec.revoked_at && !b.revoked_at && b.status !== "REVOKED") {
+      issues.push({
+        type: "REVOKED_RECORD_IN_USE",
+        binding_id: b.id,
+        credential_ref: b.credential_ref
+      });
+    }
+    if (
+      rec.expires_at &&
+      new Date(rec.expires_at).getTime() <= nowMs &&
+      !b.revoked_at &&
+      b.status !== "REVOKED"
+    ) {
+      issues.push({
+        type: "EXPIRED_RECORD_IN_USE",
+        binding_id: b.id,
+        credential_ref: b.credential_ref
+      });
+    }
+  }
+  for (const [ref, count] of refUsage) {
+    if (count > 1) {
+      issues.push({
+        type: "SHARED_CREDENTIAL_REF",
+        credential_ref: ref,
+        binding_count: count
+      });
+    }
+  }
+  return {
+    checked_at: new Date(nowMs).toISOString(),
+    issue_count: issues.length,
+    issues
+  };
+}
+
+/**
  * Canonical JSON serialization + Ed25519 signing/verification for `dis-extension/v2` and `dis-campus-plugin/v1`.
  */
 export function canonicalizeJson(value) {

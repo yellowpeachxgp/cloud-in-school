@@ -33,6 +33,91 @@ export function addDaysToLocalDate(yyyyMmDd, deltaDays) {
   return dt.toISOString().slice(0, 10);
 }
 
+/**
+ * Asia/Shanghai wall-clock parts for a UTC epoch (the school booking window is
+ * defined in Asia/Shanghai local time; the codebase stores UTC instants).
+ */
+export function getShanghaiLocalParts(nowMs) {
+  const shifted = new Date(Number(nowMs) + 8 * 3600 * 1000);
+  return {
+    localDate: shifted.toISOString().slice(0, 10),
+    localTime: shifted.toISOString().slice(11, 19)
+  };
+}
+
+/**
+ * Pure validation for an explicit user-triggered "execute now" dispatch.
+ *
+ * Product semantics: manual execution is only permitted for a job whose
+ * booking_local_date is TODAY in the school's time zone AND only while the
+ * school's official booking window [window_start, window_end_exclusive) is
+ * open. Rejections must be stable business errors and MUST NOT mutate
+ * job state, attempt_count, schedule events or remaining_days — the caller
+ * decides what to do; nothing is consumed by a failed manual validation.
+ */
+export function validateManualExecution({ job, schoolRules, nowMs = Date.now() }) {
+  const { localDate, localTime } = getShanghaiLocalParts(nowMs);
+  const windowStart = schoolRules?.window_start || "07:00:00";
+  const windowEnd = schoolRules?.window_end_exclusive || "21:30:00";
+  const bookingDate = String(job?.booking_local_date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDate)) {
+    return {
+      ok: false,
+      code: "MANUAL_DATE_NOT_ALLOWED",
+      message: "该任务没有有效的预约日期，无法立即执行",
+      detail: { booking_local_date: bookingDate || null, next_allowed_at: null }
+    };
+  }
+  if (bookingDate < localDate) {
+    return {
+      ok: false,
+      code: "BOOKING_WINDOW_CLOSED",
+      message: "该预约日期已过，无法立即执行；任务保留供只读核对",
+      detail: { booking_local_date: bookingDate, next_allowed_at: null }
+    };
+  }
+  if (bookingDate > localDate) {
+    return {
+      ok: false,
+      code: "MANUAL_DATE_NOT_ALLOWED",
+      message:
+        "立即执行仅限当天 " + localDate + " 的预约；该任务预约日期为 " + bookingDate +
+        "，任务保持原排程不变",
+      detail: {
+        booking_local_date: bookingDate,
+        today_local_date: localDate,
+        next_allowed_at: bookingDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  if (localTime < windowStart) {
+    return {
+      ok: false,
+      code: "BOOKING_NOT_OPEN",
+      message:
+        "学校抢座通道尚未开放（开放时间 " + windowStart + "，当前 " + localTime +
+        "）；任务仍按原排程保留",
+      detail: {
+        booking_local_date: bookingDate,
+        next_allowed_at: localDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  if (localTime >= windowEnd) {
+    const nextDate = addDaysToLocalDate(localDate, 1);
+    return {
+      ok: false,
+      code: "BOOKING_NOT_OPEN",
+      message: "学校抢座通道今日已关闭（" + windowEnd + " 起停止），无法立即执行",
+      detail: {
+        booking_local_date: bookingDate,
+        next_allowed_at: nextDate + "T" + windowStart + "+08:00"
+      }
+    };
+  }
+  return { ok: true };
+}
+
 export function computeTripleSchedule({
   targetLocalDate,
   targetLocalTime,
@@ -134,6 +219,7 @@ export class TripleScheduleEngine {
     while (this.inFlightJobs.has(jobId)) {
       await this.inFlightJobs.get(jobId);
     }
+    this.store.assertStorageWritable?.();
     let release;
     const p = new Promise((resolve) => {
       release = resolve;
@@ -147,7 +233,8 @@ export class TripleScheduleEngine {
     }
   }
 
-  createPlanAndJob(cloudUserId, payload, nowMs = Date.now()) {
+  createPlanAndJob(cloudUserId, payload, nowMs = Date.now(), commitOpts = {}) {
+    this.store.assertStorageWritable?.();
     const binding = this.store.schoolBindings.get(payload.school_binding_id);
     if (!binding || binding.cloud_user_id !== cloudUserId) {
       throw new ContractError("CAMPUS_BINDING_REQUIRED", "School binding not found or not owned by user");
@@ -159,6 +246,47 @@ export class TripleScheduleEngine {
     const consent = this.store.consents.get(payload.consent_id);
     if (!consent || consent.cloud_user_id !== cloudUserId || consent.withdrawn_at) {
       throw new ContractError("CONSENT_WITHDRAWN", "Active consent record is required");
+    }
+
+    // Client-seen quote contract (C8/§5): the caller may pin either a
+    // server-issued quote_id or a direct expected_price_micropeach. A drift
+    // between the displayed quote and the current price is an explicit
+    // conflict — never silently re-price on the user's behalf. A legacy
+    // client that pins NEITHER is still allowed but marked honestly as an
+    // unquoted acceptance (no silent "auto-agree at latest price").
+    let acceptedQuote = null;
+    if (payload.quote_id) {
+      const q = this.store.priceQuotes?.get(String(payload.quote_id));
+      if (!q || q.cloud_user_id !== cloudUserId) {
+        throw new ContractError("CONFLICT", "报价不存在或不属于当前用户，请重新获取报价");
+      }
+      if (Date.parse(q.expires_at) <= nowMs) {
+        throw new ContractError("CONFLICT", "报价已过期，请重新获取价格并确认");
+      }
+      if (Number.isInteger(this.store.pricingMicropeach) && q.amount_micropeach !== this.store.pricingMicropeach) {
+        throw new ContractError("CONFLICT", "报价已失效：价格已变更，请重新获取报价", {
+          quoted_price_micropeach: q.amount_micropeach,
+          current_price_micropeach: this.store.pricingMicropeach
+        });
+      }
+      acceptedQuote = q;
+      // One-shot quote: consumption happens only at the commit point below —
+      // a validation failure must not burn the user's quote.
+    }
+    if (
+      payload.expected_price_micropeach !== undefined &&
+      payload.expected_price_micropeach !== null &&
+      Number.isInteger(this.store.pricingMicropeach) &&
+      Number(payload.expected_price_micropeach) !== this.store.pricingMicropeach
+    ) {
+      throw new ContractError(
+        "CONFLICT",
+        `显示价格已变更：当前为 ${this.store.pricingMicropeach / 10000} 🍑，请重新确认价格后再创建`,
+        {
+          expected_price_micropeach: Number(payload.expected_price_micropeach),
+          current_price_micropeach: this.store.pricingMicropeach
+        }
+      );
     }
     if ((consent.school_id || binding.school_id) !== binding.school_id) {
       throw new ContractError("FORBIDDEN", "Consent school_id does not match binding school_id");
@@ -237,6 +365,7 @@ export class TripleScheduleEngine {
         );
       }
     }
+    const replacedSnapshots = [];
 
     const rules = this.schoolProvider.getRules();
     const defaultLatenessSec = rules.max_lateness_seconds_limit || 1800;
@@ -275,8 +404,34 @@ export class TripleScheduleEngine {
 
     // Only after full schedule, capability, and slot_window validation succeeds do we replace existing queued jobs!
     if (matchingJobsForDate.length > 0 && payload.replace_existing === true) {
+      // R6-C2: these old-state mutations belong to the same commit unit —
+      // snapshot them so a failed persist restores the original plan/job/
+      // events exactly instead of leaving the user with neither.
       const ts = new Date(nowMs).toISOString();
       for (const dupJob of matchingJobsForDate) {
+        replacedSnapshots.push({
+          job: dupJob,
+          jobState: {
+            user_intent_state: dupJob.user_intent_state,
+            external_execution_state: dupJob.external_execution_state,
+            state: dupJob.state,
+            state_version: dupJob.state_version,
+            display_status: dupJob.display_status
+          },
+          events: this.store.eventsForJob(dupJob.id).map((ev) => ({
+            ev,
+            status: ev.status,
+            actual_at: ev.actual_at
+          })),
+          oldPlan: this.store.reservationPlans.get(dupJob.plan_id) || null,
+          oldPlanState: this.store.reservationPlans.get(dupJob.plan_id)
+            ? {
+                enabled: this.store.reservationPlans.get(dupJob.plan_id).enabled,
+                user_intent_state: this.store.reservationPlans.get(dupJob.plan_id)
+                  .user_intent_state
+              }
+            : null
+        });
         dupJob.user_intent_state = "STOP_REQUESTED";
         dupJob.external_execution_state = "NOT_DISPATCHED";
         dupJob.state = "CANCELLED";
@@ -334,6 +489,22 @@ export class TripleScheduleEngine {
       max_lateness_seconds: requestedLatenessSec,
       policy_version: payload.accepted_policy_version || rules.rule_version,
       price_version: payload.accepted_price_version || "price-library-cloud-2026-11-v1",
+      // Immutable acceptance snapshot: the price the user agreed to AT PLAN
+      // CREATION. Orders for jobs under this plan MUST use this snapshot — a
+      // later global price change must never silently charge a different
+      // amount on an already-accepted delegation.
+      accepted_price_micropeach: Number.isInteger(this.store.pricingMicropeach)
+        ? this.store.pricingMicropeach
+        : 10_000,
+      accepted_at: new Date(nowMs).toISOString(),
+      acceptance_scope: "PER_CONFIRMED_RESERVATION",
+      acceptance_source: acceptedQuote
+        ? "SERVER_QUOTE"
+        : payload.expected_price_micropeach != null
+          ? "CLIENT_PINNED_PRICE"
+          : "LEGACY_NO_QUOTE",
+      accepted_quote_id: acceptedQuote?.quote_id || null,
+      accepted_quote_hash: acceptedQuote?.quote_hash || null,
       area_code: payload.area_code || (payload.preferred_area_ids && payload.preferred_area_ids[0]) || "4F_NORTH",
       area_name:
         payload.area_name ||
@@ -440,18 +611,108 @@ export class TripleScheduleEngine {
       created_at: new Date(nowMs).toISOString()
     };
 
-    this.store.reservationPlans.set(planId, plan);
-    this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
-    this.store.reservationJobs.set(jobId, job);
-    this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
-    for (const ev of events) {
-      this.store.scheduleEvents.set(ev.id, ev);
-      this.store.indexScheduleEvent?.(ev.id, ev);
-    }
-    if (typeof this.store.flushSnapshotSync === "function") {
-      this.store.flushSnapshotSync();
-    } else if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
+    const createdResult = {
+      plan_id: planId,
+      job_id: jobId,
+      execution_mode: "CLOUD_HOSTED",
+      target_local_date: schedule.targetLocalDate,
+      target_local_time: schedule.targetLocalTime,
+      repeat_days: repeatDays,
+      remaining_days: remainingDays,
+      end_local_date: endLocalDate,
+      target_at: schedule.targetAtIso,
+      precheck_at: schedule.precheckAtIso,
+      final_check_at: schedule.finalCheckAtIso,
+      school_window: {
+        start: rules.window_start,
+        end_exclusive: rules.window_end_exclusive,
+        time_zone: rules.time_zone
+      },
+      status: job.state,
+      capability: executionPath,
+      schedule_events: events
+    };
+
+    // R5-C2 single recoverable commit: plan + job + events + quote
+    // consumption + idempotency receipt either ALL become durable or NONE
+    // becomes visible. Applies first, then one STRICT flush; on any
+    // persistence failure the live maps are rolled back exactly, so no
+    // half-committed plan can leak through an in-memory-only success.
+    const quotePresent = acceptedQuote
+      ? this.store.priceQuotes.has(acceptedQuote.quote_id)
+      : false;
+    const appliedReceipt = Boolean(commitOpts.idempotencyCacheKey);
+    try {
+      this.store.reservationPlans.set(planId, plan);
+      this.store.indexUserScoped?.("reservationPlans", planId, cloudUserId);
+      this.store.reservationJobs.set(jobId, job);
+      this.store.indexUserScoped?.("reservationJobs", jobId, cloudUserId);
+      // Quote consumed inside the same commit — only durable success burns it.
+      if (acceptedQuote) {
+        this.store.priceQuotes.delete(acceptedQuote.quote_id);
+      }
+      for (const ev of events) {
+        this.store.scheduleEvents.set(ev.id, ev);
+        this.store.indexScheduleEvent?.(ev.id, ev);
+      }
+      if (appliedReceipt) {
+        this.store.idempotencyRecords.set(commitOpts.idempotencyCacheKey, {
+          bodyHash: commitOpts.idempotencyBodyHash,
+          data: structuredClone(createdResult),
+          hashVersion: 2,
+          canonicalHash: commitOpts.idempotencyCanonicalHash,
+          createdAtMs: nowMs
+        });
+      }
+      // STRICT persist — a silent non-strict failure would fabricate a
+      // durable-commit that restarts cannot recover.
+      if (typeof this.store.flushSnapshotStrictSync === "function") {
+        this.store.flushSnapshotStrictSync();
+      } else if (typeof this.store.flushSnapshotSync === "function") {
+        this.store.flushSnapshotSync();
+      } else if (typeof this.store.saveSnapshot === "function") {
+        this.store.saveSnapshot();
+      }
+    } catch (commitErr) {
+      const stage = commitErr?.persistStage || null;
+      const PRE_RENAME = new Set(["tmp_open", "tmp_write", "tmp_fsync", "tmp_close", "rename"]);
+      if (commitErr.commitPublished === false || (commitErr.commitPublished !== true && (!stage || PRE_RENAME.has(stage)))) {
+        // Never published — exact inverse of every mutation is safe.
+        this.store.reservationPlans.delete(planId);
+        this.store.reservationJobs.delete(jobId);
+        for (const ev of events) this.store.scheduleEvents.delete(ev.id);
+        if (appliedReceipt) this.store.idempotencyRecords.delete(commitOpts.idempotencyCacheKey);
+        if (acceptedQuote && quotePresent) {
+          this.store.priceQuotes.set(acceptedQuote.quote_id, acceptedQuote);
+        }
+        // Restore the replaced old plan/job/events exactly — the commit
+        // either contains the replacement fully or the original stays whole.
+        for (const snap of replacedSnapshots) {
+          Object.assign(snap.job, snap.jobState);
+          this.store.syncJobDisplayStatus?.(snap.job);
+          for (const { ev, status, actual_at } of snap.events) {
+            ev.status = status;
+            ev.actual_at = actual_at;
+          }
+          if (snap.oldPlan && snap.oldPlanState) {
+            Object.assign(snap.oldPlan, snap.oldPlanState);
+          }
+        }
+        this.store._rebuildIndexes?.();
+        throw new ContractError(
+          "STORAGE_PERSISTENCE_FAILED",
+          "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态"
+        );
+      }
+      // Post-rename failure: the snapshot may already contain this commit —
+      // rolling memory back would diverge from what a restart reloads.
+      // Keep state live, report honestly UNKNOWN, let the persisted receipt
+      // reconcile any client retry under the same key.
+      throw new ContractError(
+        "STORAGE_COMMIT_UNKNOWN",
+        "提交结果未知：快照已发布但目录核验失败。请携带原 Idempotency-Key 重试以对账，不要另起新键",
+        { persist_stage: stage, durability: "UNKNOWN", retry_same_key: true }
+      );
     }
 
     // Asynchronously prewarm target region & candidate seat IDs on job creation when live credentials exist
@@ -502,30 +763,11 @@ export class TripleScheduleEngine {
         .catch(() => {});
     }
 
-    return {
-      plan_id: planId,
-      job_id: jobId,
-      execution_mode: "CLOUD_HOSTED",
-      target_local_date: schedule.targetLocalDate,
-      target_local_time: schedule.targetLocalTime,
-      repeat_days: repeatDays,
-      remaining_days: remainingDays,
-      end_local_date: endLocalDate,
-      target_at: schedule.targetAtIso,
-      precheck_at: schedule.precheckAtIso,
-      final_check_at: schedule.finalCheckAtIso,
-      school_window: {
-        start: rules.window_start,
-        end_exclusive: rules.window_end_exclusive,
-        time_zone: rules.time_zone
-      },
-      status: job.state,
-      capability: executionPath,
-      schedule_events: events
-    };
+    return createdResult;
   }
 
   casJobState(jobId, expectedVersion, nextState, patch = {}) {
+    this.store.assertStorageWritable?.();
     const job = this.store.reservationJobs.get(jobId);
     if (!job || job.state_version !== expectedVersion) {
       return false;
@@ -771,6 +1013,21 @@ export class TripleScheduleEngine {
       }
     }
     return true;
+  }
+
+  _abortJobForKillSwitch(job, event, nowMs = Date.now()) {
+    const ts = new Date(nowMs).toISOString();
+    if (event) {
+      event.status = "ABORTED_KILL_SWITCH";
+      event.diagnostic_code = "SCHOOL_KILL_SWITCH_ACTIVE";
+      event.actual_at = ts;
+    }
+    this.casJobState(job.id, job.state_version, "CANCELLED", {
+      last_error_code: "SCHOOL_KILL_SWITCH_ACTIVE",
+      last_diagnostic_message: "学校自动化紧急熔断开关已启用，本次云端抢座已安全中止（未扣费）"
+    });
+    this._disarmRemainingScheduleEvents(job.id, "SKIPPED_TERMINAL", nowMs);
+    return { job, event };
   }
 
   _abortJobForStaleAuthorization(job, plan, event, nowMs = Date.now()) {
@@ -1159,7 +1416,12 @@ export class TripleScheduleEngine {
         // Read-only precheck at T-30m: check binding, rules, wallet availability
         try {
           const wallet = await this.financeService.getWalletSnapshot(job.cloud_user_id);
-          if (wallet.micropeach_balance < this.store.pricingMicropeach) {
+          // Use the plan's accepted-price snapshot — never the live global,
+          // which may have moved since the user delegated.
+          const requiredMicro = Number.isInteger(plan?.accepted_price_micropeach)
+            ? plan.accepted_price_micropeach
+            : this.store.pricingMicropeach;
+          if (wallet.micropeach_balance < requiredMicro) {
             event.status = "PRECHECK_NEEDS_USER";
             event.diagnostic_code = "WALLET_INSUFFICIENT";
             event.actual_at = new Date(nowMs).toISOString();
@@ -1381,15 +1643,7 @@ export class TripleScheduleEngine {
       if (kind === "FIRE") {
         const liveSchoolIntegration = this.store.schoolIntegrations.get(binding.school_id);
         if (liveSchoolIntegration?.kill_switch === true) {
-          event.status = "ABORTED_KILL_SWITCH";
-          event.diagnostic_code = "SCHOOL_KILL_SWITCH_ACTIVE";
-          event.actual_at = new Date(nowMs).toISOString();
-          this.casJobState(jobId, job.state_version, "CANCELLED", {
-            last_error_code: "SCHOOL_KILL_SWITCH_ACTIVE",
-            last_diagnostic_message: "学校自动化紧急熔断开关已启用，本次云端抢座已安全中止（未扣费）"
-          });
-          this._disarmRemainingScheduleEvents(jobId, "SKIPPED_TERMINAL", nowMs);
-          return { job, event };
+          return this._abortJobForKillSwitch(job, event, nowMs);
         }
         let decryptedSecret;
         try {
@@ -1413,6 +1667,22 @@ export class TripleScheduleEngine {
         }
         const shTodayStr = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
         const isPastBookingDate = Boolean(job.booking_local_date && job.booking_local_date < shTodayStr);
+
+        // Engine-side defence-in-depth for explicit manual dispatch: re-run
+        // the same pure validation as the API layer BEFORE any expiry/rollover
+        // mutation — a rejected manual execution must consume nothing: no
+        // attempt, no CAS, no EXPIRED, no multi-day rollover, schedule events
+        // stay ARMED.
+        if (options.manualExecuteNow) {
+          const verdict = validateManualExecution({
+            job,
+            schoolRules: this.schoolProvider.getRules(),
+            nowMs
+          });
+          if (!verdict.ok) {
+            throw new ContractError(verdict.code, verdict.message, verdict.detail);
+          }
+        }
         if (options.manualExecuteNow ? isPastBookingDate : nowMs > effectiveExpiresAtMs) {
           event.status = "MISSED_WINDOW";
           event.actual_at = new Date(nowMs).toISOString();
@@ -1445,7 +1715,27 @@ export class TripleScheduleEngine {
           job.state === "EXECUTING" &&
           job.state_version === executingStateVersion;
 
+        // Kill-switch fence: re-read the LIVE integration object on every
+        // invocation so a switch flipped mid-flight (during school auth,
+        // seat queries or between candidate attempts) still blocks the next
+        // external write. Checked inside the unified authorization fence AND
+        // again in onBeforeExternalWrite before the dispatch intent is
+        // persisted — there is no await between this check and the write.
+        const assertKillSwitchOff = () => {
+          const liveInteg = this.store.schoolIntegrations.get(job.school_id);
+          if (liveInteg?.kill_switch === true) {
+            throw new ContractError(
+              "SCHOOL_KILL_SWITCH_ACTIVE",
+              "学校自动化紧急熔断开关已启用，已阻止后续学校写入"
+            );
+          }
+        };
+
         const assertStillAuthorized = () => {
+          // 派发意图持久化的 await 期间，其他提交也可能使存储进入未知隔离。
+          // provider 在真正写学校前调用同一个围栏，不能只在任务开始时检查。
+          this.store.assertStorageWritable?.();
+          assertKillSwitchOff();
           if (!isStillAuthorized()) {
             throw new ContractError(
               "CONSENT_WITHDRAWN",
@@ -1459,6 +1749,10 @@ export class TripleScheduleEngine {
         let activeAttempt = null;
 
         const onBeforeExternalWrite = async (targetInfo = {}) => {
+          // Kill-switch MUST be re-checked immediately before persisting the
+          // dispatch intent (and again inside assertStillAuthorized right
+          // before the provider issues the actual write).
+          assertKillSwitchOff();
           assertStillAuthorized();
           const attempt = this.store.createReservationAttempt({
             job_id: job.id,
@@ -1562,13 +1856,27 @@ export class TripleScheduleEngine {
             onAfterExternalWrite
           });
         } catch (err) {
-          if (
+          if (err?.code === "SCHOOL_KILL_SWITCH_ACTIVE") {
+            // Kill switch opened during execution. If no external write was
+            // ever dispatched, abort cleanly as CANCELLED. If a write is
+            // already in flight we must NOT claim cancellation: keep the
+            // ambiguous/confirmed state and allow read-only reconciliation.
+            if (!writeDispatchedInThisRun) {
+              return this._abortJobForKillSwitch(job, event, nowMs);
+            }
+            submitRes = {
+              outcome: hasUnresolvedInFlightWrite ? "TIMEOUT_AMBIGUOUS" : "FAILED",
+              writeDispatched: true,
+              errorCode: "SCHOOL_KILL_SWITCH_ACTIVE",
+              diagnosticMessage:
+                "学校自动化熔断开关在执行中启用；已派发请求保持核对，不再发起后续写入"
+            };
+          } else if (
             !writeDispatchedInThisRun &&
             (err?.code === "CONSENT_WITHDRAWN" || !isStillAuthorized())
           ) {
             return this._abortJobForStaleAuthorization(job, plan, event, nowMs);
-          }
-          if (
+          } else if (
             writeDispatchedInThisRun &&
             !hasUnresolvedInFlightWrite &&
             (err?.code === "CONSENT_WITHDRAWN" || !isStillAuthorized())
@@ -1885,6 +2193,7 @@ export class TripleScheduleEngine {
     reason = "用户停止预约计划委托",
     nowMs = Date.now()
   } = {}) {
+    this.store.assertStorageWritable?.();
     const targetJob = jobId ? this.store.reservationJobs.get(jobId) : null;
     if (jobId && !targetJob) {
       throw new ContractError("NOT_FOUND", "Reservation job not found");
@@ -2354,6 +2663,7 @@ export class TripleScheduleEngine {
       let revokedDuringCancelFlow = false;
 
       const assertCancelStillAuthorized = () => {
+        this.store.assertStorageWritable?.();
         if (!isCancelAuthorizationStillValid()) {
           revokedDuringCancelFlow = true;
           throw new ContractError(
@@ -2461,6 +2771,7 @@ export class TripleScheduleEngine {
   }
 
   rolloverMultiDayPlanIfEligible(plan, finishedJob, outcomeSummary, nowMs = Date.now()) {
+    this.store.assertStorageWritable?.();
     if (!plan || !plan.enabled) return null;
     if (plan.user_intent_state && plan.user_intent_state !== "ACTIVE") return null;
     if (

@@ -2324,7 +2324,7 @@ test("Fault Injection 18 (Cloud #3 — Strict Directory open/fsync/close Error P
       nowMs: fireNowMs + 6_000
     });
     assert.equal(cancelSeatFsyncErrRes.status, 503);
-    assert.equal(cancelSeatFsyncErrRes.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(cancelSeatFsyncErrRes.body.code, "STORAGE_COMMIT_UNKNOWN");
     assert.equal(externalLiveCancelCalls, 0, "Must NEVER call external school cancel when dir fsync fails");
     assert.equal(Boolean(app.store.reservationPlans.get(planId)._stopPersistencePending), true);
     assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), true);
@@ -2338,11 +2338,11 @@ test("Fault Injection 18 (Cloud #3 — Strict Directory open/fsync/close Error P
       nowMs: fireNowMs + 7_000
     });
     assert.equal(cancelSeatCloseErrRes.status, 503);
-    assert.equal(cancelSeatCloseErrRes.body.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(cancelSeatCloseErrRes.body.code, "STORAGE_COMMIT_UNKNOWN");
     assert.equal(externalLiveCancelCalls, 0, "Must NEVER call external school cancel when dir close fails");
     assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), true);
 
-    // 4. Unsupported directory fsync (EINVAL) is cleanly distinguished from real I/O failure -> succeeds & clears _stopPersistencePending!
+    // 4. 不支持目录同步也无法证明耐久性，继续隔离且零外部调用；故障排除后才能取消。
     faultMode = "fsync_einval";
     const cancelSeatEinvalOk = await app.inject({
       method: "POST",
@@ -2350,7 +2350,12 @@ test("Fault Injection 18 (Cloud #3 — Strict Directory open/fsync/close Error P
       headers: authHeaders,
       nowMs: fireNowMs + 8_000
     });
-    assert.equal(cancelSeatEinvalOk.status, 200);
+    assert.equal(cancelSeatEinvalOk.status, 503);
+    assert.equal(cancelSeatEinvalOk.body.code, "STORAGE_COMMIT_UNKNOWN");
+    assert.equal(externalLiveCancelCalls, 0);
+    faultMode = "none";
+    const recoveredCancel = await app.inject({ method: "POST", url: `/api/v1/reservation-jobs/${jobId}/cancel-seat`, headers: authHeaders, nowMs: fireNowMs + 9_000 });
+    assert.equal(recoveredCancel.status, 200);
     assert.equal(externalLiveCancelCalls, 1);
     assert.equal(Boolean(app.store.reservationPlans.get(planId)._stopPersistencePending), false);
     assert.equal(Boolean(app.store.reservationJobs.get(jobId)._stopPersistencePending), false);

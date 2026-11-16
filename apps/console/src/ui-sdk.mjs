@@ -543,7 +543,7 @@ export function xpeachParcelRowCard(parcel) {
 
 export function xpeachOrderRowCard(
   order,
-  { isAdmin = false, pricingMicropeach = 10000, micropeachPerPeach = 10000 } = {}
+  { isAdmin = false, pricingMicropeach = 10000, micropeachPerPeach = 10000, pendingRefund = false } = {}
 ) {
   const o = order || {};
   const shortId = String(o.id || "").slice(0, 12);
@@ -582,7 +582,9 @@ export function xpeachOrderRowCard(
       ${
         isAdmin && o.payment_state === "PAID"
           ? `<div class="xp-row-card-actions">
-              <button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}">退还 🍑</button>
+              ${pendingRefund
+                ? `<span class="xp-meta-highlight">已有退还申请进行中</span>`
+                : `<button type="button" class="xp-pill xp-pill--compact" data-refund-order="${escapeHtml(o.id)}">申请退还</button>`}
             </div>`
           : ""
       }

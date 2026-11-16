@@ -1,0 +1,98 @@
+{
+  "_meta": {
+    "generated_by": "cloud-in-school 实际 apps/api handler；工具仅使用假身份和临时存储",
+    "handler_sha256": "33b76f2566870e7dc608a1308064b71fcb4f26291fb8d36eaa2821bf21de8bea"
+  },
+  "cases": [
+    {
+      "name": "quote_auth",
+      "http_status": 401,
+      "body": {
+        "ok": false,
+        "code": "CLOUD_AUTH_REQUIRED",
+        "request_id": "req_fixture_quote_auth",
+        "error": {
+          "code": "CLOUD_AUTH_REQUIRED",
+          "message": "Missing Bearer [REDACTED] header",
+          "user_action": "RECONNECT_XPEACH_BROWSER",
+          "retryable": false
+        },
+        "meta": {
+          "request_id": "req_fixture_quote_auth",
+          "api_version": "v1",
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "name": "create_unknown",
+      "http_status": 503,
+      "body": {
+        "ok": false,
+        "code": "STORAGE_COMMIT_UNKNOWN",
+        "request_id": "req_fixture_create_unknown",
+        "error": {
+          "code": "STORAGE_COMMIT_UNKNOWN",
+          "message": "提交结果未知：快照已发布但目录核验失败。请携带原 Idempotency-Key 重试以对账，不要另起新键",
+          "user_action": "RETRY_WITH_SAME_IDEMPOTENCY_KEY_TO_RECONCILE",
+          "retryable": true,
+          "detail": {
+            "persist_stage": "dir_fsync",
+            "durability": "UNKNOWN",
+            "retry_same_key": true
+          }
+        },
+        "meta": {
+          "request_id": "req_fixture_create_unknown",
+          "api_version": "v1",
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "name": "quote_unknown",
+      "http_status": 503,
+      "body": {
+        "ok": false,
+        "code": "STORAGE_COMMIT_UNKNOWN",
+        "request_id": "req_fixture_quote_unknown",
+        "error": {
+          "code": "STORAGE_COMMIT_UNKNOWN",
+          "message": "无法确认快照耐久性，保持隔离；禁止换键重建或覆盖快照",
+          "user_action": "RETRY_WITH_SAME_IDEMPOTENCY_KEY_TO_RECONCILE",
+          "retryable": true,
+          "detail": {
+            "durability": "UNKNOWN",
+            "retry_same_key": true,
+            "reason": "测试注入存储故障：dir_fsync"
+          }
+        },
+        "meta": {
+          "request_id": "req_fixture_quote_unknown",
+          "api_version": "v1",
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "name": "create_uncommitted",
+      "http_status": 503,
+      "body": {
+        "ok": false,
+        "code": "STORAGE_PERSISTENCE_FAILED",
+        "request_id": "req_fixture_create_uncommitted",
+        "error": {
+          "code": "STORAGE_PERSISTENCE_FAILED",
+          "message": "计划提交未能持久化，请稍后按原 Idempotency-Key 重试；未产生半提交状态",
+          "user_action": "RETRY_AFTER_STORAGE_RECOVERY",
+          "retryable": true
+        },
+        "meta": {
+          "request_id": "req_fixture_create_uncommitted",
+          "api_version": "v1",
+          "next_cursor": null
+        }
+      }
+    }
+  ]
+}
