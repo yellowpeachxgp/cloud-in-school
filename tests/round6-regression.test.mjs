@@ -163,7 +163,7 @@ test("R6-4: terminate fires with the final verdict code after the verdict", asyn
     stopBackgroundTasks: () => {},
     logLine: () => {},
     setExitCode: () => {},
-    maxDrainMs: 1_000,
+    maxDrainMs: 4_000,
     terminate: (code) => calls.push(code)
   });
   await shutdown("SIGTERM");

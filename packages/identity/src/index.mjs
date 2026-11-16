@@ -855,8 +855,16 @@ export class CloudIdentityService {
     };
     this.store.deviceSessions.set(sessionId, sessionRecord);
     this.store.indexDeviceSession?.(sessionId, sessionRecord);
-    if (typeof this.store.saveSnapshot === "function") {
-      this.store.saveSnapshot();
+    try {
+      // 客户端收到令牌前，会话及旧令牌消费状态必须一起耐久提交。
+      if (typeof this.store.flushSnapshotStrictSync === "function") this.store.flushSnapshotStrictSync();
+      else this.store.saveSnapshot?.();
+    } catch (error) {
+      if (error.commitPublished === false) {
+        this.store.unindexDeviceSession?.(sessionId, sessionRecord);
+        this.store.deviceSessions.delete(sessionId);
+      }
+      throw error;
     }
 
     const accessToken = this.signAccessToken({
@@ -1135,14 +1143,16 @@ export class CloudIdentityService {
     }
 
     session.consumed_at = new Date(nowMs).toISOString();
-    return this.issueDeviceSession(
-      user,
-      session.device_label,
-      session.family_id,
-      session.generation + 1,
-      nowMs,
-      session.flow || "MOBILE_APP"
-    );
+    try {
+      return this.issueDeviceSession(
+        user, session.device_label, session.family_id, session.generation + 1,
+        nowMs, session.flow || "MOBILE_APP"
+      );
+    } catch (error) {
+      // 只有确定未发布的失败才恢复旧令牌；rename 后未知保持存储围栏。
+      if (error.commitPublished === false) session.consumed_at = null;
+      throw error;
+    }
   }
 
   revokeSessionFamily(familyId, reason = "USER_LOGOUT", nowMs = Date.now()) {
@@ -1162,6 +1172,7 @@ export class CloudIdentityService {
       resource_ref: familyId,
       outcome: reason
     });
+    this.store.flushSnapshotStrictSync?.();
   }
 
   /**
@@ -1218,6 +1229,7 @@ export class CloudIdentityService {
     if (unlinkXpeach) {
       this.store.haltAllUserPlansAndBindings(cloudUserId, "XPEACH_UNLINKED", nowMs);
     }
+    this.store.flushSnapshotStrictSync?.();
     return { revokedSessions, unlinkedXpeach: unlinkXpeach };
   }
 
