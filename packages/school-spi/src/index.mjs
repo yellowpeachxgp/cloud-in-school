@@ -2100,8 +2100,8 @@ export class HautLibraryProvider {
         (s) =>
           s.seat_name === cleanWanted ||
           s.short_name === cleanWanted ||
-          s.seat_name.endsWith(cleanWanted) ||
-          s.short_name.endsWith(cleanWanted) ||
+          normalizeSeatComparisonToken(s.seat_name, primaryRegion.region_name) ===
+            normalizeSeatComparisonToken(cleanWanted, primaryRegion.region_name) ||
           String(s.id) === cleanWanted
       );
       if (found && !matchedCandidateSeats.some((c) => c.id === found.id)) {
@@ -2258,6 +2258,10 @@ export class HautLibraryProvider {
           cachedRegionMatches &&
           Array.isArray(rawPrewarmed.candidate_seats) &&
           rawPrewarmed.candidate_seats.length > 0 &&
+          (wantedSeats.length === 0 || rawPrewarmed.candidate_seats.every(seat =>
+            wantedSeats.some(wanted =>
+              normalizeSeatComparisonToken(seat.short_name || seat.seat_name, cachedRegionName) ===
+                normalizeSeatComparisonToken(wanted, cachedRegionName) || String(seat.id) === wanted))) &&
           typeof rawPrewarmed.binding_id === "string" &&
           rawPrewarmed.binding_id.trim().length > 0 &&
           rawPrewarmed.binding_id.trim() === expectedBindId &&
