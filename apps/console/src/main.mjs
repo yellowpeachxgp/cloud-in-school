@@ -2327,7 +2327,7 @@ export function renderConsoleHtml(ctx = {}) {
             });
           });
           if (seatGrid) seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
-            chip.disabled = false; chip.classList.remove("occupied");
+            chip.disabled = false; chip.classList.remove("occupied"); chip.removeAttribute("aria-disabled");
           });
           document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
             var region = LIVE_REGIONS_MAP[pill.getAttribute("data-area-pill")];
@@ -2458,7 +2458,16 @@ export function renderConsoleHtml(ctx = {}) {
           var thisSeatQuery = ++seatQueryRevision;
           var regionRevision = liveQueryRevision;
           if (LIVE_REGIONS_MAP[areaKey]) {
-            if (displayedSeatArea !== areaKey) populateSeatsFromList(seatCatalog[areaKey] || []);
+            var referenceRegion = LIVE_REGIONS_MAP[areaKey];
+            if (displayedSeatArea !== areaKey) {
+              var sameArea = displayedSeatArea === referenceRegion.name;
+              var referenceSeats = seatCatalog[areaKey] || (FALLBACK_AREAS[referenceRegion.name]
+                ? FALLBACK_AREAS[referenceRegion.name].seats.map(function (code) {
+                    return { code: code, tag: "参考座位，状态未核验", available: true };
+                  }) : []);
+              if (!sameArea) populateSeatsFromList(referenceSeats);
+              else markSeatResultsAsReference();
+            }
             displayedSeatArea = areaKey;
             var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
             apiFetch(
@@ -2472,7 +2481,7 @@ export function renderConsoleHtml(ctx = {}) {
                 if (thisSeatQuery !== seatQueryRevision || regionRevision !== liveQueryRevision ||
                     areaSelect.value !== areaKey || dateInput.value !== bDate) return;
                 var seats = (res.data && res.data.seats) || [];
-                seatCatalog[areaKey] = seats.map(function (item) {
+                if (seats.length) seatCatalog[areaKey] = seats.map(function (item) {
                   return { code: item.short_name || item.seat_name || String(item.seat_id), tag: "参考座位，状态未核验", available: true };
                 });
                 if (seats.length > 0) {
@@ -2538,6 +2547,7 @@ export function renderConsoleHtml(ctx = {}) {
                 return;
               }
               var previousArea = areaSelect.value;
+              var previousAreaName = LIVE_REGIONS_MAP[previousArea] ? LIVE_REGIONS_MAP[previousArea].name : previousArea;
               LIVE_REGIONS_MAP = {};
               var optHtml = "";
               var pillsHtml = "";
@@ -2580,7 +2590,10 @@ export function renderConsoleHtml(ctx = {}) {
                 }
               });
               areaSelect.innerHTML = optHtml;
-              areaSelect.value = LIVE_REGIONS_MAP[previousArea] ? previousArea : String(regions[0].region_id);
+              var previousRegion = regions.find(function (region) {
+                return String(region.region_id) === previousArea || region.region_name === previousAreaName;
+              });
+              areaSelect.value = String((previousRegion || regions[0]).region_id);
               if (areaPillsBar && pillsHtml) {
                 areaPillsBar.innerHTML = pillsHtml;
                 areaPillsBar.querySelectorAll("[data-area-pill]").forEach(function (pill) {

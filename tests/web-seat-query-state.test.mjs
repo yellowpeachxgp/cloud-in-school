@@ -77,3 +77,20 @@ test('切换日期后，旧日期座位查询的晚到响应不能覆盖新日�
   assert.match(w.element('plan-seat-1').innerHTML, /新日期座位/);
   assert.doesNotMatch(w.element('plan-seat-1').innerHTML, /旧日期座位/);
 });
+
+test('区域从名称映射到真实 ID 后首次查座失败，仍保留同区域的参考选择', async () => {
+  const w = workbench();
+  w.element('plan-area').value = '四层西书库北区';
+  w.element('plan-area').events.change();
+  w.element('plan-seat-1').value = '06桌 F座';
+  w.requests[0].resolve({ data: { regions: [
+    { region_id: 1, region_name: '无关区域', layer_name: '一层' },
+    { region_id: 13, region_name: '四层西书库北区', layer_name: '四层' }
+  ] } });
+  await settle();
+  w.requests[1].reject(Object.assign(new Error('尚未开放'), { code: 'SCHOOL_CAPABILITY_UNVERIFIED' }));
+  await settle();
+  assert.equal(w.element('plan-area').value, '13');
+  assert.equal(w.element('plan-seat-1').value, '06桌 F座');
+  assert.match(w.element('plan-seat-1').innerHTML, /未核验/);
+});
