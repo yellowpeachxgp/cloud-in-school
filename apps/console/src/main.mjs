@@ -2321,6 +2321,18 @@ export function renderConsoleHtml(ctx = {}) {
           if (seatGrid) seatGrid.querySelectorAll(".seat-chip-tag").forEach(function (tag) {
             tag.textContent = "参考座位，当前日期状态未核验";
           });
+          [seat1, seat2, seat3].forEach(function (select) {
+            if (select && select.options) Array.from(select.options).forEach(function (option) {
+              if (option.value) option.textContent = option.value + "（参考座位，当前日期状态未核验）";
+            });
+          });
+          if (seatGrid) seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
+            chip.disabled = false; chip.classList.remove("occupied");
+          });
+          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+            var region = LIVE_REGIONS_MAP[pill.getAttribute("data-area-pill")];
+            if (region) pill.textContent = region.name + "（参考目录）";
+          });
           if (areaSelect && areaSelect.options) Array.from(areaSelect.options).forEach(function (option) {
             var region = LIVE_REGIONS_MAP[option.value];
             if (region) option.textContent = region.layerName + " · " + region.name + "（参考目录）";

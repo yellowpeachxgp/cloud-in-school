@@ -27,12 +27,14 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 
 test('真实工作台遇到学校凭据过期时展示原因，而非吞掉错误继续提示绑定学号', async () => {
   const w = workbench();
+  w.element('plan-seat-1').options = [{ value: '01桌 A座', textContent: '01桌 A座（空闲可选）' }];
   w.requests[0].reject(Object.assign(new Error('Delegated credential has expired'), { code: 'SCHOOL_AUTH_EXPIRED' }));
   await settle();
   assert.match(w.element('seat-query-status').textContent, /学校授权已过期/);
   assert.match(w.element('seat-query-status').textContent, /重新验证/);
   assert.doesNotMatch(w.element('plan-seat-1').innerHTML, /绑定学号后加载实时状态/);
   assert.equal(w.element('live-region-badge').style.display, 'none');
+  assert.match(w.element('plan-seat-1').options[0].textContent, /未核验/);
 });
 
 test('真实日期 change 接线拒绝较早查询的晚到结果', async () => {
