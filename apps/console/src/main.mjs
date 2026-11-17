@@ -35,7 +35,7 @@ export const CONSOLE_VIEWS = [
   { id: "user-support", title: "账号支持", role: "SUPPORT" }
 ];
 
-export const CONSOLE_UI_VERSION = "20261114b";
+export const CONSOLE_UI_VERSION = "20261117a";
 
 function renderHiddenContractViews() {
   return `<template id="contract-views-marker" hidden>${CONSOLE_VIEWS.map(
@@ -71,6 +71,15 @@ function renderHead(title = "日在校园 · 运维管理控制台") {
     <link rel="stylesheet" href="/static/app.css?v=${CONSOLE_UI_VERSION}" />
     <link rel="stylesheet" href="/static/xpeach-sdk.css?v=${CONSOLE_UI_VERSION}" />
   </head>`;
+}
+
+export function renderLoginRecoveryHtml() {
+  return `${renderHead("登录链接已失效 · 日在校园")}
+    <body class="auth-body"><main class="auth-card xp-card">
+      <h1>登录链接已过期或已使用</h1>
+      <p>请回到云端主页继续。已登录的账号会直接进入工作台；尚未登录时可重新发起登录。</p>
+      <a class="btn btn-primary" href="/reservations" rel="noreferrer">回到云端主页</a>
+    </main></body></html>`;
 }
 
 export function renderMobileCallbackHtml({ ticket, txn }) {
@@ -320,6 +329,8 @@ export function renderConsoleHtml(ctx = {}) {
     ) ||
     userBindings.find((b) => !b.revoked_at) ||
     null;
+  const bindingExpired = Boolean(activeBinding?.credential_expires_at &&
+    Date.parse(activeBinding.credential_expires_at) <= Date.parse(ctx.nowIso || new Date().toISOString()));
   const activeStudentNo = activeBinding
     ? cleanDisplayText(activeBinding.student_no || activeBinding.student_no_masked, "")
     : "";
@@ -1211,8 +1222,8 @@ export function renderConsoleHtml(ctx = {}) {
         ${xpeachBentoTile({
           label: "校园学号绑定",
           value: activeStudentNo || "待绑定",
-          hint: activeStudentNo ? "河南工业大学 · KMS 信封加密托管" : "请在下方第一步完成学号验证",
-          badge: activeStudentNo
+          hint: bindingExpired ? "学校授权已过期，请重新验证学号与密码" : activeStudentNo ? "河南工业大学 · KMS 信封加密托管" : "请在下方第一步完成学号验证",
+          badge: bindingExpired ? xpeachBadge("授权已过期", "warning") : activeStudentNo
             ? xpeachBadge("已授权", "success")
             : xpeachBadge("需绑定", "warning")
         })}
@@ -1296,6 +1307,7 @@ export function renderConsoleHtml(ctx = {}) {
               <span class="xp-badge xp-badge--success" id="live-region-badge" style="display:none;">实时座位数据已连接</span>
             </div>
             <p class="text-xs text-muted" style="margin: 0 0 10px;">点选楼层区域与座位卡片设置首选 + 2 个备选座位（按优先级依次尝试）。</p>
+            <p id="seat-query-status" class="text-xs text-muted" role="status" style="display:none;"></p>
 
             <div class="xp-pill-bar" id="area-pills-bar" style="margin-bottom: 12px;">
               <button type="button" class="area-pill active" data-area-pill="五层中区">五层中区</button>
@@ -2295,6 +2307,46 @@ export function renderConsoleHtml(ctx = {}) {
         var seatGrid = document.getElementById("seat-visual-grid");
         var seatSummary = document.getElementById("seat-selection-summary");
         var LIVE_REGIONS_MAP = {};
+        var liveQueryRevision = 0;
+        var seatQueryRevision = 0;
+        var seatCatalog = {};
+        var displayedSeatArea = "";
+        var queryStatus = document.getElementById("seat-query-status");
+
+        function showSeatQueryStatus(message) {
+          if (queryStatus) { queryStatus.textContent = message; queryStatus.style.display = message ? "block" : "none"; }
+        }
+        function markSeatResultsAsReference() {
+          if (liveBadge) liveBadge.style.display = "none";
+          if (seatGrid) seatGrid.querySelectorAll(".seat-chip-tag").forEach(function (tag) {
+            tag.textContent = "参考座位，当前日期状态未核验";
+          });
+          [seat1, seat2, seat3].forEach(function (select) {
+            if (select && select.options) Array.from(select.options).forEach(function (option) {
+              if (option.value) option.textContent = option.value + "（参考座位，当前日期状态未核验）";
+            });
+          });
+          if (seatGrid) seatGrid.querySelectorAll(".seat-chip").forEach(function (chip) {
+            chip.disabled = false; chip.classList.remove("occupied"); chip.removeAttribute("aria-disabled");
+          });
+          document.querySelectorAll("[data-area-pill]").forEach(function (pill) {
+            var region = LIVE_REGIONS_MAP[pill.getAttribute("data-area-pill")];
+            if (region) pill.textContent = region.name + "（参考目录）";
+          });
+          if (areaSelect && areaSelect.options) Array.from(areaSelect.options).forEach(function (option) {
+            var region = LIVE_REGIONS_MAP[option.value];
+            if (region) option.textContent = region.layerName + " · " + region.name + "（参考目录）";
+          });
+        }
+        function showSeatQueryError(error) {
+          markSeatResultsAsReference();
+          var message = error && error.code === "SCHOOL_AUTH_EXPIRED"
+            ? "学校授权已过期，请在第一步重新验证学号与密码；已选座位保留。"
+            : error && error.code === "CLOUD_AUTH_REQUIRED"
+              ? "云账号登录已过期，请重新登录 XPeach；已选座位保留。"
+              : "当前日期的实时状态暂不可用，已选座位仅作预约偏好，到执行时再核验。";
+          showSeatQueryStatus(message);
+        }
 
         var FALLBACK_AREAS = {
           "五层中区": { name: "五层中区", prefix: "01桌 ", seats: ["01桌 A座", "01桌 B座", "01桌 C座", "01桌 D座", "02桌 A座", "02桌 B座", "02桌 C座", "02桌 D座", "03桌 A座", "03桌 B座", "04桌 A座", "04桌 B座"] },
@@ -2349,6 +2401,7 @@ export function renderConsoleHtml(ctx = {}) {
 
         function populateSeatsFromList(seatItems) {
           if (!seat1 || !seat2 || !seat3) return;
+          var previous = [seat1.value, seat2.value, seat3.value];
           var html1 = "";
           var html2 = '<option value="">不设置备选</option>';
           var html3 = '<option value="">不设置备选</option>';
@@ -2388,9 +2441,10 @@ export function renderConsoleHtml(ctx = {}) {
             bindSeatChipsClick();
           }
           var pickPool = availableCodes.length > 0 ? availableCodes : seatItems.map(function (x) { return x.code; });
-          seat1.value = pickPool.length >= 1 ? pickPool[0] : "";
-          seat2.value = pickPool.length >= 2 ? pickPool[1] : "";
-          seat3.value = pickPool.length >= 3 ? pickPool[2] : "";
+          var codes = seatItems.map(function (item) { return String(item.code); });
+          seat1.value = codes.includes(previous[0]) ? previous[0] : (pickPool[0] || "");
+          seat2.value = codes.includes(previous[1]) && previous[1] !== seat1.value ? previous[1] : "";
+          seat3.value = codes.includes(previous[2]) && previous[2] !== seat1.value && previous[2] !== seat2.value ? previous[2] : "";
           updateSeatGridHighlights();
         }
 
@@ -2401,7 +2455,20 @@ export function renderConsoleHtml(ctx = {}) {
             pill.classList.toggle("active", pill.getAttribute("data-area-pill") === areaKey);
           });
 
+          var thisSeatQuery = ++seatQueryRevision;
+          var regionRevision = liveQueryRevision;
           if (LIVE_REGIONS_MAP[areaKey]) {
+            var referenceRegion = LIVE_REGIONS_MAP[areaKey];
+            if (displayedSeatArea !== areaKey) {
+              var sameArea = displayedSeatArea === referenceRegion.name;
+              var referenceSeats = seatCatalog[areaKey] || (FALLBACK_AREAS[referenceRegion.name]
+                ? FALLBACK_AREAS[referenceRegion.name].seats.map(function (code) {
+                    return { code: code, tag: "参考座位，状态未核验", available: true };
+                  }) : []);
+              if (!sameArea) populateSeatsFromList(referenceSeats);
+              else markSeatResultsAsReference();
+            }
+            displayedSeatArea = areaKey;
             var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
             apiFetch(
               "/api/v1/schools/haut/library/live-seats?region_id=" +
@@ -2411,7 +2478,12 @@ export function renderConsoleHtml(ctx = {}) {
               { method: "GET" }
             )
               .then(function (res) {
+                if (thisSeatQuery !== seatQueryRevision || regionRevision !== liveQueryRevision ||
+                    areaSelect.value !== areaKey || dateInput.value !== bDate) return;
                 var seats = (res.data && res.data.seats) || [];
+                if (seats.length) seatCatalog[areaKey] = seats.map(function (item) {
+                  return { code: item.short_name || item.seat_name || String(item.seat_id), tag: "参考座位，状态未核验", available: true };
+                });
                 if (seats.length > 0) {
                   populateSeatsFromList(
                     seats.map(function (s) {
@@ -2424,16 +2496,24 @@ export function renderConsoleHtml(ctx = {}) {
                       };
                     })
                   );
+                  showSeatQueryStatus("");
+                  if (liveBadge) liveBadge.style.display = "inline-flex";
+                } else {
+                  markSeatResultsAsReference();
+                  showSeatQueryStatus("当前日期未返回实时座位，已选座位仅作预约偏好，到执行时再核验。");
                 }
               })
-              .catch(function () {});
+              .catch(function (error) {
+                if (thisSeatQuery === seatQueryRevision && regionRevision === liveQueryRevision) showSeatQueryError(error);
+              });
             return;
           }
 
+          displayedSeatArea = areaKey;
           var fb = FALLBACK_AREAS[areaKey] || FALLBACK_AREAS["五层中区"];
           populateSeatsFromList(
             fb.seats.map(function (code) {
-              return { code: code, tag: "绑定学号后加载实时状态", available: true };
+              return { code: code, tag: "参考座位，状态未核验", available: true };
             })
           );
         }
@@ -2449,6 +2529,10 @@ export function renderConsoleHtml(ctx = {}) {
 
         function loadLiveRegionsIfBound() {
           if (!areaSelect) return;
+          var revision = ++liveQueryRevision;
+          ++seatQueryRevision;
+          markSeatResultsAsReference();
+          showSeatQueryStatus("正在查询所选日期；参考座位不代表当前空闲。");
           var hasBoundAccount = Boolean(document.getElementById("btn-revoke-binding"));
           if (hasBoundAccount) setActionButtonsRegionLoading(true);
           var bDate = (dateInput && dateInput.value) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
@@ -2456,8 +2540,14 @@ export function renderConsoleHtml(ctx = {}) {
             method: "GET"
           })
             .then(function (res) {
+              if (revision !== liveQueryRevision || dateInput.value !== bDate) return;
               var regions = (res.data && res.data.regions) || [];
-              if (!regions.length) return;
+              if (!regions.length) {
+                showSeatQueryStatus("当前日期未返回实时区域，已选座位仅作预约偏好，到执行时再核验。");
+                return;
+              }
+              var previousArea = areaSelect.value;
+              var previousAreaName = LIVE_REGIONS_MAP[previousArea] ? LIVE_REGIONS_MAP[previousArea].name : previousArea;
               LIVE_REGIONS_MAP = {};
               var optHtml = "";
               var pillsHtml = "";
@@ -2500,6 +2590,10 @@ export function renderConsoleHtml(ctx = {}) {
                 }
               });
               areaSelect.innerHTML = optHtml;
+              var previousRegion = regions.find(function (region) {
+                return String(region.region_id) === previousArea || region.region_name === previousAreaName;
+              });
+              areaSelect.value = String((previousRegion || regions[0]).region_id);
               if (areaPillsBar && pillsHtml) {
                 areaPillsBar.innerHTML = pillsHtml;
                 areaPillsBar.querySelectorAll("[data-area-pill]").forEach(function (pill) {
@@ -2509,14 +2603,13 @@ export function renderConsoleHtml(ctx = {}) {
                   });
                 });
               }
-              if (liveBadge) {
-                liveBadge.style.display = "inline-flex";
-              }
               populateSeatsForArea();
             })
-            .catch(function () {})
+            .catch(function (error) {
+              if (revision === liveQueryRevision) showSeatQueryError(error);
+            })
             .finally(function () {
-              if (hasBoundAccount) setActionButtonsRegionLoading(false);
+              if (hasBoundAccount && revision === liveQueryRevision) setActionButtonsRegionLoading(false);
             });
         }
 

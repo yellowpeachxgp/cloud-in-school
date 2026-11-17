@@ -44,6 +44,7 @@ import { queryStationHours } from "../../../examples/parcel-station-plugin/dist/
 import {
   renderConsoleHtml,
   renderMobileCallbackHtml,
+  renderLoginRecoveryHtml,
   CONSOLE_UI_VERSION
 } from "../../console/src/main.mjs";
 import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs";
@@ -5204,12 +5205,14 @@ export function createCampusCloudApp(options = {}) {
       };
     }
     let httpTask = null;
+    let requestPathname = null;
     if (upperMethodEarly !== "GET") httpTask = registerLifecycleTask("http");
     try {
       store.recoverDurabilitySync?.();
       store.assertStorageWritable?.();
       const parsedUrl = new URL(url, "http://localhost");
       const pathname = parsedUrl.pathname;
+      requestPathname = pathname;
       const upperMethod = upperMethodEarly;
 
       // Static assets copied 1:1 from xpeach-sso (/static/app.css, /static/app.js, /static/xpeach-logo.png)
@@ -5697,6 +5700,26 @@ export function createCampusCloudApp(options = {}) {
       };
     } catch (err) {
       const errEnv = errorEnvelope(err, requestId);
+      const accept = String(headers?.accept || headers?.Accept || "");
+      if (requestPathname === "/api/v1/auth/oidc/callback" && err?.code === "CLOUD_AUTH_REQUIRED" &&
+          accept.includes("text/html") && !accept.includes("application/json")) {
+        // 旧回调仍拒绝重放；已有独立有效会话时回到工作台，不重新签发票据。
+        let currentSession = null;
+        try { currentSession = identity.verifyWebSessionCookie(headers?.cookie || headers?.Cookie || "", nowMs); } catch {}
+        return {
+          status: currentSession ? 303 : errEnv.httpStatus,
+          headers: {
+            ...SECURITY_HEADERS,
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+            "x-request-id": requestId,
+            ...(currentSession ? { Location: "/reservations" } : {})
+          },
+          rawBody: currentSession ? "" : renderLoginRecoveryHtml(),
+          body: errEnv.body
+        };
+      }
       return {
         status: errEnv.httpStatus,
         headers: {
