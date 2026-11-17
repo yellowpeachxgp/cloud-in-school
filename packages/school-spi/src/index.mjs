@@ -2654,6 +2654,9 @@ export class HautLibraryProvider {
                 binding
               );
               rawToken = freshAuth.rawToken;
+              // 401 已明确拒绝本次请求；续期后在原有有限轮次内重新查询同一目标，
+              // 不能刷新成功后因无占位/未开放标记而直接退出。未知提交仍在上层回查。
+              continue;
             } catch (reauthErr) {
               lastMsg = reauthErr?.message || lastMsg;
             }
