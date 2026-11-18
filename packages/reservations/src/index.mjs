@@ -301,6 +301,36 @@ export class TripleScheduleEngine {
     ) {
       throw new ContractError("CONFLICT", "Binding and consent authorization versions do not match");
     }
+    const userRecord = this.store.users?.get(cloudUserId);
+    const userAuthVer = Number(userRecord?.auth_version || 1);
+    if (
+      Number(binding.auth_version || 1) !== userAuthVer ||
+      Number(consent.auth_version || 1) !== userAuthVer
+    ) {
+      throw new ContractError(
+        "CONSENT_WITHDRAWN",
+        "Binding or consent authorization version is stale; please reauthorize before creating a plan"
+      );
+    }
+    if (typeof this.store.recordsForUser === "function") {
+      const latestActiveConsent =
+        typeof this.store.getLatestActiveConsent === "function"
+          ? this.store.getLatestActiveConsent(cloudUserId, binding.school_id)
+          : (() => {
+              const activeSchoolConsents = this.store
+                .recordsForUser("consents", cloudUserId)
+                .filter((c) => (c.school_id || binding.school_id) === binding.school_id && !c.withdrawn_at);
+              return activeSchoolConsents.length > 0
+                ? activeSchoolConsents[activeSchoolConsents.length - 1]
+                : null;
+            })();
+      if (latestActiveConsent && latestActiveConsent.id !== consent.id) {
+        throw new ContractError(
+          "CONSENT_WITHDRAWN",
+          "委托同意记录已更新，请重新确认最新授权后创建抢座计划"
+        );
+      }
+    }
 
     // Conflict check: same user/student_no + date active or in-flight job across bindings/devices
     const targetStudentNo = String(binding.student_no || "").trim();

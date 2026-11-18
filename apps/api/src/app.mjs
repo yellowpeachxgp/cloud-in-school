@@ -758,19 +758,12 @@ export function createCampusCloudApp(options = {}) {
   register("POST", "/api/v1/me/consents", "grantConsent", "bearer", async ({ auth, body, nowMs }) => {
     const user = store.users.get(auth.cloudUserId);
     const authVer = Number(user?.auth_version || 1);
-    const schoolId = body?.school_id || "haut";
+    const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
     const requestedScopes =
       Array.isArray(body?.scope_list) && body.scope_list.length > 0
         ? body.scope_list
         : ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"];
-    const existingActive = store
-      .recordsForUser("consents", auth.cloudUserId)
-      .find(
-        (c) =>
-          (c.school_id || DEFAULT_SCHOOL_ID) === schoolId &&
-          !c.withdrawn_at &&
-          Number(c.auth_version || 1) === authVer
-      );
+    const existingActive = store.getLatestActiveConsent(auth.cloudUserId, schoolId, authVer);
     if (existingActive) {
       const mergedScopes = Array.from(
         new Set([...(existingActive.scope_list || []), ...requestedScopes])
@@ -778,7 +771,7 @@ export function createCampusCloudApp(options = {}) {
       existingActive.scope_list = mergedScopes;
       for (const b of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
         if (
-          b.school_id === schoolId &&
+          (b.school_id || DEFAULT_SCHOOL_ID) === schoolId &&
           !b.revoked_at &&
           b.status !== "REVOKED" &&
           Number(b.auth_version || 1) === authVer
@@ -804,7 +797,7 @@ export function createCampusCloudApp(options = {}) {
     store.indexUserScoped?.("consents", id, record.cloud_user_id);
     for (const b of store.recordsForUser("schoolBindings", auth.cloudUserId)) {
       if (
-        b.school_id === record.school_id &&
+        (b.school_id || DEFAULT_SCHOOL_ID) === record.school_id &&
         !b.revoked_at &&
         b.status !== "REVOKED" &&
         Number(b.auth_version || 1) === authVer
@@ -812,6 +805,7 @@ export function createCampusCloudApp(options = {}) {
         b.consent_id = record.id;
       }
     }
+    store.saveSnapshot?.();
     return { status: 201, code: "CONSENT_GRANTED", data: record };
   });
 
@@ -986,31 +980,32 @@ export function createCampusCloudApp(options = {}) {
     "initiateSchoolBinding",
     "bearer",
     async ({ auth, body, nowMs }) => {
-      const schoolId = body?.school_id || "haut";
+      const schoolId = body?.school_id || DEFAULT_SCHOOL_ID;
       if (!store.schoolIntegrations.has(schoolId)) {
         throw new ContractError("NOT_FOUND", `Unsupported school_id: ${schoolId}`);
       }
       const explicitSno = typeof body?.student_no === "string" ? body.student_no.trim() : "";
       const studentNo = explicitSno || "20240001";
       const authVer = Number(store.users.get(auth.cloudUserId)?.auth_version || 1);
-      const activeConsents = store
-        .recordsForUser("consents", auth.cloudUserId)
-        .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId && !c.withdrawn_at);
-      const latestConsent = activeConsents[activeConsents.length - 1] || null;
+      const latestConsent =
+        store.getLatestActiveConsent(auth.cloudUserId, schoolId, authVer) ||
+        store.getLatestActiveConsent(auth.cloudUserId, schoolId);
+      const reqConsentId = body?.consent_id ? String(body.consent_id).trim() : "";
+      if (reqConsentId) {
+        const reqConsent = store.consents.get(reqConsentId);
+        if (reqConsent && (reqConsent.withdrawn_at || reqConsent.cloud_user_id !== auth.cloudUserId)) {
+          throw new ContractError("CONSENT_WITHDRAWN", "Specified consent record is invalid or withdrawn");
+        }
+      }
+      const effectiveConsentId = latestConsent?.id || reqConsentId || null;
       if (explicitSno && explicitSno !== "haut_bound_user") {
-        const reusableBinding = store
-          .recordsForUser("schoolBindings", auth.cloudUserId)
-          .find(
-            (b) =>
-              b.school_id === schoolId &&
-              !b.revoked_at &&
-              b.status !== "REVOKED" &&
-              String(b.student_no || "").trim() === studentNo &&
-              Number(b.auth_version || 1) === authVer
-          );
+        const reusableBinding = store.getPreferredActiveSchoolBinding(auth.cloudUserId, schoolId, {
+          studentNo,
+          authVersion: authVer,
+          nowMs
+        });
         if (reusableBinding) {
-          reusableBinding.consent_id =
-            body?.consent_id || latestConsent?.id || reusableBinding.consent_id || null;
+          reusableBinding.consent_id = effectiveConsentId || reusableBinding.consent_id || null;
           store.saveSnapshot();
           return { status: 201, code: "SCHOOL_BINDING_INITIATED", data: reusableBinding };
         }
@@ -1028,7 +1023,7 @@ export function createCampusCloudApp(options = {}) {
         status: "PENDING_DELEGATION",
         credential_ref: null,
         credential_expires_at: null,
-        consent_id: body?.consent_id || latestConsent?.id || null,
+        consent_id: effectiveConsentId,
         auth_version: authVer,
         created_at: new Date(nowMs).toISOString(),
         revoked_at: null
@@ -1104,10 +1099,10 @@ export function createCampusCloudApp(options = {}) {
         }
       }
       const authVer = Number(store.users.get(auth.cloudUserId)?.auth_version || 1);
-      const activeConsents = store
-        .recordsForUser("consents", auth.cloudUserId)
-        .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === binding.school_id && !c.withdrawn_at);
-      let latestConsent = activeConsents[activeConsents.length - 1] || null;
+      let latestConsent =
+        store.getLatestActiveConsent?.(auth.cloudUserId, binding.school_id, authVer) ||
+        store.getLatestActiveConsent?.(auth.cloudUserId, binding.school_id, null) ||
+        null;
       if (!latestConsent) {
         const cid = crypto.randomUUID();
         latestConsent = {
@@ -1128,7 +1123,8 @@ export function createCampusCloudApp(options = {}) {
       binding.credential_expires_at = encrypted.expires_at;
       binding.status = "DELEGATED_ACTIVE";
       binding.auth_version = authVer;
-      binding.consent_id = body?.consent_id || latestConsent?.id || binding.consent_id || null;
+      binding.consent_id = latestConsent?.id || body?.consent_id || binding.consent_id || null;
+      store.clearIntegrityReconfirmForBindings?.([binding]);
       if (latestConsent) {
         latestConsent.auth_version = authVer;
       }
@@ -1203,17 +1199,18 @@ export function createCampusCloudApp(options = {}) {
         userObj._lastBindCommitSeq = Number(userObj._lastBindCommitSeq || 0) + 1;
       }
       const authVer = Number(userObj?.auth_version || 1);
-      const activeConsents = store
-        .recordsForUser("consents", auth.cloudUserId)
-        .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === binding.school_id && !c.withdrawn_at);
-      const latestConsent = activeConsents[activeConsents.length - 1] || null;
+      const latestConsent =
+        store.getLatestActiveConsent?.(auth.cloudUserId, binding.school_id, authVer) ||
+        store.getLatestActiveConsent?.(auth.cloudUserId, binding.school_id, null) ||
+        null;
       store.encryptedCredentials.set(encrypted.id, encrypted);
       binding.credential_ref = encrypted.id;
       binding.credential_expires_at = encrypted.expires_at;
       binding.revoked_at = null;
       binding.status = "DELEGATED_ACTIVE";
       binding.auth_version = authVer;
-      binding.consent_id = body?.consent_id || latestConsent?.id || null;
+      binding.consent_id = latestConsent?.id || body?.consent_id || null;
+      store.clearIntegrityReconfirmForBindings?.([binding]);
       if (latestConsent) {
         latestConsent.auth_version = authVer;
       }
@@ -2648,10 +2645,11 @@ export function createCampusCloudApp(options = {}) {
         const userConsentsForSchool = store
           .recordsForUser("consents", auth.cloudUserId)
           .filter((c) => (c.school_id || DEFAULT_SCHOOL_ID) === schoolId);
-        const activeConsentsForSchool = userConsentsForSchool.filter((c) => !c.withdrawn_at);
         let activeConsentForBind = reqConsentId
           ? store.consents.get(reqConsentId)
-          : activeConsentsForSchool[activeConsentsForSchool.length - 1] || null;
+          : store.getLatestActiveConsent?.(auth.cloudUserId, schoolId, serverAuthVersion) ||
+            store.getLatestActiveConsent?.(auth.cloudUserId, schoolId, null) ||
+            null;
 
         if (!activeConsentForBind && userConsentsForSchool.length === 0) {
           const cid = crypto.randomUUID();
@@ -2693,8 +2691,18 @@ export function createCampusCloudApp(options = {}) {
           for (const targetBind of sameStudentBindings) {
             targetBind.status = "DELEGATED_ACTIVE";
             targetBind.auth_version = serverAuthVersion;
-            if (activeConsentForBind && !targetBind.consent_id) {
-              targetBind.consent_id = activeConsentForBind.id;
+            if (activeConsentForBind) {
+              const curBindConsent = targetBind.consent_id
+                ? store.consents.get(targetBind.consent_id)
+                : null;
+              if (
+                !curBindConsent ||
+                curBindConsent.withdrawn_at ||
+                Number(curBindConsent.auth_version || 1) !== serverAuthVersion ||
+                (!reqConsentId && curBindConsent.id !== activeConsentForBind.id)
+              ) {
+                targetBind.consent_id = activeConsentForBind.id;
+              }
             }
           }
         }
@@ -2712,6 +2720,7 @@ export function createCampusCloudApp(options = {}) {
             expiresAt: new Date(nowMs + 7 * 24 * 3600 * 1000).toISOString(),
             nowMs
           });
+          store.clearIntegrityReconfirmForBindings?.(sameStudentBindings);
           for (const targetBind of sameStudentBindings) {
             targetBind.status = "DELEGATED_ACTIVE";
             targetBind.auth_version = serverAuthVersion;
@@ -3274,7 +3283,13 @@ export function createCampusCloudApp(options = {}) {
             b.status !== "REVOKED" &&
             String(b.student_no || "").trim() === resolvedStudentNo
         );
-      let binding = sameStudentBindings[sameStudentBindings.length - 1] || null;
+      let binding =
+        store.getPreferredActiveSchoolBinding?.(auth.cloudUserId, schoolId, {
+          studentNo: resolvedStudentNo,
+          nowMs
+        }) ||
+        sameStudentBindings[sameStudentBindings.length - 1] ||
+        null;
       if (!binding) {
         const bindingId = crypto.randomUUID();
         binding = {
@@ -3336,10 +3351,10 @@ export function createCampusCloudApp(options = {}) {
         expiresAt: new Date(nowMs + 14 * 24 * 3600 * 1000).toISOString(),
         nowMs
       });
+      store.clearIntegrityReconfirmForBindings?.(sameStudentBindings);
 
-      let consent = store.recordsForUser("consents", auth.cloudUserId).find(
-        (c) => !c.withdrawn_at && Number(c.auth_version || 1) === currentAuthVersion
-      );
+      let consent =
+        store.getLatestActiveConsent?.(auth.cloudUserId, schoolId, currentAuthVersion) || null;
       if (!consent) {
         const cid = crypto.randomUUID();
         consent = {
@@ -3388,9 +3403,11 @@ export function createCampusCloudApp(options = {}) {
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) => !b.revoked_at && b.status !== "REVOKED" && b.credential_ref
-      );
+      const binding =
+        store.getPreferredActiveSchoolBinding?.(auth.cloudUserId, DEFAULT_SCHOOL_ID, {
+          requireCredential: true,
+          nowMs
+        }) || null;
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
       }
@@ -3439,9 +3456,11 @@ export function createCampusCloudApp(options = {}) {
         query.get("booking_date") ||
         query.get("date") ||
         new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      const binding = store.recordsForUser("schoolBindings", auth.cloudUserId).find(
-        (b) => !b.revoked_at && b.status !== "REVOKED" && b.credential_ref
-      );
+      const binding =
+        store.getPreferredActiveSchoolBinding?.(auth.cloudUserId, DEFAULT_SCHOOL_ID, {
+          requireCredential: true,
+          nowMs
+        }) || null;
       if (!binding) {
         throw new ContractError("CAMPUS_BINDING_REQUIRED", "请先绑定学号与统一认证密码");
       }

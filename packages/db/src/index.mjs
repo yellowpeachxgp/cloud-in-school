@@ -801,6 +801,69 @@ export class CloudDatabaseStore {
     return this._idxIdsByUser.get(collectionName)?.get(cloudUserId) || null;
   }
 
+  getLatestActiveConsent(cloudUserId, schoolId = DEFAULT_SCHOOL_ID, expectedAuthVersion = null) {
+    const cleanSchoolId = schoolId || DEFAULT_SCHOOL_ID;
+    const matching = this.recordsForUser("consents", cloudUserId).filter(
+      (c) =>
+        c &&
+        (c.school_id || DEFAULT_SCHOOL_ID) === cleanSchoolId &&
+        !c.withdrawn_at &&
+        (expectedAuthVersion == null || Number(c.auth_version || 1) === Number(expectedAuthVersion))
+    );
+    return matching.length > 0 ? matching[matching.length - 1] : null;
+  }
+
+  getPreferredActiveSchoolBinding(
+    cloudUserId,
+    schoolId = DEFAULT_SCHOOL_ID,
+    { studentNo = null, authVersion = null, requireCredential = false, nowMs = Date.now() } = {}
+  ) {
+    const cleanSchoolId = schoolId || DEFAULT_SCHOOL_ID;
+    const cleanStudentNo = studentNo != null ? String(studentNo).trim() : null;
+    const matching = this.recordsForUser("schoolBindings", cloudUserId).filter(
+      (b) =>
+        b &&
+        (b.school_id || DEFAULT_SCHOOL_ID) === cleanSchoolId &&
+        !b.revoked_at &&
+        b.status !== "REVOKED" &&
+        (cleanStudentNo == null || String(b.student_no || "").trim() === cleanStudentNo) &&
+        (authVersion == null || Number(b.auth_version || 1) === Number(authVersion)) &&
+        (!requireCredential || Boolean(b.credential_ref))
+    );
+    if (matching.length === 0) return null;
+    const healthy = matching.filter((b) => {
+      if (b.credential_needs_reconfirmation) return false;
+      if (!b.credential_ref) return !requireCredential;
+      const rec = this.encryptedCredentials.get(b.credential_ref);
+      if (!rec || rec.revoked_at || rec.binding_id !== b.id) return false;
+      if (rec.expires_at) {
+        const expMs = Date.parse(rec.expires_at);
+        if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+      }
+      return true;
+    });
+    const pool = healthy.length > 0 ? healthy : matching;
+    return pool[pool.length - 1];
+  }
+
+  clearIntegrityReconfirmForBindings(bindings) {
+    const CLEARABLE = new Set([
+      "INTEGRITY_MISMATCH",
+      "SHARED_CREDENTIAL_REF",
+      "MISMATCHED_RECORD_BINDING",
+      "CREDENTIAL_REF_SHARED_DETECTED"
+    ]);
+    for (const b of bindings || []) {
+      if (!b || !b.credential_needs_reconfirmation) continue;
+      if (!b.credential_reconfirm_reason || !CLEARABLE.has(b.credential_reconfirm_reason)) continue;
+      const rec = b.credential_ref ? this.encryptedCredentials.get(b.credential_ref) : null;
+      if (rec && rec.binding_id === b.id && !rec.revoked_at) {
+        b.credential_needs_reconfirmation = false;
+        b.credential_reconfirm_reason = null;
+      }
+    }
+  }
+
   _loadSnapshot() {
     if (!this.snapshotPath) return;
     try {
@@ -1855,6 +1918,40 @@ export class CloudDatabaseStore {
         }
       } else if (!p.user_intent_state) {
         p.user_intent_state = p.enabled === false ? "STOP_REQUESTED" : "ACTIVE";
+        mutated = true;
+      }
+    }
+
+    // 2b. Realign active bindings whose consent_id was pinned to an earlier
+    // un-withdrawn consent of the same (user, school, auth_version) onto the
+    // canonical latest active consent so new plans pass _isJobAuthorizationCurrent.
+    for (const b of this.schoolBindings.values()) {
+      if (!b || b.revoked_at || b.status === "REVOKED") continue;
+      const user = this.users.get(b.cloud_user_id);
+      const userAuthVer = Number(user?.auth_version || 1);
+      if (Number(b.auth_version || 1) !== userAuthVer) continue;
+      const schoolId = b.school_id || DEFAULT_SCHOOL_ID;
+      const latestConsent = this.getLatestActiveConsent(b.cloud_user_id, schoolId, userAuthVer);
+      if (!latestConsent || b.consent_id === latestConsent.id) continue;
+      const curConsent = b.consent_id ? this.consents.get(b.consent_id) : null;
+      const isSupersededSameGenerationConsent =
+        !curConsent ||
+        (!curConsent.withdrawn_at &&
+          curConsent.cloud_user_id === b.cloud_user_id &&
+          (curConsent.school_id || DEFAULT_SCHOOL_ID) === schoolId &&
+          Number(curConsent.auth_version || 1) === userAuthVer);
+      if (!isSupersededSameGenerationConsent) continue;
+      const hasEnabledPlanUsingCurrentConsent =
+        Boolean(curConsent) &&
+        Array.from(this.reservationPlans.values()).some(
+          (p) =>
+            p &&
+            p.enabled === true &&
+            p.school_binding_id === b.id &&
+            p.consent_id === curConsent.id
+        );
+      if (!hasEnabledPlanUsingCurrentConsent) {
+        b.consent_id = latestConsent.id;
         mutated = true;
       }
     }

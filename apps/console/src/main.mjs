@@ -2716,6 +2716,14 @@ export function renderConsoleHtml(ctx = {}) {
             var cList = ((results[1].data && results[1].data.consents) || []).slice().reverse();
             var activeBinding =
               bList.find(function (b) {
+                return (
+                  !b.revoked_at &&
+                  (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE") &&
+                  !b.credential_needs_reconfirmation &&
+                  b.credential_ref
+                );
+              }) ||
+              bList.find(function (b) {
                 return !b.revoked_at && (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE");
               }) ||
               bList.find(function (b) {
@@ -2725,25 +2733,30 @@ export function renderConsoleHtml(ctx = {}) {
               throw new Error("请先在左侧第一步填写并验证绑定您的校园学号");
             }
             var bindAuthVer = Number(activeBinding.auth_version || 1);
-            var matchedConsent =
-              (activeBinding.consent_id
-                ? cList.find(function (c) {
-                    return (
-                      c.id === activeBinding.consent_id &&
-                      !c.withdrawn_at &&
-                      Number(c.auth_version || 1) === bindAuthVer
-                    );
-                  })
-                : null) ||
-              cList.find(function (c) {
-                return (
-                  !c.withdrawn_at &&
-                  (c.school_id || "haut") === (activeBinding.school_id || "haut") &&
-                  Number(c.auth_version || 1) === bindAuthVer
-                );
-              });
-            if (matchedConsent && (!activeBinding.consent_id || activeBinding.consent_id === matchedConsent.id)) {
-              return { bindingId: activeBinding.id, consentId: matchedConsent.id };
+            var bindSchoolId = activeBinding.school_id || "haut";
+            var latestSchoolConsent = cList.find(function (c) {
+              return (
+                !c.withdrawn_at &&
+                (c.school_id || "haut") === bindSchoolId &&
+                Number(c.auth_version || 1) === bindAuthVer
+              );
+            });
+            if (latestSchoolConsent) {
+              if (activeBinding.consent_id && activeBinding.consent_id !== latestSchoolConsent.id) {
+                var alignedBinding = bList.find(function (b) {
+                  return (
+                    !b.revoked_at &&
+                    (b.status === "DELEGATED_ACTIVE" || b.status === "ACTIVE") &&
+                    (b.school_id || "haut") === bindSchoolId &&
+                    Number(b.auth_version || 1) === bindAuthVer &&
+                    b.consent_id === latestSchoolConsent.id
+                  );
+                });
+                if (alignedBinding) {
+                  activeBinding = alignedBinding;
+                }
+              }
+              return { bindingId: activeBinding.id, consentId: latestSchoolConsent.id };
             }
             return apiFetch("/api/v1/me/consents", {
               method: "POST",
