@@ -1,0 +1,20 @@
+# INF-01 secret-scan allowlist
+# 格式：ip <精确IP或IPv4/CIDR> <路径glob> # 原因
+# 格式：token <规则名> <路径glob> # 原因
+# 只允许窄路径豁免；新增豁免必须说明原因并接受安全交叉审阅。
+
+# INF-01 前已经公开的既有生产/SSO 拓扑文档；不是开发机地址。
+ip 103.236.61.117 docs/** # 既有 Campus Cloud 生产拓扑文档，INF-01 前已公开
+ip 40.160.138.219 docs/** # 既有 XPEACH SSO 拓扑文档，INF-01 前已公开
+
+# 安全测试与文档中的合成 SSRF/代理攻击向量；不代表真实校园或开发机基础设施。
+ip 169.254.169.254 docs/security/** # SSRF 防护文档中的云元数据攻击向量示例
+ip 169.254.169.254 tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip 10.0.0.1 tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip 172.16.0.5 tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip 192.168.1.1 tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip 10.0.0.2 core/database/src/test/kotlin/cn/edu/haut/campus/core/database/CloudIdentityPrivacyRegressionTest.kt # 合成代理配置回归测试输入
+ip 2001:250:4803::31 core/campusservices/src/main/kotlin/cn/edu/haut/campus/core/campusservices/HautLibraryOpacClient.kt # 已公开的学校权威 DNS 死 IPv6 注释，代码实际刻意规避该地址
+
+# triple-schedule 测试必须使用 JWT 外形验证伪造令牌不会被当作真实凭据；这些值是合成测试数据。
+token jwt tests/triple-schedule.test.mjs # 合成 JWT 外形测试数据，非真实令牌
