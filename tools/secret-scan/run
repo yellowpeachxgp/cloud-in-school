@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# cis-gate integration wrapper. Runtime-only sensitive literals are gathered in
+# the process environment or from the executing account; nothing is written to
+# the repository or printed in clear text by the scanner output.
+set -euo pipefail
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+
+scan_args=("--root" "$repo_root")
+if env | grep -q '^CIS_CAMPUS_ROOT='; then
+  if command -v id >/dev/null 2>&1; then
+    runtime_user=$(id -un 2>/dev/null || true)
+    runtime_user_len=$(printf '%s' "$runtime_user" | wc -c | tr -d ' ')
+    if [ "$runtime_user_len" -ge 4 ]; then
+      scan_args+=("--extra-literal" "$runtime_user")
+    fi
+  fi
+  runtime_host=$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)
+  runtime_host_len=$(printf '%s' "$runtime_host" | wc -c | tr -d ' ')
+  if [ "$runtime_host_len" -ge 4 ]; then
+    scan_args+=("--extra-literal" "$runtime_host")
+  fi
+fi
+
+exec node "$script_dir/scan.mjs" "${scan_args[@]}" "$@"

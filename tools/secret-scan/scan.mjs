@@ -250,8 +250,10 @@ function readAllowlist(root) {
     }
     const owner = metadataValue(comment, "owner");
     const expiry = metadataValue(comment, "expiry");
+    const classification = metadataValue(comment, "class");
     const reason = metadataReason(comment);
     if (!owner) errors.push("line " + sourceLine + ": missing owner=<owner> metadata");
+    if (!classification) errors.push("line " + sourceLine + ": missing class=<class> metadata");
     if (!expiry || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
       errors.push("line " + sourceLine + ": missing or invalid expiry=YYYY-MM-DD metadata");
     } else {
@@ -259,7 +261,7 @@ function readAllowlist(root) {
       if (!Number.isFinite(expiryTime) || expiryTime < Date.now()) errors.push("line " + sourceLine + ": expired allowlist entry");
     }
     if (!reason) errors.push("line " + sourceLine + ": missing reason=<text> metadata");
-    entries.push({ rule, hash, pathGlob, line, owner, expiry, reason, sourceLine, usedCount: 0 });
+    entries.push({ rule, hash, pathGlob, line, owner, expiry, classification, reason, sourceLine, usedCount: 0 });
   }
   if (errors.length > 0) {
     throw new Error("invalid tools/secret-scan/allowlist.txt: " + errors.join("; "));

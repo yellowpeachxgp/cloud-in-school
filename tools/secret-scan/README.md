@@ -62,7 +62,11 @@ fingerprint 是命中值本身的 SHA-256 十六进制摘要；因此白名单�
 
 ## cis-gate 集成
 
-cis-gate 的 secrets 门禁应在检出待测 SHA 后执行：
+cis-gate 的 secrets 门禁应在检出待测 SHA 后优先执行可执行包装器：
+
+    tools/secret-scan/run
+
+包装器会调用 scan.mjs；当 CIS_CAMPUS_ROOT 已在进程环境中存在时，会把当前执行账号和 hostname 作为运行时 --extra-literal 传入，用于覆盖开发机账号/地址而不在仓库中硬编码。直接手工扫描仍可使用：
 
     node tools/secret-scan/scan.mjs --root .
 
