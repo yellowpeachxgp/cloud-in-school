@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Run Gradle through the campus devbox resource guards.
+# Usage: cis-gradle <gradle-task-or-option> [...]
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=cis-common.sh
+. "$SCRIPT_DIR/cis-common.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: cis-gradle <gradle-task-or-option> [...]
+
+Runs ./gradlew from the current build checkout after:
+  * waiting for the campus PAUSE file to disappear;
+  * waiting until MemAvailable is at least 24 GiB;
+  * acquiring one of four flock build slots;
+  * setting the campus Gradle cache and Android SDK paths; and
+  * preferring a systemd user scope with MemoryMax=10G when available.
+USAGE
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 64
+fi
+
+[ -x ./gradlew ] || cis_die "cis-gradle must be run from a checkout containing executable ./gradlew"
+cis_need_cmd flock
+cis_need_cmd awk
+
+mkdir -p "$CIS_CAMPUS_ROOT/locks" "$CIS_CAMPUS_ROOT/cache/gradle" "$CIS_CAMPUS_ROOT/android-sdk"
+
+SLOT=0
+try_slot() {
+  local slot=$1
+  local lock="$CIS_CAMPUS_ROOT/locks/gradle.$slot.lock"
+  case "$slot" in
+    1)
+      exec 201>"$lock"
+      if flock -n 201; then SLOT=1; return 0; fi
+      exec 201>&-
+      ;;
+    2)
+      exec 202>"$lock"
+      if flock -n 202; then SLOT=2; return 0; fi
+      exec 202>&-
+      ;;
+    3)
+      exec 203>"$lock"
+      if flock -n 203; then SLOT=3; return 0; fi
+      exec 203>&-
+      ;;
+    4)
+      exec 204>"$lock"
+      if flock -n 204; then SLOT=4; return 0; fi
+      exec 204>&-
+      ;;
+  esac
+  return 1
+}
+
+while [ "$SLOT" -eq 0 ]; do
+  cis_wait_resources gradle
+  for candidate in 1 2 3 4; do
+    if try_slot "$candidate"; then
+      break
+    fi
+  done
+  if [ "$SLOT" -eq 0 ]; then
+    cis_info "all four Gradle build slots are busy; queueing"
+    sleep 5
+  fi
+done
+
+export GRADLE_USER_HOME=${GRADLE_USER_HOME:-$CIS_CAMPUS_ROOT/cache/gradle}
+export ANDROID_HOME=${ANDROID_HOME:-$CIS_CAMPUS_ROOT/android-sdk}
+export ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}
+export CI=${CI:-true}
+
+# The repository historically requests a 4 GiB daemon. Command-line system
+# properties have higher precedence and keep the campus daemon inside the
+# agreed budget without editing project files in every build checkout.
+gradlew_path=$(pwd -P)/gradlew
+base_cmd=(
+  "$gradlew_path"
+  "-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+  "-Dkotlin.daemon.jvmargs=-Xmx2g"
+  "$@"
+)
+
+runner=plain-jvm-caps
+unit_name="cis-gradle-$$"
+cmd=("${base_cmd[@]}")
+if command -v systemd-run >/dev/null 2>&1; then
+  true_bin=/usr/bin/true
+  [ -x "$true_bin" ] || true_bin=/bin/true
+  if systemd-run --user --scope --collect --unit "cis-gradle-probe-$$" "$true_bin" >/dev/null 2>&1; then
+    runner=systemd-user-scope-MemoryMax10G
+    cmd=(
+      systemd-run --user --scope --collect
+      -p MemoryMax=10G
+      --unit "$unit_name"
+      "${base_cmd[@]}"
+    )
+  fi
+fi
+
+memory_peak_file=
+memory_monitor_pid=
+scope_path=
+cleanup_memory_monitor() {
+  if [ -n "$memory_monitor_pid" ]; then
+    kill "$memory_monitor_pid" >/dev/null 2>&1 || true
+    wait "$memory_monitor_pid" >/dev/null 2>&1 || true
+    memory_monitor_pid=
+  fi
+}
+trap cleanup_memory_monitor EXIT
+
+if [ "$runner" = systemd-user-scope-MemoryMax10G ]; then
+  uid=$(id -u)
+  scope_path="/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/app.slice/${unit_name}.scope"
+  memory_peak_file="$CIS_CAMPUS_ROOT/artifacts/$unit_name.memory-peak"
+  mkdir -p "$CIS_CAMPUS_ROOT/artifacts"
+  printf '0\n' > "$memory_peak_file"
+  (
+    max=0
+    while :; do
+      value=0
+      if [ -r "$scope_path/memory.peak" ]; then
+        value=$(cat "$scope_path/memory.peak" 2>/dev/null || printf '0')
+      elif [ -r "$scope_path/memory.current" ]; then
+        value=$(cat "$scope_path/memory.current" 2>/dev/null || printf '0')
+      fi
+      case "$value" in ''|*[!0-9]*) value=0 ;; esac
+      if [ "$value" -gt "$max" ]; then
+        max=$value
+      fi
+      printf '%s\n' "$max" > "$memory_peak_file"
+      sleep 0.2
+    done
+  ) 201>&- 202>&- 203>&- 204>&- &
+  memory_monitor_pid=$!
+fi
+
+cis_info "acquired Gradle slot $SLOT; runner=$runner; GRADLE_USER_HOME=$GRADLE_USER_HOME; ANDROID_HOME=$ANDROID_HOME"
+
+set +e
+case "$SLOT" in
+  1) "${cmd[@]}" 201>&- ;;
+  2) "${cmd[@]}" 202>&- ;;
+  3) "${cmd[@]}" 203>&- ;;
+  4) "${cmd[@]}" 204>&- ;;
+esac
+rc=$?
+set -e
+
+cleanup_memory_monitor
+trap - EXIT
+if [ "$runner" = systemd-user-scope-MemoryMax10G ]; then
+  memory_peak_bytes=$(cat "$memory_peak_file" 2>/dev/null || printf '0')
+  rm -f -- "$memory_peak_file"
+  case "$memory_peak_bytes" in ''|*[!0-9]*) memory_peak_bytes=0 ;; esac
+  if [ "$memory_peak_bytes" -gt 0 ]; then
+    printf 'CIS_GRADLE_MEMORY_PEAK_BYTES=%s\n' "$memory_peak_bytes"
+  fi
+  printf 'CIS_GRADLE_MEMORY_MAX_BYTES=%s\n' '10737418240'
+fi
+
+case "$SLOT" in
+  1) exec 201>&- ;;
+  2) exec 202>&- ;;
+  3) exec 203>&- ;;
+  4) exec 204>&- ;;
+esac
+
+exit "$rc"

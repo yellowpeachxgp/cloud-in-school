@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Local helper: create an exclusive source worktree and configure its devbox remote.
+set -Eeuo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: CIS_DEVBOX=<ssh-target> CIS_CAMPUS_ROOT=<campus-root> CIS_LOCAL_WORKTREE_ROOT=<local-campus-worktrees> cis-worktree <repository> <new-branch> [base-ref]
+
+Creates a local exclusive worktree below CIS_LOCAL_WORKTREE_ROOT from
+origin/main or base-ref, then adds a remote named devbox pointing at
+<campus-root>/repos/<repository>.git. CIS_DEVBOX, CIS_CAMPUS_ROOT, and
+CIS_LOCAL_WORKTREE_ROOT are read only from the environment and are never hard-coded.
+USAGE
+}
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  usage
+  exit 64
+fi
+
+input_repo=$1
+branch=$2
+base_ref=${3:-origin/main}
+case "$input_repo" in
+  day-in-school|day|android) repo=day-in-school ;;
+  cloud-in-school|cloud) repo=cloud-in-school ;;
+  *) printf 'unknown repository: %s\n' "$input_repo" >&2; exit 2 ;;
+esac
+
+if [ -z "${CIS_DEVBOX:-}" ] || [ -z "${CIS_CAMPUS_ROOT:-}" ]; then
+  printf '%s\n' 'CIS_DEVBOX and CIS_CAMPUS_ROOT are required so the devbox git remote can be configured' >&2
+  exit 2
+fi
+remote_root=${CIS_CAMPUS_ROOT%/}
+case "$remote_root" in
+  ''|/) printf '%s\n' 'CIS_CAMPUS_ROOT must be a non-root absolute path' >&2; exit 2 ;;
+  /*) ;;
+  *) printf '%s\n' 'CIS_CAMPUS_ROOT must be an absolute path' >&2; exit 2 ;;
+esac
+case "$remote_root" in
+  *[!A-Za-z0-9._/-]*)
+    printf '%s\n' 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash' >&2
+    exit 2
+    ;;
+esac
+
+git check-ref-format --branch "$branch" >/dev/null 2>&1 || { printf 'invalid branch name: %s\n' "$branch" >&2; exit 2; }
+if [ -z "${CIS_LOCAL_WORKTREE_ROOT:-}" ]; then
+  printf '%s\n' 'CIS_LOCAL_WORKTREE_ROOT is required; no machine-specific local path is hard-coded' >&2
+  exit 2
+fi
+local_root=${CIS_LOCAL_WORKTREE_ROOT%/}
+seed="$local_root/$repo/_seed"
+target="$local_root/$repo/$branch"
+[ -d "$seed/.git" ] || { printf 'missing seed clone: %s\n' "$seed" >&2; exit 2; }
+[ ! -e "$target" ] || { printf 'target worktree already exists: %s\n' "$target" >&2; exit 2; }
+
+if git -C "$seed" show-ref --verify --quiet "refs/heads/$branch"; then
+  printf 'local branch already exists: %s\n' "$branch" >&2
+  exit 2
+fi
+
+git -C "$seed" fetch --prune origin
+mkdir -p "$(dirname -- "$target")"
+git -C "$seed" worktree add -b "$branch" "$target" "$base_ref"
+
+git -C "$target" remote remove devbox >/dev/null 2>&1 || true
+git -C "$target" remote add devbox "$CIS_DEVBOX:$remote_root/repos/$repo.git"
+
+printf 'CIS_WORKTREE=%s\n' "$target"
+printf 'CIS_WORKTREE_BRANCH=%s\n' "$branch"
+printf '%s\n' 'Next: commit, then run: git push devbox <branch>; ssh "$CIS_DEVBOX" "$CIS_CAMPUS_ROOT/bin/cis-gate" <repository> <branch> <gate>'

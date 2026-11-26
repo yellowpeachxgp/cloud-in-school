@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# Campus devbox gate runner.
+# Usage: cis-gate <day-in-school|cloud-in-school> <branch> <quick|android|android-full|cloud|contracts|secrets> [gate arguments]
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=cis-common.sh
+. "$SCRIPT_DIR/cis-common.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: cis-gate <repository> <branch> <gate> [arguments]
+
+Repositories: day-in-school, cloud-in-school (aliases: android/day, cloud)
+Gates:
+  quick <module> [...]   run module testDebugUnitTest task(s)
+  android                run JVM/unit tests, debug lint, debug assemble
+  android-full           run android plus release lint/assemble
+  cloud                  run npm ci, npm test, npm run contract:check
+  contracts              run local contract validation and compare contracts/ with other repository main
+  secrets                run tools/secret-scan when INF-01 has provided it
+
+The runner resolves the branch in the campus bare repository to an exact SHA,
+checks that SHA out below build/<repository>/<branch>, writes the complete log
+below logs/<repository>/<branch>, and prints only the exit code, SHA, duration,
+log path, memory summary, and the last about 60 log lines.
+USAGE
+}
+
+if [ "$#" -lt 3 ]; then
+  usage
+  exit 64
+fi
+
+input_repo=$1
+branch=$2
+gate=$3
+shift 3
+
+case "$input_repo" in
+  day-in-school|day|android) repo=day-in-school ;;
+  cloud-in-school|cloud) repo=cloud-in-school ;;
+  *) cis_die "unknown repository: $input_repo" ;;
+esac
+
+case "$gate" in
+  quick|android|android-full|cloud|contracts|secrets) ;;
+  *) cis_die "unknown gate: $gate" ;;
+esac
+
+cis_need_cmd git
+cis_need_cmd flock
+cis_need_cmd awk
+cis_need_cmd tail
+cis_need_cmd date
+
+bare="$CIS_CAMPUS_ROOT/repos/$repo.git"
+[ -d "$bare/objects" ] || cis_die "bare repository is missing: $bare; run cis-provision repos first"
+
+if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+  cis_die "invalid branch name: $branch"
+fi
+
+ref="refs/heads/$branch"
+if ! sha=$(git --git-dir="$bare" rev-parse --verify "$ref^{commit}" 2>/dev/null); then
+  cis_die "branch not present in campus bare repository: $repo/$branch; push it to the devbox remote first"
+fi
+
+build_dir="$CIS_CAMPUS_ROOT/build/$repo/$branch"
+log_dir="$CIS_CAMPUS_ROOT/logs/$repo/$branch"
+key=$(cis_branch_key "$repo/$branch")
+gate_lock="$CIS_CAMPUS_ROOT/locks/gate-$repo-$key.lock"
+log="$log_dir/$sha-$gate.log"
+memstat="$log.memstat"
+summary="$log.summary"
+
+mkdir -p "$CIS_CAMPUS_ROOT/locks" "$log_dir" "$CIS_CAMPUS_ROOT/artifacts"
+
+printf 'cis: waiting for gate lock for %s/%s\n' "$repo" "$branch" >&2
+exec 300>"$gate_lock"
+flock 300
+printf 'cis: gate lock acquired for %s/%s at %s\n' "$repo" "$branch" "$sha" >&2
+
+prepare_worktree() {
+  case "$build_dir" in
+    "$CIS_CAMPUS_ROOT/build/$repo"/*) ;;
+    *) cis_die "refusing unexpected build path: $build_dir" ;;
+  esac
+
+  git --git-dir="$bare" worktree prune
+  if git --git-dir="$bare" worktree list --porcelain     | awk -v path="$build_dir" '$0 == "worktree " path { found=1 } END { exit(found ? 0 : 1) }'; then
+    git --git-dir="$bare" worktree remove --force "$build_dir"
+  fi
+  if [ -e "$build_dir" ]; then
+    cis_require_under_campus "$build_dir"
+    rm -rf -- "$build_dir"
+  fi
+  mkdir -p "$(dirname -- "$build_dir")"
+  git --git-dir="$bare" worktree add --detach "$build_dir" "$sha"
+
+  if [ "$repo" = day-in-school ]; then
+    printf 'sdk.dir=%s\n' "$CIS_CAMPUS_ROOT/android-sdk" > "$build_dir/local.properties"
+  fi
+}
+
+run_optional_android_quality_gates() {
+  # W0-07 owns the implementation of these checks. They are deliberately
+  # discovered rather than hard-coded so the current baseline remains truthful
+  # before that card merges, and future checks are executed without changing
+  # this runner's command-line contract.
+  if [ -x tools/dep-check/run ]; then
+    tools/dep-check/run
+  elif [ -x tools/dep-check/run.sh ]; then
+    tools/dep-check/run.sh
+  fi
+  if [ -x tools/file-line-gate/run ]; then
+    tools/file-line-gate/run
+  elif [ -x tools/file-line-gate/run.sh ]; then
+    tools/file-line-gate/run.sh
+  fi
+}
+
+run_quick() {
+  if [ "$#" -eq 0 ]; then
+    printf '%s\n' 'quick gate requires at least one Gradle module (for example :core:model)' >&2
+    return 64
+  fi
+  local tasks=()
+  local module
+  for module in "$@"; do
+    case "$module" in
+      :*) tasks+=("$module:testDebugUnitTest") ;;
+      *) tasks+=(":$module:testDebugUnitTest") ;;
+    esac
+  done
+  cd "$build_dir"
+  "$SCRIPT_DIR/cis-gradle" "${tasks[@]}"
+}
+
+android_tasks() {
+  local tasks=(testDebugUnitTest :app:lintDebug :app:assembleDebug)
+  if grep -RIl --include='build.gradle.kts' -e roborazzi . >/dev/null 2>&1; then
+    tasks+=(verifyRoborazziDebug)
+  fi
+  if [ "$gate" = android-full ]; then
+    tasks+=(:app:lintRelease :app:assembleRelease)
+  fi
+  printf '%s\n' "${tasks[@]}"
+}
+
+run_android() {
+  cd "$build_dir"
+  mapfile -t tasks < <(android_tasks)
+  "$SCRIPT_DIR/cis-gradle" "${tasks[@]}"
+  run_optional_android_quality_gates
+}
+
+run_cloud() {
+  cd "$build_dir"
+  if [ -x "$CIS_CAMPUS_ROOT/node/bin/node" ]; then
+    PATH="$CIS_CAMPUS_ROOT/node/bin:$PATH"
+    export PATH
+  fi
+  export NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE:-$CIS_CAMPUS_ROOT/cache/npm}
+  npm ci
+  npm test
+  npm run contract:check
+}
+
+run_contracts() {
+  cd "$build_dir"
+  if [ "$repo" = cloud-in-school ]; then
+    npm run contract:check
+  else
+    node tools/contract-ci/validate-contracts.mjs
+  fi
+
+  local other_repo other_bare other_sha other_tmp diff_rc
+  if [ "$repo" = day-in-school ]; then
+    other_repo=cloud-in-school
+  else
+    other_repo=day-in-school
+  fi
+  other_bare="$CIS_CAMPUS_ROOT/repos/$other_repo.git"
+  other_sha=$(git --git-dir="$other_bare" rev-parse --verify 'refs/heads/main^{commit}')
+  other_tmp="$CIS_CAMPUS_ROOT/build/.contracts-$other_repo-$key-$$"
+  cis_require_under_campus "$other_tmp"
+  rm -rf -- "$other_tmp"
+  mkdir -p "$other_tmp"
+  git --git-dir="$other_bare" archive "$other_sha" contracts | tar -x -C "$other_tmp"
+
+  diff_rc=0
+  diff -qr "$build_dir/contracts" "$other_tmp/contracts" || diff_rc=$?
+  rm -rf -- "$other_tmp"
+  if [ "$diff_rc" -ne 0 ]; then
+    printf 'contracts differ from %s main (%s)\n' "$other_repo" "$other_sha" >&2
+    return "$diff_rc"
+  fi
+  printf 'contracts match %s main (%s)\n' "$other_repo" "$other_sha"
+}
+
+run_secrets() {
+  cd "$build_dir"
+  if [ -x tools/secret-scan/run ]; then
+    tools/secret-scan/run
+  elif [ -f tools/secret-scan/scan.mjs ]; then
+    node tools/secret-scan/scan.mjs
+  elif [ -x tools/secret-scan/scan ]; then
+    tools/secret-scan/scan
+  else
+    printf '%s\n' 'secrets scanner is missing: INF-01 has not merged tools/secret-scan yet' >&2
+    return 3
+  fi
+}
+
+run_gate() {
+  case "$gate" in
+    quick) run_quick "$@" ;;
+    android|android-full) run_android ;;
+    cloud) run_cloud ;;
+    contracts) run_contracts ;;
+    secrets) run_secrets ;;
+  esac
+}
+
+{
+  printf 'CIS_GATE_REPO=%s\n' "$repo"
+  printf 'CIS_GATE_BRANCH=%s\n' "$branch"
+  printf 'CIS_GATE_SHA=%s\n' "$sha"
+  printf 'CIS_GATE=%s\n' "$gate"
+  printf 'CIS_GATE_ARGS=%s\n' "$*"
+  printf 'CIS_GATE_STARTED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\n' '---'
+} > "$log"
+: > "$memstat"
+
+(
+  while true; do
+    printf '%s %s %s\n' "$(date +%s)" "$(cis_mem_total_kb)" "$(cis_mem_available_kb)" >> "$memstat"
+    sleep 2
+  done
+) 300>&- &
+monitor_pid=$!
+cleanup_monitor() {
+  kill "$monitor_pid" >/dev/null 2>&1 || true
+  wait "$monitor_pid" >/dev/null 2>&1 || true
+}
+trap cleanup_monitor EXIT
+
+start_epoch=$(date +%s)
+if (
+  set -Eeuo pipefail
+  prepare_worktree
+  run_gate "$@"
+) 300>&- >>"$log" 2>&1; then
+  rc=0
+else
+  rc=$?
+fi
+end_epoch=$(date +%s)
+duration=$((end_epoch - start_epoch))
+cleanup_monitor
+trap - EXIT
+
+total_kb=$(cis_mem_total_kb)
+min_available_kb=$(awk '$3 != "" { if (min == "" || $3 < min) min = $3 } END { if (min == "") print 0; else print min }' "$memstat")
+if [ "$min_available_kb" -eq 0 ]; then
+  min_available_kb=$(cis_mem_available_kb)
+fi
+peak_total_used_kb=$((total_kb - min_available_kb))
+gradle_peak_bytes=$(awk -F= '$1 == "CIS_GRADLE_MEMORY_PEAK_BYTES" { value = $2 } END { print value }' "$log")
+
+{
+  printf 'CIS_GATE_EXIT_CODE=%s\n' "$rc"
+  printf 'CIS_GATE_SHA=%s\n' "$sha"
+  printf 'CIS_GATE_DURATION_SECONDS=%s\n' "$duration"
+  printf 'CIS_GATE_LOG=%s\n' "$log"
+  printf 'CIS_GATE_MIN_MEM_AVAILABLE_KB=%s\n' "$min_available_kb"
+  printf 'CIS_GATE_PEAK_TOTAL_MEMORY_USED_KB=%s\n' "$peak_total_used_kb"
+  if [ -n "$gradle_peak_bytes" ]; then
+    printf 'CIS_GATE_GRADLE_SCOPE_MEMORY_PEAK_BYTES=%s\n' "$gradle_peak_bytes"
+  fi
+  printf 'CIS_GATE_MEMORY_NOTE=%s\n' 'peak is host-wide MemTotal minus minimum MemAvailable sampled during the gate, not a per-process RSS measurement'
+} > "$summary"
+
+cat "$summary"
+printf '%s\n' '--- log tail (up to 60 lines) ---'
+tail -n 60 "$log" || true
+exit "$rc"

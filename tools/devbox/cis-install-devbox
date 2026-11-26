@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Copy the public repository scripts to the campus bin directory over SSH.
+set -Eeuo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: CIS_DEVBOX=<ssh-target> CIS_CAMPUS_ROOT=<campus-root> cis-install-devbox [--provision]
+
+Copies cis-* scripts from this repository checkout to <campus-root>/bin using
+scp (no ssh inline heredoc). With --provision, then runs cis-provision all on
+the devbox. The SSH target and campus root are read only from the environment;
+neither is hard-coded in this script.
+USAGE
+}
+
+if [ -z "${CIS_DEVBOX:-}" ] || [ -z "${CIS_CAMPUS_ROOT:-}" ]; then
+  usage
+  exit 2
+fi
+provision=false
+for arg in "$@"; do
+  case "$arg" in
+    --provision) provision=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'unknown argument: %s\n' "$arg" >&2; exit 64 ;;
+  esac
+done
+
+remote_root=${CIS_CAMPUS_ROOT%/}
+case "$remote_root" in
+  ''|/) printf '%s\n' 'CIS_CAMPUS_ROOT must be a non-root absolute path' >&2; exit 2 ;;
+  /*) ;;
+  *) printf '%s\n' 'CIS_CAMPUS_ROOT must be an absolute path' >&2; exit 2 ;;
+esac
+case "$remote_root" in
+  *[!A-Za-z0-9._/-]*)
+    printf '%s\n' 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash' >&2
+    exit 2
+    ;;
+esac
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+remote_bin="$remote_root/bin"
+
+ssh "$CIS_DEVBOX" "mkdir -p $remote_bin $remote_root/repos $remote_root/build $remote_root/cache/gradle $remote_root/cache/npm $remote_root/android-sdk $remote_root/locks $remote_root/logs $remote_root/artifacts"
+scp "$SCRIPT_DIR"/cis-* "$CIS_DEVBOX:$remote_bin/"
+ssh "$CIS_DEVBOX" "chmod 0755 $remote_bin/cis-*"
+
+printf '%s\n' 'CIS_INSTALL_SCRIPTS=ok'
+if [ "$provision" = true ]; then
+  ssh "$CIS_DEVBOX" "$remote_bin/cis-provision all"
+fi

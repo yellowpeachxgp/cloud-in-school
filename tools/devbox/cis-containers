@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Start, stop, and inspect exactly named cis-* test containers.
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=cis-common.sh
+. "$SCRIPT_DIR/cis-common.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: cis-containers <start|stop|status> <repository> <branch> [postgres|redis|all]
+
+Container names are exactly cis-<repository>-<branch-slug>-<hash>-<purpose>.
+They use locally available postgres:17-alpine and redis:7-alpine images, bind
+only 127.0.0.1 on random host ports, and are removed by exact name. The test
+containers are for disposable synthetic data only; no credential is printed.
+USAGE
+}
+
+if [ "$#" -lt 3 ]; then
+  usage
+  exit 64
+fi
+
+action=$1
+input_repo=$2
+branch=$3
+shift 3
+
+case "$input_repo" in
+  day-in-school|day|android) repo=day-in-school ;;
+  cloud-in-school|cloud) repo=cloud-in-school ;;
+  *) cis_die "unknown repository: $input_repo" ;;
+esac
+case "$action" in start|stop|status) ;; *) cis_die "unknown action: $action" ;; esac
+git check-ref-format --branch "$branch" >/dev/null 2>&1 || cis_die "invalid branch name: $branch"
+cis_need_cmd docker
+
+purposes=()
+if [ "$#" -eq 0 ] || [ "${1:-all}" = all ]; then
+  purposes=(postgres redis)
+else
+  for purpose in "$@"; do
+    case "$purpose" in postgres|redis) purposes+=("$purpose") ;; *) cis_die "unknown purpose: $purpose" ;; esac
+  done
+fi
+
+slug=$(cis_sanitize_branch "$branch")
+hash=$(cis_branch_key "$repo/$branch" | cut -c1-8)
+
+container_name() {
+  printf 'cis-%s-%s-%s-%s\n' "$repo" "$slug" "$hash" "$1"
+}
+
+container_exists() {
+  docker ps -a --format '{{.Names}}' | grep -Fxq "$1"
+}
+
+container_running() {
+  docker ps --format '{{.Names}}' | grep -Fxq "$1"
+}
+
+image_ready() {
+  if ! docker image inspect "$1" >/dev/null 2>&1; then
+    docker pull "$1"
+  fi
+}
+
+print_endpoint() {
+  local name=$1 purpose=$2 container_port=$3
+  local host_port running
+  host_port=$(docker port "$name" "$container_port/tcp" 2>/dev/null | awk -F: 'NR == 1 { print $NF }')
+  if container_running "$name"; then running=true; else running=false; fi
+  printf 'CIS_CONTAINER_NAME=%s\n' "$name"
+  printf 'CIS_CONTAINER_PURPOSE=%s\n' "$purpose"
+  printf 'CIS_CONTAINER_RUNNING=%s\n' "$running"
+  printf 'CIS_CONTAINER_HOST=127.0.0.1\n'
+  printf 'CIS_CONTAINER_PORT=%s\n' "${host_port:-unknown}"
+}
+
+start_one() {
+  local purpose=$1 name image container_port
+  name=$(container_name "$purpose")
+  case "$purpose" in
+    postgres) image=postgres:17-alpine; container_port=5432 ;;
+    redis) image=redis:7-alpine; container_port=6379 ;;
+  esac
+
+  if container_exists "$name"; then
+    if ! container_running "$name"; then
+      docker start "$name" >/dev/null
+    fi
+  else
+    image_ready "$image"
+    if [ "$purpose" = postgres ]; then
+      # The official PostgreSQL image requires either a password or explicit
+      # trust mode. These disposable containers are loopback-only, random-port,
+      # exact-name test instances for synthetic data, so no secret is needed.
+      docker run -d --name "$name" --restart no         -e POSTGRES_HOST_AUTH_METHOD=trust         -p 127.0.0.1::"$container_port"         "$image" >/dev/null
+    else
+      docker run -d --name "$name" --restart no         -p 127.0.0.1::"$container_port"         "$image" redis-server --appendonly no --save '' >/dev/null
+    fi
+  fi
+  print_endpoint "$name" "$purpose" "$container_port"
+}
+
+stop_one() {
+  local purpose=$1 name
+  name=$(container_name "$purpose")
+  if container_exists "$name"; then
+    docker rm -f "$name" >/dev/null
+    printf 'CIS_CONTAINER_REMOVED=%s\n' "$name"
+  else
+    printf 'CIS_CONTAINER_ABSENT=%s\n' "$name"
+  fi
+}
+
+status_one() {
+  local purpose=$1 name container_port
+  name=$(container_name "$purpose")
+  case "$purpose" in postgres) container_port=5432 ;; redis) container_port=6379 ;; esac
+  if container_exists "$name"; then
+    print_endpoint "$name" "$purpose" "$container_port"
+  else
+    printf 'CIS_CONTAINER_ABSENT=%s\n' "$name"
+  fi
+}
+
+for purpose in "${purposes[@]}"; do
+  case "$action" in
+    start) start_one "$purpose" ;;
+    stop) stop_one "$purpose" ;;
+    status) status_one "$purpose" ;;
+  esac
+done
