@@ -248,15 +248,14 @@ cleanup_monitor() {
 trap cleanup_monitor EXIT
 
 start_epoch=$(date +%s)
-if (
+set +e
+(
   set -Eeuo pipefail
   prepare_worktree
   run_gate "$@"
-) 300>&- >>"$log" 2>&1; then
-  rc=0
-else
-  rc=$?
-fi
+) 300>&- >>"$log" 2>&1
+rc=$?
+set -e
 end_epoch=$(date +%s)
 duration=$((end_epoch - start_epoch))
 cleanup_monitor

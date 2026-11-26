@@ -10,7 +10,7 @@ export CIS_CAMPUS_ROOT=<campus-root>
 tools/devbox/cis-install-devbox --provision
 ```
 
-`cis-install-devbox` 用 `scp` 复制 `cis-*` 到 `$CIS_CAMPUS_ROOT/bin`，不使用 ssh inline heredoc。`--provision` 只做校园范围内的事项：目录树、Gradle 缓存参数、两个公开仓库裸库、campus-local Node.js 22、Android SDK。Android SDK command line tools 从 Google 官方地址下载并做 SHA-256 校验；许可证接受方式与托管 Android CI 相同，已作为 INF-00 自主决策候选留待维护者复核。
+`cis-install-devbox` 用 `scp` 先把 `cis-*` 上传到 campus root 下的 staging，远端逐个 `bash -n` 验证后在同一文件系统内 atomic mv 到 `$CIS_CAMPUS_ROOT/bin`，不使用 ssh inline heredoc，也避免直接覆盖运行中的 live script。`--provision` 只做校园范围内的事项：目录树、Gradle 缓存参数、两个公开仓库裸库、campus-local Node.js 22、Android SDK。Android SDK command line tools 从 Google 官方地址下载并做 SHA-256 校验；许可证接受方式与托管 Android CI 相同，已作为 INF-00 自主决策候选留待维护者复核。
 
 ## 本机 worktree
 

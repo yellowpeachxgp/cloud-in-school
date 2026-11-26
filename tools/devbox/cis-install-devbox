@@ -7,9 +7,12 @@ usage() {
 Usage: CIS_DEVBOX=<ssh-target> CIS_CAMPUS_ROOT=<campus-root> cis-install-devbox [--provision]
 
 Copies cis-* scripts from this repository checkout to <campus-root>/bin using
-scp (no ssh inline heredoc). With --provision, then runs cis-provision all on
-the devbox. The SSH target and campus root are read only from the environment;
-neither is hard-coded in this script.
+scp (no ssh inline heredoc). Files are first uploaded to a same-root staging
+directory, every script is validated with bash -n on the devbox, and each file
+is then atomically moved into bin. This prevents a live script from being
+overwritten in place while Bash is still reading it. With --provision, runs
+cis-provision all after installation. Neither the SSH target nor campus root is
+hard-coded.
 USAGE
 }
 
@@ -41,11 +44,36 @@ esac
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 remote_bin="$remote_root/bin"
+stamp=$(date -u +%Y%m%d%H%M%S)
+staging="$remote_root/artifacts/bin-staging-$stamp-$$"
 
-ssh "$CIS_DEVBOX" "mkdir -p $remote_bin $remote_root/repos $remote_root/build $remote_root/cache/gradle $remote_root/cache/npm $remote_root/android-sdk $remote_root/locks $remote_root/logs $remote_root/artifacts"
-scp "$SCRIPT_DIR"/cis-* "$CIS_DEVBOX:$remote_bin/"
-ssh "$CIS_DEVBOX" "chmod 0755 $remote_bin/cis-*"
+cleanup_staging() {
+  if [ -n "$staging" ]; then
+    ssh "$CIS_DEVBOX" "rm -rf -- '$staging'" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_staging EXIT
 
+ssh "$CIS_DEVBOX" "mkdir -p '$staging' '$remote_bin' '$remote_root/repos' '$remote_root/build' '$remote_root/cache/gradle' '$remote_root/cache/npm' '$remote_root/android-sdk' '$remote_root/locks' '$remote_root/logs' '$remote_root/artifacts'"
+scp "$SCRIPT_DIR"/cis-* "$CIS_DEVBOX:$staging/"
+
+# Validate every staged file before any live file is replaced. ssh joins the
+# command arguments remotely; the staging path is constrained to safe chars.
+for file in "$SCRIPT_DIR"/cis-*; do
+  base=$(basename -- "$file")
+  ssh "$CIS_DEVBOX" bash -n "$staging/$base"
+done
+
+# staging and bin are both below the same campus root, so each mv is an atomic
+# rename within one filesystem. A running Bash keeps the old unlinked inode and
+# never sees a half-written script; new invocations get the new file.
+for file in "$SCRIPT_DIR"/cis-*; do
+  base=$(basename -- "$file")
+  ssh "$CIS_DEVBOX" "mv -f -- '$staging/$base' '$remote_bin/$base' && chmod 0755 '$remote_bin/$base'"
+done
+
+ssh "$CIS_DEVBOX" "rm -rf -- '$staging'"
+trap - EXIT
 printf '%s\n' 'CIS_INSTALL_SCRIPTS=ok'
 if [ "$provision" = true ]; then
   ssh "$CIS_DEVBOX" "$remote_bin/cis-provision all"
