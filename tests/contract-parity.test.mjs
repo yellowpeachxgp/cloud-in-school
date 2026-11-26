@@ -123,7 +123,7 @@ test("Contract Parity: core runtime, endpoint inventory, and OpenAPI operationId
   assert.deepEqual(sortedOperationIds(openApiOperations), sortedOperationIds(coreRegistered), "OpenAPI/runtime operationId sets must be identical");
 });
 
-test("Contract Parity: moments extension runtime inventory is exact and explicitly pending INF-02", () => {
+test("Contract Parity: moments extension runtime inventory is exact and explicitly pending INF-02 (AUTO-012)", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const extensionRegistered = app.getRegisteredExtensionRoutes();
   const inventory = loadEndpointInventory();

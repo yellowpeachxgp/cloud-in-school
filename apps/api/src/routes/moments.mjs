@@ -5,7 +5,7 @@ import {
 } from "../../../../packages/contracts/src/index.mjs";
 
 // Moments is an explicit runtime extension contract pending INF-02/CT contract promotion.
-// It is intentionally not represented as an OpenAPI core operation in this module.
+// AUTO-012 candidate: it is intentionally not represented as an OpenAPI core operation in this module.
 export const MOMENTS_EXTENSION_CONTRACT_VERSION = "moments-extension/v0-pending-inf02";
 
 export function createMomentsExtensionRoutes(ctx) {
