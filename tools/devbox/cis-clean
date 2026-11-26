@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Clean expired campus build worktrees and logs. This script never leaves the campus root.
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=cis-common.sh
+. "$SCRIPT_DIR/cis-common.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: cis-clean [--days N] [--dry-run]
+
+Removes campus build worktrees whose newest file is older than N days (default
+7) and deletes log files older than N days. All operations are constrained to
+<campus-root> (or CIS_CAMPUS_ROOT in a test environment).
+USAGE
+}
+
+days=7
+dry_run=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --days) shift; [ "$#" -gt 0 ] || cis_die "--days requires a value"; days=$1 ;;
+    --dry-run) dry_run=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) cis_die "unknown argument: $1" ;;
+  esac
+  shift
+done
+case "$days" in ''|*[!0-9]*) cis_die "--days must be a non-negative integer" ;; esac
+
+cis_need_cmd find
+cis_need_cmd git
+
+now=$(date +%s)
+cutoff=$((now - days * 86400))
+removed=0
+removed_logs=0
+
+remove_tree() {
+  local path=$1 repo=$2
+  cis_require_under_campus "$path"
+  case "$path" in "$CIS_CAMPUS_ROOT/build/"*) ;; *) cis_die "refusing non-build path: $path" ;; esac
+  if [ "$dry_run" = true ]; then
+    printf 'CIS_CLEAN_DRY_RUN_WORKTREE=%s\n' "$path"
+    return 0
+  fi
+  local bare="$CIS_CAMPUS_ROOT/repos/$repo.git"
+  if [ -d "$bare/objects" ] && git --git-dir="$bare" worktree list --porcelain     | awk -v path="$path" '$0 == "worktree " path { found=1 } END { exit(found ? 0 : 1) }'; then
+    git --git-dir="$bare" worktree remove --force "$path" >/dev/null 2>&1 || true
+  fi
+  if [ -e "$path" ]; then
+    rm -rf -- "$path"
+  fi
+  printf 'CIS_CLEAN_REMOVED_WORKTREE=%s\n' "$path"
+}
+
+if [ -d "$CIS_CAMPUS_ROOT/build" ]; then
+  while IFS= read -r gitfile; do
+    worktree_dir=$(dirname -- "$gitfile")
+    repo=
+    case "$worktree_dir" in
+      "$CIS_CAMPUS_ROOT/build/day-in-school"/*) repo=day-in-school ;;
+      "$CIS_CAMPUS_ROOT/build/cloud-in-school"/*) repo=cloud-in-school ;;
+      *) continue ;;
+    esac
+    # Consume the complete find stream with awk. A sort | head pipeline can make
+    # sort die from SIGPIPE under pipefail on large worktrees (observed as rc=141).
+    newest=$(find "$worktree_dir" -type f -printf '%T@\n' 2>/dev/null | awk 'NR == 1 { max = $1; found = 1 } found && $1 > max { max = $1 } END { if (found) printf "%d\n", max }')
+    if [ -z "$newest" ]; then
+      newest=$(stat -c %Y "$worktree_dir" 2>/dev/null || printf '0')
+    fi
+    case "$newest" in ''|*[!0-9]*) newest=0 ;; esac
+    if [ "$newest" -lt "$cutoff" ]; then
+      remove_tree "$worktree_dir" "$repo"
+      removed=$((removed + 1))
+    fi
+  done < <(find "$CIS_CAMPUS_ROOT/build" -type f -name .git -print 2>/dev/null)
+
+  for repo in day-in-school cloud-in-school; do
+    bare="$CIS_CAMPUS_ROOT/repos/$repo.git"
+    [ -d "$bare/objects" ] && git --git-dir="$bare" worktree prune >/dev/null 2>&1 || true
+  done
+fi
+
+if [ -d "$CIS_CAMPUS_ROOT/logs" ]; then
+  while IFS= read -r logfile; do
+    if [ "$dry_run" = true ]; then
+      printf 'CIS_CLEAN_DRY_RUN_LOG=%s\n' "$logfile"
+    else
+      cis_require_under_campus "$logfile"
+      rm -f -- "$logfile"
+      printf 'CIS_CLEAN_REMOVED_LOG=%s\n' "$logfile"
+    fi
+    removed_logs=$((removed_logs + 1))
+  done < <(find "$CIS_CAMPUS_ROOT/logs" -type f -mtime "+$days" -print 2>/dev/null)
+  if [ "$dry_run" = false ]; then
+    find "$CIS_CAMPUS_ROOT/logs" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  fi
+fi
+
+printf 'CIS_CLEAN_WORKTREES_REMOVED=%s\n' "$removed"
+printf 'CIS_CLEAN_LOGS_REMOVED=%s\n' "$removed_logs"
+if command -v df >/dev/null 2>&1; then
+  df -h "$CIS_CAMPUS_ROOT" | awk 'NR == 2 { printf "CIS_CLEAN_DISK=%s used=%s avail=%s use=%s\n", $1, $3, $4, $5 }'
+fi
