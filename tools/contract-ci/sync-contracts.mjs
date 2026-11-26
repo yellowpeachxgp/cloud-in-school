@@ -6,16 +6,18 @@ import { spawnSync } from "node:child_process";
 
 const DEFAULT_CLOUD_REF = "origin/main";
 const MAX_GIT_BUFFER = 64 * 1024 * 1024;
+const CLOUD_REPOSITORY_NAME = "cloud-in-school";
 
 const USAGE = "用法：\n" +
   "  node tools/contract-ci/sync-contracts.mjs sync --cloud-root <云端仓库> --android-root <Android仓库> [--cloud-ref origin/main]\n" +
   "  node tools/contract-ci/sync-contracts.mjs sync --cloud-root <云端仓库> --android-root <Android仓库> --use-cloud-worktree\n" +
-  "  node tools/contract-ci/sync-contracts.mjs check --cloud-root <云端仓库或导出目录> --android-root <Android仓库> [--cloud-ref <ref>]\n" +
+  "  node tools/contract-ci/sync-contracts.mjs check --cloud-root <云端仓库 checkout 或完整导出> --android-root <Android仓库> [--cloud-ref <ref>]\n" +
   "  node tools/contract-ci/sync-contracts.mjs fingerprint --root <仓库>\n" +
   "\n" +
   "规则：\n" +
   "  - cloud-in-school/contracts/ 是唯一权威；sync 只从云端复制到 Android，绝不反向复制。\n" +
   "  - sync 默认先执行 git fetch origin main，再读取云端 git origin/main；显式 --cloud-ref 或 --use-cloud-worktree 时不自动 fetch。\n" +
+  "  - sync 先完整 staging 并备份受影响文件；每个文件用临时文件加 rename 替换，异常时按逆序回滚。\n" +
   "  - check 对两棵 contracts/ 树做递归文件清单与 SHA-256 逐字节比对。\n";
 
 function fail(message, exitCode = 1) {
@@ -94,7 +96,14 @@ function resolveExistingDir(input, label) {
     fail(label + " 不存在：" + input);
   }
   if (!stat.isDirectory()) fail(label + " 不是目录：" + input);
-  return resolved;
+  return fs.realpathSync(resolved);
+}
+
+function sameRealPath(first, second) {
+  const left = fs.realpathSync(first);
+  const right = fs.realpathSync(second);
+  if (process.platform === "win32") return left.toLowerCase() === right.toLowerCase();
+  return left === right;
 }
 
 function sha256(buffer) {
@@ -220,8 +229,32 @@ function readContractsFromGitRef(cloudRoot, ref) {
   return { ...finalizeEntries(entries), commit, ref };
 }
 
+function requireCloudRoot(cloudRoot) {
+  const packageJsonPath = path.join(cloudRoot, "package.json");
+  let packageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  } catch {
+    fail("--cloud-root 必须是 cloud-in-school 仓库 checkout 或完整导出（缺少可解析 package.json）；为避免错误同步，已停止");
+  }
+  if (packageJson.name !== CLOUD_REPOSITORY_NAME) {
+    fail("--cloud-root 必须是 cloud-in-school 仓库 checkout 或完整导出（package.json name 不匹配）；为避免错误同步，已停止");
+  }
+  const apiSource = path.join(cloudRoot, "apps", "api", "src");
+  let apiStat;
+  try {
+    apiStat = fs.statSync(apiSource);
+  } catch {
+    fail("--cloud-root 缺少 apps/api/src；不是可识别的 cloud-in-school 仓库，已停止");
+  }
+  if (!apiStat.isDirectory()) {
+    fail("--cloud-root 的 apps/api/src 不是目录；不是可识别的 cloud-in-school 仓库，已停止");
+  }
+}
+
 function readCloudContracts(options) {
   const cloudRoot = resolveExistingDir(options.cloudRoot, "--cloud-root");
+  requireCloudRoot(cloudRoot);
   if (options.useCloudWorktree) {
     return { ...fingerprintDirectory(cloudRoot), cloudRoot, commit: null, ref: "WORKTREE" };
   }
@@ -285,59 +318,242 @@ function requireAndroidRoot(androidRoot) {
   }
 }
 
-function removeEmptyDirectories(directory, contractsRoot) {
+function listContractDirectories(root) {
+  const contractsRoot = path.join(root, "contracts");
+  const directories = [];
+  const walk = (directory) => {
+    for (const child of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (!child.isDirectory()) continue;
+      const fullPath = path.join(directory, child.name);
+      directories.push(path.relative(contractsRoot, fullPath).split(path.sep).join("/"));
+      walk(fullPath);
+    }
+  };
+  walk(contractsRoot);
+  return new Set(directories);
+}
+
+function removeEmptyDirectories(directory, contractsRoot, preservedDirectories = new Set()) {
   for (const child of fs.readdirSync(directory, { withFileTypes: true })) {
     if (child.isDirectory()) {
-      removeEmptyDirectories(path.join(directory, child.name), contractsRoot);
+      removeEmptyDirectories(path.join(directory, child.name), contractsRoot, preservedDirectories);
     }
   }
-  if (directory !== contractsRoot && fs.readdirSync(directory).length === 0) {
+  const relative = path.relative(contractsRoot, directory).split(path.sep).join("/");
+  if (
+    directory !== contractsRoot &&
+    fs.readdirSync(directory).length === 0 &&
+    !preservedDirectories.has(relative)
+  ) {
     fs.rmdirSync(directory);
   }
+}
+
+function lstatIfExists(filePath) {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function copyFileThenRename(source, destination, transactionRoot) {
+  // 临时文件固定在事务目录中，异常清理或保留 backup 时都不会把半成品留在 contracts/。
+  // 事务目录与 contracts/ 同在 Android 仓库根目录下；若部署方把 contracts/ 挂载为独立文件系统，
+  // rename 会以 EXDEV 失败并触发回滚，而不会退化为非原子复制。
+  const temporary = path.join(transactionRoot, "atomic-rename.tmp");
+  fs.copyFileSync(source, temporary);
+  fs.renameSync(temporary, destination);
+}
+
+function stageCloudContracts(transactionRoot, cloud) {
+  const stagingRoot = path.join(transactionRoot, "staging");
+  const stagingContractsRoot = path.join(stagingRoot, "contracts");
+  for (const entry of cloud.entries) {
+    if (!entry.content) throw new Error("内部错误：缺少 contracts/" + entry.path + " 的云端内容");
+    const destination = path.join(stagingContractsRoot, entry.path);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, entry.content);
+  }
+  const staged = fingerprintDirectory(stagingRoot);
+  const comparison = compareFingerprints(cloud, staged);
+  if (!comparison.equal) {
+    printComparison(comparison);
+    throw new Error("staging 与云端 contracts/ 不一致；未触碰 Android contracts/");
+  }
+  return staged;
+}
+
+function backupTargetFile(androidRoot, transactionRoot, relative) {
+  const source = path.join(androidRoot, "contracts", relative);
+  const backup = path.join(transactionRoot, "backup", "contracts", relative);
+  fs.mkdirSync(path.dirname(backup), { recursive: true });
+  fs.copyFileSync(source, backup);
+}
+
+function restoreBackupFile(androidRoot, transactionRoot, relative) {
+  const backup = path.join(transactionRoot, "backup", "contracts", relative);
+  const destination = path.join(androidRoot, "contracts", relative);
+  if (!lstatIfExists(backup)) throw new Error("缺少回滚备份 contracts/" + relative);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  copyFileThenRename(backup, destination, transactionRoot);
+}
+
+function removeCreatedFile(androidRoot, relative) {
+  const destination = path.join(androidRoot, "contracts", relative);
+  const stat = lstatIfExists(destination);
+  if (!stat) return;
+  if (!stat.isFile()) throw new Error("回滚新增文件时遇到非普通文件 contracts/" + relative);
+  fs.unlinkSync(destination);
+}
+
+function rollbackSyncOperations(androidRoot, transactionRoot, operations, preexistingDirectories) {
+  const errors = [];
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    const operation = operations[index];
+    try {
+      if (operation.type === "write" && !operation.hadBefore) {
+        removeCreatedFile(androidRoot, operation.relative);
+      } else {
+        restoreBackupFile(androidRoot, transactionRoot, operation.relative);
+      }
+    } catch (error) {
+      errors.push("contracts/" + operation.relative + ": " + error.message);
+    }
+  }
+  try {
+    removeEmptyDirectories(
+      path.join(androidRoot, "contracts"),
+      path.join(androidRoot, "contracts"),
+      preexistingDirectories
+    );
+  } catch (error) {
+    errors.push("清理空目录: " + error.message);
+  }
+  if (errors.length > 0) throw new Error(errors.join("；"));
+}
+
+function writeTransactionManifest(transactionRoot, cloud, target, writeEntries, deleteEntries) {
+  const manifest = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    cloudRef: cloud.ref,
+    cloudCommit: cloud.commit,
+    beforeTreeSha256: target.treeSha256,
+    expectedTreeSha256: cloud.treeSha256,
+    writes: writeEntries.map((item) => ({ path: item.relative, hadBefore: item.hadBefore })),
+    deletes: deleteEntries.map((entry) => ({ path: entry.path }))
+  };
+  fs.writeFileSync(path.join(transactionRoot, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+}
+
+function cleanupTransactionRoot(transactionRoot) {
+  try {
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+function warnCleanupFailure(error) {
+  console.error("[CONTRACT-SYNC WARN] 事务临时目录清理失败：" + error.message);
 }
 
 function writeContractsToAndroid(cloud, androidRoot) {
   requireAndroidRoot(androidRoot);
   const target = fingerprintDirectory(androidRoot);
+  const preexistingDirectories = listContractDirectories(androidRoot);
   const targetEntries = entriesMap(target);
   const targetContractsRoot = path.join(androidRoot, "contracts");
   const sourcePaths = new Set(cloud.entries.map((entry) => entry.path));
+  const writeEntries = [];
+  const deleteEntries = [];
   let created = 0;
   let updated = 0;
   let unchanged = 0;
   let deleted = 0;
 
   for (const entry of cloud.entries) {
-    if (!entry.content) fail("内部错误：缺少 contracts/" + entry.path + " 的云端内容");
-    const destination = path.join(targetContractsRoot, entry.path);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
     const before = targetEntries.get(entry.path);
     if (!before) {
       created += 1;
+      writeEntries.push({ entry, relative: entry.path, hadBefore: false });
     } else if (before.sha256 !== entry.sha256) {
       updated += 1;
+      writeEntries.push({ entry, relative: entry.path, hadBefore: true });
     } else {
       unchanged += 1;
     }
-    if (!before || before.sha256 !== entry.sha256) {
-      fs.writeFileSync(destination, entry.content);
-    }
   }
-
   for (const entry of target.entries) {
     if (!sourcePaths.has(entry.path)) {
-      fs.unlinkSync(path.join(targetContractsRoot, entry.path));
+      deleteEntries.push(entry);
       deleted += 1;
     }
   }
-  removeEmptyDirectories(targetContractsRoot, targetContractsRoot);
-  const after = fingerprintDirectory(androidRoot);
-  const comparisonAfter = compareFingerprints(cloud, after);
-  if (!comparisonAfter.equal) {
-    printComparison(comparisonAfter);
-    fail("sync 后两棵 contracts/ 树仍不一致；未写入的文件必须手工检查");
+
+  const transactionRoot = fs.mkdtempSync(path.join(androidRoot, ".contracts-sync-"));
+  const operations = [];
+  let result = null;
+  try {
+    const staged = stageCloudContracts(transactionRoot, cloud);
+    const backupPaths = new Set();
+    for (const item of writeEntries) {
+      if (item.hadBefore) backupPaths.add(item.relative);
+    }
+    for (const entry of deleteEntries) backupPaths.add(entry.path);
+    for (const relative of sortPaths([...backupPaths])) {
+      backupTargetFile(androidRoot, transactionRoot, relative);
+    }
+    writeTransactionManifest(transactionRoot, cloud, target, writeEntries, deleteEntries);
+
+    for (const item of writeEntries) {
+      const stagedSource = path.join(transactionRoot, "staging", "contracts", item.relative);
+      const destination = path.join(targetContractsRoot, item.relative);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      copyFileThenRename(stagedSource, destination, transactionRoot);
+      operations.push({ type: "write", relative: item.relative, hadBefore: item.hadBefore });
+    }
+    for (const entry of deleteEntries) {
+      fs.unlinkSync(path.join(targetContractsRoot, entry.path));
+      operations.push({ type: "delete", relative: entry.path });
+    }
+    removeEmptyDirectories(targetContractsRoot, targetContractsRoot);
+
+    const after = fingerprintDirectory(androidRoot);
+    const comparisonAfter = compareFingerprints(cloud, after);
+    if (!comparisonAfter.equal) {
+      printComparison(comparisonAfter);
+      throw new Error("sync 后两棵 contracts/ 树仍不一致");
+    }
+    if (staged.treeSha256 !== after.treeSha256) {
+      throw new Error("staging 与最终 contracts/ 树指纹不一致");
+    }
+    result = { created, updated, unchanged, deleted, after };
+  } catch (error) {
+    let rollbackError = null;
+    try {
+      rollbackSyncOperations(androidRoot, transactionRoot, operations, preexistingDirectories);
+    } catch (rollbackFailure) {
+      rollbackError = rollbackFailure;
+    }
+    if (rollbackError) {
+      console.error(
+        "[CONTRACT-SYNC FAIL] 回滚不完整；事务备份保留在 Android 仓库根目录的 " +
+          path.basename(transactionRoot) + "：" + rollbackError.message
+      );
+      fail("sync 失败且回滚不完整：" + error.message);
+    }
+    const cleanupAfterRollback = cleanupTransactionRoot(transactionRoot);
+    if (cleanupAfterRollback) warnCleanupFailure(cleanupAfterRollback);
+    fail("sync 失败，已回滚到同步前状态：" + error.message);
   }
-  return { created, updated, unchanged, deleted, after };
+
+  const cleanupError = cleanupTransactionRoot(transactionRoot);
+  if (cleanupError) warnCleanupFailure(cleanupError);
+  return result;
 }
 
 function runCheck(options) {
@@ -361,7 +577,7 @@ function runCheck(options) {
 function runSync(options) {
   const cloud = readCloudContracts(options);
   const androidRoot = resolveExistingDir(options.androidRoot, "--android-root");
-  if (path.resolve(cloud.cloudRoot) === path.resolve(androidRoot)) {
+  if (sameRealPath(cloud.cloudRoot, androidRoot)) {
     fail("--cloud-root 与 --android-root 不能是同一个目录");
   }
   const result = writeContractsToAndroid(cloud, androidRoot);
