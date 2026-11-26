@@ -416,6 +416,7 @@ export function createCampusCloudApp(options = {}) {
     getRegisteredRoutes: router.getRegisteredRoutes,
     getRegisteredCoreRoutes: router.getRegisteredCoreRoutes,
     getRegisteredExtensionRoutes: router.getRegisteredExtensionRoutes,
+    getRouteBehaviorFingerprint: router.getRouteBehaviorFingerprint,
     setDraining: router.setDraining,
     isDraining: router.isDraining,
     registerLifecycleTask: router.registerLifecycleTask,

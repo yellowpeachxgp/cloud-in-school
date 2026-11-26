@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import {
@@ -78,6 +79,36 @@ function publicRoute(routeDef) {
     path: routeDef.path,
     operationId: routeDef.operationId,
     auth: routeDef.auth
+  };
+}
+
+function normalizeHandlerSource(handler) {
+  const lines = String(handler)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/u, ""));
+  const continuationIndents = lines
+    .slice(1)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => line.match(/^\s*/u)[0].length);
+  const commonIndent = continuationIndents.length > 0 ? Math.min(...continuationIndents) : 0;
+  return lines
+    .map((line, index) => {
+      if (index === 0) return line.trim();
+      if (!line.trim()) return "";
+      return line.slice(Math.min(commonIndent, line.length)).trimEnd();
+    })
+    .join("\n")
+    .trim();
+}
+
+function canonicalRouteBehaviorEntry(routeDef) {
+  return {
+    method: routeDef.method,
+    path: routeDef.path,
+    operationId: routeDef.operationId,
+    auth: routeDef.auth,
+    handler_source: normalizeHandlerSource(routeDef.handler)
   };
 }
 
@@ -825,12 +856,32 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     return [...getRegisteredCoreRoutes(), ...getRegisteredExtensionRoutes()];
   }
 
+  function getRouteBehaviorFingerprint(operationIds) {
+    const requested = Array.isArray(operationIds) ? operationIds : [];
+    const selected = [];
+    const missing = [];
+    for (const operationId of requested) {
+      const found = routes.find((routeDef) => routeDef.operationId === operationId);
+      if (found) selected.push(found);
+      else missing.push(operationId);
+    }
+    if (missing.length > 0) {
+      throw new Error("Unknown core operationId for route behavior fingerprint: " + missing.join(","));
+    }
+    const canonical = {
+      fingerprint_version: "canonical-route-handler/v1",
+      entries: selected.map(canonicalRouteBehaviorEntry)
+    };
+    return crypto.createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+  }
+
   return {
     inject,
     createHttpServer,
     getRegisteredRoutes,
     getRegisteredCoreRoutes,
     getRegisteredExtensionRoutes,
+    getRouteBehaviorFingerprint,
     setDraining,
     isDraining,
     registerLifecycleTask,
