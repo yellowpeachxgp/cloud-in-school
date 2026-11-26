@@ -24,11 +24,74 @@ import {
   PluginRegistryAndBroker,
   loadPluginDirectory
 } from "../../../packages/plugin-sdk/src/index.mjs";
-import { greetCampus } from "../../../examples/hello-campus-plugin/dist/index.mjs";
-import { queryStationHours } from "../../../examples/parcel-station-plugin/dist/index.mjs";
 import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs";
 import { createCampusRouter } from "./router.mjs";
 import { createCoreRoutes, createExtensionRoutes } from "./routes/index.mjs";
+
+const DEFAULT_REFERENCE_PLUGIN_SOURCES = Object.freeze([
+  {
+    pluginId: "org.example.hello-campus",
+    dir: path.join(REPO_ROOT, "examples/hello-campus-plugin"),
+    commandHandlers: {}
+  },
+  {
+    pluginId: "org.example.parcel-station",
+    dir: path.join(REPO_ROOT, "examples/parcel-station-plugin"),
+    commandHandlers: {}
+  }
+]);
+
+function sanitizeReferencePluginError(error) {
+  if (error?.code === "ENOENT") {
+    return "required reference plugin file is missing";
+  }
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  return rawMessage.split(REPO_ROOT).join("<repo>");
+}
+
+function loadSignedReferencePlugins({ pluginBroker, sources, logger = console }) {
+  const statuses = [];
+  for (const source of sources || []) {
+    const sourcePluginId = source?.pluginId || source?.plugin_id || "unknown";
+    try {
+      if (!source?.dir) {
+        throw new Error("reference plugin source directory is missing");
+      }
+      const publicKeyBase64 = fs
+        .readFileSync(path.join(source.dir, "plugin-signing-public.key"), "utf8")
+        .trim();
+      const loaded = loadPluginDirectory(source.dir);
+      const verified = pluginBroker.registerPluginPackage({
+        manifest: loaded.manifest,
+        artifactMap: loaded.artifactMap,
+        publicKeyBase64,
+        commandHandlers: source.commandHandlers || {}
+      });
+      statuses.push({
+        plugin_id: verified.plugin_id,
+        name: verified.name,
+        version: verified.version,
+        status: "LOADED",
+        error_code: null,
+        error_message: null
+      });
+    } catch (error) {
+      const status = {
+        plugin_id: sourcePluginId,
+        name: null,
+        version: null,
+        status: "FAILED",
+        error_code: error?.code || "PLUGIN_REFERENCE_LOAD_FAILED",
+        error_message: sanitizeReferencePluginError(error)
+      };
+      statuses.push(status);
+      logger?.warn?.(
+        `[reference-plugins] ${status.plugin_id} load failed (${status.error_code}): ${status.error_message}`
+      );
+    }
+  }
+  return statuses;
+}
 
 export function createCampusCloudApp(options = {}) {
   const store = options.store || new CloudDatabaseStore(options.storeOptions);
@@ -108,32 +171,18 @@ export function createCampusCloudApp(options = {}) {
     redisBuffer.auditAndTuneServerConfig({ applyTuning: true }).catch(() => {});
   }
 
-  // Pre-register the two signed reference plugins
-  try {
-    const helloDir = path.join(REPO_ROOT, "examples/hello-campus-plugin");
-    const helloPub = fs.readFileSync(path.join(helloDir, "plugin-signing-public.key"), "utf8").trim();
-    const helloLoaded = loadPluginDirectory(helloDir);
-    pluginBroker.registerPluginPackage({
-      manifest: helloLoaded.manifest,
-      artifactMap: helloLoaded.artifactMap,
-      publicKeyBase64: helloPub,
-      commandHandlers: { greetCampus }
-    });
-
-    const parcelDir = path.join(REPO_ROOT, "examples/parcel-station-plugin");
-    const parcelPub = fs
-      .readFileSync(path.join(parcelDir, "plugin-signing-public.key"), "utf8")
-      .trim();
-    const parcelLoaded = loadPluginDirectory(parcelDir);
-    pluginBroker.registerPluginPackage({
-      manifest: parcelLoaded.manifest,
-      artifactMap: parcelLoaded.artifactMap,
-      publicKeyBase64: parcelPub,
-      commandHandlers: { queryStationHours }
-    });
-  } catch {
-    // Allow tests to initialize even if example dirs are overridden
-  }
+  // Pre-register the two signed reference plugins. Each plugin is isolated:
+  // one broken/missing reference package must not prevent the other one from
+  // loading, and failures are logged + surfaced instead of being swallowed.
+  const referencePluginSources =
+    options.referencePluginSources === undefined
+      ? DEFAULT_REFERENCE_PLUGIN_SOURCES
+      : options.referencePluginSources;
+  const referencePluginLoadStatus = loadSignedReferencePlugins({
+    pluginBroker,
+    sources: referencePluginSources,
+    logger: options.referencePluginLogger || console
+  });
 
   function isAdminOrOperatorAuth(auth) {
     if (!auth) return false;
@@ -383,6 +432,7 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     pluginBroker,
+    referencePluginLoadStatus,
     redisBuffer,
     trustProxyHeaders,
     allowSandboxProviders,
@@ -410,6 +460,7 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     pluginBroker,
+    referencePluginLoadStatus,
     redisBuffer,
     inject: router.inject,
     createHttpServer: router.createHttpServer,
