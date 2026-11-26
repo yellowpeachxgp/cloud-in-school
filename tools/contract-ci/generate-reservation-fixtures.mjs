@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createCampusCloudApp } from '../../apps/api/src/app.mjs';
 
@@ -28,7 +27,16 @@ export async function captureReservationFixtures() {
     const wrap = res => ({ http_status: res.status, body: res.body });
     const meta = {
       generated_by: 'cloud-in-school 实际 apps/api handler；工具仅使用假身份和临时存储',
-      handler_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL('../../apps/api/src/app.mjs', import.meta.url))).digest('hex')
+      // W0-08: pin the canonical route entries and normalized handler source for
+      // the operations participating in this fixture, rather than the physical
+      // app.mjs file bytes. Pure file moves no longer invalidate the fixture.
+      handler_sha256: app.getRouteBehaviorFingerprint([
+        'getReservationQuote',
+        'createReservationPlan',
+        'grantConsent',
+        'initiateSchoolBinding',
+        'completeSchoolBinding'
+      ])
     };
     return { quote: { _meta: meta, ...wrap(quote) }, errors: { _meta: meta, cases: [
       { name: 'quote_auth', ...wrap(unauthorized) },
