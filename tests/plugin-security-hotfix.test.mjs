@@ -157,3 +157,41 @@ test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, a
   assert.equal(deniedAfterRollback.status, 403);
   assert.equal(deniedAfterRollback.body.error.code, "PLUGIN_PERMISSION_DENIED");
 });
+
+test("S1 edge: disable/enable pauses and resumes review without activating the upgrade", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { headers } = createUserSession(app, "plugin_permission_pause_user");
+  const keyPair = generateEd25519KeyPair();
+  const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions: ["ui.slot.render"] });
+  const v2 = signedTestPlugin({
+    keyPair,
+    version: "1.1.0",
+    permissions: ["ui.slot.render", "network.request"]
+  });
+
+  await installSignedFixture(app, headers, v1, keyPair.publicKeyBase64);
+  const pending = await installSignedFixture(app, headers, v2, keyPair.publicKeyBase64);
+  assert.equal(pending.body.data.status, "PENDING_PERMISSION_REVIEW");
+
+  const disabled = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "DISABLE" }
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.data.status, "DISABLED");
+  assert.equal(disabled.body.data.pending_version, "1.1.0");
+
+  const resumed = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ENABLE" }
+  });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.body.data.status, "PENDING_PERMISSION_REVIEW");
+  assert.equal(resumed.body.data.active_version, "1.0.0");
+  assert.equal(resumed.body.data.pending_version, "1.1.0");
+  assert.deepEqual(resumed.body.data.granted_permissions, ["ui.slot.render"]);
+});

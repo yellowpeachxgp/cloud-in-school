@@ -453,12 +453,14 @@ export class PluginRegistryAndBroker {
     const nowIso = new Date().toISOString();
     if (action === "ENABLE") {
       // PENDING_PERMISSION_REVIEW is a distinct approval gate. In that state
-      // the lifecycle ENABLE action is the explicit user confirmation; outside
-      // that state it remains the ordinary enable transition.
+      // the lifecycle ENABLE action is the explicit user confirmation.
       if (inst.status === "PENDING_PERMISSION_REVIEW") {
         return this.confirmPendingPluginPermissions(userId, pluginId);
       }
-      inst.status = "ENABLED";
+      // Disabling pauses a pending review. Re-enabling first resumes the review
+      // state with the old version still active; it must not silently confirm or
+      // discard the pending permission delta.
+      inst.status = inst.pending_version ? "PENDING_PERMISSION_REVIEW" : "ENABLED";
       inst.updated_at = nowIso;
       return inst;
     }
