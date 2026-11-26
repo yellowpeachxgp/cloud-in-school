@@ -5,7 +5,7 @@ cloud-in-school/contracts/ 是唯一权威；day-in-school/contracts/ 只是同�
 ## 工具
 
 - validate-contracts.mjs：校验本仓 SYSTEM_CONTRACT.md、OpenAPI 3.1.2、endpoint inventory 与 JSON Schema 的内部一致性。
-- sync-contracts.mjs sync：把云端 origin/main（默认）的 contracts/ 逐字节镜像到 Android 工作区，包括删除 Android 侧多余文件。
+- sync-contracts.mjs sync：先刷新云端 origin/main（默认），再把 contracts/ 逐字节镜像到 Android 工作区，包括删除 Android 侧多余文件；显式 --cloud-ref 或 --use-cloud-worktree 时由调用者自行保证来源新鲜。
 - sync-contracts.mjs check：递归比较两棵 contracts/ 树的文件清单和 SHA-256；任一缺失、多余或哈希不同都失败。
 - sync-contracts.mjs fingerprint：输出一棵 contracts/ 树的确定性哈希清单和 CONTRACTS_TREE_SHA256。
 

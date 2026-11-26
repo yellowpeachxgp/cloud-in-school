@@ -15,7 +15,7 @@ const USAGE = "用法：\n" +
   "\n" +
   "规则：\n" +
   "  - cloud-in-school/contracts/ 是唯一权威；sync 只从云端复制到 Android，绝不反向复制。\n" +
-  "  - sync 默认读取云端 git origin/main；只有显式 --use-cloud-worktree 才读取云端当前工作区。\n" +
+  "  - sync 默认先执行 git fetch origin main，再读取云端 git origin/main；显式 --cloud-ref 或 --use-cloud-worktree 时不自动 fetch。\n" +
   "  - check 对两棵 contracts/ 树做递归文件清单与 SHA-256 逐字节比对。\n";
 
 function fail(message, exitCode = 1) {
@@ -225,8 +225,14 @@ function readCloudContracts(options) {
   if (options.useCloudWorktree) {
     return { ...fingerprintDirectory(cloudRoot), cloudRoot, commit: null, ref: "WORKTREE" };
   }
+  const usingDefaultSyncRef = options.command === "sync" && !options.cloudRef;
   const ref = options.cloudRef || (options.command === "sync" ? DEFAULT_CLOUD_REF : null);
   if (ref) {
+    if (usingDefaultSyncRef) {
+      // 发布的同步路径必须先刷新 remote-tracking ref；否则本机陈旧的 origin/main
+      // 会让 sync 在旧快照上“成功”，无法发现云端 main 已经前进。
+      runGit(cloudRoot, ["fetch", "origin", "main"]);
+    }
     return { ...readContractsFromGitRef(cloudRoot, ref), cloudRoot };
   }
   return { ...fingerprintDirectory(cloudRoot), cloudRoot, commit: null, ref: "WORKTREE" };
