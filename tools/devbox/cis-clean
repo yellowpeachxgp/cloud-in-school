@@ -64,7 +64,9 @@ if [ -d "$CIS_CAMPUS_ROOT/build" ]; then
       "$CIS_CAMPUS_ROOT/build/cloud-in-school"/*) repo=cloud-in-school ;;
       *) continue ;;
     esac
-    newest=$(find "$worktree_dir" -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -n 1 | cut -d. -f1)
+    # Consume the complete find stream with awk. A sort | head pipeline can make
+    # sort die from SIGPIPE under pipefail on large worktrees (observed as rc=141).
+    newest=$(find "$worktree_dir" -type f -printf '%T@\n' 2>/dev/null | awk 'NR == 1 { max = $1; found = 1 } found && $1 > max { max = $1 } END { if (found) printf "%d\n", max }')
     if [ -z "$newest" ]; then
       newest=$(stat -c %Y "$worktree_dir" 2>/dev/null || printf '0')
     fi
