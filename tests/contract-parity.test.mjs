@@ -9,32 +9,147 @@ import {
   loadOpenApiText
 } from "../packages/contracts/src/index.mjs";
 import { CONSOLE_UI_VERSION, CONSOLE_VIEWS, renderConsoleHtml } from "../apps/console/src/main.mjs";
+import { MOMENTS_EXTENSION_CONTRACT_VERSION } from "../apps/api/src/routes/moments.mjs";
 
-test("Contract Parity: 100% bidirectional parity between registered HTTP routes, endpoint-inventory.yaml, and OpenAPI 3.1.2 spec", async () => {
+const OPENAPI_HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options", "trace"]);
+
+function parseOpenApiOperations(yamlText) {
+  const operations = [];
+  let inPaths = false;
+  let currentPath = null;
+  let currentMethod = null;
+  for (const line of yamlText.split(/\r?\n/)) {
+    if (/^paths:\s*$/.test(line)) {
+      inPaths = true;
+      continue;
+    }
+    if (!inPaths) continue;
+    if (/^[^\s].*:\s*$/.test(line) && !line.startsWith("paths:")) break;
+    const pathMatch = line.match(/^  (\/[^\s].*):\s*$/);
+    if (pathMatch) {
+      currentPath = pathMatch[1];
+      currentMethod = null;
+      continue;
+    }
+    const methodMatch = line.match(/^    ([a-z]+):\s*$/);
+    if (methodMatch && OPENAPI_HTTP_METHODS.has(methodMatch[1])) {
+      currentMethod = methodMatch[1].toUpperCase();
+      continue;
+    }
+    const operationMatch = line.match(/^      operationId:\s*([A-Za-z0-9_]+)\s*$/);
+    if (operationMatch && currentPath && currentMethod) {
+      operations.push({ method: currentMethod, path: currentPath, operationId: operationMatch[1] });
+    }
+  }
+  return operations;
+}
+
+function routeKey(route) {
+  return route.method + " " + route.path;
+}
+
+function byRouteKey(routes) {
+  const out = new Map();
+  for (const route of routes) {
+    assert.ok(!out.has(routeKey(route)), "duplicate route key: " + routeKey(route));
+    out.set(routeKey(route), route);
+  }
+  return out;
+}
+
+function sortedOperationIds(routes) {
+  return routes.map((route) => route.operationId).sort();
+}
+
+const EXPECTED_MOMENTS_EXTENSION_ROUTES = Object.freeze([
+  { method: "GET", path: "/api/v1/moments/snapshot", operationId: "getMomentsSnapshot", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/posts", operationId: "createMomentsPost", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/posts/{postId}/comments", operationId: "addMomentsPostComment", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/posts/{postId}/contact-requests", operationId: "createMomentsContactRequest", auth: "bearer" },
+  { method: "GET", path: "/api/v1/moments/posts/{postId}/contact-requests", operationId: "listMomentsContactRequests", auth: "bearer" },
+  { method: "POST", path: "/api/v1/moments/posts/{postId}/contact-requests/{requestId}/action", operationId: "handleMomentsContactRequestAction", auth: "bearer" },
+  { method: "POST", path: "/api/v1/moments/posts/{postId}/action", operationId: "mutateMomentsPost", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/books", operationId: "createMomentsBookListing", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/books/{bookId}/action", operationId: "mutateMomentsBookListing", auth: "public" },
+  { method: "GET", path: "/api/v1/moments/isbn-resolve", operationId: "resolveMomentsIsbn", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/anti-lost-tags", operationId: "upsertAntiLostTag", auth: "public" },
+  { method: "POST", path: "/api/v1/moments/anti-lost-tags/{tagCode}/report-found", operationId: "reportAntiLostTagFound", auth: "public" }
+]);
+
+test("Contract Parity: core runtime, endpoint inventory, and OpenAPI operationIds are 100% bidirectional", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
-  const registered = app.getRegisteredRoutes();
+  const coreRegistered = app.getRegisteredCoreRoutes();
+  const allRegistered = app.getRegisteredRoutes();
   const inventory = loadEndpointInventory();
-  const openApiText = loadOpenApiText();
+  const openApiOperations = parseOpenApiOperations(loadOpenApiText());
 
-  assert.equal(inventory.length, 97, "endpoint-inventory.yaml must declare 97 operations");
-  assert.equal(registered.length, 97, "CampusCloudApp must register all 97 operations");
+  assert.equal(inventory.length, 97, "endpoint-inventory.yaml must declare exactly 97 core operations");
+  assert.equal(openApiOperations.length, 97, "OpenAPI must declare exactly 97 core operations");
+  assert.equal(coreRegistered.length, 97, "CampusCloudApp must expose exactly 97 core operations");
+  assert.equal(allRegistered.length, 109, "CampusCloudApp must expose 97 core + 12 explicit extension operations");
 
-  const regByKey = new Map(registered.map((r) => [`${r.method} ${r.path}`, r]));
-  const invByKey = new Map(inventory.map((e) => [`${e.method} ${e.path}`, e]));
+  const coreByKey = byRouteKey(coreRegistered);
+  const inventoryByKey = byRouteKey(inventory);
+  const openApiByKey = byRouteKey(openApiOperations);
 
-  for (const [key, inv] of invByKey.entries()) {
-    const reg = regByKey.get(key);
-    assert.ok(reg, `Missing registered route for inventory entry: ${key}`);
-    assert.equal(reg.operationId, inv.operationId, `operationId mismatch on ${key}`);
-    assert.equal(reg.auth, inv.auth, `auth mode mismatch on ${key} (${reg.operationId})`);
-    assert.ok(
-      openApiText.includes(`operationId: ${inv.operationId}`),
-      `OpenAPI 3.1.2 spec missing operationId: ${inv.operationId}`
-    );
+  for (const inv of inventory) {
+    const key = routeKey(inv);
+    const reg = coreByKey.get(key);
+    const openApi = openApiByKey.get(key);
+    assert.ok(reg, "missing registered core route for inventory entry: " + key);
+    assert.ok(openApi, "missing OpenAPI operation for inventory entry: " + key);
+    assert.equal(reg.operationId, inv.operationId, "runtime operationId mismatch on " + key);
+    assert.equal(openApi.operationId, inv.operationId, "OpenAPI operationId mismatch on " + key);
+    assert.equal(reg.auth, inv.auth, "auth mode mismatch on " + key + " (" + reg.operationId + ")");
   }
 
-  for (const [key] of regByKey.entries()) {
-    assert.ok(invByKey.has(key), `Uninventoried shadow route registered: ${key}`);
+  for (const openApi of openApiOperations) {
+    const key = routeKey(openApi);
+    const inv = inventoryByKey.get(key);
+    const reg = coreByKey.get(key);
+    assert.ok(inv, "OpenAPI operation missing from endpoint inventory: " + key);
+    assert.ok(reg, "OpenAPI operation missing from runtime core routes: " + key);
+    assert.equal(inv.operationId, openApi.operationId, "inventory operationId mismatch on " + key);
+    assert.equal(reg.operationId, openApi.operationId, "runtime operationId mismatch on " + key);
+  }
+
+  for (const reg of coreRegistered) {
+    const key = routeKey(reg);
+    assert.ok(inventoryByKey.has(key), "uninventoried shadow core route registered: " + key);
+    assert.ok(openApiByKey.has(key), "OpenAPI shadow core route registered: " + key);
+  }
+
+  assert.deepEqual(sortedOperationIds(inventory), sortedOperationIds(coreRegistered), "inventory/runtime operationId sets must be identical");
+  assert.deepEqual(sortedOperationIds(openApiOperations), sortedOperationIds(coreRegistered), "OpenAPI/runtime operationId sets must be identical");
+});
+
+test("Contract Parity: moments extension runtime inventory is exact and explicitly pending INF-02", () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const extensionRegistered = app.getRegisteredExtensionRoutes();
+  const inventory = loadEndpointInventory();
+  const openApiOperations = parseOpenApiOperations(loadOpenApiText());
+  const coreRegistered = app.getRegisteredCoreRoutes();
+
+  assert.equal(MOMENTS_EXTENSION_CONTRACT_VERSION, "moments-extension/v0-pending-inf02");
+  assert.equal(extensionRegistered.length, 12, "moments extension must expose exactly 12 runtime operations");
+  assert.deepEqual(
+    extensionRegistered,
+    EXPECTED_MOMENTS_EXTENSION_ROUTES,
+    "moments extension inventory must exactly match method+path+operationId+auth"
+  );
+
+  const inventoryKeys = byRouteKey(inventory);
+  const openApiKeys = byRouteKey(openApiOperations);
+  const coreOperationIds = new Set(coreRegistered.map((route) => route.operationId));
+  const extensionOperationIds = new Set(extensionRegistered.map((route) => route.operationId));
+  assert.equal(extensionOperationIds.size, extensionRegistered.length, "moments extension operationIds must be unique");
+
+  for (const expected of EXPECTED_MOMENTS_EXTENSION_ROUTES) {
+    const key = routeKey(expected);
+    assert.ok(expected.path.startsWith("/api/v1/moments"), "moments extension path must stay under /api/v1/moments: " + key);
+    assert.ok(!inventoryKeys.has(key), "moments extension must not be silently present in endpoint inventory before INF-02: " + key);
+    assert.ok(!openApiKeys.has(key), "moments extension must not be silently present in OpenAPI before INF-02: " + key);
+    assert.ok(!coreOperationIds.has(expected.operationId), "moments extension operationId must not overlap core: " + expected.operationId);
   }
 });
 
