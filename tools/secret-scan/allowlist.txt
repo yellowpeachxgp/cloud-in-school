@@ -1,0 +1,97 @@
+# INF-01 secret-scan allowlist
+# 格式：<rule> <sha256-fingerprint> <path-glob> # 原因
+# fingerprint 是命中值本身的 SHA-256；不把秘密或 IP 原文写入本文件。
+# 只允许窄路径 + 窄指纹豁免；新增豁免必须说明原因并接受安全交叉审阅。
+
+# 以下条目只覆盖 INF-01 前已经存在的合成测试夹具或已公开拓扑证据；不豁免真实开发机、真实凭据或新代码。
+ip-literal 2631ed442f654ca5c1a59ebacd5f6ad09cb522c9cbb98561970c3f7926c45d5e docs/ARCHITECTURE.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 2631ed442f654ca5c1a59ebacd5f6ad09cb522c9cbb98561970c3f7926c45d5e docs/OPERATIONS.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 2631ed442f654ca5c1a59ebacd5f6ad09cb522c9cbb98561970c3f7926c45d5e docs/acceptance/ACCEPTANCE_EVIDENCE.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 2631ed442f654ca5c1a59ebacd5f6ad09cb522c9cbb98561970c3f7926c45d5e docs/acceptance/合并前最终验收-20261116.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 2631ed442f654ca5c1a59ebacd5f6ad09cb522c9cbb98561970c3f7926c45d5e docs/security/SECURITY_AUDIT_AND_REDTEAM_REPORT.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 34146ce1ba492ed7acf9a9925a04541645c203d9652183c6e238f55786c8b66f docs/security/SECURITY_AUDIT_AND_REDTEAM_REPORT.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal 34146ce1ba492ed7acf9a9925a04541645c203d9652183c6e238f55786c8b66f tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip-literal 63456bdaeb6d71032d8cc9e3b69bf5a778e7d3b38b94dba2a989fc4112f5a870 tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip-literal c5eb5a4cc76a5cdb16e79864b9ccd26c3553f0c396d0a21bafb7be71c1efcd8c tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip-literal cb5f37b4762871e6bbeccee663cb332438340c469160c634566ecc7c7e01009f core/database/src/test/kotlin/cn/edu/haut/campus/core/database/CloudIdentityPrivacyRegressionTest.kt # 合成代理配置回归测试输入
+ip-literal f5047344122f0dee9974ba6761e61c6b8649e1f3968d13a635ebbf7be53a3a0d tests/security-redteam.test.mjs # 合成 SSRF 阻断测试输入
+ip-literal f6009895de80434b6e015ad6c3b74f1048c3de55c48251c58b5efd55adcb11eb docs/ARCHITECTURE.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal f6009895de80434b6e015ad6c3b74f1048c3de55c48251c58b5efd55adcb11eb docs/OPERATIONS.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal f6009895de80434b6e015ad6c3b74f1048c3de55c48251c58b5efd55adcb11eb docs/acceptance/ACCEPTANCE_EVIDENCE.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal f6009895de80434b6e015ad6c3b74f1048c3de55c48251c58b5efd55adcb11eb docs/security/SECURITY_AUDIT_AND_REDTEAM_REPORT.md # INF-01 前已公开的既有拓扑文档地址，非开发机
+ip-literal-v6 321a48df301d680184b80d7d74e8ab859b3c562f5d169e8bd7dc0b001cc9ec0d core/campusservices/src/main/kotlin/cn/edu/haut/campus/core/campusservices/HautLibraryOpacClient.kt # 已公开学校权威 DNS 死 IPv6 注释，代码刻意规避该地址
+jwt c77f8e460bf1fdba24d1602500e933d5213c37c4fc7a91e83d3326b472fdbf6e tests/triple-schedule.test.mjs # 合成 JWT 外形测试数据，非真实令牌
+jwt dfda1f6b469d0c80029ed60560adf83c8e41fd1d3abd1ec66524ebbf3863ee82 tests/triple-schedule.test.mjs # 合成 JWT 外形测试数据，非真实令牌
+sensitive-assignment 0281274d98cc06346ee7b4ae02995383dd13daeb2b0172eef328843bfc3737cb tests/school-query-date.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 0872961dd824627fbb7482e5315951ebc0bba69c6909b04cda66f1d0dfcac428 tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 1078667769748770edb92004f11cd379eba2b21f745bd787f7577a9821a27de2 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 1327b595c8ba55a3a6ec5df195168c07911f68f811d942e28a54e0972b7d5c7a tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 149d2937d1bce53fa683ae652291bd54cc8754444216a9e278b45776b76375af tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 1519b6dab0dc5755d72d7fe0c8930318edce1c9f42449cfc22ca163f14b06ea4 tests/redis-buffer-high-concurrency.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 161f79c8990116b47c5753f5eb45edaae40e26a67303ca8e45f38b13f1476b86 core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 179092fc8e6de44bbdf3e97b64be08cebf816ed30820c62e4fec6a496e6ebc98 tests/security-redteam.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 19a7077846cc7effbfee4b07b769965f0717cb1fbdc28aa2558228bb4fd69f12 tests/future-plan-flow.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 1d6b70837803d3fe5c427141dbddcc883473ad131753f92548da2d7657105ac0 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 247af1613be048843c49a1f844ed30205fccecd13bd71319b98027d9e201a2a4 core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 29954e0a1185a67dcdd9b021a8b402ab48eedc950fb6b3e1080a6a5a24d86dbc core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 29e1dd6e544d67a8986fde66d94b879bcea8dd0522551dffe23d721f9523d886 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 2a23383e7223b19bc3e571da4f5576344d2be9bc59bc34e173ecf508ee1d46d6 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 2c427070218060d6728243db05906832619e4319addeabf168f7f73f0473f8b5 tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 350a7c67055f3edba87e4dc63dcabf94f090ae46047fef69d7f84bee0c5b14bb tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 39f535edfec20af6cbbff62f249c4812dcc9534831fb667a699714541208e724 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 3b367b36781ebd75863d4e58ed9cc5d819fbe618746dfa464d2b9f1a7ad353cc core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 404cde53562c5ecf11da4a4ddd8d2ac43fda60def0bb2af96c4e8c871cd70439 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 41de2a43712da6ffaa6e3f0388525c71f4e480bbb83ac5bf8c98c10dc27f8a81 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 44b392d403f5d180015bf0968ca52db57efce8f0b01dac12522b420cfd6af58d tests/school-query-date.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 4858c022ce14433f3c56c3cc3169304f0d707d37e15613ef05601a4983138eca tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 4b1b93d03d216c7200613e2d5d85e85324f40295c9fa953ed168e3ad3fb6f0c8 tests/redis-buffer-high-concurrency.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 5361bb89d23e6ea48f4511922ccd3cfc6bace17f046ebbfecfccc69b82b83647 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 5cca37c88b7c04219f533bd7d7fedd6075b8d2c1740c6299185dd599619ad9bf tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 60f40022fef02f6394aa928f4a0c8ab6381d80b9e04d868c1a89e310255bfded core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 66e7750e9579c48f43a199afc8683d9039ce05e5828f4f35e8c3efb92e347652 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 73987f9a905b60ff9d27c2c2080daef33707f5624fae13776c41d10ad329c41d tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 743503a7af322da2e4e8b4cdf05b7b8d98b02366161375d463da39e096d9df26 tests/queued-plan-execution.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 78f7793185a27f3116751ee5718f5534e650502da9cbabaead8cedc281a33471 core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 7951fdb01e2ca194753f5c43a3db0d50cee0814dd6e7383abd023695fb6d2471 tests/queued-plan-execution.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 79f8eec153e79a1b8ee17aa780fb2638a7f7a14864a13dcf9990a4735c14da0a tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 7c9a33be44042832d6affb30ad4a5ecc5e2a1fee05674d78f1ff9a1dff1af138 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 804564fc6aade58ea478988dcd9632b096560da83d860e5b81b804028afabe48 tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 8bcc9dfc26df2968af8189955273fb5dbafa8f79fbc614ff45297c4fa524afed tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 8ee05b6565a320bbd8ece81050587f26a65c41bd80f45fe24a4611f995ff708c tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 90bacfc04c4610f94ca4ea725ec81fd5e0d79e2422860c2d6f20ea0730457944 core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 95748e380c0e0b9bb2d076304c97fa86e92f8b561f646ad8f862b0413113ccf7 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 970121e0a8fd95b456304d000b6cd35166f76bf49cd87fef1bad9ce64a46f695 tests/multi-consent-binding-recovery.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment 9779029f86d40867cbc2f83e6e6eaff6d8815a364f832e8aa68d86fdd9fcbedd tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment a0b2477c8847f707783e09afc6af4af54c0928afd520201bd6293e664c30173a core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment a29ee5a329aaf0cbc05a932b0a70ae1aacc4e43f68c2f882f64368169e1f127a tests/multi-consent-binding-recovery.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment a83c08de9fc9d1afce2cb17431128ae0abf306e1fb62925acf98b9f3715a62a8 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment a924db761bd818d452b80d6625a47e77c93be8466f947b667493c1a4cd0460ad tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment aa36ce1ceb534c726a6d859774f0bf70caa086d951c56a3c67e59f0261442f5d tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment acc8c3f53c6d25a5cb10ac99f88ed1091432ec4014788a524be13a9dd521ef60 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ae74e87a1268d6678f848d8b5d92a1dc2a1b2b6d3c62185a3c94561f349e942c tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment af0bd10f05444d48f25c4334804f576eb7c799efb3239cdbc881522dca29e95e tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment c1f134345c1c42e455e85c8ab34df93b84a431fa76fa89c9736df933a5f869f1 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment c7320c9c3ac6b025b3ff939df87a653a027bc26196989c8b90346c31d6a3fc9d tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment cbd4384d0e7f25c5b817aa8cb347d9d9904565ae368be17ced416d338077caae tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ccec205386ec2a770e713ebc1a36c0f88f4f0d8bb41529eaf7a2cc019bb2be2a tests/security-redteam.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment d025c49154da74efca5cf144df2488d508ab7d66cd699bcac798c9155b4d3d6c core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment d150207948a665fd586a5c3c34f782635efb1cc7e3e7ec34f5abe592c5240d55 core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment d2d48aaa4715811dc72764e031d7bca55590646013e71719023a80367c2d47da tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment d2f59324399d4305f8128ce68cdd2040554b6f49d6f7f94f5d1c9849dc464400 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment d72ada4a246e8e7f982ee242cc42dbff346360bcab2395e2eacdd1114b487ec3 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment db84e19731632f25b9cac1e5e501ec48d1ee67246516af5f6e22d03a905208fa core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ec633eb77dbdaf4a47b5daabdce42e56f79d571e3c48c9fbc7aae315945564aa tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ee8c343824c52f7a4c3a2164ce6d6844d027a4e20618b33de61ec4651570e7aa tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment eea639bfb68468600f11d9fa8a52784d880b8d95ef18c3c3bfba42bea7645022 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ef71aab537d752f9e58a8c21e5a6569a63b7cc719512529c5ff2d3bd1480a9bd tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment f0542c120aef1621c11c1c2722d244b74c3bc79c634248d038150d31d8e87fdf core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment f18e8bd06de82e5c10ef9a7d763a3bc2070992196dfe602321a35d03c390af8e core/database/src/test/kotlin/cn/edu/haut/campus/core/database/BookingDispatchExclusiveClaimDaoTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment f3928b57155e46a9b998424ac61570e0a1c4c86fa52a8a0b8d5fdfbd28678540 core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment f6d357e5c8abdf0da18b107db5f766d2620242b592e5aea6f71abe03a88f90f1 tests/reservation-fault-injection.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment f70f18c6a28a17f512bd4ebdd413b4cf192be6e4b010b0d5ca063c237d442a8e core/database/src/test/kotlin/cn/edu/haut/campus/core/database/CloudIdentityPrivacyRegressionTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment fc045e7ea5d1b77ce612f7333c224a84a812a94ebe3bdf240fffe10f4a80075c core/campusservices/src/test/kotlin/cn/edu/haut/campus/core/campusservices/CampusServicesUnitTest.kt # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+sensitive-assignment ffc169417b4146cebe09a3e9ffbca33db82e3e593b4d04c0959a89c05b87e15d tests/triple-schedule.test.mjs # 合成测试凭据夹具，非真实密码、Token 或 Cookie
+user-at-host 0869b50c8586a360792b7cb45da67d03c7d99806f2386f5c1bd524799a32c98f docs/acceptance/合并前最终验收-20261116.md # INF-01 前已公开拓扑验收证据中的历史 user@host，非开发机
+user-at-host 65f5f03b2460a9fef24fc479050455934f91b36562fb35654a68357bc47ed9a4 core/academic/src/test/kotlin/cn/edu/haut/campus/core/academic/AcademicReadSafetyTest.kt # 合成 URL userinfo 安全测试输入
+user-at-host 9aa26d0824940c2ca33a2fae412f0ec73221b0cde5f1ddaf70f77e40d3372713 core/school-packages/src/test/kotlin/cn/edu/haut/campus/core/packages/permission/PermissionScopeTest.kt # 合成 URL userinfo 安全测试输入
