@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(SCRIPT_DIR, "../..");
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_LINE_BYTES = 1024 * 1024;
 const SKIP_DIR_NAMES = new Set([
   ".git",
   ".gradle",
@@ -24,7 +26,7 @@ const SKIP_DIR_NAMES = new Set([
   "out"
 ]);
 
-const IPV4_RE = /(?<![0-9A-Za-z_.])((?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})(?![0-9A-Za-z_.])/g;
+const IPV4_RE = /(?<![0-9A-Za-z_.])((?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})(?![0-9A-Za-z_])/g;
 const IPV6_CANDIDATE_RE = /(?<![0-9A-Za-z_.])(?:[0-9A-Fa-f]{0,4}:){2,}(?:[0-9A-Fa-f]{0,4}|[0-9]{1,3}(?:\.[0-9]{1,3}){3})?(?![0-9A-Za-z_.])/g;
 const USER_AT_HOST_RE = /(?<![0-9A-Za-z_.+-])([A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+)(?![0-9A-Za-z_.-])/g;
 const PRIVATE_KEY_RE = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/g;
@@ -39,11 +41,19 @@ const SENSITIVE_BARE_KEY_ASSIGNMENT_RE = new RegExp(
   "gi"
 );
 const YAML_SENSITIVE_ASSIGNMENT_RE = new RegExp(
-  "^\\s*[\"']?(" + SENSITIVE_KEY_PATTERN + ")[\"']?\\s*:\\s*([^\\s\"'\\x60][^#\\r\\n]*?)\\s*(?:#.*)?$",
+  "^\\s*(?:-\\s*)?[\"']?(" + SENSITIVE_KEY_PATTERN + ")[\"']?\\s*:\\s*([^\\s\"'\\x60][^#\\r\\n]*?)\\s*(?:#.*)?$",
+  "i"
+);
+const YAML_INLINE_SENSITIVE_ASSIGNMENT_RE = new RegExp(
+  "(?:^|[\\s\\{\\[,\\-])[\"']?(" + SENSITIVE_KEY_PATTERN + ")[\"']?\\s*:\\s*([^\\s\"'\\x60\\}\\],][^\\}\\]\\r\\n,]*)",
+  "gi"
+);
+const YAML_BLOCK_KEY_RE = new RegExp(
+  "^\\s*(?:-\\s*)?[\"']?(" + SENSITIVE_KEY_PATTERN + ")[\"']?\\s*:\\s*[|>](?:[+-])?\\s*(?:#.*)?$",
   "i"
 );
 const ENV_SECRET_ASSIGNMENT_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=([^\s#]+)/;
-const AUTHORIZATION_BEARER_RE = /\bauthorization\s*:\s*bearer\s+([A-Za-z0-9][A-Za-z0-9._~+\/-]{7,}={0,2})/gi;
+const AUTHORIZATION_BEARER_RE = /\b["']?authorization["']?\s*:\s*["']?bearer\s+([A-Za-z0-9][A-Za-z0-9._~+\/-]{7,}={0,2})/gi;
 
 const TOKEN_RULES = [
   { id: "github-token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b/g },
@@ -205,8 +215,12 @@ function isScanworthyIpv6(candidate) {
   if (isIP(candidate) !== 6) return false;
   const normalized = candidate.toLowerCase();
   if (normalized === "::" || normalized === "::1" || normalized.includes(".")) return true;
+  if (normalized.startsWith("::")) {
+    const suffix = normalized.slice(2);
+    if (/^[a-f]+$/.test(suffix) && !/[0-9]/.test(suffix)) return false;
+  }
   const hextets = normalized.match(/[0-9a-f]{1,4}/g) || [];
-  return hextets.length >= 2;
+  return hextets.length >= 1;
 }
 
 function metadataValue(comment, key) {
@@ -287,6 +301,23 @@ function allowlistMatches(entries, rule, value, file, lineNumber) {
 
 function fingerprint(value) {
   return createHash("sha256").update(String(value), "utf8").digest("hex").slice(0, 12) + "/len" + String(value).length;
+}
+
+function redactPathForOutput(value) {
+  const configuredRoot = (process.env.CIS_CAMPUS_ROOT || "").trim().replace(/\/+$/, "");
+  if (!configuredRoot) return value;
+  const candidates = [configuredRoot];
+  try {
+    const canonicalRoot = fs.realpathSync(configuredRoot).replace(/\/+$/, "");
+    if (!candidates.includes(canonicalRoot)) candidates.push(canonicalRoot);
+  } catch {
+    // Keep the configured spelling when it cannot be canonicalized.
+  }
+  for (const campusRoot of candidates) {
+    if (value === campusRoot) return "<campus-root>";
+    if (value.startsWith(campusRoot + "/")) return "<campus-root>" + value.slice(campusRoot.length);
+  }
+  return value;
 }
 
 function addFinding(findings, seen, file, line, rule, value) {
@@ -439,11 +470,18 @@ function isTemplateOrPlaceholder(value) {
   return false;
 }
 
+function isUpperConstantSymbolKey(key) {
+  const raw = String(key || "").replace(/^["']+|["']+$/g, "");
+  return /^[A-Z0-9_]+$/.test(raw) && raw.includes("_");
+}
+
 function isCredentialKey(key) {
   const normalized = String(key || "").replace(/^["']+|["']+$/g, "").toLowerCase().replace(/[-_]/g, "");
   if (normalized === "setcookie") return false;
-  if (/^(password|passwd|pwd|passphrase|passcode|token|cookie|secret|apikey|accesskey|secretkey|privatekey|clientsecret|rawtoken|passtoken|servicetoken|sessiontoken|accesstoken|refreshtoken|authtoken|bearertoken|idtoken)$/.test(normalized)) return true;
-  return /(?:password|passwd|pwd|passphrase|passcode|secret|cookie|accesstoken|refreshtoken|authtoken|bearertoken|idtoken|clientsecret|apikey|accesskey|secretkey|privatekey|rawtoken|passtoken|servicetoken|sessiontoken)$/.test(normalized);
+  if (normalized === "matchedtoken" || normalized === "mutationtoken") return false;
+  if (/^(password|passwd|pwd|passphrase|passcode|token|cookie|secret|apikey|accesskey|secretkey|privatekey|clientsecret|apitoken|rawtoken|passtoken|servicetoken|sessiontoken|accesstoken|refreshtoken|authtoken|bearertoken|idtoken|csrftoken|logintoken|privatetoken)$/.test(normalized)) return true;
+  if (normalized.endsWith("token")) return true;
+  return /(?:password|passwd|pwd|passphrase|passcode|secret|cookie|apitoken|accesstoken|refreshtoken|authtoken|bearertoken|idtoken|clientsecret|apikey|accesskey|secretkey|privatekey|rawtoken|passtoken|servicetoken|sessiontoken)$/.test(normalized);
 }
 
 function isYamlFile(file) {
@@ -456,10 +494,15 @@ function isConcatenatedFragment(line, match) {
   return before.endsWith("+") || after.startsWith("+");
 }
 
-function scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allowlist }) {
+function leadingWhitespaceWidth(line) {
+  const match = line.match(/^[ \t]*/);
+  return match ? match[0].length : 0;
+}
+
+function scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allowlist, yamlState }) {
   const candidates = [];
   for (const match of line.matchAll(SENSITIVE_QUOTED_KEY_ASSIGNMENT_RE)) {
-    if (isCredentialKey(match[2]) && !isConcatenatedFragment(line, match)) candidates.push({ value: match[4], rule: "sensitive-assignment" });
+    if (isCredentialKey(match[2]) && !isUpperConstantSymbolKey(match[2]) && !isConcatenatedFragment(line, match)) candidates.push({ value: match[4], rule: "sensitive-assignment" });
   }
   for (const match of line.matchAll(SENSITIVE_BARE_KEY_ASSIGNMENT_RE)) {
     if (isCredentialKey(match[1]) && !isConcatenatedFragment(line, match)) candidates.push({ value: match[3], rule: "sensitive-assignment" });
@@ -469,8 +512,23 @@ function scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allo
   if (envMatch && isCredentialKey(envMatch[1])) candidates.push({ value: envMatch[2], rule: "sensitive-assignment" });
 
   if (isYamlFile(file)) {
+    const blockKeyMatch = line.match(YAML_BLOCK_KEY_RE);
+    if (blockKeyMatch && isCredentialKey(blockKeyMatch[1])) {
+      yamlState.pending = true;
+      yamlState.indent = leadingWhitespaceWidth(line);
+    } else if (yamlState.pending && line.trim()) {
+      if (leadingWhitespaceWidth(line) > yamlState.indent) {
+        candidates.push({ value: line.trim(), rule: "sensitive-assignment" });
+      }
+      yamlState.pending = false;
+    }
+
     const yamlMatch = line.match(YAML_SENSITIVE_ASSIGNMENT_RE);
     if (yamlMatch && isCredentialKey(yamlMatch[1])) candidates.push({ value: yamlMatch[2], rule: "sensitive-assignment" });
+
+    for (const match of line.matchAll(YAML_INLINE_SENSITIVE_ASSIGNMENT_RE)) {
+      if (isCredentialKey(match[1]) && !isConcatenatedFragment(line, match)) candidates.push({ value: match[2], rule: "sensitive-assignment" });
+    }
   }
 
   for (const match of line.matchAll(AUTHORIZATION_BEARER_RE)) {
@@ -486,6 +544,73 @@ function scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allo
   }
 }
 
+function scanLineContent({ findings, seen, file, lineNumber, line, allowlist, runtimeNeedles, yamlState }) {
+  scanIpLine({ findings, seen, file, lineNumber, line, allowlist, runtimeNeedles });
+
+  for (const match of line.matchAll(PRIVATE_KEY_RE)) {
+    addFinding(findings, seen, file, lineNumber, "private-key-header", match[0]);
+  }
+
+  for (const match of line.matchAll(PGP_PRIVATE_KEY_RE)) {
+    addFinding(findings, seen, file, lineNumber, "pgp-private-key-header", match[0]);
+  }
+
+  for (const rule of TOKEN_RULES) {
+    for (const match of line.matchAll(rule.pattern)) {
+      if (allowlistMatches(allowlist, rule.id, match[0], file, lineNumber)) continue;
+      addFinding(findings, seen, file, lineNumber, rule.id, match[0]);
+    }
+  }
+
+  scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allowlist, yamlState });
+}
+
+function scanLines(lines, startLineNumber, context) {
+  for (let index = 0; index < lines.length; index += 1) {
+    scanLineContent({
+      ...context,
+      line: lines[index],
+      lineNumber: startLineNumber + index
+    });
+  }
+  return startLineNumber + lines.length;
+}
+
+function scanLargeTextFileInChunks(absolute, file, allowlist, runtimeNeedles, findings, seen) {
+  const fd = fs.openSync(absolute, "r");
+  const decoder = new StringDecoder("utf8");
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  const yamlState = { pending: false, indent: 0 };
+  let leftover = "";
+  let lineNumber = 1;
+  let firstChunk = true;
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      if (firstChunk && isProbablyBinary(chunk.subarray(0, Math.min(bytesRead, 8192)))) return false;
+      firstChunk = false;
+      leftover += decoder.write(chunk.subarray(0, bytesRead));
+      const parts = leftover.split(/\r?\n/);
+      leftover = parts.pop() || "";
+      if (leftover.length > MAX_LINE_BYTES) {
+        throw new Error("oversize line in chunked scan for " + file);
+      }
+      if (parts.length > 0) {
+        lineNumber = scanLines(parts, lineNumber, { findings, seen, file, allowlist, runtimeNeedles, yamlState });
+      }
+    }
+    leftover += decoder.end();
+    if (leftover.length > 0) {
+      if (leftover.length > MAX_LINE_BYTES) throw new Error("oversize line in chunked scan for " + file);
+      scanLines([leftover], lineNumber, { findings, seen, file, allowlist, runtimeNeedles, yamlState });
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return true;
+}
+
 function scanTextFile(root, file, allowlist, runtimeNeedles, findings, seen, warnings) {
   const absolute = path.join(root, file);
   let stat;
@@ -497,35 +622,15 @@ function scanTextFile(root, file, allowlist, runtimeNeedles, findings, seen, war
   }
   if (!stat.isFile()) return false;
   if (stat.size > MAX_FILE_BYTES) {
-    warnings.push({ file, warning: "file-over-20MiB-not-content-scanned" });
-    return false;
+    warnings.push({ file, warning: "file-over-20MiB-scanned-in-chunks" });
+    return scanLargeTextFileInChunks(absolute, file, allowlist, runtimeNeedles, findings, seen);
   }
   const buffer = fs.readFileSync(absolute);
   if (isProbablyBinary(buffer)) return false;
   const text = buffer.toString("utf8");
   const lines = text.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const lineNumber = index + 1;
-    scanIpLine({ findings, seen, file, lineNumber, line, allowlist, runtimeNeedles });
-
-    for (const match of line.matchAll(PRIVATE_KEY_RE)) {
-      addFinding(findings, seen, file, lineNumber, "private-key-header", match[0]);
-    }
-
-    for (const match of line.matchAll(PGP_PRIVATE_KEY_RE)) {
-      addFinding(findings, seen, file, lineNumber, "pgp-private-key-header", match[0]);
-    }
-
-    for (const rule of TOKEN_RULES) {
-      for (const match of line.matchAll(rule.pattern)) {
-        if (allowlistMatches(allowlist, rule.id, match[0], file, lineNumber)) continue;
-        addFinding(findings, seen, file, lineNumber, rule.id, match[0]);
-      }
-    }
-
-    scanSensitiveAssignments({ findings, seen, file, lineNumber, line, allowlist });
-  }
+  const yamlState = { pending: false, indent: 0 };
+  scanLines(lines, 1, { findings, seen, file, allowlist, runtimeNeedles, yamlState });
   return true;
 }
 
@@ -537,7 +642,7 @@ function main() {
   }
   const root = path.resolve(options.root);
   if (!fs.existsSync(path.join(root, ".git"))) {
-    throw new Error("Not a git worktree: " + root);
+    throw new Error("Not a git worktree: " + redactPathForOutput(root));
   }
 
   const allowlist = readAllowlist(root);
@@ -565,7 +670,7 @@ function main() {
   const allowlistUsed = allowlist.filter(entry => entry.usedCount > 0).length;
   const result = {
     ok: findings.length === 0,
-    root,
+    root: redactPathForOutput(root),
     scannedFiles,
     trackedFiles: trackedFiles.length,
     allowlistEntries: allowlist.length,

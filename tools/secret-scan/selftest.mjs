@@ -17,6 +17,20 @@ const template = name => dollar + braceOpen + name + braceClose;
 const synthetic = {
   jsonPassword: join("json-", "secret-", "1234"),
   jsonApiKey: join("json-", "api-", "key-1234"),
+  jsonApiToken: join("json-", "api-", "token-1234"),
+  lowerApiToken: join("lower-", "api-", "token-123"),
+  upperApiToken: join("upper-", "api-", "token-123"),
+  jsonBearerToken: join("json-", "bearer-", "token-12345"),
+  csrfToken: join("csrf-", "token-", "1234"),
+  loginToken: join("login-", "token-", "1234"),
+  privateToken: join("private-", "token-", "1234"),
+  yamlListSecret: join("yaml-", "list-", "secret-1234"),
+  yamlInlineSecret: join("yaml-", "inline-", "secret-1234"),
+  yamlBlockSecret: join("yaml-", "block-", "secret-1234"),
+  bigChunkSecret: join("big-", "chunk-", "secret-123"),
+  yamlPasswordKey: join("pass", "word"),
+  ipv4Sentence: join("10.9.", "8.7"),
+  ipv6Compressed: join("fd", "00::"),
   yamlPassword: join("yaml-", "secret-", "1234"),
   yamlApiKey: join("yaml-", "api-", "key-1234"),
   yamlQuotedPassword: join("yaml-", "quoted-", "secret-1234"),
@@ -88,20 +102,28 @@ function ruleCounts(result) {
 }
 
 const positiveRoot = makeRepo({
-  "config.json": "{\"password\":\"" + synthetic.jsonPassword + "\",\"nested\":{\"apiKey\":\"" + synthetic.jsonApiKey + "\"}}\n",
+  "config.json": "{\"password\":\"" + synthetic.jsonPassword + "\",\"nested\":{\"apiKey\":\"" + synthetic.jsonApiKey + "\"},\"apiToken\":\"" + synthetic.jsonApiToken + "\",\"csrfToken\":\"" + synthetic.csrfToken + "\",\"loginToken\":\"" + synthetic.loginToken + "\",\"privateToken\":\"" + synthetic.privateToken + "\"}\n",
   "config.yaml": [
     "password: " + synthetic.yamlPassword,
     "apiKey: " + synthetic.yamlApiKey,
     "quoted_password: \"" + synthetic.yamlQuotedPassword + "\"",
+    "- " + synthetic.yamlPasswordKey + ": " + synthetic.yamlListSecret,
+    "- { " + synthetic.yamlPasswordKey + ": " + synthetic.yamlInlineSecret + " }",
+    synthetic.yamlPasswordKey + ": |",
+    "  " + synthetic.yamlBlockSecret,
     ""
   ].join("\n"),
   "shell.sh": [
     "password=" + synthetic.lowerEnvPassword,
     "API_KEY=" + synthetic.upperApiKey,
+    "api_token=" + synthetic.lowerApiToken,
+    "API_TOKEN=" + synthetic.upperApiToken,
     "export session_token=" + synthetic.lowerSessionToken,
     ""
   ].join("\n"),
   "http.txt": "Authorization: Bearer " + synthetic.bearerToken + "\n",
+  "json-auth.json": "{\"Authorization\":\"Bearer " + synthetic.jsonBearerToken + "\"}\n",
+  "network.txt": "sentence end IPv4: " + synthetic.ipv4Sentence + ".\ncompressed IPv6: " + synthetic.ipv6Compressed + "\n",
   "pgp.asc": synthetic.pgpHeader + "\n",
   "pem.key": synthetic.pemHeader + "\n",
   "extra-arg.txt": "literal=" + synthetic.argExtra + "\n",
@@ -117,19 +139,38 @@ const negativeRoot = makeRepo({
     ""
   ].join("\n"),
   "http.txt": "Authorization: Bearer " + template("TOKEN_VALUE") + "\n",
-  "code.js": "const matchedToken = \"abcdef123456\";\n",
+  "json-auth-negative.json": "{\"Authorization\":\"Bearer " + template("TOKEN_VALUE") + "\"}\n",
+  "code.js": "const matchedToken = \"abcdef123456\";\nconst mutationToken = \"abcdef123456\";\nconst mode = hasValidClaimToken ? \"HIGH_ENTROPY_CLAIM_TOKEN\" : \"TRUSTED_UNIQUE_SSO_SUBJECT\";\n",
   ".env.example": "PASSWORD=<example-password>\n",
   "note.txt": "password and token fields are documented here without assignment. Local worktree /Volumes/example/campus-worktrees/repo/branch is allowed.\n"
 });
 
+{
+  const bigPath = path.join(positiveRoot, "big-chunked.txt");
+  const filler = "safe filler line for chunked scanning\n";
+  const fillerBlock = filler.repeat(1024);
+  const targetBytes = 20 * 1024 * 1024 + 4096;
+  let written = 0;
+  while (written < targetBytes) {
+    fs.appendFileSync(bigPath, fillerBlock);
+    written += Buffer.byteLength(fillerBlock);
+  }
+  fs.appendFileSync(bigPath, "password=" + synthetic.bigChunkSecret + "\n");
+  git(positiveRoot, ["add", "big-chunked.txt"]);
+}
+
 try {
   const positive = runScan(positiveRoot, ["--extra-literal", synthetic.argExtra], {
-    CIS_SECRET_SCAN_EXTRA_LITERALS: synthetic.envExtra
+    CIS_SECRET_SCAN_EXTRA_LITERALS: synthetic.envExtra,
+    CIS_CAMPUS_ROOT: positiveRoot
   });
   assert(positive.rc === 1 && positive.result, "positive fixture should exit 1 with JSON findings; rc=" + positive.rc + " stderr=" + positive.stderr);
+  assert(positive.result.root === "<campus-root>", "JSON root should redact CIS_CAMPUS_ROOT; got " + positive.result.root);
   const counts = ruleCounts(positive.result);
-  assert((counts.get("sensitive-assignment") || 0) >= 8, "quoted/unquoted JSON/YAML and lowercase/uppercase env assignments not fully detected; got " + (counts.get("sensitive-assignment") || 0));
-  assert((counts.get("authorization-bearer") || 0) === 1, "Authorization Bearer value not detected");
+  assert((counts.get("sensitive-assignment") || 0) >= 18, "quoted/unquoted JSON/YAML/list/block/inline, token suffix variants, lowercase/uppercase env, and chunked assignments not fully detected; got " + (counts.get("sensitive-assignment") || 0));
+  assert((counts.get("authorization-bearer") || 0) === 2, "plain and JSON Authorization Bearer values not detected; got " + (counts.get("authorization-bearer") || 0));
+  assert((counts.get("ip-literal") || 0) === 1, "sentence-ending IPv4 not detected");
+  assert((counts.get("ip-literal-v6") || 0) === 1, "compressed single-hextet IPv6 not detected");
   assert((counts.get("pgp-private-key-header") || 0) === 1, "PGP private key header not detected");
   assert((counts.get("private-key-header") || 0) === 1, "PEM private key header not detected");
   assert((counts.get("extra-literal") || 0) === 2, "argument and environment supplied extra literals not detected; got " + (counts.get("extra-literal") || 0));

@@ -26,12 +26,12 @@ cis-gate 或调用方只能在进程环境/命令行参数中传入这些值，�
 1. IP 字面量：默认扫描所有非白名单 IPv4/IPv6，包括私网、公网、链路本地等可能指向真实基础设施的地址。默认白名单仅限 unspecified、loopback、RFC 3849/5737 文档地址、组播/保留地址。
 2. user@host：扫描带点主机名的 user@host 形态；Kotlin 的 this/return/break/continue 标签语义会排除。合成 URL userinfo 安全测试只允许逐指纹、逐行豁免。
 3. Token/Key 格式：GitHub、GitLab、OpenAI/Anthropic 风格、Stripe、Slack、AWS、Google API、JWT、npm、PyPI，以及 URI 内嵌用户名和密码。
-4. 凭据赋值：扫描 JSON/YAML 中带引号或不带引号的 password/passwd/pwd/passphrase/passcode/token/cookie/secret/apiKey/accessKey 类键；扫描 shell 风格无空格小写或大写 env 赋值；扫描 Authorization: Bearer <值>。模板变量、尖括号占位符、明显拼接片段和 HTTP set-cookie 清除头不作为命中；这不构成对 password/token/cookie 的目录级或宽泛忽略。
+4. 凭据赋值：扫描 JSON/YAML 中带引号或不带引号的 password/passwd/pwd/passphrase/passcode/token/cookie/secret/apiKey/accessKey 类键，覆盖 apiToken/csrfToken/loginToken/privateToken 等 token 后缀、YAML list/block/inline 形态和 shell 风格无空格小写或大写 env 赋值；扫描 plain 或 JSON/quoted Authorization: Bearer <值>。模板变量、尖括号占位符、明显拼接片段、matchedToken/mutationToken 和 HTTP set-cookie 清除头不作为命中；这不构成对 password/token/cookie 的目录级或宽泛忽略。
 5. 私钥头：PEM 私钥 BEGIN 行和 PGP PRIVATE KEY BLOCK 行。
 6. .env：跟踪或未跟踪的 .env、.env.local、.env.production 等文件；.env.example、.env.sample、.env.template 视为安全模板，但其中的真实凭据仍应删除。
 7. 已知的非网络误报会做语义排除，例如 Chrome User-Agent 中的四位版本号、OpenJDK/JDK 版本号、Kotlin 作用域标签。
 
-这是仓库内容门禁，不替代 Git 历史审计、运行时 secret manager 或人工审阅。压缩包、图片等二进制文件不解析；超过 20 MiB 的文本文件会输出 warning，后续如需覆盖应分块扫描。
+这是仓库内容门禁，不替代 Git 历史审计、运行时 secret manager 或人工审阅。压缩包、图片等二进制文件不解析；超过 20 MiB 的文本文件按 1 MiB 块分块扫描并输出 warning，单行超过 1 MiB 会以退出码 2 fail-closed，不能用填充绕过门禁。JSON root 与错误中的 campus 根路径会按 CIS_CAMPUS_ROOT 脱敏。
 
 ## 白名单
 
@@ -56,9 +56,9 @@ fingerprint 是命中值本身的 SHA-256 十六进制摘要；因此白名单�
 
     node tools/secret-scan/selftest.mjs
 
-自测在临时 git 仓库中生成合成正/负例，不使用 node --test，不访问网络，不写入仓库。覆盖：quoted/unquoted JSON/YAML key、lowercase/uppercase env、Authorization Bearer、PGP/PEM private key、运行时 extra literal、模板占位符和非凭据 token 负例。期望输出：
+自测在临时 git 仓库中生成合成正/负例，不使用 node --test，不访问网络，不写入仓库。覆盖：quoted/unquoted JSON/YAML key、YAML list/block/inline、apiToken/csrfToken/loginToken/privateToken、lowercase/uppercase env、plain 与 JSON/quoted Authorization Bearer、句末 IPv4、压缩 IPv6、超过 20 MiB 分块文件、PGP/PEM private key、运行时 extra literal、模板占位符，以及 matchedToken/mutationToken 非凭据负例。期望输出：
 
-    SECRET_SCAN_SELFTEST_PASS positiveFindings=13 negativeFindings=0
+    SECRET_SCAN_SELFTEST_PASS positiveFindings=26 negativeFindings=0
 
 ## cis-gate 集成
 
@@ -66,7 +66,7 @@ cis-gate 的 secrets 门禁应在检出待测 SHA 后优先执行可执行包装
 
     tools/secret-scan/run
 
-包装器会调用 scan.mjs；当 CIS_CAMPUS_ROOT 已在进程环境中存在时，会把当前执行账号和 hostname 作为运行时 --extra-literal 传入，用于覆盖开发机账号/地址而不在仓库中硬编码。直接手工扫描仍可使用：
+包装器会调用 scan.mjs；当 CIS_CAMPUS_ROOT 已在进程环境中存在时，会把当前执行账号和 hostname 合并进 CIS_SECRET_SCAN_EXTRA_LITERALS 环境变量传入，而不是暴露在命令行 argv 中，用于覆盖开发机账号/地址而不在仓库中硬编码。直接手工扫描仍可使用：
 
     node tools/secret-scan/scan.mjs --root .
 
