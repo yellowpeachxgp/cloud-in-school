@@ -80,7 +80,7 @@ async function invokePingWithOrigin(app, headers) {
 
 test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, and rollback shrinks grants", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "plugin_permission_hotfix_user");
+  const { headers, user } = createUserSession(app, "plugin_permission_hotfix_user");
   const keyPair = generateEd25519KeyPair();
   const v1Permissions = ["ui.slot.render"];
   const v2Permissions = [
@@ -109,6 +109,20 @@ test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, a
     "location.coarse"
   ]);
   assert.deepEqual(installV2.body.data.granted_permissions, v1Permissions);
+
+  const oldVersionStillActive = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/commands/ping/invoke",
+    headers,
+    body: {}
+  });
+  assert.equal(oldVersionStillActive.status, 200);
+  assert.equal(oldVersionStillActive.body.data.version, "1.0.0");
+  const pendingSlots = app.pluginBroker.getResolvedUiSlotDescriptors(user.id, "campus.services");
+  assert.equal(
+    pendingSlots.find((slot) => slot.plugin_id === "org.example.permission-hotfix")?.plugin_version,
+    "1.0.0"
+  );
 
   const deniedBeforeReview = await invokePingWithOrigin(app, headers);
   assert.equal(deniedBeforeReview.status, 403);

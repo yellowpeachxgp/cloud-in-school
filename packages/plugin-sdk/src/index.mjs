@@ -234,6 +234,12 @@ function intersectPermissionLists(grantedPermissions, declaredPermissions) {
   return uniquePermissionList(declaredPermissions).filter((permission) => granted.has(permission));
 }
 
+function isOperationallyEnabled(installation) {
+  // PENDING_PERMISSION_REVIEW means the *new* version is not active yet. The
+  // previously active version must continue to run with its old grant set.
+  return installation?.status === "ENABLED" || installation?.status === "PENDING_PERMISSION_REVIEW";
+}
+
 export class PluginRegistryAndBroker {
   constructor({ publicKeyBase64 = null, privateKeyBase64 = null, hostApiVersion = 2 } = {}) {
     if (!publicKeyBase64 || !privateKeyBase64) {
@@ -498,7 +504,7 @@ export class PluginRegistryAndBroker {
   getResolvedUiSlotDescriptors(userId, slotId = null) {
     const descriptors = [];
     for (const inst of this.userInstallations.values()) {
-      if (inst.user_id !== userId || inst.status !== "ENABLED") continue;
+      if (inst.user_id !== userId || !isOperationallyEnabled(inst)) continue;
       const pkg = this.packages.get(`${inst.plugin_id}@${inst.active_version}`);
       if (!pkg) continue;
       if (!(inst.granted_permissions || []).includes("ui.slot.render")) continue;
@@ -528,7 +534,7 @@ export class PluginRegistryAndBroker {
   }) {
     const installKey = `${userId}:${pluginId}`;
     const inst = this.userInstallations.get(installKey);
-    if (!inst || inst.status !== "ENABLED") {
+    if (!inst || !isOperationallyEnabled(inst)) {
       throw new ContractError(
         "PLUGIN_PERMISSION_DENIED",
         `Plugin '${pluginId}' is not installed and enabled for user`
