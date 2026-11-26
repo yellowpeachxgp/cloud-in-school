@@ -6,14 +6,24 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: CIS_DEVBOX=<ssh-target> CIS_CAMPUS_ROOT=<campus-root> cis-install-devbox [--provision]
 
-Copies cis-* scripts from this repository checkout to <campus-root>/bin using
-scp (no ssh inline heredoc). Files are first uploaded to a same-root staging
-directory, every script is validated with bash -n on the devbox, and each file
-is then atomically moved into bin. This prevents a live script from being
-overwritten in place while Bash is still reading it. With --provision, runs
-cis-provision all after installation. Neither the SSH target nor campus root is
-hard-coded.
+Copies the supported cis-* scripts from this repository checkout to
+<campus-root>/bin using scp (no ssh inline heredoc). The SSH target must be a
+hostname or user@hostname using only letters, digits, dot, underscore, and
+hyphen; this deliberately excludes option injection and shell metacharacters.
+The remote campus root is created if needed, canonicalized on the devbox, and
+must contain a campus path component. The devbox user must not be root.
+
+Files are uploaded to a hidden staging directory inside bin, remotely validated
+with bash -n, verified to be on the same filesystem as bin, chmodded while still
+in staging, and then moved into place with rename(2)-backed mv. Thus no live
+script is ever overwritten in place or visible half-written. With --provision,
+runs cis-provision all after installation. Neither target nor root is hard-coded.
 USAGE
+}
+
+die() {
+  printf 'cis-install-devbox: ERROR: %s\n' "$*" >&2
+  exit 2
 }
 
 if [ -z "${CIS_DEVBOX:-}" ] || [ -z "${CIS_CAMPUS_ROOT:-}" ]; then
@@ -29,52 +39,131 @@ for arg in "$@"; do
   esac
 done
 
-remote_root=${CIS_CAMPUS_ROOT%/}
-case "$remote_root" in
-  ''|/) printf '%s\n' 'CIS_CAMPUS_ROOT must be a non-root absolute path' >&2; exit 2 ;;
-  /*) ;;
-  *) printf '%s\n' 'CIS_CAMPUS_ROOT must be an absolute path' >&2; exit 2 ;;
+case "$CIS_DEVBOX" in
+  -*|*@-*|*@) die 'CIS_DEVBOX must not begin with an option-like hyphen or have an empty host part' ;;
 esac
-case "$remote_root" in
+if [[ ! "$CIS_DEVBOX" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  die 'CIS_DEVBOX must be hostname or user@hostname using only letters, digits, dot, underscore, and hyphen'
+fi
+
+input_root=${CIS_CAMPUS_ROOT%/}
+while [ "$input_root" != / ] && [ "$input_root" != "${input_root%/}" ]; do
+  input_root=${input_root%/}
+done
+case "$input_root" in
+  ''|/) die 'CIS_CAMPUS_ROOT must be a non-root absolute path' ;;
+  /*) ;;
+  *) die 'CIS_CAMPUS_ROOT must be an absolute path' ;;
+esac
+case "$input_root" in
   *[!A-Za-z0-9._/-]*)
-    printf '%s\n' 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash' >&2
-    exit 2
+    die 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash'
     ;;
+esac
+case "/$input_root/" in
+  */../*) die 'CIS_CAMPUS_ROOT must not contain a .. path component' ;;
 esac
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$CIS_DEVBOX")
+scp_cmd=(scp -p -o BatchMode=yes -o ConnectTimeout=15)
+
+if ! "${ssh_cmd[@]}" true; then
+  die 'unable to reach CIS_DEVBOX with BatchMode ssh'
+fi
+if ! remote_uid=$("${ssh_cmd[@]}" 'id -u' 2>/dev/null); then
+  die 'unable to read remote user id'
+fi
+case "$remote_uid" in
+  0) die 'refusing to install or run campus infrastructure as root' ;;
+  ''|*[!0-9]*) die 'remote user id was not numeric' ;;
+esac
+
+if ! "${ssh_cmd[@]}" "mkdir -p -- '$input_root'"; then
+  die 'unable to create remote campus root'
+fi
+if ! remote_root=$("${ssh_cmd[@]}" "CDPATH= cd -- '$input_root' && pwd -P" 2>/dev/null); then
+  die 'unable to canonicalize remote campus root'
+fi
+case "$remote_root" in
+  ''|/) die 'canonical remote campus root must not be /' ;;
+  /*) ;;
+  *) die 'canonical remote campus root is not absolute' ;;
+esac
+case "$remote_root" in
+  */campus|*/campus/*) ;;
+  *) die 'canonical remote campus root must contain a campus path component' ;;
+esac
+case "$remote_root" in
+  *[!A-Za-z0-9._/-]*) die 'canonical remote campus root contains unsupported characters' ;;
+esac
+
 remote_bin="$remote_root/bin"
+if "${ssh_cmd[@]}" "[ -L '$remote_bin' ]"; then
+  die 'remote campus bin must be a real directory, not a symlink'
+fi
+if "${ssh_cmd[@]}" "[ -e '$remote_bin' ] && [ ! -d '$remote_bin' ]"; then
+  die 'remote campus bin exists but is not a directory'
+fi
+
 stamp=$(date -u +%Y%m%d%H%M%S)
-staging="$remote_root/artifacts/bin-staging-$stamp-$$"
+staging="$remote_bin/.staging-$stamp-$$"
 
 cleanup_staging() {
   if [ -n "$staging" ]; then
-    ssh "$CIS_DEVBOX" "rm -rf -- '$staging'" >/dev/null 2>&1 || true
+    "${ssh_cmd[@]}" "rm -rf -- '$staging'" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_staging EXIT
 
-ssh "$CIS_DEVBOX" "mkdir -p '$staging' '$remote_bin' '$remote_root/repos' '$remote_root/build' '$remote_root/cache/gradle' '$remote_root/cache/npm' '$remote_root/android-sdk' '$remote_root/locks' '$remote_root/logs' '$remote_root/artifacts'"
-scp "$SCRIPT_DIR"/cis-* "$CIS_DEVBOX:$staging/"
+if "${ssh_cmd[@]}" "[ -e '$staging' ]"; then
+  die 'staging path unexpectedly already exists'
+fi
+"${ssh_cmd[@]}" "mkdir -p -- '$staging' '$remote_bin' '$remote_root/repos' '$remote_root/build' '$remote_root/cache/gradle' '$remote_root/cache/npm' '$remote_root/android-sdk' '$remote_root/locks' '$remote_root/logs' '$remote_root/artifacts'"
 
-# Validate every staged file before any live file is replaced. ssh joins the
-# command arguments remotely; the staging path is constrained to safe chars.
-for file in "$SCRIPT_DIR"/cis-*; do
-  base=$(basename -- "$file")
-  ssh "$CIS_DEVBOX" bash -n "$staging/$base"
+scripts=(cis-clean cis-common.sh cis-containers cis-gate cis-gradle cis-install-devbox cis-provision cis-worktree)
+local_files=()
+for base in "${scripts[@]}"; do
+  file="$SCRIPT_DIR/$base"
+  [ -f "$file" ] || die "missing required script in checkout: $base"
+  [ ! -L "$file" ] || die "refusing to install symlinked script: $base"
+  if ! bash -n -- "$file"; then
+    die "local bash syntax validation failed: $base"
+  fi
+  local_files+=("$file")
 done
 
-# staging and bin are both below the same campus root, so each mv is an atomic
-# rename within one filesystem. A running Bash keeps the old unlinked inode and
-# never sees a half-written script; new invocations get the new file.
-for file in "$SCRIPT_DIR"/cis-*; do
-  base=$(basename -- "$file")
-  ssh "$CIS_DEVBOX" "mv -f -- '$staging/$base' '$remote_bin/$base' && chmod 0755 '$remote_bin/$base'"
+if ! "${scp_cmd[@]}" "${local_files[@]}" "$CIS_DEVBOX:$staging/"; then
+  die 'scp upload to staging failed'
+fi
+
+for base in "${scripts[@]}"; do
+  if ! "${ssh_cmd[@]}" "bash -n -- '$staging/$base'"; then
+    die "remote bash syntax validation failed before installation: $base"
+  fi
 done
 
-ssh "$CIS_DEVBOX" "rm -rf -- '$staging'"
+if ! staging_dev=$("${ssh_cmd[@]}" "stat -L -c %d -- '$staging'" 2>/dev/null); then
+  die 'unable to inspect staging filesystem'
+fi
+if ! bin_dev=$("${ssh_cmd[@]}" "stat -L -c %d -- '$remote_bin'" 2>/dev/null); then
+  die 'unable to inspect bin filesystem'
+fi
+if [ -z "$staging_dev" ] || [ -z "$bin_dev" ] || [ "$staging_dev" != "$bin_dev" ]; then
+  die 'staging and bin are not on the same filesystem; refusing non-atomic installation'
+fi
+
+for base in "${scripts[@]}"; do
+  # chmod is done before mv so each visible live file is complete and executable
+  # from the instant rename(2) publishes it. mv within one filesystem is atomic.
+  if ! "${ssh_cmd[@]}" "chmod 0755 -- '$staging/$base' && mv -f -- '$staging/$base' '$remote_bin/$base'"; then
+    die "atomic installation failed for: $base"
+  fi
+done
+
+"${ssh_cmd[@]}" "rm -rf -- '$staging'"
 trap - EXIT
 printf '%s\n' 'CIS_INSTALL_SCRIPTS=ok'
 if [ "$provision" = true ]; then
-  ssh "$CIS_DEVBOX" "$remote_bin/cis-provision all"
+  "${ssh_cmd[@]}" "$remote_bin/cis-provision all"
 fi

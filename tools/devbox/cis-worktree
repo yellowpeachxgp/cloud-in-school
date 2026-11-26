@@ -6,11 +6,17 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: CIS_DEVBOX=<ssh-target> CIS_CAMPUS_ROOT=<campus-root> CIS_LOCAL_WORKTREE_ROOT=<local-campus-worktrees> cis-worktree <repository> <new-branch> [base-ref]
 
-Creates a local exclusive worktree below CIS_LOCAL_WORKTREE_ROOT from
-origin/main or base-ref, then adds a remote named devbox pointing at
-<campus-root>/repos/<repository>.git. CIS_DEVBOX, CIS_CAMPUS_ROOT, and
-CIS_LOCAL_WORKTREE_ROOT are read only from the environment and are never hard-coded.
+Creates a local exclusive worktree below CIS_LOCAL_WORKTREE_ROOT from origin/main
+or base-ref, then adds a remote named devbox pointing at <campus-root>/repos/
+<repository>.git. CIS_DEVBOX, CIS_CAMPUS_ROOT, and CIS_LOCAL_WORKTREE_ROOT are
+read only from the environment and are never hard-coded. The SSH target is
+validated as hostname or user@hostname to prevent ssh option injection.
 USAGE
+}
+
+die() {
+  printf 'cis-worktree: ERROR: %s\n' "$*" >&2
+  exit 2
 }
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
@@ -24,45 +30,73 @@ base_ref=${3:-origin/main}
 case "$input_repo" in
   day-in-school|day|android) repo=day-in-school ;;
   cloud-in-school|cloud) repo=cloud-in-school ;;
-  *) printf 'unknown repository: %s\n' "$input_repo" >&2; exit 2 ;;
+  *) die "unknown repository: $input_repo" ;;
 esac
 
 if [ -z "${CIS_DEVBOX:-}" ] || [ -z "${CIS_CAMPUS_ROOT:-}" ]; then
-  printf '%s\n' 'CIS_DEVBOX and CIS_CAMPUS_ROOT are required so the devbox git remote can be configured' >&2
-  exit 2
+  die 'CIS_DEVBOX and CIS_CAMPUS_ROOT are required so the devbox git remote can be configured'
 fi
+case "$CIS_DEVBOX" in
+  -*|*@-*|*@) die 'CIS_DEVBOX must not begin with an option-like hyphen or have an empty host part' ;;
+esac
+if [[ ! "$CIS_DEVBOX" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  die 'CIS_DEVBOX must be hostname or user@hostname using only letters, digits, dot, underscore, and hyphen'
+fi
+
 remote_root=${CIS_CAMPUS_ROOT%/}
+while [ "$remote_root" != / ] && [ "$remote_root" != "${remote_root%/}" ]; do
+  remote_root=${remote_root%/}
+done
 case "$remote_root" in
-  ''|/) printf '%s\n' 'CIS_CAMPUS_ROOT must be a non-root absolute path' >&2; exit 2 ;;
+  ''|/) die 'CIS_CAMPUS_ROOT must be a non-root absolute path' ;;
   /*) ;;
-  *) printf '%s\n' 'CIS_CAMPUS_ROOT must be an absolute path' >&2; exit 2 ;;
+  *) die 'CIS_CAMPUS_ROOT must be an absolute path' ;;
 esac
 case "$remote_root" in
-  *[!A-Za-z0-9._/-]*)
-    printf '%s\n' 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash' >&2
-    exit 2
-    ;;
+  *[!A-Za-z0-9._/-]*) die 'CIS_CAMPUS_ROOT may contain only letters, digits, dot, underscore, hyphen, and slash' ;;
+esac
+case "/$remote_root/" in
+  */../*) die 'CIS_CAMPUS_ROOT must not contain a .. path component' ;;
 esac
 
-git check-ref-format --branch "$branch" >/dev/null 2>&1 || { printf 'invalid branch name: %s\n' "$branch" >&2; exit 2; }
+git check-ref-format --branch "$branch" >/dev/null 2>&1 || die "invalid branch name: $branch"
+case "$base_ref" in
+  ''|-*|*[!A-Za-z0-9._/-]*) die 'base-ref must be a simple ref or SHA using only letters, digits, dot, underscore, hyphen, and slash' ;;
+esac
 if [ -z "${CIS_LOCAL_WORKTREE_ROOT:-}" ]; then
-  printf '%s\n' 'CIS_LOCAL_WORKTREE_ROOT is required; no machine-specific local path is hard-coded' >&2
-  exit 2
+  die 'CIS_LOCAL_WORKTREE_ROOT is required; no machine-specific local path is hard-coded'
 fi
 local_root=${CIS_LOCAL_WORKTREE_ROOT%/}
+while [ "$local_root" != / ] && [ "$local_root" != "${local_root%/}" ]; do
+  local_root=${local_root%/}
+done
+case "$local_root" in
+  ''|/) die 'CIS_LOCAL_WORKTREE_ROOT must be a non-root absolute path' ;;
+  /*) ;;
+  *) die 'CIS_LOCAL_WORKTREE_ROOT must be an absolute path' ;;
+esac
+case "$local_root" in
+  *$'\n'*|*$'\r'*|*$'\t'*) die 'CIS_LOCAL_WORKTREE_ROOT must not contain tab or newline characters' ;;
+esac
+case "/$local_root/" in
+  */../*) die 'CIS_LOCAL_WORKTREE_ROOT must not contain a .. path component' ;;
+esac
+
 seed="$local_root/$repo/_seed"
 target="$local_root/$repo/$branch"
-[ -d "$seed/.git" ] || { printf 'missing seed clone: %s\n' "$seed" >&2; exit 2; }
-[ ! -e "$target" ] || { printf 'target worktree already exists: %s\n' "$target" >&2; exit 2; }
+[ -d "$seed/.git" ] || die "missing seed clone: $seed"
+[ ! -e "$target" ] || die "target worktree already exists: $target"
 
 if git -C "$seed" show-ref --verify --quiet "refs/heads/$branch"; then
-  printf 'local branch already exists: %s\n' "$branch" >&2
-  exit 2
+  die "local branch already exists: $branch"
 fi
 
 git -C "$seed" fetch --prune origin
+if ! base_sha=$(git -C "$seed" rev-parse --verify "$base_ref^{commit}" 2>/dev/null); then
+  die "base-ref does not resolve to a commit: $base_ref"
+fi
 mkdir -p "$(dirname -- "$target")"
-git -C "$seed" worktree add -b "$branch" "$target" "$base_ref"
+git -C "$seed" worktree add -b "$branch" "$target" "$base_sha"
 
 git -C "$target" remote remove devbox >/dev/null 2>&1 || true
 git -C "$target" remote add devbox "$CIS_DEVBOX:$remote_root/repos/$repo.git"

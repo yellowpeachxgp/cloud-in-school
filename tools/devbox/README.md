@@ -10,7 +10,7 @@ export CIS_CAMPUS_ROOT=<campus-root>
 tools/devbox/cis-install-devbox --provision
 ```
 
-`cis-install-devbox` 用 `scp` 先把 `cis-*` 上传到 campus root 下的 staging，远端逐个 `bash -n` 验证后在同一文件系统内 atomic mv 到 `$CIS_CAMPUS_ROOT/bin`，不使用 ssh inline heredoc，也避免直接覆盖运行中的 live script。`--provision` 只做校园范围内的事项：目录树、Gradle 缓存参数、两个公开仓库裸库、campus-local Node.js 22、Android SDK。Android SDK command line tools 从 Google 官方地址下载并做 SHA-256 校验；许可证接受方式与托管 Android CI 相同，已作为 INF-00 自主决策候选留待维护者复核。
+`cis-install-devbox` 校验 `CIS_DEVBOX` 只能是 hostname 或 user@hostname 的安全字符形式、拒绝 root 远程用户；先在开发机创建并 canonicalize `CIS_CAMPUS_ROOT`，要求 canonical path 含 campus 组件。它用 `scp` 把受支持脚本上传到 `bin` 内隐藏的 same-directory staging，远端逐个 `bash -n` 验证，再用 `stat -L` 确认 staging 与 `bin` 同文件系统；先 chmod staging 文件，然后逐文件 atomic `mv` 发布。整个过程不使用 ssh inline heredoc，避免直接覆盖运行中的 live script，也不会出现半写入文件（逐文件原子，不宣称整目录事务）。`--provision` 只做校园范围内的事项：目录树、Gradle 缓存参数、两个公开仓库裸库、campus-local Node.js 22、Android SDK。Android SDK command line tools 从 Google 官方地址下载并做 SHA-256 校验；许可证接受方式与托管 Android CI 相同，已作为 INF-00 自主决策候选留待维护者复核。
 
 ## 本机 worktree
 
@@ -51,7 +51,7 @@ cis-containers stop cloud-in-school feat/example all
 cis-clean --days 7
 ```
 
-测试容器名精确为 `cis-<仓库>-<分支短名>-<哈希>-<用途>`，只绑定 `127.0.0.1` 随机端口，停止时按确切名字删除；不做全局 prune，不触碰任何非 `cis-` 容器。`cis-clean` 只清理 campus root 内超过 7 天未用的构建 worktree 和日志。
+测试容器名精确为 `cis-<仓库>-<分支短名>-<哈希>-<用途>`，只绑定 `127.0.0.1` 随机端口，停止时按确切名字删除；不做全局 prune，不触碰任何非 `cis-` 容器。PostgreSQL 不再使用 trust；PostgreSQL/Redis 每次新建时使用随机密码，连接参数只写入 campus artifacts 下 mode-0600 的 per-container auth 文件，输出只给该文件相对路径，不打印密码。`cis-clean` 只清理 campus root 内超过 7 天未用的构建 worktree 和日志。
 
 ## 门禁
 
@@ -60,6 +60,6 @@ cis-clean --days 7
 | `quick <模块> [...]` | 指定模块 `testDebugUnitTest` |
 | `android` | `testDebugUnitTest :app:lintDebug :app:assembleDebug`；发现 Roborazzi 后追加 `verifyRoborazziDebug`，并动态执行 W0-07 提供的检查入口 |
 | `android-full` | `android` 内容加 release lint/assemble；Room 迁移测试由全量单元测试覆盖 |
-| `cloud` | `npm ci && npm test && npm run contract:check` |
+| `cloud` | 有 `package-lock.json`/`npm-shrinkwrap.json` 时必须 `npm ci`；无 lockfile 且 `package.json` 所有依赖字段均为空时明确记录并跳过安装；有任何依赖却无 lockfile 时失败并要求补 lockfile。随后 `npm test && npm run contract:check`（AUTO-006 候选） |
 | `contracts` | 本仓 contract-ci + 与另一仓 `main` 的 `contracts/` 逐文件比对 |
 | `secrets` | 调用 INF-01 的 `tools/secret-scan`；未合入时明确返回缺失，不伪造通过 |

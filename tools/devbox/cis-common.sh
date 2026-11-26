@@ -15,7 +15,11 @@ if [ -z "${CIS_CAMPUS_ROOT+x}" ]; then
     exit 2
   fi
 fi
-CIS_CAMPUS_ROOT=${CIS_CAMPUS_ROOT%/}
+
+# Remove trailing slashes before validating; "/" itself is rejected below.
+while [ "$CIS_CAMPUS_ROOT" != / ] && [ "$CIS_CAMPUS_ROOT" != "${CIS_CAMPUS_ROOT%/}" ]; do
+  CIS_CAMPUS_ROOT=${CIS_CAMPUS_ROOT%/}
+done
 case "$CIS_CAMPUS_ROOT" in
   ''|/)
     printf '%s\n' 'cis: ERROR: CIS_CAMPUS_ROOT must be a non-root absolute path' >&2
@@ -27,10 +31,89 @@ case "$CIS_CAMPUS_ROOT" in
     exit 2
     ;;
 esac
+if [ ! -d "$CIS_CAMPUS_ROOT" ]; then
+  printf '%s\n' 'cis: ERROR: CIS_CAMPUS_ROOT must already exist; create it through cis-install-devbox or a campus provisioning step' >&2
+  exit 2
+fi
+_cis_canonical_root=$(CDPATH= cd -- "$CIS_CAMPUS_ROOT" && pwd -P) || {
+  printf '%s\n' 'cis: ERROR: unable to canonicalize CIS_CAMPUS_ROOT' >&2
+  exit 2
+}
+CIS_CAMPUS_ROOT=$_cis_canonical_root
+unset _cis_canonical_root
+case "$CIS_CAMPUS_ROOT" in
+  */campus|*/campus/*) ;;
+  *)
+    printf '%s\n' 'cis: ERROR: CIS_CAMPUS_ROOT must contain a campus path component after canonicalization' >&2
+    exit 2
+    ;;
+esac
+case "$CIS_CAMPUS_ROOT" in
+  *[!A-Za-z0-9._/-]*)
+    printf '%s\n' 'cis: ERROR: canonical CIS_CAMPUS_ROOT contains unsupported characters' >&2
+    exit 2
+    ;;
+esac
+if [ "$(id -u 2>/dev/null || printf '1')" = 0 ]; then
+  printf '%s\n' 'cis: ERROR: refusing to run campus infrastructure as root' >&2
+  exit 2
+fi
 export CIS_CAMPUS_ROOT
 
 CIS_MIN_MEM_AVAILABLE_KB=${CIS_MIN_MEM_AVAILABLE_KB:-25165824} # 24 GiB in KiB
-CIS_PAUSE_FILE=${CIS_PAUSE_FILE:-$CIS_CAMPUS_ROOT/PAUSE}
+case "$CIS_MIN_MEM_AVAILABLE_KB" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'cis: ERROR: CIS_MIN_MEM_AVAILABLE_KB must be an integer KiB value' >&2
+    exit 2
+    ;;
+esac
+if [ "$CIS_MIN_MEM_AVAILABLE_KB" -eq 0 ]; then
+  printf '%s\n' 'cis: ERROR: CIS_MIN_MEM_AVAILABLE_KB must be greater than zero' >&2
+  exit 2
+fi
+
+if [ -n "${CIS_PAUSE_FILE+x}" ]; then
+  case "$CIS_PAUSE_FILE" in
+    ''|/*) ;;
+    *)
+      printf '%s\n' 'cis: ERROR: CIS_PAUSE_FILE must be an absolute path' >&2
+      exit 2
+      ;;
+  esac
+  case "$CIS_PAUSE_FILE" in
+    ''|/|*[!A-Za-z0-9._/-]*)
+      printf '%s\n' 'cis: ERROR: CIS_PAUSE_FILE contains unsupported characters' >&2
+      exit 2
+      ;;
+  esac
+  case "/$CIS_PAUSE_FILE/" in
+    */../*)
+      printf '%s\n' 'cis: ERROR: CIS_PAUSE_FILE must not contain a .. path component' >&2
+      exit 2
+      ;;
+  esac
+  _cis_pause_dir=$(dirname -- "$CIS_PAUSE_FILE")
+  _cis_pause_base=$(basename -- "$CIS_PAUSE_FILE")
+  if [ ! -d "$_cis_pause_dir" ]; then
+    printf '%s\n' 'cis: ERROR: CIS_PAUSE_FILE parent directory must exist' >&2
+    exit 2
+  fi
+  _cis_pause_dir=$(CDPATH= cd -- "$_cis_pause_dir" && pwd -P) || {
+    printf '%s\n' 'cis: ERROR: unable to canonicalize CIS_PAUSE_FILE parent' >&2
+    exit 2
+  }
+  CIS_PAUSE_FILE=$_cis_pause_dir/$_cis_pause_base
+  unset _cis_pause_dir _cis_pause_base
+  case "$CIS_PAUSE_FILE" in
+    "$CIS_CAMPUS_ROOT"/*) ;;
+    *)
+      printf '%s\n' 'cis: ERROR: CIS_PAUSE_FILE must stay below CIS_CAMPUS_ROOT' >&2
+      exit 2
+      ;;
+  esac
+else
+  CIS_PAUSE_FILE=$CIS_CAMPUS_ROOT/PAUSE
+fi
 
 cis_info() {
   printf 'cis: %s\n' "$*" >&2

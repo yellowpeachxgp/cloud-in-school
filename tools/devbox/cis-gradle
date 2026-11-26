@@ -73,9 +73,12 @@ while [ "$SLOT" -eq 0 ]; do
   fi
 done
 
-export GRADLE_USER_HOME=${GRADLE_USER_HOME:-$CIS_CAMPUS_ROOT/cache/gradle}
-export ANDROID_HOME=${ANDROID_HOME:-$CIS_CAMPUS_ROOT/android-sdk}
-export ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}
+# Campus builds must not inherit cache or SDK paths for another project.
+# Force both into the canonical campus root even if the caller environment
+# already contains machine-specific values.
+export GRADLE_USER_HOME="$CIS_CAMPUS_ROOT/cache/gradle"
+export ANDROID_HOME="$CIS_CAMPUS_ROOT/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export CI=${CI:-true}
 
 # The repository historically requests a 4 GiB daemon. Command-line system
@@ -95,7 +98,7 @@ cmd=("${base_cmd[@]}")
 if command -v systemd-run >/dev/null 2>&1; then
   true_bin=/usr/bin/true
   [ -x "$true_bin" ] || true_bin=/bin/true
-  if systemd-run --user --scope --collect --unit "cis-gradle-probe-$$" "$true_bin" >/dev/null 2>&1; then
+  if systemd-run --user --scope --collect -p MemoryMax=10G --unit "cis-gradle-probe-$$" "$true_bin" >/dev/null 2>&1; then
     runner=systemd-user-scope-MemoryMax10G
     cmd=(
       systemd-run --user --scope --collect

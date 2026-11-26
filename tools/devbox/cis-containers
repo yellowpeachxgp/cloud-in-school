@@ -11,9 +11,10 @@ usage() {
 Usage: cis-containers <start|stop|status> <repository> <branch> [postgres|redis|all]
 
 Container names are exactly cis-<repository>-<branch-slug>-<hash>-<purpose>.
-They use locally available postgres:17-alpine and redis:7-alpine images, bind
-only 127.0.0.1 on random host ports, and are removed by exact name. The test
-containers are for disposable synthetic data only; no credential is printed.
+They use postgres:17-alpine and redis:7-alpine images, bind only 127.0.0.1 on
+random host ports, and are removed by exact name. PostgreSQL and Redis use a
+per-start random password. The password is written only to a mode-0600 file
+below campus artifacts and is never printed.
 USAGE
 }
 
@@ -46,10 +47,16 @@ else
 fi
 
 slug=$(cis_sanitize_branch "$branch")
+[ -n "$slug" ] || cis_die "branch does not contain any characters usable in a safe container slug"
 hash=$(cis_branch_key "$repo/$branch" | cut -c1-8)
+auth_dir="$CIS_CAMPUS_ROOT/artifacts/container-auth"
 
 container_name() {
   printf 'cis-%s-%s-%s-%s\n' "$repo" "$slug" "$hash" "$1"
+}
+
+auth_file_rel() {
+  printf 'artifacts/container-auth/%s.env\n' "$(container_name "$1")"
 }
 
 container_exists() {
@@ -66,9 +73,48 @@ image_ready() {
   fi
 }
 
+random_secret() {
+  od -An -N24 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]'
+}
+
+write_auth_file() {
+  local purpose=$1 password=$2 port=$3 rel abs user_line
+  rel=$(auth_file_rel "$purpose")
+  abs="$CIS_CAMPUS_ROOT/$rel"
+  cis_require_under_campus "$abs"
+  mkdir -p "$auth_dir"
+  chmod 700 "$auth_dir"
+  user_line=
+  if [ "$purpose" = postgres ]; then
+    user_line='CIS_CONTAINER_USER=postgres'
+  fi
+  (
+    umask 077
+    {
+      printf 'CIS_CONTAINER_HOST=127.0.0.1\n'
+      printf 'CIS_CONTAINER_PORT=%s\n' "$port"
+      printf 'CIS_CONTAINER_PASSWORD=%s\n' "$password"
+      if [ -n "$user_line" ]; then
+        printf '%s\n' "$user_line"
+      fi
+    } > "$abs"
+  )
+  chmod 600 "$abs"
+}
+
+remove_auth_file() {
+  local purpose=$1 rel abs
+  rel=$(auth_file_rel "$purpose")
+  abs="$CIS_CAMPUS_ROOT/$rel"
+  if [ -e "$abs" ]; then
+    cis_require_under_campus "$abs"
+    rm -f -- "$abs"
+  fi
+}
+
 print_endpoint() {
   local name=$1 purpose=$2 container_port=$3
-  local host_port running
+  local host_port running rel
   host_port=$(docker port "$name" "$container_port/tcp" 2>/dev/null | awk -F: 'NR == 1 { print $NF }')
   if container_running "$name"; then running=true; else running=false; fi
   printf 'CIS_CONTAINER_NAME=%s\n' "$name"
@@ -76,43 +122,70 @@ print_endpoint() {
   printf 'CIS_CONTAINER_RUNNING=%s\n' "$running"
   printf 'CIS_CONTAINER_HOST=127.0.0.1\n'
   printf 'CIS_CONTAINER_PORT=%s\n' "${host_port:-unknown}"
+  rel=$(auth_file_rel "$purpose")
+  if [ -f "$CIS_CAMPUS_ROOT/$rel" ]; then
+    printf 'CIS_CONTAINER_AUTH_FILE=%s\n' "$rel"
+  fi
 }
 
 start_one() {
-  local purpose=$1 name image container_port
+  local purpose=$1 name image container_port password host_port rel
   name=$(container_name "$purpose")
   case "$purpose" in
     postgres) image=postgres:17-alpine; container_port=5432 ;;
     redis) image=redis:7-alpine; container_port=6379 ;;
   esac
+  rel=$(auth_file_rel "$purpose")
+
+  if container_exists "$name" && [ ! -f "$CIS_CAMPUS_ROOT/$rel" ]; then
+    # Older bootstrap containers used loopback-only trust/no-password mode.
+    # They are disposable test instances, so replace them exactly rather than
+    # leaving a weaker authentication posture in place.
+    docker rm -f "$name" >/dev/null
+    printf 'CIS_CONTAINER_RECREATED_FOR_AUTH=%s\n' "$name"
+  fi
 
   if container_exists "$name"; then
     if ! container_running "$name"; then
       docker start "$name" >/dev/null
     fi
   else
+    cis_need_cmd od
     image_ready "$image"
-    if [ "$purpose" = postgres ]; then
-      # The official PostgreSQL image requires either a password or explicit
-      # trust mode. These disposable containers are loopback-only, random-port,
-      # exact-name test instances for synthetic data, so no secret is needed.
-      docker run -d --name "$name" --restart no         -e POSTGRES_HOST_AUTH_METHOD=trust         -p 127.0.0.1::"$container_port"         "$image" >/dev/null
-    else
-      docker run -d --name "$name" --restart no         -p 127.0.0.1::"$container_port"         "$image" redis-server --appendonly no --save '' >/dev/null
+    password=$(random_secret)
+    if [ ${#password} -lt 32 ]; then
+      cis_die "failed to generate a container password for $purpose"
     fi
+    if [ "$purpose" = postgres ]; then
+      docker run -d --name "$name" --restart no         -e POSTGRES_PASSWORD="$password"         -p 127.0.0.1::"$container_port"         "$image" >/dev/null
+    else
+      docker run -d --name "$name" --restart no         -e REDIS_PASSWORD="$password"         -p 127.0.0.1::"$container_port"         "$image" sh -c 'exec redis-server --requirepass "$REDIS_PASSWORD" --appendonly no --save ""' >/dev/null
+    fi
+    host_port=$(docker port "$name" "$container_port/tcp" 2>/dev/null | awk -F: 'NR == 1 { print $NF }')
+    case "$host_port" in
+      ''|*[!0-9]*)
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        cis_die "unable to determine numeric loopback host port for $name"
+        ;;
+    esac
+    write_auth_file "$purpose" "$password" "$host_port"
+    password=
   fi
   print_endpoint "$name" "$purpose" "$container_port"
 }
 
 stop_one() {
-  local purpose=$1 name
+  local purpose=$1 name rel
   name=$(container_name "$purpose")
+  rel=$(auth_file_rel "$purpose")
   if container_exists "$name"; then
     docker rm -f "$name" >/dev/null
     printf 'CIS_CONTAINER_REMOVED=%s\n' "$name"
   else
     printf 'CIS_CONTAINER_ABSENT=%s\n' "$name"
   fi
+  remove_auth_file "$purpose"
+  printf 'CIS_CONTAINER_AUTH_REMOVED=%s\n' "$rel"
 }
 
 status_one() {

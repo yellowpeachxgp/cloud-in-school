@@ -45,12 +45,15 @@ EOF
 }
 
 clone_or_update_bare() {
+  cis_need_cmd git
   local repo=$1 url=$2 target="$CIS_CAMPUS_ROOT/repos/$1.git"
   if [ ! -d "$target/objects" ]; then
     git clone --bare "$url" "$target"
   else
     git --git-dir="$target" remote set-url origin "$url"
-    git --git-dir="$target" fetch origin '+refs/heads/main:refs/heads/main'
+    # Never force-update the mirror ref: a divergence is operator-visible instead
+    # of silently rewriting what may be a devbox-pushed main.
+    git --git-dir="$target" fetch origin 'refs/heads/main:refs/heads/main'
   fi
   printf 'CIS_PROVISION_REPO=%s main=%s\n' "$repo" "$(git --git-dir="$target" rev-parse refs/heads/main)"
 }
@@ -63,9 +66,14 @@ provision_repos() {
 
 provision_node() {
   provision_dirs
+  cis_need_cmd curl
+  cis_need_cmd sha256sum
+  cis_need_cmd tar
   local version archive url shasums cache extracted selected
   version=${CIS_NODE22_VERSION:-v22.23.5}
-  case "$version" in v22.*) ;; *) cis_die "CIS_NODE22_VERSION must be a v22.x version, got: $version" ;; esac
+  if ! printf '%s\n' "$version" | grep -Eq '^v22\.[0-9]+\.[0-9]+$'; then
+    cis_die "CIS_NODE22_VERSION must be a strict v22.x.y version, got: $version"
+  fi
 
   if [ -x "$CIS_CAMPUS_ROOT/node/bin/node" ]; then
     local current_major
@@ -101,10 +109,19 @@ provision_node() {
 
 provision_android() {
   provision_dirs
+  cis_need_cmd curl
+  cis_need_cmd sha256sum
+  cis_need_cmd unzip
   local sdk version sha archive url cache tmp
   sdk="$CIS_CAMPUS_ROOT/android-sdk"
   version=${CIS_ANDROID_CMDTOOLS_VERSION:-15859902}
   sha=${CIS_ANDROID_CMDTOOLS_SHA256:-4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583}
+  case "$version" in
+    ''|*[!0-9]*) cis_die "CIS_ANDROID_CMDTOOLS_VERSION must contain only digits" ;;
+  esac
+  if ! printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    cis_die "CIS_ANDROID_CMDTOOLS_SHA256 must be a lowercase SHA-256 hex digest"
+  fi
   archive="commandlinetools-linux-${version}_latest.zip"
   url="https://dl.google.com/android/repository/$archive"
   cache="$CIS_CAMPUS_ROOT/cache/android"

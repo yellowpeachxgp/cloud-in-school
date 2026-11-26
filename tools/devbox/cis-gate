@@ -157,12 +157,23 @@ run_android() {
 
 run_cloud() {
   cd "$build_dir"
-  if [ -x "$CIS_CAMPUS_ROOT/node/bin/node" ]; then
-    PATH="$CIS_CAMPUS_ROOT/node/bin:$PATH"
-    export PATH
+  # Keep cloud dependency caches inside the campus boundary even when the
+  # caller has an NPM_CONFIG_CACHE for another project.
+  export NPM_CONFIG_CACHE="$CIS_CAMPUS_ROOT/cache/npm"
+  # AUTO-006 candidate: npm ci is mandatory whenever a lockfile exists. The
+  # current cloud repository intentionally has no package dependencies and no
+  # lockfile; in that exact case installation is a recorded no-op. If any
+  # dependency field appears without a lockfile, fail rather than constructing
+  # a non-reproducible dependency tree.
+  if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+    printf '%s\n' 'CIS_CLOUD_NPM_CI=lockfile-present'
+    npm ci
+  elif node -e 'const p=require("./package.json"); const present=(v)=>v != null && (typeof v !== "object" || Object.keys(v).length > 0); const fields=["dependencies","devDependencies","peerDependencies","optionalDependencies","bundleDependencies","bundledDependencies"]; process.exit(fields.some((k)=>present(p[k])) ? 1 : 0)' 2>/dev/null; then
+    printf '%s\n' 'CIS_CLOUD_NPM_CI=skipped-no-lockfile-no-dependencies'
+  else
+    printf '%s\n' 'cis: ERROR: package-lock.json/npm-shrinkwrap.json is missing while package.json declares dependencies or cannot be parsed' >&2
+    return 2
   fi
-  export NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE:-$CIS_CAMPUS_ROOT/cache/npm}
-  npm ci
   npm test
   npm run contract:check
 }
@@ -214,6 +225,12 @@ run_secrets() {
 }
 
 run_gate() {
+  # Node-dependent cloud/contracts/secrets gates all use the campus-local
+  # toolchain when present, rather than depending on a host-global installation.
+  if [ -x "$CIS_CAMPUS_ROOT/node/bin/node" ]; then
+    PATH="$CIS_CAMPUS_ROOT/node/bin:$PATH"
+    export PATH
+  fi
   case "$gate" in
     quick) run_quick "$@" ;;
     android|android-full) run_android ;;
@@ -282,7 +299,9 @@ gradle_peak_bytes=$(awk -F= '$1 == "CIS_GRADLE_MEMORY_PEAK_BYTES" { value = $2 }
   printf 'CIS_GATE_MEMORY_NOTE=%s\n' 'peak is host-wide MemTotal minus minimum MemAvailable sampled during the gate, not a per-process RSS measurement'
 } > "$summary"
 
-cat "$summary"
-printf '%s\n' '--- log tail (up to 60 lines) ---'
+# The gate result has already been captured. Output/ssh pipe failures must not
+# replace it, so best-effort printing is deliberately decoupled from rc.
+cat "$summary" || true
+printf '%s\n' '--- log tail (up to 60 lines) ---' || true
 tail -n 60 "$log" || true
 exit "$rc"
