@@ -3,7 +3,7 @@ info:
   title: Day in School Campus Cloud Event & Outbox Contracts
   version: 1.0.0
   description: |
-    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, and repair workflow events.
+    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, repair workflow events, and Campus Graph place status events.
 defaultContentType: application/json
 channels:
   reservation.schedule.precheck:
@@ -144,6 +144,12 @@ channels:
       operationId: publishRepairReviewedEvent
       message:
         $ref: '#/components/messages/RepairReviewedEvent'
+  place.status.changed:
+    description: TTL-aware aggregate status for one Campus Graph place+metric changed after an accepted report/correction, moderation exclusion, or TTL expiry recomputation; payload intentionally omits free-text notes and never claims an official realtime feed.
+    publish:
+      operationId: publishPlaceStatusChangedEvent
+      message:
+        $ref: '#/components/messages/PlaceStatusChangedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -677,6 +683,72 @@ components:
             type: integer
             minimum: 1
             maximum: 5
+    PlaceStatusChangedEvent:
+      name: PlaceStatusChangedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, school_id, campus_id, place_ref, place_type, metric, previous_effective_state, effective_state, trigger_type, aggregation_revision, active_report_count, reporter_count, expires_at, trigger_report_id, moderation_action, official_realtime_status]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:place-status:report:[0-9a-fA-F-]{36}:revision:[0-9]+:v1$'
+          event_type:
+            type: string
+            enum: [changed]
+          occurred_at:
+            type: string
+            format: date-time
+          school_id:
+            type: string
+          campus_id:
+            type: string
+          place_ref:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{1,128}/[A-Za-z0-9_-]{1,128}/(campus|building|floor|room|facility|entrance|indoor_node)/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+          place_type:
+            type: string
+            enum: [campus, building, floor, room, facility, entrance, indoor_node]
+          metric:
+            type: string
+            enum: [ACCESS, OPERATION, OCCUPANCY, SAFETY]
+          previous_effective_state:
+            type: string
+            enum: [OPEN, CLOSED, RESTRICTED, WORKING, DEGRADED, OUT_OF_SERVICE, QUIET, MODERATE, CROWDED, FULL, SAFE, HAZARD, CONTESTED, UNKNOWN]
+          effective_state:
+            type: string
+            enum: [OPEN, CLOSED, RESTRICTED, WORKING, DEGRADED, OUT_OF_SERVICE, QUIET, MODERATE, CROWDED, FULL, SAFE, HAZARD, CONTESTED, UNKNOWN]
+          trigger_type:
+            type: string
+            enum: [REPORT_ACCEPTED, CORRECTION_ACCEPTED, MODERATION_REVIEW, TTL_EXPIRED]
+            description: Machine-readable cause of the aggregate recomputation that changed effective_state.
+          aggregation_revision:
+            type: integer
+            minimum: 1
+          active_report_count:
+            type: integer
+            minimum: 0
+          reporter_count:
+            type: integer
+            minimum: 0
+          expires_at:
+            type: [string, 'null']
+            format: date-time
+            description: Latest expires_at across unexpired eligible reports after recomputation; null when no unexpired eligible report remains.
+          trigger_report_id:
+            type: string
+            format: uuid
+            description: Report or correction accepted/excluded, or a contributing report whose TTL expiry triggered recompute; event_key uses this stable id plus the aggregation revision.
+          moderation_action:
+            type: [string, 'null']
+            enum: [KEEP_VISIBLE, EXCLUDE_INCORRECT, EXCLUDE_ABUSE, REJECT_FLAG, null]
+            description: Populated only when trigger_type=MODERATION_REVIEW; otherwise null.
+          official_realtime_status:
+            type: boolean
+            const: false
+            description: Contractual sentinel proving the event is user-reported aggregate evidence, never an official realtime occupancy/access/operation feed.
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:
