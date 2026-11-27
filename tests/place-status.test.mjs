@@ -701,6 +701,30 @@ test("W4-04 TTL expiry: staggered deadlines publish ordered state transitions in
   }
 });
 
+test("W4-04 TTL expiry: simultaneous deadlines collapse to one aggregate transition", async () => {
+  const app = createTestApp();
+  const alice = setupUser(app, "alice_simultaneous_ttl");
+  const bob = setupUser(app, "bob_simultaneous_ttl");
+  const observed = new Date(BASE_NOW - 10 * 60_000).toISOString();
+
+  const quiet = await createReport(app, alice, { state: "QUIET", observed_at: observed });
+  assert.equal(quiet.status, 201, JSON.stringify(quiet.body));
+  const crowded = await createReport(app, bob, { state: "CROWDED", observed_at: observed });
+  assert.equal(crowded.status, 201, JSON.stringify(crowded.body));
+  assert.equal((await queryOne(app, alice, "OCCUPANCY", BASE_NOW)).effective_state, "CONTESTED");
+
+  const finalView = await queryOne(app, alice, "OCCUPANCY", BASE_NOW + 21 * 60_000);
+  assert.equal(finalView.effective_state, "UNKNOWN");
+  const ttlEvents = app.store.outboxEvents
+    .filter((event) => event.event_type === "place.status.changed" && event.payload_json.trigger_type === "TTL_EXPIRED")
+    .map((event) => event.payload_json);
+  assert.equal(ttlEvents.length, 1, "same-deadline reports expire as one grouped recomputation, not duplicate contradictory alerts");
+  assert.equal(ttlEvents[0].previous_effective_state, "CONTESTED");
+  assert.equal(ttlEvents[0].effective_state, "UNKNOWN");
+  assert.ok([quiet.body.data.report_id, crowded.body.data.report_id].includes(ttlEvents[0].trigger_report_id));
+  assert.equal(ttlEvents[0].expires_at, null);
+});
+
 test("W4-04 subscription fan-out: exact-place type filters and revoked bindings suppress new alerts", async () => {
   const app = createTestApp();
   const filteredSubscriber = setupUser(app, "subscriber_type_filtered");
