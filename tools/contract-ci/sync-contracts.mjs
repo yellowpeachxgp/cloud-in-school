@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 const DEFAULT_CLOUD_REF = "origin/main";
 const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 const CLOUD_REPOSITORY_NAME = "cloud-in-school";
+const ORIGIN_MAIN_FETCH_REFSPEC = "+refs/heads/main:refs/remotes/origin/main";
 
 const USAGE = "用法：\n" +
   "  node tools/contract-ci/sync-contracts.mjs sync --cloud-root <云端仓库> --android-root <Android仓库> [--cloud-ref origin/main]\n" +
@@ -16,7 +17,7 @@ const USAGE = "用法：\n" +
   "\n" +
   "规则：\n" +
   "  - cloud-in-school/contracts/ 是唯一权威；sync 只从云端复制到 Android，绝不反向复制。\n" +
-  "  - sync 默认先执行 git fetch origin main，再读取云端 git origin/main；显式 --cloud-ref 或 --use-cloud-worktree 时不自动 fetch。\n" +
+  "  - sync 默认先执行 git fetch origin +refs/heads/main:refs/remotes/origin/main，再读取云端 git origin/main；显式 --cloud-ref 或 --use-cloud-worktree 时不自动 fetch。\n" +
   "  - sync 先完整 staging 并备份受影响文件；每个文件用临时文件加 rename 替换，异常时按逆序回滚。\n" +
   "  - check 对两棵 contracts/ 树做递归文件清单与 SHA-256 逐字节比对。\n";
 
@@ -137,7 +138,78 @@ function sortEntries(entries) {
   return entries.sort((a, b) => comparePaths(a.path, b.path));
 }
 
+function pathPortabilityKey(relativePath) {
+  return relativePath.normalize("NFKD").toLowerCase();
+}
+
+function pathWithParentPrefixes(relativePath) {
+  const parts = relativePath.split("/");
+  const prefixes = [];
+  for (let index = 1; index <= parts.length; index += 1) {
+    prefixes.push(parts.slice(0, index).join("/"));
+  }
+  return prefixes;
+}
+
+function collectCasePortableSpellings(paths, label) {
+  const spellings = new Map();
+  for (const relativePath of paths) {
+    for (const candidate of pathWithParentPrefixes(relativePath)) {
+      const key = pathPortabilityKey(candidate);
+      const before = spellings.get(key);
+      if (before && before !== candidate) {
+        fail(label + " 中包含仅大小写或 Unicode 规范化不同的不可移植路径：" + before + " 与 " + candidate + "；已 fail-closed");
+      }
+      spellings.set(key, candidate);
+    }
+  }
+  return spellings;
+}
+
+function assertNoCrossCaseAliases(cloud, targetPaths) {
+  const cloudSpellings = collectCasePortableSpellings(
+    cloud.entries.map((entry) => entry.path),
+    "云端 contracts/"
+  );
+  const targetSpellings = collectCasePortableSpellings(targetPaths, "Android contracts/");
+  for (const [key, cloudSpelling] of cloudSpellings) {
+    const targetSpelling = targetSpellings.get(key);
+    if (targetSpelling && targetSpelling !== cloudSpelling) {
+      fail(
+        "检测到大小写不敏感 alias 风险：云端 contracts/" + cloudSpelling +
+          " 与 Android contracts/" + targetSpelling + " 仅大小写或 Unicode 规范化不同；已 fail-closed，未执行写入/删除"
+      );
+    }
+  }
+}
+
+function assertNoFileDirectoryConflicts(cloud, androidRoot) {
+  const contractsRoot = path.join(androidRoot, "contracts");
+  for (const entry of cloud.entries) {
+    const parts = entry.path.split("/");
+    let parentRelative = "";
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      parentRelative = parentRelative ? parentRelative + "/" + parts[index] : parts[index];
+      const parentStat = lstatIfExists(path.join(contractsRoot, parentRelative));
+      if (parentStat && !parentStat.isDirectory()) {
+        fail(
+          "检测到 file↔directory 风险：云端 contracts/" + entry.path +
+            " 需要目录 contracts/" + parentRelative + "，但 Android 同路径不是目录；已 fail-closed"
+        );
+      }
+    }
+    const destinationStat = lstatIfExists(path.join(contractsRoot, entry.path));
+    if (destinationStat && !destinationStat.isFile()) {
+      fail(
+        "检测到 file↔directory 风险：云端文件 contracts/" + entry.path +
+          " 在 Android 同路径不是普通文件；已 fail-closed"
+      );
+    }
+  }
+}
+
 function finalizeEntries(entries) {
+  collectCasePortableSpellings(entries.map((entry) => entry.path), "contracts/");
   const sorted = sortEntries(entries);
   const seen = new Set();
   for (const entry of sorted) {
@@ -208,6 +280,25 @@ function runGit(cloudRoot, args) {
   return result.stdout;
 }
 
+function probeGit(cloudRoot, args) {
+  const result = spawnSync("git", args, {
+    cwd: cloudRoot,
+    encoding: "utf8",
+    maxBuffer: MAX_GIT_BUFFER
+  });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout).trim();
+}
+
+function assertNotSparseCloudCheckout(cloudRoot) {
+  const insideWorkTree = probeGit(cloudRoot, ["rev-parse", "--is-inside-work-tree"]);
+  if (insideWorkTree !== "true") return;
+  const sparse = probeGit(cloudRoot, ["config", "--bool", "core.sparseCheckout"]);
+  if (sparse === "true") {
+    fail("--cloud-root 是 sparse checkout；为避免把缺失文件误当权威删除，已 fail-closed。请使用完整 checkout/完整导出或 git ref");
+  }
+}
+
 function readContractsFromGitRef(cloudRoot, ref) {
   if (!ref || ref.startsWith("-")) fail("--cloud-ref 不能为空或以短横线开头", 2);
   const commit = runGit(cloudRoot, ["rev-parse", "--verify", ref + "^{commit}"])
@@ -255,6 +346,7 @@ function requireCloudRoot(cloudRoot) {
 function readCloudContracts(options) {
   const cloudRoot = resolveExistingDir(options.cloudRoot, "--cloud-root");
   requireCloudRoot(cloudRoot);
+  assertNotSparseCloudCheckout(cloudRoot);
   if (options.useCloudWorktree) {
     return { ...fingerprintDirectory(cloudRoot), cloudRoot, commit: null, ref: "WORKTREE" };
   }
@@ -264,7 +356,7 @@ function readCloudContracts(options) {
     if (usingDefaultSyncRef) {
       // 发布的同步路径必须先刷新 remote-tracking ref；否则本机陈旧的 origin/main
       // 会让 sync 在旧快照上“成功”，无法发现云端 main 已经前进。
-      runGit(cloudRoot, ["fetch", "origin", "main"]);
+      runGit(cloudRoot, ["fetch", "origin", ORIGIN_MAIN_FETCH_REFSPEC]);
     }
     return { ...readContractsFromGitRef(cloudRoot, ref), cloudRoot };
   }
@@ -463,8 +555,13 @@ function warnCleanupFailure(error) {
 
 function writeContractsToAndroid(cloud, androidRoot) {
   requireAndroidRoot(androidRoot);
+  assertNoFileDirectoryConflicts(cloud, androidRoot);
   const target = fingerprintDirectory(androidRoot);
   const preexistingDirectories = listContractDirectories(androidRoot);
+  assertNoCrossCaseAliases(cloud, [
+    ...target.entries.map((entry) => entry.path),
+    ...preexistingDirectories
+  ]);
   const targetEntries = entriesMap(target);
   const targetContractsRoot = path.join(androidRoot, "contracts");
   const sourcePaths = new Set(cloud.entries.map((entry) => entry.path));
