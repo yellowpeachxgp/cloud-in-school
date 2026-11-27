@@ -91,7 +91,7 @@ DISABLED
   └─ UNINSTALL ─> UNINSTALLED
 ```
 
-首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
+首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。显式版本安装、待审权限确认、逐项撤权和回滚在读取持久化包前都会重新解析当前信任根、重验签名与全部声明产物摘要；持久化数据只是证据，不是信任输入。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
 
 ## 4.1 发布者信任根与持久化边界
 
