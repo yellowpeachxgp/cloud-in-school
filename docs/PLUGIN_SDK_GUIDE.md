@@ -189,7 +189,7 @@ CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm 
 4. 工程内 legacy `plugin-signing-private.key` / `plugin-signing-public.key`（兼容行为）；
 5. pack zip 内嵌的 `plugin-signing-public.key`（仅 zip 输入；自声明性质，信任决定仍属宿主钉扎/信任根）。
 
-**密钥卫生警告**：不带 `--keyring` 的 `init` 保持 W6-00 兼容行为，会把 `plugin-signing-private.key` 写在插件目录中。绝对不要提交、上传或分享该文件；`init` 现在会同时生成覆盖该文件的 `.gitignore`。正式发布请使用 `keygen` + `init --keyring` 流程。CLI 把私钥默认迁出插件目录是 W6-01a/AC-24 的明确待办，本指南不把现状描述为安全终态。
+**密钥卫生终态（W6-01a/AC-24）**：`init` 一律使用/创建外部密钥环私钥，插件目录只写入 public key 和 `.gitignore`，绝不会新生成 `plugin-signing-private.key`；`--keyring` 仅作为兼容脚本的无操作标志保留。既有旧工程里残留的 legacy 私钥仍可被 `sign/verify` 兼容读取，但 `doctor` 会给出 WARN；绝对不要提交、上传或分享该文件。
 
 ### 6.1 三种 init 模板
 

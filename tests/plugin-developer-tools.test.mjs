@@ -130,19 +130,21 @@ test("W6-01b init: card/service/datapack templates produce valid signed plugins 
   }
 });
 
-test("W6-01b init legacy default: unchanged W6-00 layout (in-dir keys, campus.services ping)", async () => {
+test("W6-01a/01b init legacy template: W6-00 layout with keyring-only private keys", async () => {
   const home = tmpDir("dis-w601b-home-");
   const dir = tmpDir("dis-w601b-legacy-");
   const out = JSON.parse(runCliOutofProcess(["init", dir, "--id", "org.example.legacy-compat"], home));
   assert.equal(out.template, "legacy");
-  assert.equal(out.key_source, "legacy-in-dir");
-  assert.ok(fs.existsSync(path.join(dir, "plugin-signing-private.key")), "legacy mode keeps in-dir private key for compatibility");
+  assert.equal(out.key_source, "keyring-created");
+  assert.equal(fs.existsSync(path.join(dir, "plugin-signing-private.key")), false, "AC-24: init must never write a private key into the project");
+  assert.ok(out.private_key_path.startsWith(path.join(home, "keys")), "private key path must stay in the external keyring");
   const loaded = loadPluginDirectory(dir);
   const normalized = validatePluginManifest(loaded.manifest);
   assert.equal(normalized.ui_slots[0].slot_id, "campus.services");
   assert.equal(normalized.commands[0].name, "ping");
+  assert.equal(normalized.commands[0].type, "show_data");
   const verify = await runCliInProcess(["verify", dir], home);
-  assert.equal(JSON.parse(verify.stdout).key_source, "legacy-in-dir");
+  assert.equal(JSON.parse(verify.stdout).key_source, "keyring");
 });
 
 // ---------------------------------------------------------------------------
@@ -374,6 +376,9 @@ test("W6-01b doctor: legacy in-dir private key surfaces as WARN, not FAIL", asyn
   const home = tmpDir("dis-w601b-home-");
   const dir = tmpDir("dis-w601b-legacy-doc-");
   JSON.parse(runCliOutofProcess(["init", dir, "--id", "org.example.legacy-doctor"], home));
+  // AC-24 prevents init from creating this legacy layout, but existing projects may
+  // still contain it; doctor must keep surfacing that residual key as a warning.
+  fs.writeFileSync(path.join(dir, "plugin-signing-private.key"), "synthetic-legacy-private-key-for-doctor\n", "utf8");
   const result = runCliOutofProcessResult(["doctor", dir], home);
   const report = JSON.parse(result.stdout);
   assert.equal(report.checks.find((c) => c.id === "hygiene.private_key").status, "WARN");
