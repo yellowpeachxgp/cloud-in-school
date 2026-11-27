@@ -214,9 +214,8 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       const indent = (raw.match(/^ */) || [""])[0].length;
       if (indent <= parentIndent) break;
       const text = raw.slice(indent).trimEnd();
-      const startsQuoted = text.startsWith("'") || text.startsWith("\"");
       const content = stripPlainScalarComment(text);
-      if ((startsQuoted && parseMappingKey(text)) || /:(?:\s|$)/.test(content)) {
+      if (/:(?:\s|$)/.test(content)) {
         errors.push(label + ":" + (index + 1) + ": mapping syntax cannot appear inside a plain-scalar continuation");
       }
       index += 1;
@@ -464,8 +463,16 @@ function assertYamlDuplicateKeyScannerSelfTest() {
     malformedContinuationControl.errors.length > 0,
     "duplicate-key scanner must reject mapping syntax inside plain-scalar continuations"
   );
+  const quotedContinuationCommentControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: first line\n    \"Retry\" # Note: manual retry\n  sibling: true\n",
+    "quoted-continuation-comment-control.yaml"
+  );
+  assert(
+    quotedContinuationCommentControl.errors.length === 0 && quotedContinuationCommentControl.duplicates.length === 0,
+    "duplicate-key scanner must allow colons inside quoted plain-scalar continuation comments"
+  );
   const malformedQuotedContinuationControl = analyzeYamlDuplicateKeys(
-    "root:\n  description: first line\n    \"Retry #1\": manual\n  sibling: true\n",
+    "root:\n  description: first line\n    \"Retry\": manual\n  sibling: true\n",
     "malformed-quoted-continuation-control.yaml"
   );
   assert(
