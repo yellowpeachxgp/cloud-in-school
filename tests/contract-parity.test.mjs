@@ -76,18 +76,6 @@ const EXPECTED_CT01_PLANNED_ROUTES = Object.freeze([
   { method: "DELETE", path: "/api/v1/groups/{groupId}/members/{memberId}", operationId: "removeGroupMember", auth: "bearer" }
 ]);
 
-const EXPECTED_CT02_PLANNED_ROUTES = Object.freeze([
-  { method: "PUT", path: "/api/v1/groups/{groupId}/availability/me", operationId: "replaceMyGroupAvailability", auth: "bearer" },
-  { method: "DELETE", path: "/api/v1/groups/{groupId}/availability/me", operationId: "deleteMyGroupAvailability", auth: "bearer" },
-  { method: "POST", path: "/api/v1/groups/{groupId}/availability/query", operationId: "queryGroupAvailability", auth: "bearer" },
-  { method: "POST", path: "/api/v1/groups/{groupId}/polls", operationId: "createGroupPoll", auth: "bearer" },
-  { method: "GET", path: "/api/v1/polls/{pollId}", operationId: "getGroupPoll", auth: "bearer" },
-  { method: "POST", path: "/api/v1/polls/{pollId}/votes", operationId: "upsertGroupPollVote", auth: "bearer" },
-  { method: "POST", path: "/api/v1/polls/{pollId}/confirm", operationId: "confirmGroupPoll", auth: "bearer" }
-]);
-
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length;
-
 test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI operationIds are 100% bidirectional", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
@@ -892,6 +880,18 @@ test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fa
   assert.equal(m4.body.data.messages.length, 4);
   assert.equal(m4.body.data.initiator_contact, "微信: owner_wx_99");
 });
+
+const EXPECTED_CT02_PLANNED_ROUTES = Object.freeze([
+  { method: "PUT", path: "/api/v1/groups/{groupId}/availability/me", operationId: "replaceMyGroupAvailability", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/groups/{groupId}/availability/me", operationId: "deleteMyGroupAvailability", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/availability/query", operationId: "queryGroupAvailability", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/polls", operationId: "createGroupPoll", auth: "bearer" },
+  { method: "GET", path: "/api/v1/polls/{pollId}", operationId: "getGroupPoll", auth: "bearer" },
+  { method: "POST", path: "/api/v1/polls/{pollId}/votes", operationId: "upsertGroupPollVote", auth: "bearer" },
+  { method: "POST", path: "/api/v1/polls/{pollId}/confirm", operationId: "confirmGroupPoll", auth: "bearer" }
+]);
+
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length;
 
 test("Contract Parity: CT-01/CT-02 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
