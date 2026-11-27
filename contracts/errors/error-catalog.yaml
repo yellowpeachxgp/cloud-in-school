@@ -110,6 +110,11 @@ errors:
     retryable: false
     user_action: REVIEW_PLUGIN_PERMISSIONS
     description: Plugin attempted an undeclared or forbidden capability via PluginBroker.
+  - code: PLUGIN_COMMAND_UNSUPPORTED
+    http_status: 400
+    retryable: false
+    user_action: USE_DECLARED_PLUGIN_COMMAND_TYPE
+    description: Plugin command type is missing or outside the declarative open_host_route, open_url, and show_data contract surface; hosts must not fabricate executed command echoes.
   - code: STORAGE_PERSISTENCE_FAILED
     http_status: 503
     retryable: true
@@ -125,6 +130,11 @@ errors:
     retryable: false
     user_action: FIX_REQUEST_FIELDS
     description: Request parameters or JSON body failed schema validation.
+  - code: CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: RESOLVE_CONFLICT
+    description: Business state conflicts with the current immutable or terminal resource state; resolve the conflict before retrying.
   - code: GROUP_NOT_FOUND
     http_status: 404
     retryable: false
