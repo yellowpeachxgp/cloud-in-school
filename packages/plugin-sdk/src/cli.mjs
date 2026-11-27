@@ -23,13 +23,14 @@ import {
   parsePluginManifestJson,
   assertSafeRelativeArtifactPath
 } from "./index.mjs";
-import { generateEd25519KeyPair, sha256Hex } from "../../crypto/src/index.mjs";
+import { sha256Hex } from "../../crypto/src/index.mjs";
 import {
   keygenPublisherKeypair,
   resolvePrivateKey,
   resolvePublicKey,
   derivePublicKeyBase64,
   readKeyringPrivateKey,
+  keyringPrivateKeyPath,
   LEGACY_PRIVATE_KEY_FILE,
   LEGACY_PUBLIC_KEY_FILE
 } from "./keyring.mjs";
@@ -233,7 +234,9 @@ function commandInit({ positional, flags, env }) {
       "unknown template '" + template + "'; supported templates: " + PLUGIN_INIT_TEMPLATES.join(", ")
     );
   }
-  const useKeyring = flags.get("--keyring") === true;
+  // W6-01a/AC-24 final behavior: init always uses the external keyring.
+  // --keyring remains accepted as a no-op for W6-01b script compatibility;
+  // no init mode writes a private key into the plugin project.
 
   const scaffold = buildTemplateScaffold(pluginId, template);
   fs.mkdirSync(dir, { recursive: true });
@@ -251,30 +254,18 @@ function commandInit({ positional, flags, env }) {
   let publicKeyBase64;
   let privateKeyBase64;
 
-  if (useKeyring) {
-    let keyringKey = readKeyringPrivateKey(pluginId, env);
-    if (!keyringKey) {
-      keygenPublisherKeypair({ pluginId, force: false, env });
-      keyringKey = readKeyringPrivateKey(pluginId, env);
-      keySource = "keyring-created";
-    } else {
-      keySource = "keyring-existing";
-    }
-    privateKeyBase64 = keyringKey;
-    publicKeyBase64 = derivePublicKeyBase64(privateKeyBase64);
-    // Only the public key enters the project; the private key never leaves the keyring.
-    fs.writeFileSync(path.join(dir, LEGACY_PUBLIC_KEY_FILE), publicKeyBase64 + "\n", "utf8");
+  let keyringKey = readKeyringPrivateKey(pluginId, env);
+  if (!keyringKey) {
+    keygenPublisherKeypair({ pluginId, force: false, env });
+    keyringKey = readKeyringPrivateKey(pluginId, env);
+    keySource = "keyring-created";
   } else {
-    // Legacy compatibility mode (W6-00 behavior): the keypair is generated into
-    // the project directory. W6-01a/AC-24 owns retiring this default; the
-    // generated .gitignore at least keeps the key out of version control.
-    const pair = generateEd25519KeyPair();
-    privateKeyBase64 = pair.privateKeyBase64;
-    publicKeyBase64 = pair.publicKeyBase64;
-    keySource = "legacy-in-dir";
-    fs.writeFileSync(path.join(dir, LEGACY_PUBLIC_KEY_FILE), publicKeyBase64, "utf8");
-    fs.writeFileSync(path.join(dir, LEGACY_PRIVATE_KEY_FILE), privateKeyBase64, "utf8");
+    keySource = "keyring-existing";
   }
+  privateKeyBase64 = keyringKey;
+  publicKeyBase64 = derivePublicKeyBase64(privateKeyBase64);
+  // Only the public key enters the project; the private key never leaves the keyring.
+  fs.writeFileSync(path.join(dir, LEGACY_PUBLIC_KEY_FILE), publicKeyBase64 + "\n", "utf8");
 
   const signed = buildSignedPluginManifest({
     manifestDraft: scaffold.manifestDraft,
@@ -291,6 +282,7 @@ function commandInit({ positional, flags, env }) {
     plugin_id: pluginId,
     template,
     key_source: keySource,
+    private_key_path: keyringPrivateKeyPath(pluginId, env),
     artifacts: Object.keys(scaffold.artifacts).sort()
   };
 }
