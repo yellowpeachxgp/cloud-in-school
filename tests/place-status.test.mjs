@@ -995,4 +995,10 @@ test("W4-04 erasure: flag detail is removed from foreign review receipt replay a
   assert.equal(replay.body.data.flag.detail, null, "review receipt replay must not resurrect erased flag detail");
   assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).detail, null);
   assert.ok(!JSON.stringify(Array.from(app.store.idempotencyRecords.values())).includes(detail), "no retained receipt may contain erased flag detail");
+
+  const moderatorDeleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: moderator.auth });
+  assert.equal(moderatorDeleted.status, 202, JSON.stringify(moderatorDeleted.body));
+  assert.equal(moderatorDeleted.body.data.place_status_purged.reviews_detached, 1);
+  assert.equal(moderatorDeleted.body.data.place_status_purged.review_notes_redacted, 1);
+  assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).review_note, null, "reviewer deletion must erase reviewer-authored free text");
 });
