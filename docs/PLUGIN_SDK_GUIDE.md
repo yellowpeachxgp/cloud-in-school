@@ -125,6 +125,12 @@ DISABLED
 | `group.manage` | 更新或归档小组；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
 | `group.invite.manage` | 创建或吊销限时、限次小组邀请；要求 GROUP_OWNER/GROUP_ADMIN 授权 |
 | `group.member.manage` | 管理成员角色、共享级别、移出或自助退出；school 作用域隔离强制 |
+| `group.availability.write` | 上传、替换或撤回本人在组内共享的量化忙闲块；不能写其他成员的忙闲 |
+| `group.availability.read` | 在活跃小组内做隐私最小化交集查询并读取成员 AVAILABLE/BUSY/UNKNOWN 状态；查询结果不暴露原始忙闲块 |
+| `group.poll.create` | 以活跃组成员身份在同一 school 作用域创建带截止时间的时间投票 |
+| `group.poll.read` | 以活跃组成员身份读取投票选项、截止时间、分项结果、本人投票与确认状态 |
+| `group.poll.vote` | 在投票 OPEN 期间投出或修改本人的单选投票 |
+| `group.poll.confirm` | 把投票选项确认为最终群组事件；限投票创建者或同作用域 GROUP_OWNER/GROUP_ADMIN |
 
 ## 6. CLI（`dis-plugin`）
 
@@ -161,6 +167,14 @@ CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm 
 | `service` | `campus.services` | `openService` | `dist/index.mjs` | 校园服务入口，声明一个 HTTPS `allowed_origins` 占位 |
 | `datapack` | `campus.services` | `queryDataset` | `dist/index.mjs` + `assets/dataset.json` | 签名数据包：数据集作为产物被签名与核验 |
 | `legacy` | `campus.services` | `ping` | `dist/index.mjs` | W6-00 兼容脚手架（缺省模板），权限含保留项 `storage.scoped` |
+
+三种模板各自的最小脚手架命令：
+
+```bash
+dis-plugin init ./my-card --id org.example.my-card --template card --keyring
+dis-plugin init ./my-service --id org.example.my-service --template service --keyring
+dis-plugin init ./my-datapack --id org.example.my-datapack --template datapack --keyring
+```
 
 模板数据全部标注 `SIMULATED_TEMPLATE_DATA`；真实数据包必须按 SYSTEM_CONTRACT 为每条数据给出 `sources` 与核验状态，不得把示例数据当真实学校数据发布。
 
