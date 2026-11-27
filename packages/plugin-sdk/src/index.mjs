@@ -380,7 +380,10 @@ export class PluginRegistryAndBroker {
         previous_version: existing.previous_version || null,
         pending_version: targetVersion,
         pending_permissions: addedPermissions,
-        status: "PENDING_PERMISSION_REVIEW",
+        // A disabled installation must stay disabled while the upgrade is
+        // staged. Its first explicit ENABLE resumes the review state; it does
+        // not confirm the new permissions by itself.
+        status: existing.status === "DISABLED" ? "DISABLED" : "PENDING_PERMISSION_REVIEW",
         granted_permissions: currentGranted,
         updated_at: nowIso
       };
@@ -457,9 +460,11 @@ export class PluginRegistryAndBroker {
       if (inst.status === "PENDING_PERMISSION_REVIEW") {
         return this.confirmPendingPluginPermissions(userId, pluginId);
       }
-      // Disabling pauses a pending review. Re-enabling first resumes the review
-      // state with the old version still active; it must not silently confirm or
-      // discard the pending permission delta.
+      // Disabling pauses a pending review. The first ENABLE from DISABLED only
+      // resumes the review state with the old version and old grant set; a
+      // second ENABLE while PENDING_PERMISSION_REVIEW is the explicit confirmation
+      // that authorizes the pending version. ENABLE must never silently confirm
+      // or discard the pending permission delta.
       inst.status = inst.pending_version ? "PENDING_PERMISSION_REVIEW" : "ENABLED";
       inst.updated_at = nowIso;
       return inst;

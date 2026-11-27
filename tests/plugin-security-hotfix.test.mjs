@@ -78,6 +78,15 @@ async function invokePingWithOrigin(app, headers) {
   });
 }
 
+async function invokePing(app, headers) {
+  return app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/commands/ping/invoke",
+    headers,
+    body: {}
+  });
+}
+
 test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, and rollback shrinks grants", async () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const { headers, user } = createUserSession(app, "plugin_permission_hotfix_user");
@@ -183,6 +192,13 @@ test("S1 edge: disable/enable pauses and resumes review without activating the u
   assert.equal(disabled.body.data.status, "DISABLED");
   assert.equal(disabled.body.data.pending_version, "1.1.0");
 
+  const restagedWhileDisabled = await installSignedFixture(app, headers, v2, keyPair.publicKeyBase64);
+  assert.equal(restagedWhileDisabled.status, 201);
+  assert.equal(restagedWhileDisabled.body.data.status, "DISABLED");
+  assert.equal(restagedWhileDisabled.body.data.active_version, "1.0.0");
+  assert.equal(restagedWhileDisabled.body.data.pending_version, "1.1.0");
+  assert.deepEqual(restagedWhileDisabled.body.data.granted_permissions, ["ui.slot.render"]);
+
   const resumed = await app.inject({
     method: "POST",
     url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
@@ -194,4 +210,74 @@ test("S1 edge: disable/enable pauses and resumes review without activating the u
   assert.equal(resumed.body.data.active_version, "1.0.0");
   assert.equal(resumed.body.data.pending_version, "1.1.0");
   assert.deepEqual(resumed.body.data.granted_permissions, ["ui.slot.render"]);
+});
+
+test("W6-HOTFIX regression: pre-disabled upgrade cannot invoke until the two-step enable confirmation", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { headers } = createUserSession(app, "plugin_permission_pre_disabled_user");
+  const keyPair = generateEd25519KeyPair();
+  const v1Permissions = ["ui.slot.render"];
+  const v2Permissions = ["ui.slot.render", "network.request"];
+  const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions: v1Permissions });
+  const v2 = signedTestPlugin({ keyPair, version: "1.1.0", permissions: v2Permissions });
+
+  const installV1 = await installSignedFixture(app, headers, v1, keyPair.publicKeyBase64);
+  assert.equal(installV1.status, 201);
+  assert.equal(installV1.body.data.status, "ENABLED");
+
+  const disabledBeforeUpgrade = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "DISABLE" }
+  });
+  assert.equal(disabledBeforeUpgrade.status, 200);
+  assert.equal(disabledBeforeUpgrade.body.data.status, "DISABLED");
+  assert.equal(disabledBeforeUpgrade.body.data.pending_version, null);
+
+  const upgradeWhileDisabled = await installSignedFixture(app, headers, v2, keyPair.publicKeyBase64);
+  assert.equal(upgradeWhileDisabled.status, 201);
+  assert.equal(upgradeWhileDisabled.body.data.status, "DISABLED");
+  assert.equal(upgradeWhileDisabled.body.data.active_version, "1.0.0");
+  assert.equal(upgradeWhileDisabled.body.data.pending_version, "1.1.0");
+  assert.deepEqual(upgradeWhileDisabled.body.data.pending_permissions, ["network.request"]);
+  assert.deepEqual(upgradeWhileDisabled.body.data.granted_permissions, v1Permissions);
+
+  const invokeWhileDisabled = await invokePing(app, headers);
+  assert.equal(invokeWhileDisabled.status, 403);
+  assert.equal(invokeWhileDisabled.body.error.code, "PLUGIN_PERMISSION_DENIED");
+
+  const firstEnable = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ENABLE" }
+  });
+  assert.equal(firstEnable.status, 200);
+  assert.equal(firstEnable.body.data.status, "PENDING_PERMISSION_REVIEW");
+  assert.equal(firstEnable.body.data.active_version, "1.0.0");
+  assert.equal(firstEnable.body.data.pending_version, "1.1.0");
+  assert.deepEqual(firstEnable.body.data.pending_permissions, ["network.request"]);
+  assert.deepEqual(firstEnable.body.data.granted_permissions, v1Permissions);
+
+  const newPermissionStillDenied = await invokePingWithOrigin(app, headers);
+  assert.equal(newPermissionStillDenied.status, 403);
+  assert.equal(newPermissionStillDenied.body.error.code, "PLUGIN_PERMISSION_DENIED");
+
+  const secondEnable = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ENABLE" }
+  });
+  assert.equal(secondEnable.status, 200);
+  assert.equal(secondEnable.body.data.status, "ENABLED");
+  assert.equal(secondEnable.body.data.active_version, "1.1.0");
+  assert.equal(secondEnable.body.data.pending_version, null);
+  assert.deepEqual(secondEnable.body.data.pending_permissions, []);
+  assert.deepEqual(secondEnable.body.data.granted_permissions, v2Permissions);
+
+  const allowedAfterExplicitConfirmation = await invokePingWithOrigin(app, headers);
+  assert.equal(allowedAfterExplicitConfirmation.status, 200);
+  assert.equal(allowedAfterExplicitConfirmation.body.data.version, "1.1.0");
 });
