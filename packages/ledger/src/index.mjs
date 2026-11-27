@@ -18,12 +18,10 @@ import {
   canonicalize,
   clone,
   iso,
-  optionalString,
   paginateRows,
   parseDateTimeMs,
   parseLimit,
   pseudonymizeExactUserIdRefs,
-  pushArrayCommitted,
   requireAllowed,
   requireNoUnknownFields,
   requireString,
@@ -195,10 +193,6 @@ function normalizeText(value, field, options = {}) {
 
 function validateKeySet(body, allowed, label) {
   requireNoUnknownFields(body, allowed, label);
-}
-
-function positiveBigIntOutput(value) {
-  return Number(fenToBigInt(value));
 }
 
 function memberSortRows(rows) {
@@ -676,8 +670,8 @@ export class LedgerService extends DormCollaborationBase {
         member_id: memberId,
         posting_credit_fen: jsonFen(row.posting, "posting credit"),
         share_cost_fen: jsonFen(row.shares, "share cost"),
-        outbound_settlement_fen: positiveBigIntOutput(row.outbound),
-        inbound_settlement_fen: positiveBigIntOutput(row.inbound),
+        outbound_settlement_fen: jsonFen(row.outbound, "outbound settlement"),
+        inbound_settlement_fen: jsonFen(row.inbound, "inbound settlement"),
         balance_fen: jsonFen(balance, "member balance"),
         _big: balance
       });
@@ -853,7 +847,7 @@ export class LedgerService extends DormCollaborationBase {
     const settlementId = String(params?.settlementId || "");
     const idem = this._idempotency("cancelSettlement", auth, headers, body ?? {}, { settlementId });
     if (idem.replay) return idem.replay;
-    validateKeySet(body ?? {}, ["reason"], "cancel settlement body");
+    validateKeySet(body, ["reason"], "cancel settlement body");
     normalizeText(body?.reason, "reason", { min: 0, max: 240 });
     const { settlement, member } = this._requireSettlementVisible(auth, settlementId);
     const party = this._partyForMember(settlement, member.id);
@@ -1097,7 +1091,7 @@ export class LedgerService extends DormCollaborationBase {
     const taskId = String(params?.taskId || "");
     const idem = this._idempotency("completeDutyTask", auth, headers, body ?? {}, { taskId });
     if (idem.replay) return idem.replay;
-    validateKeySet(body ?? {}, ["completion_note"], "complete duty task body");
+    validateKeySet(body, ["completion_note"], "complete duty task body");
     const note = normalizeText(body?.completion_note, "completion_note", { min: 0, max: 240 });
     const { task, group, member } = this._requireTaskVisible(auth, taskId);
     if (task.assigned_member_id !== member.id) throw domainError("DUTY_PERMISSION_DENIED", "only the currently assigned member can complete this task");
@@ -1120,7 +1114,7 @@ export class LedgerService extends DormCollaborationBase {
     const taskId = String(params?.taskId || "");
     const idem = this._idempotency("confirmDutyTaskCompletion", auth, headers, body ?? {}, { taskId });
     if (idem.replay) return idem.replay;
-    validateKeySet(body ?? {}, ["confirmation_note"], "confirm duty task body");
+    validateKeySet(body, ["confirmation_note"], "confirm duty task body");
     const note = normalizeText(body?.confirmation_note, "confirmation_note", { min: 0, max: 240 });
     const { task, group, member } = this._requireTaskVisible(auth, taskId);
     if (task.assigned_member_id === member.id) throw domainError("DUTY_CONFIRMATION_NOT_ALLOWED", "duty completion must be confirmed by a different active member");
