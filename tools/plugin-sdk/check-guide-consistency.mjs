@@ -47,7 +47,7 @@ for (const boundary of [
   "宿主不会加载或执行",
   "不把尚未完成的契约面或插件能力写成已实现",
   "contracts/fixtures/plugins/",
-  "后续微切片",
+  "cloud-in-school/contracts 是唯一权威",
   "plugin-signing-private.key",
   "reference_plugins",
   "runtime_validation_code"

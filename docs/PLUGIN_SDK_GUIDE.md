@@ -3,16 +3,15 @@
 > 状态：W6-00 运行时规范事实源 + W6-01b 开发者工具事实源。本文只描述**当前两端实际实现**的 snake_case
 > `dis-extension/v2` 与 `dis-plugin` CLI 的真实行为，不把尚未完成的契约面或插件能力写成已实现。
 >
-> **契约边界（必须读懂）**：CT-01 当前独占两仓 `contracts/**`。因此
-> `contracts/schemas/plugin-extension-v2.schema.json`、
-> `contracts/compatibility/host-api-matrix.yaml` 和
-> `contracts/fixtures/plugins/` 的字面收敛**不在本切片内**，AC-01…AC-03 的契约面验收仍需
-> CT-01 合并后的后续微切片。本切片使用且不伪装为契约共享夹具的运行时文件是：
+> **契约边界（必须读懂）**：cloud-in-school/contracts 是唯一权威。W6 契约面微切片已经把
+> `contracts/schemas/plugin-extension-v2.schema.json` 收敛为运行时 snake_case 事实形，云端 SDK 直接读取该契约 Schema；
+> `contracts/compatibility/host-api-matrix.yaml` 的 host_api 2 只列 6 个实装槽位；
+> `contracts/fixtures/plugins/` 是云端与 Android 共同消费的 58 个共享夹具。
+> 运行时只保留经过测试逐项对照的便利镜像：
 >
-> - `packages/plugin-sdk/schema/plugin-extension-v2-runtime.schema.json`（运行时 Schema）
-> - `packages/plugin-sdk/runtime/host-api-matrix.json`（运行时 host API 事实源）
-> - `packages/plugin-sdk/test-fixtures/runtime-plugin-manifests/`（云端运行时测试夹具）
-> - Android `core/school-packages/src/test/resources/runtime-plugin-manifest-fixtures/`（同名运行时测试夹具）
+> - `packages/plugin-sdk/runtime/host-api-matrix.json`（host API 2 槽位运行时镜像，不是第二权威）
+>
+> W6-00 的非 contracts 清单 Schema 与两端测试夹具镜像已迁移删除，不能再引用为 AC-01…AC-03 证据。
 
 ## 1. 支持边界：声明式，不执行插件代码
 
@@ -40,7 +39,7 @@
 | `permissions` | string array | 只能包含 §5 权限目录中的 ID |
 | `allowed_origins` | string array | 只能是无路径 HTTPS origin，例如 `https://plugin.example.com`；不允许 `http:` 或路径 |
 | `ui_slots` | object array | 每项必须有 `slot_id / card_id / title / action_command`，可选 `subtitle`；`title` 为 1–60 字符且不能是纯空白（空白集同上，与 ECMAScript `\s` 一致） |
-| `commands` | object array | 每项必须有 `name`，可选 `description / required_permission` |
+| `commands` | object array | 每项必须有 `name`；可选 `description / required_permission`；契约同时登记 `type / route / url / artifact_path` 作为 W6-01a 声明式命令目标字段，严格执行语义在 W6-01a 合入前不宣称完成 |
 | `entry_artifacts` | object array | 每项必须有 `path / sha256 / size_bytes`；`size_bytes` 为 0–2147483647 的整数字面量（按现有内存内摘要核验实现选择最严合理上限，超大文件待未来流式契约另行设计） |
 
 可选字段：
@@ -56,7 +55,7 @@
 
 ## 3. 六个运行时 UI 槽位
 
-权威运行时列表来自 `packages/plugin-sdk/runtime/host-api-matrix.json`；Android 使用同名运行时资源并在测试中逐项比对。当前状态必须诚实区分「描述符可解析」与「宿主界面已渲染」：
+权威列表来自 `contracts/compatibility/host-api-matrix.yaml`；云端和 Android 各自打包同名运行时便利镜像，并在测试中逐项与契约矩阵比对。当前状态必须诚实区分「描述符可解析」与「宿主界面已渲染」：
 
 | 槽位 | 设计含义 / 预定渲染位置 | 当前实现状态 |
 |---|---|---|

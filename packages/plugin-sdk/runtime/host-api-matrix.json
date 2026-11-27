@@ -1,6 +1,6 @@
 {
-  "version": "runtime-fact-2026-11-27",
-  "notice": "Runtime-only plugin host API fact source for W6-00. This is not contracts/compatibility/host-api-matrix.yaml and must not be presented as the CT/INF contract shared fixture source. The contract-surface convergence slice is pending CT-01.",
+  "version": "runtime-mirror-2026-11-28",
+  "notice": "Runtime convenience mirror of the authoritative contracts/compatibility/host-api-matrix.yaml host_api 2 slot list. cloud-in-school/contracts is the sole contract authority; conformance tests compare this runtime mirror item-by-item with the contract matrix.",
   "host_api_versions": [
     {
       "host_api": 2,

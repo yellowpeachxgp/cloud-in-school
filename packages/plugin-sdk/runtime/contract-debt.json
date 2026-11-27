@@ -13,7 +13,7 @@
         "url",
         "artifact_path"
       ],
-      "resolution_evidence": "contracts/schemas/plugin-extension-v2.schema.json is now the runtime-shaped snake_case dis-extension/v2 schema and registers the declarative command target fields."
+      "resolution_evidence": "contracts/schemas/plugin-extension-v2.schema.json is now the runtime-shaped snake_case dis-extension/v2 schema and registers the declarative command target fields; the transitional non-contract schema mirror was removed after runtime switched to the contract schema."
     },
     {
       "id": "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
@@ -29,7 +29,7 @@
       "runtime_fact_source": "packages/plugin-sdk/test-fixtures/runtime-plugin-manifests/",
       "contract_target": "contracts/fixtures/plugins/",
       "resolved_contract_fields": [],
-      "resolution_evidence": "The 58 runtime plugin manifest fixtures were migrated byte-for-byte into contracts/fixtures/plugins/{valid,invalid}/ as the shared authoritative fixture set."
+      "resolution_evidence": "The 58 runtime plugin manifest fixtures were migrated byte-for-byte into contracts/fixtures/plugins/{valid,invalid}/ as the shared authoritative fixture set; the non-contract fixture mirrors were removed from cloud and Android test resources."
     },
     {
       "id": "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
