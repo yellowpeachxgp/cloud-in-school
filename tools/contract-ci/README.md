@@ -4,7 +4,7 @@ cloud-in-school/contracts/ 是唯一权威；day-in-school/contracts/ 只是同�
 
 ## 工具
 
-- validate-contracts.mjs：校验本仓 SYSTEM_CONTRACT.md、OpenAPI 3.1.2、endpoint inventory 与 JSON Schema 的内部一致性，并严格检查每个 path template 参数都有 in: path 且 required: true 的声明；反向检查已声明 path 参数必须存在于模板。生命周期状态分为 active / planned / reserved：active 必须与运行时 100% 双向一致；planned/reserved 是显式 contract-only，要求 OpenAPI `x-dis-status`、inventory `status` 与 `contract_card` 完整一致，不计入运行时缺失，也不能被运行时装配提前占用。
+- validate-contracts.mjs：校验本仓 SYSTEM_CONTRACT.md、OpenAPI 3.1.2、endpoint inventory 与 JSON Schema 的内部一致性，并对 contracts/**/*.yaml 执行 strict duplicate-key 文本层扫描；扫描器每次运行先执行负例/对照自证（重复 path key、plain/single-quoted/double-quoted 三形态等价键与跨 indentless sequence 重复键必须失败；双引号 \\x/\\u/\\U escape 先 canonicalize 再比对；key/value 位置 anchor/tag/alias、merge key 与 flow mapping 均 fail-closed；序列项合法重复、block scalar、plain scalar 占位符/折行/续行内联注释与注释 tab 不得误报；plain scalar 续行中的 mapping 语法必须失败），再严格检查每个 path template 参数都有 in: path 且 required: true 的声明；反向检查已声明 path 参数必须存在于模板。生命周期状态分为 active / planned / reserved：active 必须与运行时 100% 双向一致；planned/reserved 是显式 contract-only，要求 OpenAPI `x-dis-status`、inventory `status` 与 `contract_card` 完整一致，不计入运行时缺失，也不能被运行时装配提前占用。
 - sync-contracts.mjs sync：默认先执行 git fetch origin +refs/heads/main:refs/remotes/origin/main，再读取云端 git origin/main；显式 --cloud-ref 或 --use-cloud-worktree 时由调用者自行保证来源新鲜。写入前先校验 cloud-root 是 cloud-in-school 仓库 checkout 或完整导出，再完整 staging 云端树、备份受影响文件；每个文件通过临时文件加 rename 替换，异常时按逆序回滚，避免留下半同步状态。
 - sync 在计划/执行前 fail-closed：云端或 Android contracts 内仅大小写/Unicode 规范化不同的 alias、跨仓 case-only rename、file↔directory 冲突都会拒绝；sparse checkout 不支持并明确拒绝，避免把缺失文件误当权威删除。
 - sync-contracts.mjs check：递归比较两棵 contracts/ 树的文件清单和 SHA-256；任一缺失、多余或哈希不同都失败。cloud-root 同样必须是 cloud-in-school 仓库 checkout 或完整导出。

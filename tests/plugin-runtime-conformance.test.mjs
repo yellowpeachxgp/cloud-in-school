@@ -91,7 +91,10 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
     "invalid-runtime_schema_invalid-host-api-int32-overflow.json",
     "invalid-runtime_schema_invalid-size-bytes-int32-overflow.json",
     "invalid-runtime_schema_invalid-duplicate-top-level-key.json",
-    "invalid-runtime_schema_invalid-overlong-number-literal.json"
+    "invalid-runtime_schema_invalid-overlong-number-literal.json",
+    "invalid-runtime_schema_invalid-unknown-top-level-field.json",
+    "invalid-runtime_schema_invalid-ui-slot-extra-field.json",
+    "invalid-runtime_schema_invalid-command-extra-field.json"
   ]) {
     assert.throws(
       () => validatePluginManifest(readFixtureText(fileName)),
@@ -99,6 +102,12 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
       fileName + " must fail with runtime_schema_invalid"
     );
   }
+
+  assert.throws(
+    () => validatePluginManifest(readFixtureText("invalid-runtime_signature_invalid-signature-extra-field.json")),
+    (error) => error?.detail?.runtime_validation_code === "runtime_signature_invalid",
+    "unknown signature fields must fail closed with runtime_signature_invalid"
+  );
 });
 
 test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2 slot list", () => {
@@ -115,6 +124,69 @@ test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2
     "parcel.providers",
     "settings.entries"
   ]);
+});
+
+test("W6-01a contract debt: transitional runtime surfaces are explicitly registered outside contracts", () => {
+  const registryPath = path.join(REPO_ROOT, "packages/plugin-sdk/runtime/contract-debt.json");
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  assert.match(registry.authority_notice, /not a contract/);
+  assert.match(registry.authority_notice, /cloud-in-school\/contracts/);
+  const byId = new Map((registry.debts || []).map((debt) => [debt.id, debt]));
+  const expectedStatuses = new Map([
+    ["PLUGIN_RUNTIME_SCHEMA_TRANSITION", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"],
+    ["PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"],
+    ["PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"]
+  ]);
+  for (const [id, expectedStatus] of expectedStatuses) {
+    assert.ok(byId.has(id), "missing contract debt entry " + id);
+    assert.equal(byId.get(id).status, expectedStatus);
+    assert.ok(
+      fs.existsSync(path.join(REPO_ROOT, byId.get(id).runtime_fact_source)),
+      "runtime fact source must exist for " + id
+    );
+  }
+  for (const id of [
+    "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+    "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+    "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS"
+  ]) {
+    assert.match(byId.get(id).resolution || "", /AUTO-022/, id + " must remain explicitly deferred to AUTO-022");
+  }
+  for (const id of [
+    "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+    "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT"
+  ]) {
+    assert.ok(Array.isArray(byId.get(id).resolved_contract_fields), id + " must retain closed contract field evidence");
+    assert.match(byId.get(id).resolution_evidence || "", /Plugin/, id + " must retain closure evidence");
+  }
+  assert.deepEqual(
+    byId.get("PLUGIN_RUNTIME_SCHEMA_TRANSITION").unregistered_runtime_fields,
+    ["type", "route", "url", "artifact_path"],
+    "declarative command runtime fields must be itemized rather than silently treated as contract-registered"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT").unregistered_runtime_fields,
+    ["artifact_map", "version", "school_id"],
+    "install runtime-only fields must be itemized"
+  );
+  assert.ok(
+    byId.get("PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT").contradictory_contract_fields.some((item) => item.startsWith("public_key_base64:")),
+    "the install public_key_base64 trust-root contradiction must be explicit"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION").unregistered_runtime_fields,
+    ["REVOKE_PERMISSION", "target_version", "permission", "scope", "admin_kill_switch", "school_id", "kill_switch_reason", "QUARANTINED", "pre_quarantine_status", "quarantine_reason", "quarantined_at"],
+    "lifecycle runtime security extensions must be itemized completely"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT").unregistered_runtime_fields,
+    ["payload", "requested_origin", "school_id"],
+    "invoke runtime-only fields must be itemized"
+  );
 });
 
 test("W6-00 examples: both signed reference manifests pass the transitional runtime schema", () => {
@@ -137,9 +209,15 @@ test("W6-00 CLI init: generated manifest passes the transitional runtime schema 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w600-cli-init-"));
   try {
     const cliPath = path.join(REPO_ROOT, "packages/plugin-sdk/bin/dis-plugin.mjs");
-    execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.w600-runtime"], {
-      stdio: "pipe"
-    });
+    const keyHome = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w600-keys-"));
+    try {
+      execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.w600-runtime"], {
+        stdio: "pipe",
+        env: { ...process.env, DIS_PLUGIN_KEY_HOME: keyHome }
+      });
+    } finally {
+      fs.rmSync(keyHome, { recursive: true, force: true });
+    }
     const loaded = loadPluginDirectory(tmpDir);
     assert.deepEqual(validatePluginRuntimeSchema(loaded.manifest), []);
     const normalized = validatePluginManifest(loaded.manifest);

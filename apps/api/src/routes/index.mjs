@@ -12,6 +12,7 @@ import { createCampusContentRoutes } from "./campus-content.mjs";
 import { createMomentsExtensionRoutes } from "./moments.mjs";
 import { createCommunityRoutes } from "./community.mjs";
 import { createAvailabilityRoutes } from "./availability.mjs";
+import { createPlaceStatusRoutes } from "./place-status.mjs";
 
 export function createCoreRoutes(ctx) {
   return [
@@ -27,7 +28,8 @@ export function createCoreRoutes(ctx) {
     ...createSyncRoutes(ctx),
     ...createCampusContentRoutes(ctx),
     ...createCommunityRoutes(ctx),
-    ...createAvailabilityRoutes(ctx)
+    ...createAvailabilityRoutes(ctx),
+    ...createPlaceStatusRoutes(ctx)
   ];
 }
 
