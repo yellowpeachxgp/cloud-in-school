@@ -66,7 +66,7 @@ components:
       name: GroupMemberEvent
       payload:
         type: object
-        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, member_id, cloud_user_id, actor_cloud_user_id, role, sharing_level]
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, member_id, cloud_user_id, actor_cloud_user_id, role, sharing_level, reason]
         properties:
           event_id:
             type: string
@@ -88,6 +88,7 @@ components:
           member_id:
             type: string
             format: uuid
+            description: Membership-period UUID; a leave followed by rejoin uses a fresh member_id, keeping joined/left event keys unique across lifecycle cycles.
           cloud_user_id:
             type: string
             format: uuid
@@ -100,6 +101,7 @@ components:
           sharing_level:
             type: string
             enum: [NONE, BUSY_BLOCKS_30MIN]
+            description: Effective sharing level after the transition; left events therefore carry NONE because sharing is withdrawn immediately.
           reason:
             type: string
             enum: [GROUP_CREATED, INVITE_ACCEPTED, SELF_LEFT, ADMIN_REMOVED, GROUP_ARCHIVED]

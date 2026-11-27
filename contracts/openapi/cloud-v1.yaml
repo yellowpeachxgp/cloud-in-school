@@ -1140,7 +1140,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/GroupMemberEnvelope'
         '200':
-          description: Durable idempotent replay or already-active membership returned without duplicate effects
+          description: Durable idempotent replay of the original invite acceptance result
           content:
             application/json:
               schema:
@@ -3322,6 +3322,9 @@ components:
         qr_payload:
           type: string
           pattern: '^dis-group-invite:v1:[A-Za-z0-9_-]{8,64}$'
+        label:
+          type: string
+          maxLength: 80
         status:
           $ref: '#/components/schemas/GroupInviteStatus'
         expires_at:
@@ -3384,6 +3387,7 @@ components:
         member_id:
           type: string
           format: uuid
+          description: Membership-period UUID rather than a user identifier; leaving and later rejoining creates a fresh member_id so lifecycle event keys remain unique.
         group_id:
           type: string
           format: uuid
@@ -3416,6 +3420,7 @@ components:
       properties:
         role:
           $ref: '#/components/schemas/GroupRole'
+          description: Setting another active member to OWNER atomically transfers ownership and demotes the previous owner to MEMBER; the last remaining owner cannot be demoted without such a transfer.
         sharing_level:
           $ref: '#/components/schemas/GroupSharingLevel'
     GroupMemberEnvelope:

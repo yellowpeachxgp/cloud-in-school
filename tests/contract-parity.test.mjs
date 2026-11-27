@@ -33,6 +33,16 @@ function sortedOperationIds(routes) {
   return routes.map((route) => route.operationId).sort();
 }
 
+function assertUniqueOperationIds(routes, label) {
+  const operationIds = routes.map((route) => route.operationId);
+  assert.equal(new Set(operationIds).size, operationIds.length, label + " operationIds must be unique");
+}
+
+function assertUniqueRouteKeys(routes, label) {
+  const keys = routes.map((route) => routeKey(route));
+  assert.equal(new Set(keys).size, keys.length, label + " method+path keys must be unique");
+}
+
 function loadInventoryOperations() {
   return parseEndpointInventory(fs.readFileSync(path.join(REPO_ROOT, "contracts/endpoints/endpoint-inventory.yaml"), "utf8"));
 }
@@ -89,7 +99,25 @@ test("Contract Parity: active core runtime/inventory/OpenAPI remain exact while 
   assert.equal(activeOpenApi.length, 97, "OpenAPI must declare exactly 97 active core operations");
   assert.equal(coreRegistered.length, 97, "CampusCloudApp must expose exactly 97 active core operations");
   assert.equal(allRegistered.length, 109, "CampusCloudApp must expose 97 core + 12 explicit extension operations");
+  assert.equal(
+    plannedInventory.length,
+    EXPECTED_CT01_PLANNED_ROUTES.length,
+    "endpoint-inventory.yaml must declare exactly the 11 CT-01 planned operations"
+  );
+  assert.equal(
+    plannedOpenApi.length,
+    EXPECTED_CT01_PLANNED_ROUTES.length,
+    "OpenAPI must declare exactly the 11 CT-01 planned operations"
+  );
+  assertUniqueOperationIds(coreRegistered, "active core runtime");
+  assertUniqueOperationIds(inventory, "active endpoint inventory");
+  assertUniqueOperationIds(activeOpenApi, "active OpenAPI");
+  assertUniqueOperationIds(plannedInventory, "planned endpoint inventory");
+  assertUniqueOperationIds(plannedOpenApi, "planned OpenAPI");
+  assertUniqueRouteKeys(plannedInventory, "planned endpoint inventory");
+  assertUniqueRouteKeys(plannedOpenApi, "planned OpenAPI");
   const ct01Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-01");
+  assert.equal(ct01Inventory.length, EXPECTED_CT01_PLANNED_ROUTES.length, "CT-01 inventory entries must be explicitly countable");
   assert.deepEqual(
     ct01Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
     EXPECTED_CT01_PLANNED_ROUTES,
