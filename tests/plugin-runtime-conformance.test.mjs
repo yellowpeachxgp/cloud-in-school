@@ -91,7 +91,11 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
     "invalid-runtime_schema_invalid-host-api-int32-overflow.json",
     "invalid-runtime_schema_invalid-size-bytes-int32-overflow.json",
     "invalid-runtime_schema_invalid-duplicate-top-level-key.json",
-    "invalid-runtime_schema_invalid-overlong-number-literal.json"
+    "invalid-runtime_schema_invalid-overlong-number-literal.json",
+    "invalid-runtime_schema_invalid-unknown-top-level-field.json",
+    "invalid-runtime_schema_invalid-ui-slot-extra-field.json",
+    "invalid-runtime_schema_invalid-command-extra-field.json",
+    "invalid-runtime_signature_invalid-signature-extra-field.json"
   ]) {
     assert.throws(
       () => validatePluginManifest(readFixtureText(fileName)),
@@ -115,6 +119,32 @@ test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2
     "parcel.providers",
     "settings.entries"
   ]);
+});
+
+test("W6-01a contract debt: transitional runtime surfaces are explicitly registered outside contracts", () => {
+  const registryPath = path.join(REPO_ROOT, "packages/plugin-sdk/runtime/contract-debt.json");
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  assert.match(registry.authority_notice, /not a contract/);
+  assert.match(registry.authority_notice, /cloud-in-school\/contracts/);
+  const byId = new Map((registry.debts || []).map((debt) => [debt.id, debt]));
+  for (const id of [
+    "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+    "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+    "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
+    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION"
+  ]) {
+    assert.ok(byId.has(id), "missing contract debt entry " + id);
+    assert.equal(byId.get(id).status, "OPEN_CONTRACT_DEBT");
+    assert.ok(
+      fs.existsSync(path.join(REPO_ROOT, byId.get(id).runtime_fact_source)),
+      "runtime fact source must exist for " + id
+    );
+  }
+  assert.deepEqual(
+    byId.get("PLUGIN_RUNTIME_SCHEMA_TRANSITION").unregistered_runtime_fields,
+    ["type", "route", "url", "artifact_path"],
+    "declarative command runtime fields must be itemized rather than silently treated as contract-registered"
+  );
 });
 
 test("W6-00 examples: both signed reference manifests pass the transitional runtime schema", () => {

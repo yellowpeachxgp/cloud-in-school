@@ -1,0 +1,47 @@
+{
+  "version": "w6-01a-contract-debt-2026-11-28",
+  "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface; every entry here must be resolved by the contract line before being presented as a published contract capability.",
+  "debts": [
+    {
+      "id": "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/schema/plugin-extension-v2-runtime.schema.json",
+      "contract_target": "contracts/schemas/plugin-extension-v2.schema.json",
+      "unregistered_runtime_fields": [
+        "type",
+        "route",
+        "url",
+        "artifact_path"
+      ],
+      "resolution": "the contract line must either register the snake_case runtime command fields in contracts/** or remove them from runtime before they are documented as published contract fields"
+    },
+    {
+      "id": "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/runtime/host-api-matrix.json",
+      "contract_target": "contracts/compatibility/host-api-matrix.yaml",
+      "unregistered_runtime_fields": [],
+      "resolution": "the contract line must converge the authoritative host-api matrix with the six runtime-supported v2 slots and dynamic_code_loading_allowed=false"
+    },
+    {
+      "id": "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/test-fixtures/runtime-plugin-manifests/",
+      "contract_target": "contracts/fixtures/plugins/",
+      "unregistered_runtime_fields": [],
+      "resolution": "the contract line must move or recreate equivalent shared fixtures under contracts/fixtures/plugins/ when contracts/** is available; these runtime fixtures must not be cited as AC-02 contract fixtures"
+    },
+    {
+      "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml",
+      "unregistered_runtime_fields": [
+        "school_id",
+        "REVOKE_PERMISSION",
+        "kill_switch_reason"
+      ],
+      "resolution": "the contract line must register the account/school scoped lifecycle fields and revoke/kill-switch semantics or the runtime surface must remain undocumented and non-publicized"
+    }
+  ]
+}
