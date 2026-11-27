@@ -243,11 +243,12 @@ export function createMeRoutes(ctx) {
 
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     // Single atomic commit unit: the halt/purge/revoke mutations and their one
-    // durable flush succeed or fail together. A pre-publish flush failure rolls
-    // every mutation back so memory never diverges from the unpublished disk
-    // snapshot; a post-publish failure surfaces STORAGE_COMMIT_UNKNOWN without
+    // durable flush succeed or fail together. Mutations are buffered in the
+    // store's copy-on-write overlay; a pre-publish flush failure discards that
+    // overlay so memory never diverges from the unpublished disk snapshot,
+    // while a post-publish failure surfaces STORAGE_COMMIT_UNKNOWN without
     // rollback, matching the single-operation commit protocol.
-    const outcome = store.runAtomicCommitUnit(() => {
+    const outcome = await store.runAtomicCommitUnit(() => {
       const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       const communityPurged = community?.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
