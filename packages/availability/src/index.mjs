@@ -1370,6 +1370,7 @@ export class AvailabilityService {
     }
 
     if (this.store.idempotencyRecords instanceof Map) {
+      const availabilityPrefixes = AVAILABILITY_IDEMPOTENCY_OPS.map((op) => op + "|");
       const ownPrefixes = AVAILABILITY_IDEMPOTENCY_OPS.map((op) => op + "|" + cloudUserId + "|");
       for (const [key, record] of Array.from(this.store.idempotencyRecords.entries())) {
         if (ownPrefixes.some((prefix) => key.startsWith(prefix))) {
@@ -1377,6 +1378,11 @@ export class AvailabilityService {
           receiptsDeleted += 1;
           continue;
         }
+        // Keep this purge domain-scoped: community/group receipts are scrubbed by
+        // packages/community in the same data-delete commit unit. Availability
+        // receipts are still defensively pseudonymized if a future response embeds
+        // the erased cloud user id.
+        if (!availabilityPrefixes.some((prefix) => key.startsWith(prefix))) continue;
         if (!record || typeof record !== "object") continue;
         const counter = { count: 0 };
         if (record.data !== undefined) {
