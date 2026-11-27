@@ -612,11 +612,13 @@ export class PlaceStatusService {
     });
   }
 
-  _fanoutStatusEventCommitted(payload, place, undo) {
+  _fanoutStatusEventCommitted(payload, place, undo, transitionAtMs) {
     const notified = new Set();
     for (const subscription of this.store.placeStatusSubscriptions.values()) {
       if (subscription.status !== "ACTIVE" || subscription.school_id !== payload.school_id) continue;
       if (!subscription.metrics.includes(payload.metric)) continue;
+      const subscriptionCreatedMs = Date.parse(subscription.created_at);
+      if (!Number.isFinite(subscriptionCreatedMs) || subscriptionCreatedMs > transitionAtMs) continue;
       const target = subscription.target || {};
       let matches = false;
       if (target.type === "PLACE") {
@@ -640,7 +642,7 @@ export class PlaceStatusService {
     }
   }
 
-  _emitStatusChangedCommitted({ view, previousEffectiveState, triggerType, triggerReportId, moderationAction = null, occurredAt }, undo) {
+  _emitStatusChangedCommitted({ view, previousEffectiveState, triggerType, triggerReportId, moderationAction = null, occurredAt, transitionAtMs = Date.parse(occurredAt) }, undo) {
     const eventId = crypto.randomUUID();
     const payload = {
       event_id: eventId,
@@ -673,7 +675,7 @@ export class PlaceStatusService {
       delivered_at: null
     }, undo);
     const place = this.store.campusGraphPlaces.get(view.place_ref);
-    this._fanoutStatusEventCommitted(payload, place, undo);
+    this._fanoutStatusEventCommitted(payload, place, undo, transitionAtMs);
     return payload;
   }
 
@@ -701,7 +703,8 @@ export class PlaceStatusService {
         triggerType,
         triggerReportId,
         moderationAction,
-        occurredAt: iso(nowMs)
+        occurredAt: iso(nowMs),
+        transitionAtMs: evaluationMs
       }, undo);
     }
     return view;
@@ -1111,10 +1114,14 @@ export class PlaceStatusService {
 
   _checkFlagRateLimit(auth, nowMs) {
     const since = nowMs - 3600_000;
-    const count = Array.from(this.store.placeReportFlags.values()).filter(
+    const flagCount = Array.from(this.store.placeReportFlags.values()).filter(
       (flag) => flag.flagger_cloud_user_id === auth.cloudUserId && Date.parse(flag.created_at) >= since
     ).length;
-    if (count >= FLAG_RATE_LIMIT_PER_HOUR) {
+    const receiptPrefix = "flagPlaceStatusReport|" + auth.cloudUserId + "|";
+    const receiptCount = Array.from(this.store.idempotencyRecords.entries()).filter(([key, record]) =>
+      key.startsWith(receiptPrefix) && Number.isFinite(Number(record?.createdAtMs)) && Number(record.createdAtMs) >= since
+    ).length;
+    if (Math.max(flagCount, receiptCount) >= FLAG_RATE_LIMIT_PER_HOUR) {
       throw new ContractError("PLACE_STATUS_RATE_LIMITED", "Place report flag rate limit reached; retry after the rolling window");
     }
   }
@@ -1133,6 +1140,7 @@ export class PlaceStatusService {
     if (!FLAG_REASONS.has(reason)) throw flagInvalid("reason is not supported");
     const detail = body.detail === undefined ? null : requireString(body.detail, "detail", { min: 0, max: 500, error: flagInvalid });
     assertNoPii(detail, "detail", flagInvalid);
+    this._checkFlagRateLimit(auth, nowMs);
     const existingOpen = Array.from(this.store.placeReportFlags.values()).filter(
       (flag) => flag.report_id === report.id && flag.flagger_cloud_user_id === auth.cloudUserId && flag.status === "OPEN"
     );
@@ -1145,7 +1153,6 @@ export class PlaceStatusService {
       }), idem.receipt, nowMs);
     }
     if (existingOpen.length > 0) throw flagInvalid("an active flag by the same caller already exists for this report");
-    this._checkFlagRateLimit(auth, nowMs);
     return this._commitWithReceipt((undo) => {
       const flag = {
         id: crypto.randomUUID(),

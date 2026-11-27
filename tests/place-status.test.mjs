@@ -394,6 +394,55 @@ test("W4-04 subscriptions: create/list/cancel idempotently and fan out only in-a
   assert.equal(foreignDelete.body.error.code, "PLACE_STATUS_SUBSCRIPTION_NOT_FOUND");
 });
 
+test("W4-04 flag abuse control: fresh duplicate keys are rate-limited while true receipt replay remains free", async () => {
+  const app = createTestApp();
+  const author = setupUser(app, "author_flag_receipt_limit");
+  const flagger = setupUser(app, "flagger_receipt_limit");
+  const report = await createReport(app, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  const flagBody = { reason: "INCORRECT", detail: "重复举报回执写入限速" };
+
+  const initial = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: flagBody
+  });
+  assert.equal(initial.status, 201, JSON.stringify(initial.body));
+  let lastFoldedKey = null;
+  for (let index = 0; index < 19; index += 1) {
+    lastFoldedKey = nextKey("flag-folded-abuse");
+    const folded = await app.inject({
+      method: "POST",
+      url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+      headers: writeHeaders(flagger, lastFoldedKey),
+      body: flagBody
+    });
+    assert.equal(folded.status, 200, JSON.stringify(folded.body));
+  }
+  const receiptPrefix = "flagPlaceStatusReport|" + flagger.user.id + "|";
+  assert.equal(Array.from(app.store.idempotencyRecords.keys()).filter((key) => key.startsWith(receiptPrefix)).length, 20);
+  assert.equal(app.store.placeReportFlags.size, 1, "duplicate folds still must not create additional flag rows");
+
+  const limited = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: flagBody
+  });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error.code, "PLACE_STATUS_RATE_LIMITED");
+
+  const replay = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger, lastFoldedKey),
+    body: flagBody
+  });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.code, "REQUEST_DUPLICATE", "replaying an existing receipt must not consume fresh-write budget");
+});
+
 test("W4-04 flags and moderation: queue is school-scoped, exclusion recomputes without rewriting observations", async () => {
   const app = createTestApp();
   const author = setupUser(app, "author_moderation");
@@ -723,6 +772,56 @@ test("W4-04 TTL expiry: simultaneous deadlines collapse to one aggregate transit
   assert.equal(ttlEvents[0].effective_state, "UNKNOWN");
   assert.ok([quiet.body.data.report_id, crowded.body.data.report_id].includes(ttlEvents[0].trigger_report_id));
   assert.equal(ttlEvents[0].expires_at, null);
+});
+
+test("W4-04 subscription fan-out: lazy expiry alerts respect the subscription start time", async () => {
+  const app = createTestApp();
+  const alice = setupUser(app, "alice_expiry_subscription_time");
+  const bob = setupUser(app, "bob_expiry_subscription_time");
+  const middleSubscriber = setupUser(app, "subscriber_between_expiries");
+  const lateSubscriber = setupUser(app, "subscriber_after_expiries");
+
+  const quiet = await createReport(app, alice, {
+    state: "QUIET",
+    observed_at: new Date(BASE_NOW - 10 * 60_000).toISOString()
+  });
+  assert.equal(quiet.status, 201, JSON.stringify(quiet.body));
+  const crowded = await createReport(app, bob, {
+    state: "CROWDED",
+    observed_at: new Date(BASE_NOW - 5 * 60_000).toISOString()
+  });
+  assert.equal(crowded.status, 201, JSON.stringify(crowded.body));
+
+  for (const [subscriber, subscribedAt] of [
+    [middleSubscriber, BASE_NOW + 22 * 60_000],
+    [lateSubscriber, BASE_NOW + 26 * 60_000]
+  ]) {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/places/status/subscriptions",
+      headers: writeHeaders(subscriber),
+      body: { school_id: "haut", target: { type: "PLACE", place_ref: PLACE }, metrics: ["OCCUPANCY"] },
+      nowMs: subscribedAt
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+  }
+
+  const sweepMs = BASE_NOW + 27 * 60_000;
+  const finalView = await queryOne(app, alice, "OCCUPANCY", sweepMs);
+  assert.equal(finalView.effective_state, "UNKNOWN");
+  const ttlEvents = app.store.outboxEvents
+    .filter((event) => event.event_type === "place.status.changed" && event.payload_json.trigger_type === "TTL_EXPIRED")
+    .map((event) => event.payload_json);
+  assert.equal(ttlEvents.length, 2, "ordered expiry facts must remain in the outbox even when inbox fan-out is filtered");
+  for (const payload of ttlEvents) assert.equal(payload.occurred_at, new Date(sweepMs).toISOString());
+
+  const notificationsFor = (user) => Array.from(app.store.notifications.values())
+    .filter((row) => row.cloud_user_id === user.user.id && row.category === "place_status");
+  const middleInbox = notificationsFor(middleSubscriber);
+  assert.equal(middleInbox.length, 1, "a subscriber present for the second deadline receives only that later transition");
+  assert.match(middleInbox[0].body, /变为 UNKNOWN/);
+  assert.equal(middleInbox[0].created_at, new Date(sweepMs).toISOString(), "inbox delivery keeps the lazy publication timestamp");
+  assert.equal(notificationsFor(lateSubscriber).length, 0, "a subscriber created after both deadlines must not receive already-ended intermediate states");
 });
 
 test("W4-04 subscription fan-out: exact-place type filters and revoked bindings suppress new alerts", async () => {
