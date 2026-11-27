@@ -480,6 +480,14 @@ function canonicalManifestText(manifest) {
   }
 }
 
+function durableManifestCopy(manifest) {
+  // parsePluginManifestJson attaches non-enumerable lexical metadata used only
+  // for validation. structuredClone copies the JSON data without that parser
+  // metadata, keeping durable plugin records safe for the data-delete candidate
+  // reconcile algorithm and for snapshot serialization.
+  return structuredClone(manifest);
+}
+
 function publisherIdForManifest(manifest) {
   return manifest?.signature?.key_id || "unknown-publisher";
 }
@@ -933,13 +941,14 @@ export class PluginRegistryAndBroker {
     }
     const registryNowIso = new Date().toISOString();
     const existingRegistryRoot = this.installedPlugins.get(pluginId);
+    const durableManifest = durableManifestCopy(verified);
     this.installedPlugins.set(pluginId, {
       plugin_id: pluginId,
       format: verified.schema_version,
       version,
       publisher: publisherId,
       lifecycle_state: "REGISTERED",
-      manifest_json: verified,
+      manifest_json: durableManifest,
       previous_manifest_json: existingRegistryRoot?.manifest_json || null,
       signature_base64: verified.signature?.value_base64 || "",
       public_key_base64: publicKeyBase64,
@@ -953,7 +962,7 @@ export class PluginRegistryAndBroker {
       plugin_id: pluginId,
       version,
       publisher_id: publisherId,
-      manifest: verified,
+      manifest: durableManifest,
       artifactMap: persistedArtifacts,
       signature_base64: verified.signature?.value_base64 || "",
       public_key_base64: publicKeyBase64,
