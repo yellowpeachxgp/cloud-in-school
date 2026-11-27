@@ -891,9 +891,39 @@ const EXPECTED_CT02_PLANNED_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/polls/{pollId}/confirm", operationId: "confirmGroupPoll", auth: "bearer" }
 ]);
 
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length;
+const EXPECTED_CT03_PLANNED_ROUTES = Object.freeze([
+  { method: "POST", path: "/api/v1/groups/{groupId}/ledger/entries", operationId: "createLedgerEntry", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/ledger/entries", operationId: "listLedgerEntries", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/ledger/entries/{entryId}/amend", operationId: "amendLedgerEntry", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/ledger/balances", operationId: "getLedgerBalances", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/settlements", operationId: "createSettlement", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/settlements", operationId: "listSettlements", auth: "bearer" },
+  { method: "GET", path: "/api/v1/settlements/{settlementId}", operationId: "getSettlement", auth: "bearer" },
+  { method: "POST", path: "/api/v1/settlements/{settlementId}/confirm", operationId: "confirmSettlement", auth: "bearer" },
+  { method: "POST", path: "/api/v1/settlements/{settlementId}/cancel", operationId: "cancelSettlement", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/rotas", operationId: "createDutyRota", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/rotas", operationId: "listDutyRotas", auth: "bearer" },
+  { method: "GET", path: "/api/v1/rotas/{rotaId}", operationId: "getDutyRota", auth: "bearer" },
+  { method: "PATCH", path: "/api/v1/rotas/{rotaId}", operationId: "updateDutyRota", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/duty-tasks", operationId: "listDutyTasks", auth: "bearer" },
+  { method: "POST", path: "/api/v1/duty-tasks/{taskId}/complete", operationId: "completeDutyTask", auth: "bearer" },
+  { method: "POST", path: "/api/v1/duty-tasks/{taskId}/confirm", operationId: "confirmDutyTaskCompletion", auth: "bearer" },
+  { method: "POST", path: "/api/v1/duty-tasks/{taskId}/skip", operationId: "skipDutyTask", auth: "bearer" },
+  { method: "POST", path: "/api/v1/rotas/{rotaId}/swaps", operationId: "requestDutySwap", auth: "bearer" },
+  { method: "GET", path: "/api/v1/rotas/{rotaId}/swaps", operationId: "listDutySwaps", auth: "bearer" },
+  { method: "GET", path: "/api/v1/duty-swaps/{swapId}", operationId: "getDutySwap", auth: "bearer" },
+  { method: "POST", path: "/api/v1/duty-swaps/{swapId}/resolve", operationId: "resolveDutySwap", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/repairs", operationId: "createRepairTicket", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/repairs", operationId: "listRepairTickets", auth: "bearer" },
+  { method: "GET", path: "/api/v1/repairs/{repairId}", operationId: "getRepairTicket", auth: "bearer" },
+  { method: "PATCH", path: "/api/v1/repairs/{repairId}", operationId: "updateRepairTicket", auth: "bearer" },
+  { method: "POST", path: "/api/v1/repairs/{repairId}/status", operationId: "transitionRepairStatus", auth: "bearer" },
+  { method: "POST", path: "/api/v1/repairs/{repairId}/review", operationId: "submitRepairReview", auth: "bearer" }
+]);
 
-test("Contract Parity: CT-01/CT-02 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length + EXPECTED_CT03_PLANNED_ROUTES.length;
+
+test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -905,8 +935,8 @@ test("Contract Parity: CT-01/CT-02 planned group contracts are explicit, countab
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 18 CT-01+CT-02 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 18 CT-01+CT-02 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -929,6 +959,14 @@ test("Contract Parity: CT-01/CT-02 planned group contracts are explicit, countab
     ct02Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
     EXPECTED_CT02_PLANNED_ROUTES,
     "CT-02 planned inventory must exactly match the approved availability/poll route slice"
+  );
+
+  const ct03Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-03");
+  assert.equal(ct03Inventory.length, EXPECTED_CT03_PLANNED_ROUTES.length, "CT-03 inventory entries must be explicitly countable");
+  assert.deepEqual(
+    ct03Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT03_PLANNED_ROUTES,
+    "CT-03 planned inventory must exactly match the approved ledger/duty/repair route slice"
   );
 
   const coreByKey = byRouteKey(coreRegistered);
