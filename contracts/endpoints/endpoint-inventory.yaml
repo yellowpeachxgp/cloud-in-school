@@ -491,78 +491,67 @@ endpoints:
     operationId: createGroup
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: GET
     path: /api/v1/groups
     operationId: listGroups
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: GET
     path: /api/v1/groups/{groupId}
     operationId: getGroup
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: PATCH
     path: /api/v1/groups/{groupId}
     operationId: updateGroup
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: DELETE
     path: /api/v1/groups/{groupId}
     operationId: deleteGroup
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: POST
     path: /api/v1/groups/{groupId}/invites
     operationId: createGroupInvite
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: POST
     path: /api/v1/group-invites/{code}/accept
     operationId: acceptGroupInvite
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: DELETE
     path: /api/v1/groups/{groupId}/invites/{inviteId}
     operationId: revokeGroupInvite
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: GET
     path: /api/v1/groups/{groupId}/members
     operationId: listGroupMembers
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: PATCH
     path: /api/v1/groups/{groupId}/members/{memberId}
     operationId: updateGroupMember
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: DELETE
     path: /api/v1/groups/{groupId}/members/{memberId}
     operationId: removeGroupMember
     auth: bearer
     owner: community
-    status: planned
-    contract_card: CT-01
+    status: active
   - method: PUT
     path: /api/v1/groups/{groupId}/availability/me
     operationId: replaceMyGroupAvailability

@@ -62,7 +62,7 @@ const EXPECTED_MOMENTS_EXTENSION_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/moments/anti-lost-tags/{tagCode}/report-found", operationId: "reportAntiLostTagFound", auth: "public" }
 ]);
 
-const EXPECTED_CT01_PLANNED_ROUTES = Object.freeze([
+const EXPECTED_CT01_GROUP_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/groups", operationId: "createGroup", auth: "bearer" },
   { method: "GET", path: "/api/v1/groups", operationId: "listGroups", auth: "bearer" },
   { method: "GET", path: "/api/v1/groups/{groupId}", operationId: "getGroup", auth: "bearer" },
@@ -83,10 +83,10 @@ test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI oper
   const inventory = partitionByStatus(loadInventoryOperations()).active;
   const openApiOperations = partitionByStatus(parseOpenApiOperations(loadOpenApiText())).active;
 
-  assert.equal(inventory.length, 97, "endpoint-inventory.yaml must declare exactly 97 active core operations");
-  assert.equal(openApiOperations.length, 97, "OpenAPI must declare exactly 97 active core operations");
-  assert.equal(coreRegistered.length, 97, "CampusCloudApp must expose exactly 97 active core operations");
-  assert.equal(allRegistered.length, 109, "CampusCloudApp must expose 97 core + 12 explicit extension operations");
+  assert.equal(inventory.length, 108, "endpoint-inventory.yaml must declare exactly 108 active core operations");
+  assert.equal(openApiOperations.length, 108, "OpenAPI must declare exactly 108 active core operations");
+  assert.equal(coreRegistered.length, 108, "CampusCloudApp must expose exactly 108 active core operations");
+  assert.equal(allRegistered.length, 120, "CampusCloudApp must expose 108 core + 12 explicit extension operations");
 
   const coreByKey = byRouteKey(coreRegistered);
   const inventoryByKey = byRouteKey(inventory);
@@ -921,9 +921,9 @@ const EXPECTED_CT03_PLANNED_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/repairs/{repairId}/review", operationId: "submitRepairReview", auth: "bearer" }
 ]);
 
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length + EXPECTED_CT03_PLANNED_ROUTES.length;
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT02_PLANNED_ROUTES.length + EXPECTED_CT03_PLANNED_ROUTES.length;
 
-test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
+test("Contract Parity: CT-01 group contracts are active in runtime while CT-02/CT-03 stay planned and runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -935,8 +935,8 @@ test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, c
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "W4-01 flips CT-01 to active; endpoint-inventory.yaml must declare exactly the 34 CT-02+CT-03 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "W4-01 flips CT-01 to active; OpenAPI must declare exactly the 34 CT-02+CT-03 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -945,13 +945,8 @@ test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, c
   assertUniqueRouteKeys(plannedInventory, "planned endpoint inventory");
   assertUniqueRouteKeys(plannedOpenApi, "planned OpenAPI");
 
-  const ct01Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-01");
-  assert.equal(ct01Inventory.length, EXPECTED_CT01_PLANNED_ROUTES.length, "CT-01 inventory entries must be explicitly countable");
-  assert.deepEqual(
-    ct01Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
-    EXPECTED_CT01_PLANNED_ROUTES,
-    "CT-01 planned inventory must exactly match the approved group/invite/member route slice"
-  );
+  const ct01Leftover = plannedInventory.filter((entry) => entry.contractCard === "CT-01");
+  assert.equal(ct01Leftover.length, 0, "W4-01 leaves no CT-01 planned inventory entries behind");
 
   const ct02Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-02");
   assert.equal(ct02Inventory.length, EXPECTED_CT02_PLANNED_ROUTES.length, "CT-02 inventory entries must be explicitly countable");
@@ -970,6 +965,34 @@ test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, c
   );
 
   const coreByKey = byRouteKey(coreRegistered);
+  const activeInventoryByKey = byRouteKey(inventoryPartitions.active);
+  const activeOpenApiByKey = byRouteKey(openApiPartitions.active);
+  const groupInventoryRoutes = inventoryPartitions.active.filter(
+    (entry) => entry.path.startsWith("/api/v1/groups") || entry.path.startsWith("/api/v1/group-invites")
+  );
+  assert.equal(groupInventoryRoutes.length, EXPECTED_CT01_GROUP_ROUTES.length, "CT-01 active inventory entries must be explicitly countable");
+  assert.deepEqual(
+    groupInventoryRoutes.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT01_GROUP_ROUTES,
+    "CT-01 active inventory must exactly match the approved group/invite/member route slice"
+  );
+
+  for (const expected of EXPECTED_CT01_GROUP_ROUTES) {
+    const key = routeKey(expected);
+    const inventory = activeInventoryByKey.get(key);
+    const openApi = activeOpenApiByKey.get(key);
+    const runtime = coreByKey.get(key);
+    assert.ok(inventory, "CT-01 route missing from active inventory: " + key);
+    assert.ok(openApi, "CT-01 route missing from active OpenAPI: " + key);
+    assert.ok(runtime, "CT-01 route missing from runtime core routes: " + key);
+    assert.equal(inventory.status, "active", "CT-01 inventory entry must be active: " + key);
+    assert.equal(openApi.status, "active", "CT-01 OpenAPI operation must be active: " + key);
+    assert.equal(inventory.operationId, expected.operationId, "CT-01 inventory operationId mismatch: " + key);
+    assert.equal(openApi.operationId, expected.operationId, "CT-01 OpenAPI operationId mismatch: " + key);
+    assert.equal(runtime.operationId, expected.operationId, "CT-01 runtime operationId mismatch: " + key);
+    assert.equal(runtime.auth, expected.auth, "CT-01 runtime auth mismatch: " + key);
+  }
+
   const plannedInventoryByKey = byRouteKey(plannedInventory);
   const plannedOpenApiByKey = byRouteKey(plannedOpenApi);
   assert.deepEqual(sortedOperationIds(plannedInventory), sortedOperationIds(plannedOpenApi), "planned inventory/OpenAPI operationId sets must be identical");
@@ -990,7 +1013,7 @@ test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, c
   }
 
   console.log(
-    "[CONTRACT-PARITY] active=97 planned=" + plannedOpenApi.length +
+    "[CONTRACT-PARITY] active=108 planned=" + plannedOpenApi.length +
       " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length + " moments_extension=12"
   );
 });

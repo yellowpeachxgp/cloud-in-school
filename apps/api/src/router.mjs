@@ -713,7 +713,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
       });
 
       const status = result.status || 200;
-      const envelope = okEnvelope(result.code || "OK", result.data, requestId);
+      const envelope = okEnvelope(result.code || "OK", result.data, requestId, result.nextCursor || null);
       return {
         status,
         headers: {
