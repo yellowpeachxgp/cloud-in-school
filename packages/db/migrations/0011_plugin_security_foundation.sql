@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS plugin_publishers (
 );
 
 CREATE TABLE IF NOT EXISTS plugin_versions (
-  plugin_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL REFERENCES installed_plugins(plugin_id) ON DELETE CASCADE,
   version TEXT NOT NULL,
   publisher_id TEXT NOT NULL REFERENCES plugin_publishers(publisher_id),
   manifest_json JSONB NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS plugin_installations (
   id UUID PRIMARY KEY,
   cloud_user_id UUID NOT NULL REFERENCES cloud_users(id) ON DELETE CASCADE,
   school_id TEXT NOT NULL,
-  plugin_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL REFERENCES installed_plugins(plugin_id) ON DELETE CASCADE,
   active_version TEXT,
   previous_version TEXT,
   pending_version TEXT,

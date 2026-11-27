@@ -330,6 +330,7 @@ function artifactMapForVerification(storedArtifactMap = {}) {
 
 function createMemoryPluginStore() {
   const store = {
+    installedPlugins: new Map(),
     pluginPublishers: new Map(),
     pluginVersions: new Map(),
     pluginInstallations: new Map(),
@@ -497,6 +498,7 @@ export class PluginRegistryAndBroker {
     this.failureThreshold = Math.max(1, Number(failureThreshold || 3));
 
     this.store = store || createMemoryPluginStore();
+    this.installedPlugins = this.store.installedPlugins;
     this.pluginPublishers = this.store.pluginPublishers;
     this.packages = this.store.pluginVersions;
     this.userInstallations = this.store.pluginInstallations;
@@ -770,6 +772,21 @@ export class PluginRegistryAndBroker {
         updated_at: new Date().toISOString()
       });
     }
+    const registryNowIso = new Date().toISOString();
+    const existingRegistryRoot = this.installedPlugins.get(pluginId);
+    this.installedPlugins.set(pluginId, {
+      plugin_id: pluginId,
+      format: verified.schema_version,
+      version,
+      publisher: publisherId,
+      lifecycle_state: "REGISTERED",
+      manifest_json: verified,
+      previous_manifest_json: existingRegistryRoot?.manifest_json || null,
+      signature_base64: verified.signature?.value_base64 || "",
+      public_key_base64: publicKeyBase64,
+      installed_at: existingRegistryRoot?.installed_at || registryNowIso,
+      updated_at: registryNowIso
+    });
     if (!existingKey) this.ownerKeyByPlugin.set(pluginId, publicKeyBase64);
     if (!existingOwner && actorUserId) this.ownerUserByPlugin.set(pluginId, actorUserId);
 

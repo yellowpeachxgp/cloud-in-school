@@ -646,6 +646,7 @@ export class CloudDatabaseStore {
     this.parcelSyncJobs = new Map(); // jobId -> sync job
 
     // Plugins (W6-01a SQL 0011 durable model mirrored by the snapshot store)
+    this.installedPlugins = new Map(); // plugin_id -> legacy 0002 signed registry root row
     this.pluginPublishers = new Map(); // publisherId -> trusted publisher/public key metadata
     this.pluginVersions = new Map(); // `${pluginId}@${version}` -> signed immutable version record
     this.pluginInstallations = new Map(); // `${userId}:${schoolId}:${pluginId}` -> installation
@@ -908,6 +909,7 @@ export class CloudDatabaseStore {
       loadMap(this.parcelEvents, raw.parcelEvents);
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
       loadMap(this.parcelSyncJobs, raw.parcelSyncJobs);
+      loadMap(this.installedPlugins, raw.installedPlugins);
       loadMap(this.pluginPublishers, raw.pluginPublishers);
       loadMap(this.pluginVersions, raw.pluginVersions);
       loadMap(this.pluginInstallations, raw.pluginInstallations);
@@ -1156,6 +1158,7 @@ export class CloudDatabaseStore {
         parcelEvents: Array.from(this.parcelEvents.entries()),
         parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
         parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
+        installedPlugins: Array.from(this.installedPlugins.entries()),
         pluginPublishers: Array.from(this.pluginPublishers.entries()),
         pluginVersions: Array.from(this.pluginVersions.entries()),
         pluginInstallations: Array.from(this.pluginInstallations.entries()),
