@@ -14,8 +14,23 @@ function expectContains(text, label) {
   }
 }
 
-for (const command of ["init", "validate", "sign", "package", "verify", "test"]) {
+for (const command of [
+  "keygen",
+  "init",
+  "validate",
+  "sign",
+  "pack",
+  "package",
+  "verify",
+  "test",
+  "simulate",
+  "doctor"
+]) {
   expectContains("`" + command + "`", `CLI command ${command}`);
+}
+
+for (const templateMarker of ["--template card", "--template service", "--template datapack"]) {
+  expectContains(templateMarker, "init template documentation " + templateMarker);
 }
 
 const hostEntry = runtimeHostApiEntry(2);
