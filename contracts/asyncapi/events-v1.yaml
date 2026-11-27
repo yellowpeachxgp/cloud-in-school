@@ -48,8 +48,61 @@ channels:
       operationId: publishSecurityAuditEvent
       message:
         $ref: '#/components/messages/SecurityAuditEvent'
+  group.member.joined:
+    description: Membership became active in a school-scoped group (creator owner or invite acceptance); consumer must treat event_key as idempotent.
+    publish:
+      operationId: publishGroupMemberJoinedEvent
+      message:
+        $ref: '#/components/messages/GroupMemberEvent'
+  group.member.left:
+    description: Membership ceased to be active (self leave, admin removal, or group archival); busy-block sharing is withdrawn immediately.
+    publish:
+      operationId: publishGroupMemberLeftEvent
+      message:
+        $ref: '#/components/messages/GroupMemberEvent'
 components:
   messages:
+    GroupMemberEvent:
+      name: GroupMemberEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, member_id, cloud_user_id, actor_cloud_user_id, role, sharing_level]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:member:[0-9a-fA-F-]{36}:(joined|left):v1$'
+          event_type:
+            type: string
+            enum: [joined, left]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          member_id:
+            type: string
+            format: uuid
+          cloud_user_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          role:
+            type: string
+            enum: [OWNER, ADMIN, MEMBER]
+          sharing_level:
+            type: string
+            enum: [NONE, BUSY_BLOCKS_30MIN]
+          reason:
+            type: string
+            enum: [GROUP_CREATED, INVITE_ACCEPTED, SELF_LEFT, ADMIN_REMOVED, GROUP_ARCHIVED]
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:

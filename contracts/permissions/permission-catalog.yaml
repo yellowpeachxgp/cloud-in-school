@@ -44,6 +44,30 @@ permissions:
     scope: plugin
     description: Submit normalized parcel snapshots from authorized campus station plugins.
     default_granted: false
+  - id: group.read
+    scope: user_school_scope
+    description: Read groups and active membership visible to the authenticated user within the same school_id scope.
+    default_granted: true
+  - id: group.create
+    scope: user_school_scope
+    description: Create study, dorm, club, or project groups after verified campus binding in the requested school_id scope.
+    default_granted: true
+  - id: group.join
+    scope: user_school_scope
+    description: Accept a valid group invite or QR payload inside the matching school_id scope.
+    default_granted: true
+  - id: group.manage
+    scope: user_school_scope
+    description: Update or archive a group; requires GROUP_OWNER or GROUP_ADMIN authorization inside that group.
+    default_granted: false
+  - id: group.invite.manage
+    scope: user_school_scope
+    description: Create or revoke expiring, use-limited group invites; requires GROUP_OWNER or GROUP_ADMIN authorization.
+    default_granted: false
+  - id: group.member.manage
+    scope: user_school_scope
+    description: Manage group roles, sharing levels, removal, or self-service leave; school scope isolation is mandatory.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

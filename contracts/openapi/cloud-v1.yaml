@@ -37,6 +37,8 @@ tags:
     description: Immutable service pricing catalog
   - name: notifications
     description: User notification inbox and read receipts
+  - name: groups
+    description: School-scoped study, dorm, club, and project groups, invites, and membership lifecycle
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -875,6 +877,437 @@ paths:
                 $ref: '#/components/schemas/ActionAckEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/groups:
+    get:
+      operationId: listGroups
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: List active groups for the authenticated user within one school scope
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: type
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/GroupType'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Groups visible to the authenticated user in the requested school scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    post:
+      operationId: createGroup
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.create]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.member.joined]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Create a study, dorm, club, or project group anchored to a verified school scope
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGroupRequest'
+      responses:
+        '201':
+          description: Group created; the creator is the initial OWNER and emits group.member.joined
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupEnvelope'
+        '200':
+          description: Durable idempotent replay of the original group creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}:
+    get:
+      operationId: getGroup
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Get group detail if the authenticated user is a member in the same school scope
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: Group detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    patch:
+      operationId: updateGroup
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Update group display metadata; type and school scope are immutable
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGroupRequest'
+      responses:
+        '200':
+          description: Group updated, or the durable idempotent replay of the original update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: deleteGroup
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.member.left]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Archive a group and terminate all active memberships in the same school scope
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Group archived; each active member becomes LEFT and emits group.member.left
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/invites:
+    post:
+      operationId: createGroupInvite
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.invite.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Create an expiring, use-limited invite code and QR payload for a group
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGroupInviteRequest'
+      responses:
+        '201':
+          description: Invite created with expiration time, maximum use count, and QR payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupInviteEnvelope'
+        '200':
+          description: Durable idempotent replay of the original invite creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupInviteEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/group-invites/{code}/accept:
+    post:
+      operationId: acceptGroupInvite
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.join]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_INVITE_INVALID, GROUP_INVITE_EXPIRED, GROUP_INVITE_EXHAUSTED, GROUP_ALREADY_MEMBER, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.member.joined]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Accept an invite code or QR payload and join the group in the inviter school scope
+      parameters:
+        - $ref: '#/components/parameters/GroupInviteCodeParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '201':
+          description: Membership created and group.member.joined emitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMemberEnvelope'
+        '200':
+          description: Durable idempotent replay or already-active membership returned without duplicate effects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMemberEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Invite expired; request a fresh invite
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/invites/{inviteId}:
+    delete:
+      operationId: revokeGroupInvite
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.invite.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Revoke an active invite before expiration without affecting existing members
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/GroupInviteIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Invite revoked, or the durable idempotent replay of the original revocation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/members:
+    get:
+      operationId: listGroupMembers
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: List active members, roles, and busy-block sharing levels for a group
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Active group member list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMemberListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/groups/{groupId}/members/{memberId}:
+    patch:
+      operationId: updateGroupMember
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.member.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN, GROUP_MEMBER_NOT_FOUND, GROUP_LAST_OWNER_REQUIRED]
+      x-dis-idempotency: required
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Update a member role or busy-block sharing level with school-scope isolation
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/GroupMemberIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGroupMemberRequest'
+      responses:
+        '200':
+          description: Member updated, or the durable idempotent replay of the original update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMemberEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: removeGroupMember
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
+      x-dis-permissions: [group.member.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN, GROUP_MEMBER_NOT_FOUND, GROUP_LAST_OWNER_REQUIRED]
+      x-dis-idempotency: required
+      x-dis-events: [group.member.left]
+      tags: [groups]
+      security:
+        - bearerAuth: []
+      summary: Remove a member or leave the group; leaving immediately withdraws busy-block sharing
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/GroupMemberIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Membership ended and group.member.left emitted; sharing is withdrawn immediately
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -1940,6 +2373,36 @@ components:
       schema:
         type: string
         format: uuid
+    GroupIdParam:
+      name: groupId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GroupInviteIdParam:
+      name: inviteId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GroupInviteCodeParam:
+      name: code
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+        pattern: '^[A-Za-z0-9_-]+$'
+    GroupMemberIdParam:
+      name: memberId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ParcelIdParam:
       name: parcelId
       in: path
@@ -2719,6 +3182,272 @@ components:
           type: array
           items:
             type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupType:
+      type: string
+      enum: [study, dorm, club, project]
+    GroupRole:
+      type: string
+      enum: [OWNER, ADMIN, MEMBER]
+    GroupSharingLevel:
+      type: string
+      enum: [NONE, BUSY_BLOCKS_30MIN]
+      description: Busy-block sharing is the only availability sharing level; blocks are quantized to at least 30 minutes.
+    GroupStatus:
+      type: string
+      enum: [ACTIVE, ARCHIVED]
+    Group:
+      type: object
+      additionalProperties: false
+      required: [group_id, school_id, type, name, status, created_by, created_at, updated_at, member_count, my_role]
+      properties:
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        type:
+          $ref: '#/components/schemas/GroupType'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: [string, 'null']
+          maxLength: 500
+        status:
+          $ref: '#/components/schemas/GroupStatus'
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        archived_at:
+          type: [string, 'null']
+          format: date-time
+        member_count:
+          type: integer
+          minimum: 0
+        my_role:
+          $ref: '#/components/schemas/GroupRole'
+    CreateGroupRequest:
+      type: object
+      additionalProperties: false
+      required: [school_id, type, name]
+      properties:
+        school_id:
+          type: string
+          minLength: 1
+        type:
+          $ref: '#/components/schemas/GroupType'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+    UpdateGroupRequest:
+      type: object
+      additionalProperties: false
+      anyOf:
+        - required: [name]
+        - required: [description]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: [string, 'null']
+          maxLength: 500
+    GroupEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/Group'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Group'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupInviteStatus:
+      type: string
+      enum: [ACTIVE, REVOKED, EXHAUSTED, EXPIRED]
+    GroupInvite:
+      type: object
+      additionalProperties: false
+      required: [invite_id, group_id, school_id, code, qr_payload, status, expires_at, max_uses, used_count, created_by, created_at, revoked_at]
+      properties:
+        invite_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        code:
+          type: string
+          minLength: 8
+          maxLength: 64
+          pattern: '^[A-Za-z0-9_-]+$'
+        qr_payload:
+          type: string
+          pattern: '^dis-group-invite:v1:[A-Za-z0-9_-]{8,64}$'
+        status:
+          $ref: '#/components/schemas/GroupInviteStatus'
+        expires_at:
+          type: string
+          format: date-time
+        max_uses:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        used_count:
+          type: integer
+          minimum: 0
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+    CreateGroupInviteRequest:
+      type: object
+      additionalProperties: false
+      required: [expires_at, max_uses]
+      properties:
+        expires_at:
+          type: string
+          format: date-time
+        max_uses:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        label:
+          type: string
+          maxLength: 80
+    GroupInviteEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupInvite'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupMemberStatus:
+      type: string
+      enum: [ACTIVE, LEFT, REMOVED]
+    GroupMember:
+      type: object
+      additionalProperties: false
+      required: [member_id, group_id, school_id, cloud_user_id, display_name, role, sharing_level, status, joined_at, left_at]
+      properties:
+        member_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        cloud_user_id:
+          type: string
+          format: uuid
+        display_name:
+          type: [string, 'null']
+          maxLength: 80
+        role:
+          $ref: '#/components/schemas/GroupRole'
+        sharing_level:
+          $ref: '#/components/schemas/GroupSharingLevel'
+        status:
+          $ref: '#/components/schemas/GroupMemberStatus'
+        joined_at:
+          type: string
+          format: date-time
+        left_at:
+          type: [string, 'null']
+          format: date-time
+    UpdateGroupMemberRequest:
+      type: object
+      additionalProperties: false
+      anyOf:
+        - required: [role]
+        - required: [sharing_level]
+      properties:
+        role:
+          $ref: '#/components/schemas/GroupRole'
+        sharing_level:
+          $ref: '#/components/schemas/GroupSharingLevel'
+    GroupMemberEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupMember'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupMemberListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupMember'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     ParcelListEnvelope:
