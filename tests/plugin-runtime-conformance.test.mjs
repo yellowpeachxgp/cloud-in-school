@@ -163,7 +163,7 @@ test("W6-01a contract debt: transitional runtime surfaces are explicitly registe
   );
   assert.deepEqual(
     byId.get("PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION").unregistered_runtime_fields,
-    ["REVOKE_PERMISSION", "target_version", "permission", "scope", "admin_kill_switch", "school_id", "kill_switch_reason", "QUARANTINED"],
+    ["REVOKE_PERMISSION", "target_version", "permission", "scope", "admin_kill_switch", "school_id", "kill_switch_reason", "QUARANTINED", "pre_quarantine_status", "quarantine_reason", "quarantined_at"],
     "lifecycle runtime security extensions must be itemized completely"
   );
   assert.deepEqual(

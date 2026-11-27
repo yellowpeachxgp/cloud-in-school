@@ -61,7 +61,10 @@
         "admin_kill_switch",
         "school_id",
         "kill_switch_reason",
-        "QUARANTINED"
+        "QUARANTINED",
+        "pre_quarantine_status",
+        "quarantine_reason",
+        "quarantined_at"
       ],
       "resolution": "the contract line must register the account/school scoped lifecycle fields, the REVOKE_PERMISSION action, explicit rollback target_version, and admin kill-switch semantics or the runtime surface must remain undocumented and non-publicized"
     },
