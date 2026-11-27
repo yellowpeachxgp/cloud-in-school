@@ -597,7 +597,8 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "parcelSyncJobs", "installedPlugins", "pluginPublishers", "pluginVersions",
   "pluginInstallations", "pluginPermissionGrants", "pluginStorageEntries",
   "pluginCacheEntries", "pluginRuntimeStates", "campusContent", "groups", "groupMembers",
-  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords",
+  "groupInvites", "availabilityShares", "busyBlocks", "meetingPolls", "pollOptions",
+  "pollVotes", "confirmedGroupEvents", "notifications", "priceQuotes", "idempotencyRecords",
   "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
   "placeStatusAggregates"
 ]);
@@ -925,6 +926,13 @@ export class CloudDatabaseStore {
     this.groupMembers = new Map(); // memberId -> membership-period record
     this.groupInvites = new Map(); // inviteId -> invite
 
+    // Availability & time polls (W4-02): privacy-minimized blocks and collaboration state
+    this.availabilityShares = new Map(); // memberId -> TTL-bounded share metadata/tombstone
+    this.busyBlocks = new Map(); // busyBlockId -> quantized time block only (never title/reason)
+    this.meetingPolls = new Map(); // pollId -> deadline-bound group time poll
+    this.pollOptions = new Map(); // optionId -> quantized poll time window
+    this.pollVotes = new Map(); // voteId -> one vote per (poll, membership period)
+    this.confirmedGroupEvents = new Map(); // confirmedEventId -> terminal group event
     // Place Status (W4-04): bootstrap Campus Graph snapshot, immutable user
     // observations, flags, subscriptions, and aggregate revision state.
     this.campusGraphPlaces = new Map(); // placeRef -> coarse graph entity
@@ -1197,6 +1205,12 @@ export class CloudDatabaseStore {
       loadMap(this.groups, raw.groups);
       loadMap(this.groupMembers, raw.groupMembers);
       loadMap(this.groupInvites, raw.groupInvites);
+      loadMap(this.availabilityShares, raw.availabilityShares);
+      loadMap(this.busyBlocks, raw.busyBlocks);
+      loadMap(this.meetingPolls, raw.meetingPolls);
+      loadMap(this.pollOptions, raw.pollOptions);
+      loadMap(this.pollVotes, raw.pollVotes);
+      loadMap(this.confirmedGroupEvents, raw.confirmedGroupEvents);
       loadMap(this.campusGraphPlaces, raw.campusGraphPlaces);
       loadMap(this.placeReports, raw.placeReports);
       loadMap(this.placeReportFlags, raw.placeReportFlags);
@@ -1437,6 +1451,159 @@ export class CloudDatabaseStore {
       }
     }
 
+    const members = new Map(raw.groupMembers || []);
+    const shares = new Map(raw.availabilityShares || []);
+    const polls = new Map(raw.meetingPolls || []);
+    const options = new Map(raw.pollOptions || []);
+    const quantized = (row) => {
+      const start = Date.parse(row?.start_at);
+      const end = Date.parse(row?.end_at);
+      return Number.isFinite(start) && Number.isFinite(end) &&
+        end > start && end - start >= 1_800_000 &&
+        start % 1_800_000 === 0 && end % 1_800_000 === 0;
+    };
+    const finiteTime = (value) => Number.isFinite(Date.parse(value));
+    for (const [, share] of shares) {
+      const member = members.get(share?.member_id);
+      const group = groups.get(share?.group_id);
+      if (!member || member.group_id !== share.group_id || member.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与成员作用域不一致");
+      }
+      if (!group || group.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与学校作用域不一致");
+      }
+      if (!Number.isInteger(share?.revision) || share.revision < 1) {
+        throw new Error("忙闲共享快照 revision 不是正整数");
+      }
+      if (!Number.isInteger(share?.ttl_seconds) || share.ttl_seconds < 1800 || share.ttl_seconds > 7776000) {
+        throw new Error("忙闲共享快照 TTL 超出 30 分钟到 90 天边界");
+      }
+      if (!finiteTime(share?.expires_at)) {
+        throw new Error("忙闲共享快照 expires_at 无效");
+      }
+      const shareShapeValid =
+        (share?.status === "ACTIVE" && share.withdrawn_at == null && share.expired_at == null) ||
+        (share?.status === "WITHDRAWN" && finiteTime(share.withdrawn_at) && share.expired_at == null) ||
+        (share?.status === "EXPIRED" && finiteTime(share.expired_at) && share.withdrawn_at == null);
+      if (!shareShapeValid) {
+        throw new Error("忙闲共享快照状态时间戳形状不一致");
+      }
+    }
+    const blocksByMember = new Map();
+    for (const [, block] of raw.busyBlocks || []) {
+      const share = shares.get(block?.member_id);
+      if (!share || share.group_id !== block.group_id || share.school_id !== block.school_id) {
+        throw new Error("忙闲块快照与共享作用域不一致");
+      }
+      if (!quantized(block)) {
+        throw new Error("忙闲块快照违反 30 分钟量化约束");
+      }
+      if (share.status !== "ACTIVE") {
+        throw new Error("撤回或过期忙闲共享仍保留原始时间块");
+      }
+      if (!blocksByMember.has(block.member_id)) blocksByMember.set(block.member_id, []);
+      blocksByMember.get(block.member_id).push(block);
+    }
+    for (const memberBlocks of blocksByMember.values()) {
+      memberBlocks.sort((a, b) => Date.parse(a.start_at) - Date.parse(b.start_at) || Date.parse(a.end_at) - Date.parse(b.end_at));
+      for (let index = 1; index < memberBlocks.length; index += 1) {
+        if (Date.parse(memberBlocks[index].start_at) < Date.parse(memberBlocks[index - 1].end_at)) {
+          throw new Error("忙闲块快照存在重叠时间窗");
+        }
+      }
+    }
+    for (const [, poll] of polls) {
+      const group = groups.get(poll?.group_id);
+      if (!group || group.school_id !== poll.school_id) {
+        throw new Error("投票快照与学校作用域不一致");
+      }
+      if (typeof poll?.title !== "string" || poll.title.trim().length < 1 || poll.title.trim().length > 120) {
+        throw new Error("投票快照标题无效");
+      }
+      if (!finiteTime(poll?.voting_deadline_at)) {
+        throw new Error("投票快照截止时间无效");
+      }
+      const pollShapeValid =
+        (poll?.status === "OPEN" && poll.closed_at == null && poll.confirmed_at == null && poll.confirmed_option_id == null && poll.confirmed_event_id == null) ||
+        (poll?.status === "CLOSED" && finiteTime(poll.closed_at) && poll.confirmed_at == null && poll.confirmed_option_id == null && poll.confirmed_event_id == null) ||
+        (poll?.status === "CONFIRMED" && finiteTime(poll.closed_at) && finiteTime(poll.confirmed_at) && typeof poll.confirmed_option_id === "string" && typeof poll.confirmed_event_id === "string");
+      if (!pollShapeValid) {
+        throw new Error("投票快照状态终态形状不一致");
+      }
+    }
+    const optionWindows = new Set();
+    const optionCountByPoll = new Map();
+    for (const [, option] of options) {
+      const poll = polls.get(option?.poll_id);
+      if (!poll || !quantized(option)) {
+        throw new Error("投票选项快照与投票或量化约束不一致");
+      }
+      if (!Number.isInteger(option?.position) || option.position < 0) {
+        throw new Error("投票选项快照 position 无效");
+      }
+      const windowKey = option.poll_id + "|" + option.start_at + "|" + option.end_at;
+      if (optionWindows.has(windowKey)) {
+        throw new Error("投票选项快照存在重复时间窗");
+      }
+      optionWindows.add(windowKey);
+      optionCountByPoll.set(option.poll_id, (optionCountByPoll.get(option.poll_id) || 0) + 1);
+    }
+    for (const [pollId] of polls) {
+      const count = optionCountByPoll.get(pollId) || 0;
+      if (count < 2 || count > 10) {
+        throw new Error("投票快照选项数量不在 2..10 边界内");
+      }
+    }
+    const voteMembers = new Set();
+    for (const [, vote] of raw.pollVotes || []) {
+      const poll = polls.get(vote?.poll_id);
+      const option = options.get(vote?.option_id);
+      const member = members.get(vote?.member_id);
+      if (!poll || poll.group_id !== vote.group_id || poll.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== vote.poll_id) {
+        throw new Error("投票表决快照与选项不一致");
+      }
+      if (!member || member.group_id !== vote.group_id || member.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与成员作用域不一致");
+      }
+      const voteKey = vote.poll_id + "|" + vote.member_id;
+      if (voteMembers.has(voteKey)) {
+        throw new Error("投票表决快照违反单成员一票约束");
+      }
+      voteMembers.add(voteKey);
+      if (finiteTime(vote?.created_at) && finiteTime(vote?.updated_at) && Date.parse(vote.updated_at) < Date.parse(vote.created_at)) {
+        throw new Error("投票表决快照 updated_at 早于 created_at");
+      }
+    }
+    const confirmedPolls = new Set();
+    for (const [, confirmed] of raw.confirmedGroupEvents || []) {
+      const poll = polls.get(confirmed?.poll_id);
+      const option = options.get(confirmed?.option_id);
+      if (!poll || poll.group_id !== confirmed.group_id || poll.school_id !== confirmed.school_id) {
+        throw new Error("确认事件快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== confirmed.poll_id || !quantized(confirmed)) {
+        throw new Error("确认事件快照与选项或量化约束不一致");
+      }
+      if (confirmed?.status !== "CONFIRMED" || !finiteTime(confirmed.confirmed_at)) {
+        throw new Error("确认事件快照不是有效终态");
+      }
+      if (confirmedPolls.has(confirmed.poll_id)) {
+        throw new Error("确认事件快照违反单投票唯一终态约束");
+      }
+      confirmedPolls.add(confirmed.poll_id);
+      if (
+        poll.status !== "CONFIRMED" ||
+        poll.confirmed_option_id !== confirmed.option_id ||
+        poll.confirmed_event_id !== confirmed.id ||
+        option.start_at !== confirmed.start_at ||
+        option.end_at !== confirmed.end_at
+      ) {
+        throw new Error("确认事件快照与投票终态指针不一致");
+      }
+    }
     const graphPlaces = new Map(raw.campusGraphPlaces || []);
     const placeReports = new Map(raw.placeReports || []);
     for (const [, report] of placeReports) {
@@ -1583,6 +1750,12 @@ export class CloudDatabaseStore {
         groups: Array.from(source.groups.entries()),
         groupMembers: Array.from(source.groupMembers.entries()),
         groupInvites: Array.from(source.groupInvites.entries()),
+        availabilityShares: Array.from(source.availabilityShares.entries()),
+        busyBlocks: Array.from(source.busyBlocks.entries()),
+        meetingPolls: Array.from(source.meetingPolls.entries()),
+        pollOptions: Array.from(source.pollOptions.entries()),
+        pollVotes: Array.from(source.pollVotes.entries()),
+        confirmedGroupEvents: Array.from(source.confirmedGroupEvents.entries()),
         campusGraphPlaces: Array.from(source.campusGraphPlaces.entries()),
         placeReports: Array.from(source.placeReports.entries()),
         placeReportFlags: Array.from(source.placeReportFlags.entries()),

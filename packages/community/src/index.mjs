@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
+import { withdrawAvailabilityForMembershipTransition } from "../../availability/src/index.mjs";
 
 const GROUP_TYPES = new Set(["study", "dorm", "club", "project"]);
 const GROUP_ROLES = new Set(["OWNER", "ADMIN", "MEMBER"]);
@@ -608,6 +609,16 @@ export class CommunityService {
           { status: "LEFT", sharing_level: "NONE", left_at: ts },
           undo
         );
+        // W4-02 privacy invariant: group archival withdraws busy-block sharing
+        // immediately and deletes the raw time blocks in the same commit unit.
+        withdrawAvailabilityForMembershipTransition(
+          this.store,
+          group,
+          member,
+          auth.cloudUserId,
+          ts,
+          undo
+        );
         this._appendMemberEvent(
           {
             group,
@@ -868,7 +879,25 @@ export class CommunityService {
         mutateObject(target, { role: desiredRole }, undo);
       }
       if (hasSharing && desiredSharing !== target.sharing_level) {
-        mutateObject(target, { sharing_level: desiredSharing }, undo);
+        if (desiredSharing === "NONE") {
+          // AUTO-030 makes sharing_level self-service, but privacy minimization is
+          // stronger than the bare flag: a self-service withdrawal must delete the
+          // raw busy blocks in the same commit unit instead of merely hiding them
+          // until TTL expiry.
+          withdrawAvailabilityForMembershipTransition(
+            this.store,
+            group,
+            target,
+            auth.cloudUserId,
+            iso(nowMs),
+            undo
+          );
+        } else {
+          // Opting in through the membership flag records consent only; no busy
+          // block becomes visible until the member explicitly uploads a
+          // TTL-bounded replacement set through the availability endpoint.
+          mutateObject(target, { sharing_level: desiredSharing }, undo);
+        }
       }
       return { status: 200, code: "GROUP_MEMBER_UPDATED", data: this._memberView(target) };
     }, idem.receipt, nowMs);
@@ -910,6 +939,16 @@ export class CommunityService {
           sharing_level: "NONE",
           left_at: ts
         },
+        undo
+      );
+      // W4-02 privacy invariant: self-leave and admin removal both withdraw
+      // busy-block sharing immediately; raw blocks never wait for TTL expiry.
+      withdrawAvailabilityForMembershipTransition(
+        this.store,
+        group,
+        target,
+        auth.cloudUserId,
+        ts,
         undo
       );
       this._appendMemberEvent(
