@@ -94,8 +94,7 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
     "invalid-runtime_schema_invalid-overlong-number-literal.json",
     "invalid-runtime_schema_invalid-unknown-top-level-field.json",
     "invalid-runtime_schema_invalid-ui-slot-extra-field.json",
-    "invalid-runtime_schema_invalid-command-extra-field.json",
-    "invalid-runtime_signature_invalid-signature-extra-field.json"
+    "invalid-runtime_schema_invalid-command-extra-field.json"
   ]) {
     assert.throws(
       () => validatePluginManifest(readFixtureText(fileName)),
@@ -103,6 +102,12 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
       fileName + " must fail with runtime_schema_invalid"
     );
   }
+
+  assert.throws(
+    () => validatePluginManifest(readFixtureText("invalid-runtime_signature_invalid-signature-extra-field.json")),
+    (error) => error?.detail?.runtime_validation_code === "runtime_signature_invalid",
+    "unknown signature fields must fail closed with runtime_signature_invalid"
+  );
 });
 
 test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2 slot list", () => {
