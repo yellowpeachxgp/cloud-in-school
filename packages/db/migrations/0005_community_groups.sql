@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS "groups" (
   name TEXT NOT NULL CHECK (char_length(btrim(name)) BETWEEN 1 AND 80),
   description TEXT CHECK (description IS NULL OR char_length(description) <= 500),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'ARCHIVED')),
+  -- Logical owner reference. Intentionally not a hard FK: account deletion may detach
+  -- this field to the documented tombstone without deleting shared group content.
   created_by UUID NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -52,6 +54,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS group_members_one_active_per_user_idx
   ON group_members (group_id, cloud_user_id)
   WHERE status = 'ACTIVE';
 
+-- Ownership transfer is atomic and exactly one ACTIVE owner exists per group.
+CREATE UNIQUE INDEX IF NOT EXISTS group_members_one_active_owner_idx
+  ON group_members (group_id)
+  WHERE status = 'ACTIVE' AND role = 'OWNER';
+
 CREATE INDEX IF NOT EXISTS group_members_group_active_idx
   ON group_members (group_id, status, joined_at, member_id);
 CREATE INDEX IF NOT EXISTS group_members_user_scope_idx
@@ -75,6 +82,8 @@ CREATE TABLE IF NOT EXISTS group_invites (
     FOREIGN KEY (group_id, school_id)
     REFERENCES "groups" (group_id, school_id)
     ON DELETE CASCADE,
+  CONSTRAINT group_invites_qr_matches_code_check
+    CHECK (qr_payload = 'dis-group-invite:v1:' || code),
   CONSTRAINT group_invites_used_within_max_check
     CHECK (used_count <= max_uses),
   CONSTRAINT group_invites_revoked_shape_check
