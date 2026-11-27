@@ -35,5 +35,8 @@ jobs:
       - name: Validate OpenAPI 3.1.2, JSON Schemas & SYSTEM_CONTRACT
         run: npm run contract:check
 
+      - name: 输出云端权威契约哈希清单
+        run: node tools/contract-ci/sync-contracts.mjs fingerprint --root .
+
       - name: Run Unit, Contract Parity, Triple-Schedule, Finance Saga, Plugin & Security Red-Team Tests
         run: npm test
