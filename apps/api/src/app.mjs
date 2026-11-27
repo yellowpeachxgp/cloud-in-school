@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import {
   REPO_ROOT,
   ContractError,
@@ -105,6 +106,16 @@ function loadSignedReferencePlugins({ pluginBroker, sources, logger = console })
         );
         error.code = "PLUGIN_REFERENCE_UNTRUSTED";
         throw error;
+      }
+      // The packaged public key remains required as a consistency attestation,
+      // but it is never trusted by itself. A missing file preserves the AC-04/S5
+      // degraded-load signal; a mismatch means the package and host root diverged.
+      const packagedPublicKey = fs.readFileSync(path.join(source.dir, "plugin-signing-public.key"), "utf8").trim();
+      if (packagedPublicKey !== publicKeyBase64) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "reference plugin packaged public key does not match the configured publisher trust root"
+        );
       }
       const verified = pluginBroker.registerPluginPackage({
         manifest: loaded.manifest,
