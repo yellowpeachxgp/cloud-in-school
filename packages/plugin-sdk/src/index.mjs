@@ -400,7 +400,9 @@ export class PluginRegistryAndBroker {
           : existing.previous_version || null,
       pending_version: null,
       pending_permissions: [],
-      status: "ENABLED",
+      // Reinstalling or applying a same-permission upgrade must never reactivate
+      // a disabled installation. Only an explicit lifecycle ENABLE may do that.
+      status: existing.status === "DISABLED" ? "DISABLED" : "ENABLED",
       // Permission grants are always the approved set intersected with what the
       // active version actually declares; a silent re-install must not re-grant
       // permissions that are no longer declared or approved.
@@ -492,7 +494,9 @@ export class PluginRegistryAndBroker {
       // newer version are removed immediately; the surviving set is exactly
       // granted ∩ target-version-declared.
       inst.granted_permissions = intersectPermissionLists(inst.granted_permissions, rollbackPermissions);
-      inst.status = "ENABLED";
+      // Rollback changes the selected version, not the user's enablement intent.
+      // A disabled installation remains disabled until an explicit ENABLE.
+      inst.status = inst.status === "DISABLED" ? "DISABLED" : "ENABLED";
       inst.updated_at = nowIso;
       return inst;
     }

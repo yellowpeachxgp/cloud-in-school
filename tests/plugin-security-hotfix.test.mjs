@@ -281,3 +281,109 @@ test("W6-HOTFIX regression: pre-disabled upgrade cannot invoke until the two-ste
   assert.equal(allowedAfterExplicitConfirmation.status, 200);
   assert.equal(allowedAfterExplicitConfirmation.body.data.version, "1.1.0");
 });
+
+test("W6-HOTFIX regression: pre-disabled reinstall or same-permission upgrade stays disabled", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { headers } = createUserSession(app, "plugin_permission_disabled_reinstall_user");
+  const keyPair = generateEd25519KeyPair();
+  const permissions = ["ui.slot.render"];
+  const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions });
+  const v101 = signedTestPlugin({ keyPair, version: "1.0.1", permissions });
+
+  const installV1 = await installSignedFixture(app, headers, v1, keyPair.publicKeyBase64);
+  assert.equal(installV1.status, 201);
+  assert.equal(installV1.body.data.status, "ENABLED");
+
+  const disabled = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "DISABLE" }
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.data.status, "DISABLED");
+
+  const reinstallSameVersion = await installSignedFixture(app, headers, v1, keyPair.publicKeyBase64);
+  assert.equal(reinstallSameVersion.status, 201);
+  assert.equal(reinstallSameVersion.body.data.status, "DISABLED");
+  assert.equal(reinstallSameVersion.body.data.active_version, "1.0.0");
+  assert.equal(reinstallSameVersion.body.data.pending_version, null);
+
+  const invokeAfterReinstall = await invokePing(app, headers);
+  assert.equal(invokeAfterReinstall.status, 403);
+  assert.equal(invokeAfterReinstall.body.error.code, "PLUGIN_PERMISSION_DENIED");
+
+  const samePermissionUpgrade = await installSignedFixture(app, headers, v101, keyPair.publicKeyBase64);
+  assert.equal(samePermissionUpgrade.status, 201);
+  assert.equal(samePermissionUpgrade.body.data.status, "DISABLED");
+  assert.equal(samePermissionUpgrade.body.data.active_version, "1.0.1");
+  assert.equal(samePermissionUpgrade.body.data.previous_version, "1.0.0");
+  assert.equal(samePermissionUpgrade.body.data.pending_version, null);
+  assert.deepEqual(samePermissionUpgrade.body.data.granted_permissions, permissions);
+
+  const invokeAfterUpgrade = await invokePing(app, headers);
+  assert.equal(invokeAfterUpgrade.status, 403);
+  assert.equal(invokeAfterUpgrade.body.error.code, "PLUGIN_PERMISSION_DENIED");
+
+  const explicitEnable = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ENABLE" }
+  });
+  assert.equal(explicitEnable.status, 200);
+  assert.equal(explicitEnable.body.data.status, "ENABLED");
+  assert.equal(explicitEnable.body.data.active_version, "1.0.1");
+});
+
+test("W6-HOTFIX regression: pre-disabled rollback stays disabled until explicit enable", async () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const { headers } = createUserSession(app, "plugin_permission_disabled_rollback_user");
+  const keyPair = generateEd25519KeyPair();
+  const permissions = ["ui.slot.render"];
+  const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions });
+  const v2 = signedTestPlugin({ keyPair, version: "1.1.0", permissions });
+
+  await installSignedFixture(app, headers, v1, keyPair.publicKeyBase64);
+  const upgradeBeforeDisable = await installSignedFixture(app, headers, v2, keyPair.publicKeyBase64);
+  assert.equal(upgradeBeforeDisable.status, 201);
+  assert.equal(upgradeBeforeDisable.body.data.status, "ENABLED");
+  assert.equal(upgradeBeforeDisable.body.data.active_version, "1.1.0");
+  assert.equal(upgradeBeforeDisable.body.data.previous_version, "1.0.0");
+
+  const disabled = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "DISABLE" }
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.data.status, "DISABLED");
+
+  const rollback = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ROLLBACK" }
+  });
+  assert.equal(rollback.status, 200);
+  assert.equal(rollback.body.data.status, "DISABLED");
+  assert.equal(rollback.body.data.active_version, "1.0.0");
+  assert.equal(rollback.body.data.previous_version, "1.1.0");
+  assert.equal(rollback.body.data.pending_version, null);
+  assert.deepEqual(rollback.body.data.granted_permissions, permissions);
+
+  const invokeAfterRollback = await invokePing(app, headers);
+  assert.equal(invokeAfterRollback.status, 403);
+  assert.equal(invokeAfterRollback.body.error.code, "PLUGIN_PERMISSION_DENIED");
+
+  const explicitEnable = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/org.example.permission-hotfix/lifecycle",
+    headers,
+    body: { action: "ENABLE" }
+  });
+  assert.equal(explicitEnable.status, 200);
+  assert.equal(explicitEnable.body.data.status, "ENABLED");
+  assert.equal(explicitEnable.body.data.active_version, "1.0.0");
+});
