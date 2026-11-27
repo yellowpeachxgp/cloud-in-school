@@ -3,7 +3,7 @@ info:
   title: Day in School Campus Cloud Event & Outbox Contracts
   version: 1.0.0
   description: |
-    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, and Security Audit Events.
+    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, and repair workflow events.
 defaultContentType: application/json
 channels:
   reservation.schedule.precheck:
@@ -78,6 +78,72 @@ channels:
       operationId: publishGroupEventConflictDetectedEvent
       message:
         $ref: '#/components/messages/GroupEventConflictDetectedEvent'
+  ledger.entry.created:
+    description: Append-only ledger posting created with deterministic integer-fen shares; consumers must treat event_key as idempotent and must not interpret it as a payment.
+    publish:
+      operationId: publishLedgerEntryCreatedEvent
+      message:
+        $ref: '#/components/messages/LedgerEntryCreatedEvent'
+  ledger.entry.amended:
+    description: Append-only correction posting linked to an earlier ledger entry; original postings are never rewritten.
+    publish:
+      operationId: publishLedgerEntryAmendedEvent
+      message:
+        $ref: '#/components/messages/LedgerEntryAmendedEvent'
+  settlement.confirmed:
+    description: Debtor and creditor both confirmed an out-of-band settlement record; this is mutual acknowledgement only, never payment success evidence.
+    publish:
+      operationId: publishSettlementConfirmedEvent
+      message:
+        $ref: '#/components/messages/SettlementConfirmedEvent'
+  duty.task.completed:
+    description: Assigned member marked a dorm duty task completed; peer confirmation is still required.
+    publish:
+      operationId: publishDutyTaskCompletedEvent
+      message:
+        $ref: '#/components/messages/DutyTaskEvent'
+  duty.task.confirmed:
+    description: A different active member confirmed completion of a dorm duty task.
+    publish:
+      operationId: publishDutyTaskConfirmedEvent
+      message:
+        $ref: '#/components/messages/DutyTaskEvent'
+  duty.task.skipped:
+    description: A group owner/admin marked a still-pending dorm duty task SKIPPED as the terminal leave disposition; it never counts as completion.
+    publish:
+      operationId: publishDutyTaskSkippedEvent
+      message:
+        $ref: '#/components/messages/DutyTaskEvent'
+  duty.swap.requested:
+    description: Duty swap or cover requested for one generated task; no reassignment occurs before acceptance.
+    publish:
+      operationId: publishDutySwapRequestedEvent
+      message:
+        $ref: '#/components/messages/DutySwapEvent'
+  duty.swap.resolved:
+    description: Duty swap accepted, rejected, or cancelled; accepted swaps atomically reassign the referenced task.
+    publish:
+      operationId: publishDutySwapResolvedEvent
+      message:
+        $ref: '#/components/messages/DutySwapEvent'
+  repair.created:
+    description: Dorm repair coordination record created; this is not an official school or property work order.
+    publish:
+      operationId: publishRepairCreatedEvent
+      message:
+        $ref: '#/components/messages/RepairWorkflowEvent'
+  repair.status_changed:
+    description: Dorm repair coordination status changed through the explicit state machine.
+    publish:
+      operationId: publishRepairStatusChangedEvent
+      message:
+        $ref: '#/components/messages/RepairWorkflowEvent'
+  repair.reviewed:
+    description: Reporter submitted the one-time review for a resolved dorm repair record.
+    publish:
+      operationId: publishRepairReviewedEvent
+      message:
+        $ref: '#/components/messages/RepairReviewedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -273,6 +339,344 @@ components:
             type: boolean
             const: false
             description: Contractual sentinel proving the event is advisory only; consumers must prompt users and never silently move the confirmed event.
+    LedgerEntryCreatedEvent:
+      name: LedgerEntryCreatedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, entry_id, actor_member_id, actor_cloud_user_id, entry_kind, amount_fen, paid_by_member_id, share_count, balance_revision]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:ledger-entry:[0-9a-fA-F-]{36}:created:v1$'
+          event_type:
+            type: string
+            enum: [created]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          entry_id:
+            type: string
+            format: uuid
+          actor_member_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          entry_kind:
+            type: string
+            enum: [EXPENSE, REFUND]
+          amount_fen:
+            type: integer
+            format: int64
+          paid_by_member_id:
+            type: string
+            format: uuid
+          share_count:
+            type: integer
+            minimum: 0
+            description: Count only; individual shares are available through the ledger API and are not embedded in the event.
+          balance_revision:
+            type: integer
+            minimum: 1
+    LedgerEntryAmendedEvent:
+      name: LedgerEntryAmendedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, entry_id, corrects_entry_id, actor_member_id, actor_cloud_user_id, amount_fen, paid_by_member_id, share_count, balance_revision]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:ledger-entry:[0-9a-fA-F-]{36}:correction:[0-9a-fA-F-]{36}:v1$'
+          event_type:
+            type: string
+            enum: [amended]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          entry_id:
+            type: string
+            format: uuid
+            description: Newly appended correction posting id.
+          corrects_entry_id:
+            type: string
+            format: uuid
+            description: Earlier posting or correction this delta is linked to; the target is never rewritten.
+          actor_member_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          amount_fen:
+            type: integer
+            format: int64
+            description: Signed correction delta in fen.
+          paid_by_member_id:
+            type: string
+            format: uuid
+          share_count:
+            type: integer
+            minimum: 0
+          balance_revision:
+            type: integer
+            minimum: 1
+    SettlementConfirmedEvent:
+      name: SettlementConfirmedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, settlement_id, debtor_member_id, creditor_member_id, debtor_cloud_user_id, creditor_cloud_user_id, amount_fen, basis_balance_revision, applied_balance_revision, confirmed_at, payment_executed]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:settlement:[0-9a-fA-F-]{36}:confirmed:v1$'
+          event_type:
+            type: string
+            enum: [confirmed]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          settlement_id:
+            type: string
+            format: uuid
+          debtor_member_id:
+            type: string
+            format: uuid
+          creditor_member_id:
+            type: string
+            format: uuid
+          debtor_cloud_user_id:
+            type: string
+            format: uuid
+          creditor_cloud_user_id:
+            type: string
+            format: uuid
+          amount_fen:
+            type: integer
+            format: int64
+            minimum: 1
+          basis_balance_revision:
+            type: integer
+            minimum: 0
+          applied_balance_revision:
+            type: integer
+            minimum: 1
+            description: New balance revision after the confirmed out-of-band settlement is applied to member balances.
+          confirmed_at:
+            type: string
+            format: date-time
+          payment_executed:
+            type: boolean
+            const: false
+            description: Contractual sentinel proving this event is only mutual ledger acknowledgement and never payment execution evidence.
+    DutyTaskEvent:
+      name: DutyTaskEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, rota_id, task_id, assigned_member_id, actor_member_id, actor_cloud_user_id, due_date, status]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:duty-task:[0-9a-fA-F-]{36}:(completed|confirmed|skipped):v1$'
+          event_type:
+            type: string
+            enum: [completed, confirmed, skipped]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          rota_id:
+            type: string
+            format: uuid
+          task_id:
+            type: string
+            format: uuid
+          assigned_member_id:
+            type: string
+            format: uuid
+          actor_member_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          due_date:
+            type: string
+            format: date
+          status:
+            type: string
+            enum: [COMPLETED, CONFIRMED, SKIPPED]
+    DutySwapEvent:
+      name: DutySwapEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, rota_id, duty_task_id, swap_id, requested_by_member_id, target_member_id, actor_member_id, actor_cloud_user_id, swap_type, status, reassigned]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:duty-swap:[0-9a-fA-F-]{36}:(requested|resolved):v1$'
+          event_type:
+            type: string
+            enum: [requested, resolved]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          rota_id:
+            type: string
+            format: uuid
+          duty_task_id:
+            type: string
+            format: uuid
+          swap_id:
+            type: string
+            format: uuid
+          requested_by_member_id:
+            type: string
+            format: uuid
+          target_member_id:
+            type: string
+            format: uuid
+          actor_member_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          swap_type:
+            type: string
+            enum: [SWAP, COVER]
+          status:
+            type: string
+            enum: [PENDING, ACCEPTED, REJECTED, CANCELLED]
+          reassigned:
+            type: boolean
+            description: True only when status is ACCEPTED and the task assignment changed atomically.
+    RepairWorkflowEvent:
+      name: RepairWorkflowEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, repair_id, reporter_member_id, actor_member_id, actor_cloud_user_id, category, status, status_revision, official_work_order]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:repair:[0-9a-fA-F-]{36}:(created|status:[0-9]+):v1$'
+          event_type:
+            type: string
+            enum: [created, status_changed]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          repair_id:
+            type: string
+            format: uuid
+          reporter_member_id:
+            type: string
+            format: uuid
+          actor_member_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          category:
+            type: string
+            enum: [PLUMBING, ELECTRICAL, FURNITURE, NETWORK, CLEANING, SAFETY, OTHER]
+          status:
+            type: string
+            enum: [OPEN, TRIAGED, IN_PROGRESS, RESOLVED, REJECTED, CLOSED]
+          status_revision:
+            type: integer
+            minimum: 1
+          official_work_order:
+            type: boolean
+            const: false
+            description: Contractual sentinel proving the record is not an official school/property work order.
+    RepairReviewedEvent:
+      name: RepairReviewedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, repair_id, review_id, reviewer_member_id, reviewer_cloud_user_id, rating]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:repair:[0-9a-fA-F-]{36}:review:[0-9a-fA-F-]{36}:v1$'
+          event_type:
+            type: string
+            enum: [reviewed]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          repair_id:
+            type: string
+            format: uuid
+          review_id:
+            type: string
+            format: uuid
+          reviewer_member_id:
+            type: string
+            format: uuid
+          reviewer_cloud_user_id:
+            type: string
+            format: uuid
+          rating:
+            type: integer
+            minimum: 1
+            maximum: 5
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:

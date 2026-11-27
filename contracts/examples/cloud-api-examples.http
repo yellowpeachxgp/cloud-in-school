@@ -244,3 +244,268 @@ Idempotency-Key: poll_confirm_demo_0001
 {
   "option_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 }
+
+
+### 27. CT-03 Append Shared Expense With Deterministic Split (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: ledger_entry_create_demo_0001
+
+{
+  "entry_kind": "EXPENSE",
+  "title": "宿舍公共洗衣液",
+  "note": "四人共用",
+  "amount_fen": 101,
+  "paid_by_member_id": "77777777-7777-4777-8777-777777777777",
+  "occurred_at": "2026-12-01T19:30:00+08:00",
+  "split_rule": {
+    "type": "SELECTED",
+    "participant_member_ids": [
+      "77777777-7777-4777-8777-777777777777",
+      "88888888-8888-4888-8888-888888888888"
+    ]
+  }
+}
+
+### 28. CT-03 List Ledger Entries And Append-Only Corrections (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries?limit=50
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 29. CT-03 Append Signed Ledger Correction (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/amend
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: ledger_entry_amend_demo_0001
+
+{
+  "reason": "实际优惠后少 0.01 元",
+  "title": "宿舍公共洗衣液更正",
+  "amount_fen": -1,
+  "paid_by_member_id": "77777777-7777-4777-8777-777777777777",
+  "occurred_at": "2026-12-01T20:00:00+08:00",
+  "split_rule": {
+    "type": "SELECTED",
+    "participant_member_ids": [
+      "77777777-7777-4777-8777-777777777777",
+      "88888888-8888-4888-8888-888888888888"
+    ]
+  }
+}
+
+### 30. CT-03 Get Member Balances And Balance Revision (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/balances
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 31. CT-03 Propose Two-Party Settlement Record (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: settlement_create_demo_0001
+
+{
+  "debtor_member_id": "88888888-8888-4888-8888-888888888888",
+  "creditor_member_id": "77777777-7777-4777-8777-777777777777",
+  "amount_fen": 50,
+  "basis_balance_revision": 3,
+  "note": "线下已自行结清，等待双方确认"
+}
+
+### 32. CT-03 List Settlement History (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements?status=PENDING_BOTH_CONFIRMATIONS&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 33. CT-03 Get Settlement Detail (planned)
+GET http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 34. CT-03 Confirm One Side Of Settlement (planned)
+POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/confirm
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: settlement_confirm_demo_0001
+
+{
+  "basis_balance_revision": 3
+}
+
+### 35. CT-03 Cancel Unconfirmed Settlement (planned)
+POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/cancel
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: settlement_cancel_demo_0001
+
+{
+  "reason": "账本更正后金额已变化，重新结算"
+}
+
+### 36. CT-03 Create Weekly Duty Rotation (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_rota_create_demo_0001
+
+{
+  "title": "宿舍卫生值日",
+  "description": "扫地、倒垃圾与台面整理",
+  "rotation_member_ids": [
+    "77777777-7777-4777-8777-777777777777",
+    "88888888-8888-4888-8888-888888888888"
+  ],
+  "frequency": "WEEKLY",
+  "days_of_week": [1, 4],
+  "start_date": "2026-12-01",
+  "end_date": "2027-01-31",
+  "time_zone": "Asia/Shanghai",
+  "generate_weeks_ahead": 2
+}
+
+### 37. CT-03 List Duty Rotations (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas?status=ACTIVE&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 38. CT-03 Get Duty Rotation Detail (planned)
+GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 39. CT-03 Update Future Duty Rotation Schedule (planned)
+PATCH http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_rota_patch_demo_0001
+
+{
+  "days_of_week": [2, 5],
+  "generate_weeks_ahead": 3
+}
+
+### 40. CT-03 List Duty Tasks (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/duty-tasks?status=PENDING&from_date=2026-12-01&to_date=2026-12-14
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 41. CT-03 Mark Assigned Duty Task Completed (planned)
+POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/complete
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_task_complete_demo_0001
+
+{
+  "completion_note": "垃圾已倒，地面已扫"
+}
+
+### 42. CT-03 Confirm Another Member Duty Completion (planned)
+POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/confirm
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_task_confirm_demo_0001
+
+{
+  "confirmation_note": "现场检查完成"
+}
+
+### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (planned)
+POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/skip
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_task_skip_demo_0001
+
+{
+  "skip_reason": "请假且无人接受代值，宿舍管理员确认本次跳过"
+}
+
+### 44. CT-03 Request Duty Cover Or Swap (planned)
+POST http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_swap_request_demo_0001
+
+{
+  "duty_task_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "type": "COVER",
+  "target_member_id": "88888888-8888-4888-8888-888888888888",
+  "reason": "当晚有实验课"
+}
+
+### 45. CT-03 List Duty Swap Audit Records (planned)
+GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps?status=ACCEPTED&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 46. CT-03 Get Duty Swap Audit Record (planned)
+GET http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 47. CT-03 Resolve Duty Swap Request (planned)
+POST http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff/resolve
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_swap_resolve_demo_0001
+
+{
+  "action": "ACCEPT",
+  "resolution_note": "本次由我代值"
+}
+
+### 48. CT-03 Submit Dorm Repair Record (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: repair_create_demo_0001
+
+{
+  "title": "洗手池下水管漏水",
+  "category": "PLUMBING",
+  "location_text": "宿舍 3 号楼 512 洗手池下方",
+  "description": "夜间滴水，地面有积水。此记录仅用于宿舍协作，不代表已向校方正式报修。"
+}
+
+### 49. CT-03 List Repair Records (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs?status=OPEN&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 50. CT-03 Get Repair Detail (planned)
+GET http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 51. CT-03 Update Editable Repair Metadata (planned)
+PATCH http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: repair_patch_demo_0001
+
+{
+  "description": "夜间滴水加快，已用盆接水。此记录仅用于宿舍协作，不代表校方受理状态。"
+}
+
+### 52. CT-03 Transition Repair Status (planned)
+POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/status
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: repair_status_demo_0001
+
+{
+  "to_status": "TRIAGED",
+  "assigned_member_id": "88888888-8888-4888-8888-888888888888",
+  "note": "先检查是否能临时紧固"
+}
+
+### 53. CT-03 Submit One-Time Repair Review (planned)
+POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/review
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: repair_review_demo_0001
+
+{
+  "rating": 4,
+  "comment": "处理及时，后续继续观察是否复漏"
+}

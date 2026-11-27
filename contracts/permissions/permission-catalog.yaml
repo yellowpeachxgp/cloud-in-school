@@ -92,6 +92,46 @@ permissions:
     scope: user_school_scope
     description: Confirm a poll option as the terminal group event; limited to the poll creator or GROUP_OWNER/GROUP_ADMIN in the same school scope.
     default_granted: false
+  - id: group.ledger.read
+    scope: user_school_scope
+    description: Read append-only ledger postings, deterministic shares, member balances, and settlement history inside an active group and the same school_id scope.
+    default_granted: true
+  - id: group.ledger.write
+    scope: user_school_scope
+    description: Append expense, refund, or correction postings for a group; never permits payment execution or rewriting existing postings.
+    default_granted: true
+  - id: group.settlement.write
+    scope: user_school_scope
+    description: Propose, confirm, or cancel settlement records when the caller is an authorized party; confirmation only records mutual acknowledgement and never moves money.
+    default_granted: true
+  - id: group.duty.read
+    scope: user_school_scope
+    description: Read duty rotation schedules, generated tasks, assignment state, completion confirmation state, and pending/terminal swap audit records inside an active group.
+    default_granted: true
+  - id: group.duty.write
+    scope: user_school_scope
+    description: Complete caller-assigned duty tasks and request or resolve one-task swaps or covers according to party and group-role rules.
+    default_granted: true
+  - id: group.duty.confirm
+    scope: user_school_scope
+    description: Confirm completion of another active member's duty task; self-confirmation is forbidden.
+    default_granted: true
+  - id: group.duty.manage
+    scope: user_school_scope
+    description: Create and update duty rotation schedules and mark still-pending tasks SKIPPED as the owner/admin leave disposition; requires GROUP_OWNER or GROUP_ADMIN authorization inside the group.
+    default_granted: false
+  - id: group.repair.read
+    scope: user_school_scope
+    description: Read dorm repair records, workflow state, and review state inside an active group.
+    default_granted: true
+  - id: group.repair.write
+    scope: user_school_scope
+    description: Submit repair records, edit editable reporter metadata, and submit the reporter's one-time review; does not contact external maintenance systems.
+    default_granted: true
+  - id: group.repair.manage
+    scope: user_school_scope
+    description: Triage, assign, progress, resolve, reject, or close repair records; requires GROUP_OWNER or GROUP_ADMIN authorization inside the group.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]
