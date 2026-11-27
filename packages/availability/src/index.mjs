@@ -1296,10 +1296,19 @@ export class AvailabilityService {
     const memberIds = new Set(memberships.map((member) => member.id));
     const shares = Array.from(this.store.availabilityShares.values()).filter((row) => memberIds.has(row.member_id));
     const blocks = Array.from(this.store.busyBlocks.values()).filter((row) => memberIds.has(row.member_id));
-    const polls = Array.from(this.store.meetingPolls.values()).filter((row) => memberIds.has(row.created_by_member_id));
-    const pollIds = new Set(polls.map((row) => row.id));
-    const options = Array.from(this.store.pollOptions.values()).filter((row) => pollIds.has(row.poll_id));
     const votes = Array.from(this.store.pollVotes.values()).filter((row) => memberIds.has(row.member_id));
+    const confirmedByUser = Array.from(this.store.confirmedGroupEvents.values()).filter((row) => memberIds.has(row.confirmed_by_member_id));
+    // A vote or confirmation is user data even when the poll itself is owned by
+    // the group or another member. Export the minimum poll/option context needed
+    // to interpret those user-owned rows; poll rows never embed other voters.
+    const pollIds = new Set();
+    for (const poll of this.store.meetingPolls.values()) {
+      if (memberIds.has(poll.created_by_member_id)) pollIds.add(poll.id);
+    }
+    for (const vote of votes) pollIds.add(vote.poll_id);
+    for (const confirmed of confirmedByUser) pollIds.add(confirmed.poll_id);
+    const polls = Array.from(this.store.meetingPolls.values()).filter((row) => pollIds.has(row.id));
+    const options = Array.from(this.store.pollOptions.values()).filter((row) => pollIds.has(row.poll_id));
     const confirmedEvents = Array.from(this.store.confirmedGroupEvents.values()).filter(
       (row) => memberIds.has(row.confirmed_by_member_id) || pollIds.has(row.poll_id)
     );

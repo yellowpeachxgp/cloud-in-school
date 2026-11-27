@@ -622,6 +622,25 @@ test("W4-02 erasure: export contains availability domain and data-delete removes
     nowMs: BASE_NOW + 1000
   });
   assert.equal(vote.status, 200);
+  const ownerVote = await app.inject({
+    method: "POST",
+    url: "/api/v1/polls/" + created.body.data.poll_id + "/votes",
+    headers: { ...owner.auth, "idempotency-key": nextKey("w402-erasure-owner-vote") },
+    body: { option_id: created.body.data.options[1].option_id },
+    nowMs: BASE_NOW + 1500
+  });
+  assert.equal(ownerVote.status, 200, JSON.stringify(ownerVote.body));
+  const ownerExported = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/data-export",
+    headers: owner.auth,
+    nowMs: BASE_NOW + 1800
+  });
+  assert.equal(ownerExported.status, 200, JSON.stringify(ownerExported.body));
+  assert.equal(ownerExported.body.data.availability_polls.length, 1, "voter export includes minimum group-owned poll context");
+  assert.equal(ownerExported.body.data.availability_poll_options.length, 2);
+  assert.equal(ownerExported.body.data.availability_poll_votes.length, 1);
+  assert.equal(ownerExported.body.data.availability_poll_votes[0].member_id, memberRow(app, group.group_id, owner.user.id).id);
 
   const exported = await app.inject({
     method: "POST",
