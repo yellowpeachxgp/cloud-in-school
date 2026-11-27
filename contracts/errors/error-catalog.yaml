@@ -435,3 +435,68 @@ errors:
     retryable: false
     user_action: NONE
     description: Reserved feature endpoint (decision D2); the feature is contract-only with no implementation, clients must keep the entry hidden or disabled and must not retry or probe for availability.
+  - code: CONTENT_PACK_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_CONTENT_PACK_METADATA
+    description: Content pack identifier, format/kind combination, version, provenance, compatibility range, or immutable metadata failed validation.
+  - code: CONTENT_PACK_SIGNATURE_INVALID
+    http_status: 400
+    retryable: false
+    user_action: VERIFY_CONTENT_PACK_SIGNATURE
+    description: Detached Ed25519 signature, trust-root fingerprint, signed payload scheme, or artifact digest verification failed for a school package or data pack.
+  - code: CONTENT_PACK_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_CONTENT_PACK_ID
+    description: Content pack does not exist or is not visible in the requested school catalog scope.
+  - code: CONTENT_PACK_VERSION_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_CONTENT_PACK_VERSION
+    description: Content pack version does not exist or is not visible in the requested school catalog scope.
+  - code: CONTENT_PACK_VERSION_RETIRED
+    http_status: 410
+    retryable: false
+    user_action: USE_LATEST_PUBLISHED_CONTENT_PACK
+    description: Content pack version has been retired; new downloads and new installs are refused while metadata remains auditable.
+  - code: CONTENT_PACK_VERSION_CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: CHOOSE_NEW_CONTENT_PACK_VERSION
+    description: The immutable pack_id/version already exists with different artifact bytes or metadata; publish a new version instead of rewriting history.
+  - code: CONTENT_PACK_SUBMISSION_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_CONTENT_PACK_SUBMISSION
+    description: Content pack submission artifact encoding, digest, contribution reference, note, or review metadata failed validation.
+  - code: CONTENT_PACK_SUBMISSION_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_CONTENT_PACK_SUBMISSION
+    description: Content pack submission does not exist or is not visible to the authenticated caller or reviewer scope.
+  - code: CONTENT_PACK_REVIEW_INVALID
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_CONTENT_PACK_SUBMISSION
+    description: Content pack submission is already terminal or the requested review action is invalid for its current state.
+  - code: CONTENT_PACK_REVIEW_REQUIRED
+    http_status: 409
+    retryable: false
+    user_action: COMPLETE_CONTENT_PACK_REVIEW
+    description: Only an APPROVED and maintainer-signed submission can be published; pending, changed, rejected, or already-published submissions are not publishable.
+  - code: CONTENT_PACK_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_CONTENT_PACK_AUTHORIZATION
+    description: Caller lacks the required school-scoped content catalog read, download, submit, review, publish, or retirement authorization.
+  - code: CONTENT_PACK_RATE_LIMITED
+    http_status: 429
+    retryable: true
+    user_action: WAIT_FOR_RATE_LIMIT_WINDOW
+    description: Content pack submission or artifact download rate limit reached; automated mirror scraping and retry amplification are forbidden.
+  - code: CONTENT_PACK_ARTIFACT_TOO_LARGE
+    http_status: 413
+    retryable: false
+    user_action: REDUCE_CONTENT_PACK_ARTIFACT
+    description: Content package artifact exceeds the v1 16 MiB ceiling or the base64 review submission body limit.

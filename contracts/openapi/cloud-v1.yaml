@@ -57,6 +57,8 @@ tags:
     description: Reserved (D2) operations review queue and audited dispositions; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
   - name: media
     description: Reserved (D2) media upload slots with EXIF stripping and WebP conversion intent; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
+  - name: content-packs
+    description: Signed school-package and dis-datapack/v1 content catalog, version metadata, audited downloads, submissions, review, publication, and retirement
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -3202,6 +3204,454 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/content-packs:
+    get:
+      operationId: listContentPacks
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_PERMISSION_DENIED]
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: List visible signed school packages and data packs in one school catalog
+      description: |
+        Returns catalog summaries for the requested school_id. By default only packages with at least one non-retired published version are listed; include_retired=true also exposes fully retired packages for audit and installed-client rollback decisions. The list never includes submission artifacts, credentials, or submitter/reviewer cloud identities. Catalog presence is provenance metadata only and must not be rendered as official school verification. Examples 76 and 77 in contracts/examples/cloud-api-examples.http.
+        School packages use the existing dis-campus-plugin/v1 zip format; independently distributable JSON datasets use dis-datapack/v1. No separate school-package endpoint exists in the current contract, so this CT-06 catalog is the single distribution surface for both artifact families.
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 64
+          description: School catalog isolation scope. The master-plan draft used camelCase schoolId; v1 uses the repository-wide snake_case query spelling school_id consistently.
+        - name: kind
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ContentPackKind'
+        - name: artifact_format
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ContentPackArtifactFormat'
+        - name: include_retired
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Visible content pack catalog page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackCatalogListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/content-packs/{packId}/versions:
+    get:
+      operationId: listContentPackVersions
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: List published and retired versions for one content pack
+      description: |
+        Returns reverse-chronological version metadata for one pack. RETIRED rows remain visible by default because already-installed clients must learn that the version is unsafe or stale; the response contains metadata and detached signature facts only, never artifact bytes. Version ordering uses the existing MAJOR.MINOR.PATCH comparator. Example 78.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackIdParam'
+        - name: include_retired
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Version metadata page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/content-packs/{packId}/versions/{version}:
+    get:
+      operationId: getContentPackVersion
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: Read immutable metadata and detached signature facts for one content pack version
+      description: |
+        Returns immutable metadata, provenance, artifact digest, size, compatibility limits, retirement state, and the detached Ed25519 signature needed by the appropriate verifier. Clients must download the artifact separately, compare artifact_sha256 before verification, verify the signature against a pinned publisher trust root, validate dis-datapack/v1 against contracts/schemas/dis-datapack-v1.schema.json or validate the legacy school package with the existing school-package verifier, and only then install. A RETIRED version remains auditable but must not be newly installed. Example 79.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackIdParam'
+        - $ref: '#/components/parameters/ContentPackVersionParam'
+      responses:
+        '200':
+          description: Version metadata and detached signature facts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/content-packs/{packId}/versions/{version}/download:
+    get:
+      operationId: downloadContentPackArtifact
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.download]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONTENT_PACK_VERSION_RETIRED, CONTENT_PACK_PERMISSION_DENIED, CONTENT_PACK_RATE_LIMITED]
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: Download the exact signed artifact bytes for one non-retired content pack version
+      description: |
+        Returns application/octet-stream artifact bytes. For dis-campus-plugin/v1 the artifact is the existing school-package zip; for dis-datapack/v1 it is the canonical JSON document. The detached signature is available from the metadata endpoint rather than being concatenated into this byte stream, preserving byte-for-byte digest semantics. The server must send X-Content-Pack-Artifact-Sha256 and clients must compare it with metadata before install. Retired versions fail with 410 CONTENT_PACK_VERSION_RETIRED so retirement cannot be bypassed by a cached link. Example 80.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackIdParam'
+        - $ref: '#/components/parameters/ContentPackVersionParam'
+      responses:
+        '200':
+          description: Exact artifact bytes for the immutable version
+          headers:
+            X-Content-Pack-Artifact-Sha256:
+              required: true
+              schema:
+                type: string
+                pattern: ^[0-9a-f]{64}$
+            X-Content-Pack-Format:
+              required: true
+              schema:
+                $ref: '#/components/schemas/ContentPackArtifactFormat'
+            X-Content-Pack-Version:
+              required: true
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionValue'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Content pack version has been retired; new downloads are refused while metadata remains auditable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/content-pack-submissions:
+    post:
+      operationId: createContentPackSubmission
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.submit]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_SUBMISSION_INVALID, CONTENT_PACK_INVALID, CONTENT_PACK_SIGNATURE_INVALID, CONTENT_PACK_ARTIFACT_TOO_LARGE, CONTENT_PACK_PERMISSION_DENIED, CONTENT_PACK_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: Submit one signed-pack candidate artifact for maintainer review
+      description: |
+        Accepts one complete artifact for review. The submitter supplies the unsigned dis-datapack/v1 JSON document or the legacy school-package zip plus its contribution reference; the maintainer signing/publication step later produces the detached signature recorded in catalog metadata. The server validates shape, artifact hash, size ceiling, format/kind compatibility, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContentPackSubmissionCreateRequest'
+      responses:
+        '201':
+          description: Mutation accepted and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackSubmissionEnvelope'
+        '200':
+          description: Durable idempotent replay of the original mutation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackSubmissionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          description: Artifact exceeds the 16 MiB content package ceiling or encoded submission body limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/content-pack-submissions/{submissionId}:
+    get:
+      operationId: getContentPackSubmission
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.submit]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
+      tags: [content-packs]
+      security:
+        - bearerAuth: []
+      summary: Read caller-visible status for one content pack submission
+      description: |
+        Returns status metadata for the submitter. Another user submission is indistinguishable from not found; operations reviewers use the admin queue. Artifact bytes are never returned. Review notes are public-safe and do not expose reviewer identity beyond a pseudonymous alias. Example 82.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackSubmissionIdParam'
+      responses:
+        '200':
+          description: Submission status metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackSubmissionEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/admin/content-pack-submissions:
+    get:
+      operationId: listContentPackSubmissionReviews
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.review]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_PERMISSION_DENIED]
+      tags: [content-packs, admin]
+      security:
+        - bearerAuth: []
+      summary: List content pack submissions for school-scoped maintainer review
+      description: |
+        Lists submission metadata for operations reviewers holding explicit content_pack.review authorization in the matching school scope. It is a content-catalog review queue, not the reserved UGC moderation queue. Rows expose no artifact bytes, no raw cloud identity, and no credentials. Example 83.
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 64
+          description: School catalog isolation scope. The master-plan draft used camelCase schoolId; v1 uses the repository-wide snake_case query spelling school_id consistently.
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ContentPackSubmissionStatus'
+        - name: kind
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ContentPackKind'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Submission review queue page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackSubmissionListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/content-pack-submissions/{submissionId}/review:
+    post:
+      operationId: reviewContentPackSubmission
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.review]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_REVIEW_INVALID, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [content-packs, admin]
+      security:
+        - bearerAuth: []
+      summary: Approve, request changes on, or reject one content pack submission
+      description: |
+        Applies exactly one review decision. APPROVE means the artifact may be published once after the maintainer signing step; it does not itself create a catalog version and does not imply school verification. REQUEST_CHANGES and REJECT require a public-safe review_note. A submission in PUBLISHED or REJECTED state cannot be reviewed again. The decision is written to the tamper-evident audit trail; the response exposes only pseudonymous aliases. Example 84.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackSubmissionIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewContentPackSubmissionRequest'
+      responses:
+        '200':
+          description: Review decision applied or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackSubmissionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/admin/content-packs:
+    post:
+      operationId: publishContentPackVersion
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.publish]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_REVIEW_REQUIRED, CONTENT_PACK_INVALID, CONTENT_PACK_SIGNATURE_INVALID, CONTENT_PACK_VERSION_CONFLICT, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [content-pack.published]
+      tags: [content-packs, admin]
+      security:
+        - bearerAuth: []
+      summary: Publish one approved and maintainer-signed content pack submission
+      description: |
+        Publishes exactly one immutable version derived from an APPROVED submission. The publisher must first complete the maintainer signing step for the matching artifact bytes: detached Ed25519 over the existing dis-campus-plugin/v1 manifest+files payload or over the CT-06 dis-datapack/v1 canonical JSON payload. The server revalidates schema, format/kind compatibility, provenance, review state, trust-root eligibility, artifact digest, signature payload, size ceiling, and package version ordering. Publishing the same pack_id/version with different bytes or metadata is CONTENT_PACK_VERSION_CONFLICT; replays require the same Idempotency-Key. On first durable commit exactly one content-pack.published event is emitted. Example 85.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishContentPackRequest'
+      responses:
+        '201':
+          description: Mutation accepted and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionEnvelope'
+        '200':
+          description: Durable idempotent replay of the original mutation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/admin/content-packs/{packId}/versions/{version}/retire:
+    post:
+      operationId: retireContentPackVersion
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [content_pack.publish]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONFLICT, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [content-packs, admin]
+      security:
+        - bearerAuth: []
+      summary: Retire one published content pack version without rewriting history
+      description: |
+        Marks a published version RETIRED. Retirement is append-only metadata: the artifact digest, version row, provenance, and audit history are never deleted or rewritten. New downloads are refused with 410, catalog latest-version selection skips retired rows, and installed clients must treat the local copy as needing re-verification or rollback to a lower non-retired version. Replaying the same Idempotency-Key returns the original result; a fresh retirement attempt for an already retired version is 409 CONFLICT. Example 86.
+      parameters:
+        - $ref: '#/components/parameters/ContentPackIdParam'
+        - $ref: '#/components/parameters/ContentPackVersionParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireContentPackVersionRequest'
+      responses:
+        '200':
+          description: Version retired or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPackVersionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/boards:
     get:
       operationId: listBoards
@@ -4608,6 +5058,27 @@ components:
         format: uuid
     MediaUploadIdParam:
       name: uploadId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ContentPackIdParam:
+      name: packId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ContentPackIdValue'
+      description: Stable content pack id percent-encoded as one path segment.
+    ContentPackVersionParam:
+      name: version
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ContentPackVersionValue'
+      description: Package version percent-encoded as one path segment.
+    ContentPackSubmissionIdParam:
+      name: submissionId
       in: path
       required: true
       schema:
@@ -7842,6 +8313,445 @@ components:
           $ref: '#/components/schemas/PlaceReportFlagReviewResult'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
+    ContentPackArtifactFormat:
+      type: string
+      enum: [dis-campus-plugin/v1, dis-datapack/v1]
+      description: Signed artifact family. dis-campus-plugin/v1 is the existing zipped school package format; dis-datapack/v1 is the canonical JSON data pack format whose schema lives at contracts/schemas/dis-datapack-v1.schema.json.
+    ContentPackKind:
+      type: string
+      enum: [school-profile, campus-guide, procedure-guide, opportunity-catalog, facility-catalog, indoor-graph, period-preset, pharmacy-catalog]
+      description: school-profile/campus-guide are valid only for dis-campus-plugin/v1. The six guide/catalog/graph/preset kinds are valid only for dis-datapack/v1. Implementations must reject mismatched combinations instead of coercing them.
+    ContentPackVerificationLevel:
+      type: string
+      enum: [UNVERIFIED, SOURCE_CONFIRMED, MOCK_TESTED, DEVICE_TESTED, SCHOOL_VERIFIED, DISTRIBUTION_READY]
+      description: Evidence level copied from signed content metadata. UNVERIFIED is explicit for maintainer/agent-compiled public-source data under D1; SCHOOL_VERIFIED and DEVICE_TESTED require matching evidence and are never implied by catalog presence.
+    ContentPackLifecycleStatus:
+      type: string
+      enum: [PUBLISHED, RETIRED]
+    ContentPackSubmissionStatus:
+      type: string
+      enum: [PENDING_REVIEW, CHANGES_REQUESTED, APPROVED, REJECTED, PUBLISHED]
+    ContentPackReviewAction:
+      type: string
+      enum: [APPROVE, REQUEST_CHANGES, REJECT]
+    ContentPackRetireReason:
+      type: string
+      enum: [INCORRECT_DATA, OUTDATED, SECURITY, LICENSE, MAINTAINER_REQUEST, OTHER]
+    ContentPackIdValue:
+      type: string
+      minLength: 3
+      maxLength: 128
+      pattern: ^[a-z0-9][a-z0-9._-]{2,127}$
+      description: Stable package identifier, normally <schoolId>.<topic>; it contains no slash and must be percent-encoded when used in one path segment.
+    ContentPackVersionValue:
+      type: string
+      pattern: ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$
+      description: MAJOR.MINOR.PATCH[-prerelease] compatible with the existing school-package version comparator.
+    ContentPackSource:
+      type: object
+      additionalProperties: false
+      required: [url, title, retrieved_at]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: ^https://
+          description: Publicly accessible HTTPS source URL; credentialed school intranet URLs are not acceptable catalog provenance.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        retrieved_at:
+          type: string
+          format: date
+    ContentPackSignature:
+      type: object
+      additionalProperties: false
+      required: [algorithm, scheme, public_key_fingerprint, value, signed_payload_sha256]
+      properties:
+        algorithm:
+          type: string
+          const: Ed25519
+        scheme:
+          type: string
+          enum: [DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1, DIS_DATAPACK_CANONICAL_JSON_SHA256_V1]
+          description: DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1 is the existing school-package payload (format line, canonical manifest digest, files digest). DIS_DATAPACK_CANONICAL_JSON_SHA256_V1 signs UTF-8 text dis-datapack/v1 + LF + lowercase SHA-256 of the RFC-8785-canonical JSON document + LF. Implementations must not invent a third interpretation.
+        public_key_fingerprint:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          description: SHA-256 fingerprint of the raw Ed25519 public key. Clients compare it with a pinned publisher trust root; catalog data alone is not a trust root.
+        value:
+          type: string
+          pattern: ^[A-Za-z0-9+/]{86}==$
+          description: Base64-encoded detached 64-byte Ed25519 signature.
+        signed_payload_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          description: SHA-256 of the exact payload bytes that were signed, published for transparency; verifiers still recompute the payload from the artifact.
+    ContentPackSummary:
+      type: object
+      additionalProperties: false
+      required: [pack_id, school_id, kind, artifact_format, title, latest_version, verification_level, review_by, source_count, updated_at]
+      properties:
+        pack_id:
+          $ref: '#/components/schemas/ContentPackIdValue'
+        school_id:
+          type: string
+          minLength: 2
+          maxLength: 64
+        kind:
+          $ref: '#/components/schemas/ContentPackKind'
+        artifact_format:
+          $ref: '#/components/schemas/ContentPackArtifactFormat'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        latest_version:
+          type:
+            - string
+            - 'null'
+          description: Highest non-retired published version visible to the caller; null only when include_retired exposes a fully retired package.
+        verification_level:
+          $ref: '#/components/schemas/ContentPackVerificationLevel'
+        review_by:
+          type: string
+          format: date
+          description: Date after which clients must display the content as needing re-verification; catalog presence never means school verification.
+        source_count:
+          type: integer
+          minimum: 1
+        updated_at:
+          type: string
+          format: date-time
+    ContentPackVersion:
+      type: object
+      additionalProperties: false
+      required: [pack_id, school_id, kind, artifact_format, version, lifecycle_status, artifact_sha256, artifact_size_bytes, signature, verification_level, verified_at, review_by, sources, maintainers, published_at, published_by_alias, submission_id, download_path, min_host_api, min_app_version_code, retired_at, retirement_reason, retirement_detail]
+      properties:
+        pack_id:
+          $ref: '#/components/schemas/ContentPackIdValue'
+        school_id:
+          type: string
+          minLength: 2
+          maxLength: 64
+        kind:
+          $ref: '#/components/schemas/ContentPackKind'
+        artifact_format:
+          $ref: '#/components/schemas/ContentPackArtifactFormat'
+        version:
+          $ref: '#/components/schemas/ContentPackVersionValue'
+        lifecycle_status:
+          $ref: '#/components/schemas/ContentPackLifecycleStatus'
+        artifact_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          description: Lowercase SHA-256 of the exact downloadable artifact bytes.
+        artifact_size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 16777216
+          description: v1 reuses the existing school-package 16 MiB ceiling for zip school packages and canonical JSON data packs.
+        signature:
+          $ref: '#/components/schemas/ContentPackSignature'
+        verification_level:
+          $ref: '#/components/schemas/ContentPackVerificationLevel'
+        verified_at:
+          type: string
+          format: date
+        review_by:
+          type: string
+          format: date
+        sources:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ContentPackSource'
+        maintainers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 2
+            maxLength: 120
+          description: Maintainer provenance identifiers such as github:name; they are not write-authorization proof.
+        published_at:
+          type: string
+          format: date-time
+        published_by_alias:
+          type: string
+          minLength: 2
+          maxLength: 80
+          description: Pseudonymous operator alias; never a cloud user UUID, SSO username, student number, or real-name staff identifier.
+        submission_id:
+          type: string
+          format: uuid
+        download_path:
+          type: string
+          pattern: ^/api/v1/content-packs/[^\s]+/versions/[^\s]+/download$
+          description: Concrete percent-encoded relative download path for this immutable version.
+        min_host_api:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+          maximum: 2147483647
+        min_app_version_code:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+          maximum: 2147483647
+        retired_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        retirement_reason:
+          type:
+            - string
+            - 'null'
+          enum: [INCORRECT_DATA, OUTDATED, SECURITY, LICENSE, MAINTAINER_REQUEST, OTHER, null]
+        retirement_detail:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: Public-safe reason text without reporter identity, credentials, student numbers, or unmitigated vulnerability details.
+    ContentPackCatalogListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContentPackSummary'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ContentPackVersionListResult:
+      type: object
+      additionalProperties: false
+      required: [pack, versions]
+      properties:
+        pack:
+          $ref: '#/components/schemas/ContentPackSummary'
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContentPackVersion'
+    ContentPackVersionListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/ContentPackVersionListResult'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ContentPackVersionEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/ContentPackVersion'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ContentPackSubmissionCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_format, kind, school_id, pack_id, version, artifact_encoding, artifact_sha256, artifact_base64, contribution_reference]
+      properties:
+        artifact_format:
+          $ref: '#/components/schemas/ContentPackArtifactFormat'
+        kind:
+          $ref: '#/components/schemas/ContentPackKind'
+        school_id:
+          type: string
+          minLength: 2
+          maxLength: 64
+        pack_id:
+          $ref: '#/components/schemas/ContentPackIdValue'
+        version:
+          $ref: '#/components/schemas/ContentPackVersionValue'
+        artifact_encoding:
+          type: string
+          const: base64
+        artifact_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        artifact_base64:
+          type: string
+          minLength: 16
+          maxLength: 23000000
+          description: Base64 of the complete artifact. dis-campus-plugin/v1 is the zip school package; dis-datapack/v1 is the unsigned canonical JSON document. The detached signature is produced by the maintainer signing step before publication rather than being trusted from an arbitrary submitter.
+        contribution_reference:
+          type: string
+          format: uri
+          pattern: ^https://
+          maxLength: 2048
+          description: Public contribution PR or equivalent reviewable source link; school intranet and credentialed URLs are forbidden.
+        submission_note:
+          type: string
+          maxLength: 2000
+          description: Public-safe reviewer note without credentials, cookies, student numbers, private contact data, or unpublished vulnerability details.
+    ContentPackSubmissionReview:
+      type: object
+      additionalProperties: false
+      required: [action, reviewer_alias, reviewed_at, review_note]
+      properties:
+        action:
+          $ref: '#/components/schemas/ContentPackReviewAction'
+        reviewer_alias:
+          type: string
+          minLength: 2
+          maxLength: 80
+        reviewed_at:
+          type: string
+          format: date-time
+        review_note:
+          type:
+            - string
+            - 'null'
+          maxLength: 2000
+    ContentPackSubmission:
+      type: object
+      additionalProperties: false
+      required: [submission_id, status, artifact_format, kind, school_id, pack_id, version, artifact_sha256, artifact_size_bytes, contribution_reference, submission_note, submitter_alias, created_at, updated_at, review]
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ContentPackSubmissionStatus'
+        artifact_format:
+          $ref: '#/components/schemas/ContentPackArtifactFormat'
+        kind:
+          $ref: '#/components/schemas/ContentPackKind'
+        school_id:
+          type: string
+          minLength: 2
+          maxLength: 64
+        pack_id:
+          $ref: '#/components/schemas/ContentPackIdValue'
+        version:
+          $ref: '#/components/schemas/ContentPackVersionValue'
+        artifact_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        artifact_size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 16777216
+        contribution_reference:
+          type: string
+          format: uri
+        submission_note:
+          type:
+            - string
+            - 'null'
+          maxLength: 2000
+        submitter_alias:
+          type: string
+          minLength: 2
+          maxLength: 80
+          description: Pseudonymous submitter alias; never a cloud user UUID, SSO username, student number, phone, or campus login identifier.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        review:
+          anyOf:
+            - $ref: '#/components/schemas/ContentPackSubmissionReview'
+            - type: 'null'
+          description: Latest review decision; absent/null while pending. Artifact bytes are never returned by this resource after acceptance.
+    ContentPackSubmissionEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/ContentPackSubmission'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ContentPackSubmissionListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContentPackSubmission'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReviewContentPackSubmissionRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          $ref: '#/components/schemas/ContentPackReviewAction'
+        review_note:
+          type: string
+          maxLength: 2000
+          description: Required when action is REQUEST_CHANGES or REJECT; optional for APPROVE. Public-safe text only.
+    PublishContentPackRequest:
+      type: object
+      additionalProperties: false
+      required: [submission_id]
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        release_note:
+          type: string
+          maxLength: 1000
+          description: Optional public-safe catalog release note. It must not alter the signed artifact or its provenance.
+    RetireContentPackVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          $ref: '#/components/schemas/ContentPackRetireReason'
+        detail:
+          type: string
+          maxLength: 1000
+          description: Public-safe explanation shown to users; required when reason=OTHER and never includes private identities, credentials, or unmitigated exploit instructions.
     ParcelListEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
