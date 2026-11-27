@@ -527,7 +527,7 @@ export class CommunityService {
   }
 
   updateGroup(auth, params, body, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("updateGroup", auth, headers, body);
+    const idem = this._idempotency("updateGroup:" + String(params?.groupId || ""), auth, headers, body);
     if (idem.replay) return idem.replay;
     requireNoUnknownFields(body, ["name", "description"], "UpdateGroupRequest");
     const hasName = Object.hasOwn(body, "name");
@@ -552,7 +552,7 @@ export class CommunityService {
   }
 
   archiveGroup(auth, params, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("deleteGroup", auth, headers, {});
+    const idem = this._idempotency("deleteGroup:" + String(params?.groupId || ""), auth, headers, {});
     if (idem.replay) return idem.replay;
     const group = this._requireActiveGroup(params.groupId);
     this._requireGroupManager(group, auth);
@@ -592,7 +592,7 @@ export class CommunityService {
   }
 
   createGroupInvite(auth, params, body, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("createGroupInvite", auth, headers, body);
+    const idem = this._idempotency("createGroupInvite:" + String(params?.groupId || ""), auth, headers, body);
     if (idem.replay) return idem.replay;
     requireNoUnknownFields(body, ["expires_at", "max_uses", "label"], "CreateGroupInviteRequest");
     const expiresMs = parseDateTimeMs(body.expires_at, "expires_at");
@@ -642,7 +642,7 @@ export class CommunityService {
   }
 
   acceptGroupInvite(auth, params, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("acceptGroupInvite", auth, headers, {});
+    const idem = this._idempotency("acceptGroupInvite:" + String(params?.code || ""), auth, headers, {});
     if (idem.replay) return idem.replay;
     const code = this._normalizeInviteCode(params.code);
     const invite = Array.from(this.store.groupInvites.values()).find(
@@ -706,7 +706,7 @@ export class CommunityService {
   }
 
   revokeGroupInvite(auth, params, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("revokeGroupInvite", auth, headers, {});
+    const idem = this._idempotency("revokeGroupInvite:" + String(params?.groupId || "") + ":" + String(params?.inviteId || ""), auth, headers, {});
     if (idem.replay) return idem.replay;
     const group = this._requireActiveGroup(params.groupId);
     this._requireGroupManager(group, auth);
@@ -753,7 +753,7 @@ export class CommunityService {
   }
 
   updateGroupMember(auth, params, body, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("updateGroupMember", auth, headers, body);
+    const idem = this._idempotency("updateGroupMember:" + String(params?.groupId || "") + ":" + String(params?.memberId || ""), auth, headers, body);
     if (idem.replay) return idem.replay;
     requireNoUnknownFields(body, ["role", "sharing_level"], "UpdateGroupMemberRequest");
     const hasRole = Object.hasOwn(body, "role");
@@ -823,7 +823,7 @@ export class CommunityService {
   }
 
   removeGroupMember(auth, params, headers, nowMs = Date.now()) {
-    const idem = this._idempotency("removeGroupMember", auth, headers, {});
+    const idem = this._idempotency("removeGroupMember:" + String(params?.groupId || "") + ":" + String(params?.memberId || ""), auth, headers, {});
     if (idem.replay) return idem.replay;
     const group = this._requireActiveGroup(params.groupId);
     const actorMember = this._requireVisibleMember(group, auth);
