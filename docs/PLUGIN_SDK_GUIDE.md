@@ -130,6 +130,11 @@ DISABLED
 | `group.poll.read` | CT-02 planned 语义：读取投票选项、截止时间、各选项结果、调用者投票和确认状态 |
 | `group.poll.vote` | CT-02 planned 语义：在投票 OPEN 期间投出或修改调用者的单选投票 |
 | `group.poll.confirm` | CT-02 planned 语义：把投票选项确认为终态群组事项；限投票创建者或同 school 作用域 GROUP_OWNER/GROUP_ADMIN |
+
+CT-03 contract-first planned 权限（同样全部是 `scope: user_school_scope`；此处登记的是 CT-03 契约线授权语义，**不是插件可声明权限**，也不表示账本/值日/报修运行时实现已经 active）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
 | `group.ledger.read` | CT-03 planned 语义：读取同组同 school 作用域内只追加账本 postings、确定性分摊、成员余额和结算历史 |
 | `group.ledger.write` | CT-03 planned 语义：追加费用、退款或更正 postings；不执行支付，也不改写既有 postings |
 | `group.settlement.write` | CT-03 planned 语义：授权当事方提出、确认或取消结算记录；确认只记录双方认可，绝不移动资金 |
