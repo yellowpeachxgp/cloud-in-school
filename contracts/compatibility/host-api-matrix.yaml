@@ -10,28 +10,12 @@ host_api_versions:
     format: dis-extension/v2
     aliases: [dis-plugin/v2]
     status: CURRENT_STABLE
-    supported_types:
-      - feature-card
-      - school-service
-      - library-provider
-      - parcel-discovery-provider
-      - parcel-tracking-provider
-      - parcel-station-provider
-      - academic-adapter
     supported_ui_slots:
-      - home.bento.primary
-      - home.bento.secondary
-      - campus.services.grid
-      - academic.overview.panel
-      - timetable.detail.action
-      - library.booking.preference
-      - profile.extensions
-      - settings.integrations
-      - widget.generic.card
-      - console.dashboard.widget
-      - console.feature.page
-      - parcel.sources
-      - parcel.details
-      - parcel.settings
+      - home.cards
+      - campus.services
+      - library.actions
+      - parcel.cards
+      - parcel.providers
+      - settings.entries
     signature_algorithm: Ed25519
     dynamic_code_loading_allowed: false

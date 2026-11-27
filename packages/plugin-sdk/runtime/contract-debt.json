@@ -1,0 +1,79 @@
+{
+  "version": "w6-contract-surface-2026-11-28-r1",
+  "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface. Records are retained for audit even after the contract line closes them.",
+  "debts": [
+    {
+      "id": "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "packages/plugin-sdk/schema/plugin-extension-v2-runtime.schema.json",
+      "contract_target": "contracts/schemas/plugin-extension-v2.schema.json",
+      "resolved_contract_fields": [
+        "type",
+        "route",
+        "url",
+        "artifact_path"
+      ],
+      "resolution_evidence": "contracts/schemas/plugin-extension-v2.schema.json is now the runtime-shaped snake_case dis-extension/v2 schema and registers the declarative command target fields."
+    },
+    {
+      "id": "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "packages/plugin-sdk/runtime/host-api-matrix.json",
+      "contract_target": "contracts/compatibility/host-api-matrix.yaml",
+      "resolved_contract_fields": [],
+      "resolution_evidence": "contracts/compatibility/host-api-matrix.yaml host_api 2 now lists exactly the six runtime-supported v2 slots and dynamic_code_loading_allowed=false."
+    },
+    {
+      "id": "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "packages/plugin-sdk/test-fixtures/runtime-plugin-manifests/",
+      "contract_target": "contracts/fixtures/plugins/",
+      "resolved_contract_fields": [],
+      "resolution_evidence": "The 58 runtime plugin manifest fixtures were migrated byte-for-byte into contracts/fixtures/plugins/{valid,invalid}/ as the shared authoritative fixture set."
+    },
+    {
+      "id": "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginInstallRequest",
+      "resolved_contract_fields": [
+        "artifact_map",
+        "school_id",
+        "public_key_base64"
+      ],
+      "resolution_evidence": "PluginInstallRequest now requires only the signed manifest, registers canonical artifact_map and school_id, removes detached signature evidence, and documents public_key_base64 strictly as an optional consistency proof rather than trust input."
+    },
+    {
+      "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginLifecycleRequest",
+      "resolved_contract_fields": [
+        "REVOKE_PERMISSION",
+        "target_version",
+        "permission",
+        "scope",
+        "admin_kill_switch",
+        "school_id",
+        "kill_switch_reason",
+        "QUARANTINED",
+        "pre_quarantine_status",
+        "quarantine_reason",
+        "quarantined_at"
+      ],
+      "resolution_evidence": "PluginLifecycleRequest and response schemas now register account/school scoped lifecycle fields, REVOKE_PERMISSION, rollback target_version, admin kill-switch isolation output, and restart-time QUARANTINED evidence fields."
+    },
+    {
+      "id": "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT",
+      "status": "CLOSED_BY_W6_CONTRACT_SURFACE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginCommandInvokeRequest",
+      "resolved_contract_fields": [
+        "payload",
+        "requested_origin",
+        "school_id"
+      ],
+      "resolution_evidence": "PluginCommandInvokeRequest now uses canonical payload/requested_origin/school_id scope selection, removes campus_profile_id and input from the published shape, and the invoke response documents non-echo declarative output."
+    }
+  ]
+}

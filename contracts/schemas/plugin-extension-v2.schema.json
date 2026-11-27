@@ -1,28 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://campus.yellowpeachxgp.com/schemas/plugin-extension-v2.schema.json",
-  "title": "Day in School Unified Plugin Manifest (v1/v2)",
-  "description": "Validates dis-extension/v2, dis-plugin/v2, and legacy dis-campus-plugin/v1 manifests with strict permission, UI slot, command, and Ed25519 signature invariants.",
+  "title": "Day in School dis-extension/v2 Plugin Manifest",
+  "description": "Authoritative contract schema for the runtime snake_case dis-extension/v2 plugin manifest used by cloud plugin-sdk and Android. dis-plugin/v2 is a compatibility alias; legacy_schema_version is only a migration marker for dis-campus-plugin/v1. The schema intentionally mirrors runtime validation, including nonblank display strings, host_api integer bounds, size_bytes bounds, declarative command target fields, and Ed25519 signature shape.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "format",
-    "id",
+    "schema_version",
+    "plugin_id",
     "name",
     "version",
-    "publisher",
-    "license",
-    "hostApi",
-    "types",
-    "capabilities",
-    "permissions"
+    "min_host_api",
+    "max_host_api",
+    "permissions",
+    "allowed_origins",
+    "ui_slots",
+    "commands",
+    "entry_artifacts"
   ],
   "properties": {
-    "format": {
+    "schema_version": {
       "type": "string",
-      "enum": ["dis-extension/v2", "dis-plugin/v2", "dis-campus-plugin/v1"]
+      "enum": [
+        "dis-extension/v2",
+        "dis-plugin/v2"
+      ]
     },
-    "id": {
+    "legacy_schema_version": {
+      "type": "string",
+      "enum": [
+        "dis-campus-plugin/v1"
+      ]
+    },
+    "plugin_id": {
       "type": "string",
       "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$",
       "minLength": 5,
@@ -30,165 +40,90 @@
     },
     "name": {
       "type": "string",
-      "minLength": 2,
-      "maxLength": 80
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
     },
     "version": {
       "type": "string",
-      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?$"
+      "pattern": "^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$"
     },
-    "publisher": {
-      "type": "string",
-      "minLength": 2,
-      "maxLength": 80
+    "min_host_api": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
     },
-    "license": {
-      "type": "string",
-      "minLength": 2,
-      "maxLength": 64
-    },
-    "category": {
-      "type": "string",
-      "enum": ["campus", "library", "parcel", "academic", "utility"]
-    },
-    "hostApi": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["min", "max"],
-      "properties": {
-        "min": { "type": "integer", "minimum": 1, "maximum": 2 },
-        "max": { "type": "integer", "minimum": 1, "maximum": 2 }
-      }
-    },
-    "types": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "string",
-        "enum": [
-          "feature-card",
-          "school-service",
-          "library-provider",
-          "parcel-discovery-provider",
-          "parcel-tracking-provider",
-          "parcel-station-provider",
-          "academic-adapter"
-        ]
-      }
-    },
-    "targets": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["schoolId"],
-        "properties": {
-          "schoolId": { "type": "string", "minLength": 2, "maxLength": 64 }
-        }
-      }
-    },
-    "capabilities": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "string",
-        "pattern": "^[a-z0-9._-]+$"
-      }
+    "max_host_api": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
     },
     "permissions": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["kind"],
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": [
-              "network.request",
-              "account.session",
-              "storage.scoped",
-              "notification.send",
-              "location.coarse"
-            ]
-          },
-          "origins": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^https://[a-zA-Z0-9.-]+(:[0-9]+)?$"
-            }
-          },
-          "paths": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^/[a-zA-Z0-9/_.-]*$"
-            }
-          },
-          "methods": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": ["GET", "POST"]
-            }
-          },
-          "purposes": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": ["READ", "AUTH", "WRITE"]
-            }
-          },
-          "scope": { "type": "string" },
-          "operations": {
-            "type": "array",
-            "items": { "type": "string", "enum": ["read", "write"] }
-          }
-        }
+        "type": "string",
+        "enum": [
+          "network.request",
+          "account.session",
+          "storage.scoped",
+          "notification.send",
+          "location.coarse",
+          "library.booking.read",
+          "library.booking.create",
+          "parcel.read",
+          "parcel.ai.invoke",
+          "ui.slot.render",
+          "parcel.write.import"
+        ]
       }
     },
-    "uiContributions": {
+    "allowed_origins": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https://[a-zA-Z0-9.-]+(:[0-9]+)?$"
+      }
+    },
+    "ui_slots": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["slot", "componentId", "template", "title"],
+        "required": [
+          "slot_id",
+          "card_id",
+          "title",
+          "action_command"
+        ],
         "properties": {
-          "slot": {
+          "slot_id": {
             "type": "string",
             "enum": [
-              "home.bento.primary",
-              "home.bento.secondary",
-              "campus.services.grid",
-              "academic.overview.panel",
-              "timetable.detail.action",
-              "library.booking.preference",
-              "profile.extensions",
-              "settings.integrations",
-              "widget.generic.card",
-              "console.dashboard.widget",
-              "console.feature.page",
-              "parcel.sources",
-              "parcel.details",
-              "parcel.settings"
+              "home.cards",
+              "campus.services",
+              "library.actions",
+              "parcel.cards",
+              "parcel.providers",
+              "settings.entries"
             ]
           },
-          "componentId": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-          "template": {
+          "card_id": {
             "type": "string",
-            "enum": ["metric-card/v1", "key-value-card/v1", "action-list/v1", "query-form/v1"]
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
           },
-          "title": { "type": "string", "minLength": 1, "maxLength": 60 },
-          "subtitle": { "type": "string", "maxLength": 120 },
-          "bind": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["type", "command"],
-            "properties": {
-              "type": { "type": "string", "enum": ["host-query", "host-command"] },
-              "command": { "type": "string" }
-            }
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
+          },
+          "subtitle": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "action_command": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
           }
         }
       }
@@ -198,59 +133,106 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "sideEffect", "handler"],
+        "required": [
+          "name"
+        ],
         "properties": {
-          "name": { "type": "string", "pattern": "^[a-z0-9._-]+$" },
-          "inputSchema": { "type": "string" },
-          "outputSchema": { "type": "string" },
-          "sideEffect": { "type": "string", "enum": ["NONE", "READ_ONLY", "MUTATION_GATED"] },
-          "handler": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind"],
-            "properties": {
-              "kind": { "type": "string", "enum": ["remote-https", "declarative-mock"] },
-              "method": { "type": "string", "enum": ["GET", "POST"] },
-              "path": { "type": "string", "pattern": "^/[a-zA-Z0-9/_.-]*$" },
-              "staticResponse": { "type": "object" }
-            }
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "required_permission": {
+            "type": "string",
+            "enum": [
+              "network.request",
+              "account.session",
+              "storage.scoped",
+              "notification.send",
+              "location.coarse",
+              "library.booking.read",
+              "library.booking.create",
+              "parcel.read",
+              "parcel.ai.invoke",
+              "ui.slot.render",
+              "parcel.write.import"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "route": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "artifact_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
           }
         }
       }
     },
-    "storage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["scope", "maxBytes"],
-      "properties": {
-        "scope": { "type": "string", "enum": ["school-account", "campus-profile"] },
-        "maxBytes": { "type": "integer", "minimum": 1024, "maximum": 10485760 }
-      }
-    },
-    "runtime": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["networkTimeoutMs", "maxResponseBytes"],
-      "properties": {
-        "networkTimeoutMs": { "type": "integer", "minimum": 500, "maximum": 15000 },
-        "maxResponseBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 }
-      }
-    },
-    "artifacts": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string",
-        "pattern": "^[a-f0-9]{64}$"
+    "entry_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "size_bytes"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        }
       }
     },
     "signature": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["algorithm", "publisherKeyId"],
+      "required": [
+        "algorithm",
+        "key_id",
+        "value_base64"
+      ],
       "properties": {
-        "algorithm": { "type": "string", "const": "Ed25519" },
-        "publisherKeyId": { "type": "string", "minLength": 3, "maxLength": 64 },
-        "detachedFile": { "type": "string" }
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "value_base64": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "minLength": 64,
+          "maxLength": 128
+        }
       }
     }
   }

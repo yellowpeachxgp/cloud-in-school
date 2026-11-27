@@ -8070,21 +8070,50 @@ components:
             type: object
         meta:
           $ref: '#/components/schemas/ResponseMeta'
+    PluginSchoolId:
+      type: string
+      minLength: 2
+      maxLength: 32
+      pattern: '^[a-z0-9][a-z0-9_-]{1,31}$'
+      description: Lowercase school isolation scope. The host trims and lowercases this identifier before resolving the account/school plugin installation.
+    PluginPermissionId:
+      type: string
+      enum:
+        - network.request
+        - account.session
+        - storage.scoped
+        - notification.send
+        - location.coarse
+        - library.booking.read
+        - library.booking.create
+        - parcel.read
+        - parcel.ai.invoke
+        - ui.slot.render
+        - parcel.write.import
+    PluginVersion:
+      type: string
+      pattern: '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$'
     PluginInstallRequest:
       type: object
       additionalProperties: false
-      required: [manifest, signature_base64, public_key_base64]
+      required: [manifest]
       properties:
         manifest:
           type: object
-        signature_base64:
-          type: string
-        public_key_base64:
-          type: string
-        artifact_payloads:
+          description: Signed snake_case dis-extension/v2 manifest conforming to contracts/schemas/plugin-extension-v2.schema.json. manifest.signature.value_base64 is the authoritative signature evidence; no detached signature field is part of this contract.
+        artifact_map:
           type: object
           additionalProperties:
             type: string
+          description: Canonical artifact payload map keyed by the exact safe relative paths declared in manifest.entry_artifacts. JSON string values are the artifact bytes represented as UTF-8 text; the host persists them as bytes and verifies every declared SHA-256 digest.
+        public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 128
+          pattern: '^[A-Za-z0-9+/]+={0,2}$'
+          description: Optional client consistency proof for the host-configured publisher trust root. It is never trust input, never overrides the publisher/key_id trust root, and is not required.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
     PluginLifecycleRequest:
       type: object
       additionalProperties: false
@@ -8092,9 +8121,168 @@ components:
       properties:
         action:
           type: string
-          enum: [ENABLE, DISABLE, ROLLBACK, UNINSTALL]
+          enum: [ENABLE, DISABLE, REVOKE_PERMISSION, ROLLBACK, UNINSTALL]
+        target_version:
+          $ref: '#/components/schemas/PluginVersion'
+        permission:
+          $ref: '#/components/schemas/PluginPermissionId'
+        scope:
+          type: string
+          enum: [installation, global]
+          default: installation
+          description: installation affects only the caller account/school installation. global is reserved for the admin/operator kill-switch form of DISABLE.
+        admin_kill_switch:
+          type: boolean
+          default: false
+          description: When true with action DISABLE and scope global, an admin/operator globally disables the plugin and existing installations. Ordinary users cannot use this form.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
         reason:
           type: string
+          maxLength: 240
+          description: Optional audit reason for revocation, uninstall, or administrative kill-switch isolation.
+    PluginInstallation:
+      type: object
+      additionalProperties: false
+      required:
+        - installation_id
+        - cloud_user_id
+        - user_id
+        - school_id
+        - plugin_id
+        - active_version
+        - status
+        - granted_permissions
+        - installed_at
+        - updated_at
+      properties:
+        installation_id:
+          type: string
+          format: uuid
+        cloud_user_id:
+          type: string
+        user_id:
+          type: string
+          description: Compatibility mirror of cloud_user_id retained for the transitional runtime persistence shape.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+        plugin_id:
+          type: string
+          pattern: '^[a-z0-9]+(\.[a-z0-9-]+)+$'
+        active_version:
+          $ref: '#/components/schemas/PluginVersion'
+        previous_version:
+          anyOf:
+            - $ref: '#/components/schemas/PluginVersion'
+            - type: 'null'
+        pending_version:
+          anyOf:
+            - $ref: '#/components/schemas/PluginVersion'
+            - type: 'null'
+        pending_permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginPermissionId'
+        status:
+          type: string
+          enum: [ENABLED, DISABLED, PENDING_PERMISSION_REVIEW, QUARANTINED]
+        granted_permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginPermissionId'
+        disabled_reason:
+          type: string
+        pre_quarantine_status:
+          type: string
+          enum: [ENABLED, DISABLED, PENDING_PERMISSION_REVIEW]
+          description: Lifecycle state captured before restart-time package integrity isolation; present only for QUARANTINED installations.
+        quarantine_reason:
+          type: string
+          enum: [ACTIVE_PACKAGE_COMPROMISED]
+          description: Machine-readable reason a QUARANTINED installation was isolated after persisted package verification failed.
+        quarantined_at:
+          type: string
+          format: date-time
+        installed_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PluginUninstallResult:
+      type: object
+      additionalProperties: false
+      required: [plugin_id, school_id, status, cleanup, uninstalled_at]
+      properties:
+        plugin_id:
+          type: string
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+        status:
+          type: string
+          enum: [UNINSTALLED]
+        cleanup:
+          type: object
+          additionalProperties: false
+          required: [permission_grants, storage_entries, cache_entries]
+          properties:
+            permission_grants:
+              type: integer
+              minimum: 0
+            storage_entries:
+              type: integer
+              minimum: 0
+            cache_entries:
+              type: integer
+              minimum: 0
+        uninstalled_at:
+          type: string
+          format: date-time
+    PluginRuntimeIsolationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - plugin_id
+        - failure_count
+        - consecutive_failure_count
+        - auto_disabled
+        - disabled_reason
+        - kill_switch
+        - kill_switch_reason
+        - updated_at
+        - disabled_installations
+      properties:
+        plugin_id:
+          type: string
+        failure_count:
+          type: integer
+          minimum: 0
+        consecutive_failure_count:
+          type: integer
+          minimum: 0
+        auto_disabled:
+          type: boolean
+        disabled_reason:
+          anyOf:
+            - type: string
+            - type: 'null'
+        kill_switch:
+          type: boolean
+        kill_switch_reason:
+          anyOf:
+            - type: string
+            - type: 'null'
+        updated_at:
+          type: string
+          format: date-time
+        disabled_installations:
+          type: integer
+          minimum: 0
+    PluginLifecycleResponseData:
+      oneOf:
+        - $ref: '#/components/schemas/PluginInstallation'
+        - $ref: '#/components/schemas/PluginUninstallResult'
+        - $ref: '#/components/schemas/PluginRuntimeIsolationResult'
     PluginDescriptorEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
@@ -8106,20 +8294,39 @@ components:
         request_id:
           type: string
         data:
-          type: object
+          $ref: '#/components/schemas/PluginLifecycleResponseData'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     PluginCommandInvokeRequest:
       type: object
       additionalProperties: false
-      required: [campus_profile_id, input]
       properties:
-        campus_profile_id:
-          type: string
-        school_id:
-          type: string
-        input:
+        payload:
           type: object
+          description: Canonical command payload object. The legacy input alias and campus_profile_id selector are not part of the published contract; the bearer cloud user plus school_id select the installation scope.
+        requested_origin:
+          type: string
+          pattern: '^https://[a-zA-Z0-9.-]+(:[0-9]+)?$'
+          description: Optional credential-free HTTPS origin being invoked through the broker. It must be present in the plugin manifest allowed_origins and requires granted network.request permission.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+    PluginCommandInvokeResult:
+      type: object
+      additionalProperties: false
+      required: [plugin_id, version, command, executed, output]
+      properties:
+        plugin_id:
+          type: string
+        version:
+          $ref: '#/components/schemas/PluginVersion'
+        command:
+          type: string
+        executed:
+          type: boolean
+          const: true
+        output:
+          type: object
+          description: Declarative open_host_route/open_url/show_data output, or host-owned reference-handler output for built-in examples. Third-party plugin artifacts are never executed and request payloads are never echoed as fake execution evidence.
     PluginCommandInvokeEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
@@ -8131,7 +8338,7 @@ components:
         request_id:
           type: string
         data:
-          type: object
+          $ref: '#/components/schemas/PluginCommandInvokeResult'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     FeatureCatalogEnvelope:

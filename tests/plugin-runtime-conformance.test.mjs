@@ -14,10 +14,8 @@ import {
   validatePluginRuntimeSchema
 } from "../packages/plugin-sdk/src/runtime-contract.mjs";
 
-const FIXTURE_DIR = path.join(
-  REPO_ROOT,
-  "packages/plugin-sdk/test-fixtures/runtime-plugin-manifests"
-);
+const FIXTURE_ROOT = path.join(REPO_ROOT, "contracts/fixtures/plugins");
+const FIXTURE_GROUPS = ["valid", "invalid"];
 
 function fixtureExpectation(fileName) {
   if (fileName.startsWith("valid-")) return { valid: true, code: null };
@@ -27,23 +25,45 @@ function fixtureExpectation(fileName) {
 }
 
 function fixtureFiles() {
-  return fs
-    .readdirSync(FIXTURE_DIR)
-    .filter((name) => name.endsWith(".json"))
-    .sort();
+  return FIXTURE_GROUPS.flatMap((group) =>
+    fs
+      .readdirSync(path.join(FIXTURE_ROOT, group))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => ({ group, name }))
+  ).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function readFixtureText(fileName) {
-  return fs.readFileSync(path.join(FIXTURE_DIR, fileName), "utf8");
+  for (const group of FIXTURE_GROUPS) {
+    const candidate = path.join(FIXTURE_ROOT, group, fileName);
+    if (fs.existsSync(candidate)) return fs.readFileSync(candidate, "utf8");
+  }
+  throw new Error("shared contract fixture is missing: " + fileName);
 }
 
-test("W6-00 runtime fixtures: SDK conclusions and canonical validation codes are stable", () => {
-  const files = fixtureFiles();
-  assert.ok(files.length >= 30, `expected at least 30 runtime fixtures, found ${files.length}`);
-  assert.ok(files.some((name) => name.startsWith("valid-")), "valid fixtures must exist");
-  assert.ok(files.some((name) => name.startsWith("invalid-")), "invalid fixtures must exist");
+function contractHostApi2Slots() {
+  const matrixText = fs.readFileSync(
+    path.join(REPO_ROOT, "contracts/compatibility/host-api-matrix.yaml"),
+    "utf8"
+  );
+  const host2 = matrixText.split("  - host_api: 2\n")[1];
+  if (!host2) throw new Error("contract host-api matrix is missing host_api 2");
+  const slotSection = host2.split("    supported_ui_slots:\n")[1] || "";
+  return slotSection
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("      - "))
+    .map((line) => line.slice("      - ".length).trim());
+}
 
-  for (const fileName of files) {
+test("W6 contract fixtures: SDK conclusions and canonical validation codes are stable", () => {
+  const files = fixtureFiles();
+  assert.equal(files.length, 58, `expected exactly 58 shared contract fixtures, found ${files.length}`);
+  assert.ok(files.some((file) => file.group === "valid"), "valid fixtures must exist");
+  assert.ok(files.some((file) => file.group === "invalid"), "invalid fixtures must exist");
+
+  for (const file of files) {
+    const fileName = file.name;
+    assert.equal(file.group, fileName.startsWith("valid-") ? "valid" : "invalid", fileName + " must be in the directory matching its name");
     const expected = fixtureExpectation(fileName);
     const manifestText = readFixtureText(fileName);
     if (expected.valid) {
@@ -101,12 +121,13 @@ test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and s
   }
 });
 
-test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2 slot list", () => {
+test("W6 contract host matrix: SDK slot list exactly follows authoritative host_api 2", () => {
   const hostEntry = runtimeHostApiEntry(2);
   assert.ok(hostEntry, "runtime host_api 2 entry must exist");
   assert.equal(hostEntry.format, "dis-extension/v2");
   assert.equal(hostEntry.dynamic_code_loading_allowed, false);
   assert.deepEqual([...SUPPORTED_UI_SLOTS], hostEntry.supported_ui_slots);
+  assert.deepEqual(hostEntry.supported_ui_slots, contractHostApi2Slots());
   assert.deepEqual(hostEntry.supported_ui_slots, [
     "home.cards",
     "campus.services",
@@ -117,7 +138,7 @@ test("W6-00 runtime host matrix: SDK slot list is exactly the runtime host_api 2
   ]);
 });
 
-test("W6-00 examples: both signed reference manifests pass the transitional runtime schema", () => {
+test("W6 contract schema: both signed reference manifests pass the authoritative schema", () => {
   for (const dirName of ["hello-campus-plugin", "parcel-station-plugin"]) {
     const loaded = loadPluginDirectory(path.join(REPO_ROOT, "examples", dirName));
     assert.deepEqual(validatePluginRuntimeSchema(loaded.manifest), [], dirName);
@@ -132,7 +153,7 @@ test("W6-00 honest guide: documented CLI, slots, permissions, and boundaries mat
   assert.match(output, /PLUGIN-GUIDE PASS/);
 });
 
-test("W6-00 CLI init: generated manifest passes the transitional runtime schema and semantic validation", async (t) => {
+test("W6 contract schema: CLI init generated manifest passes authoritative schema and semantic validation", async (t) => {
   const os = await import("node:os");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w600-cli-init-"));
   try {

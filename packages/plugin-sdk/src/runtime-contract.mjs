@@ -6,7 +6,7 @@ import { ContractError, jsonNumberLiteralAt } from "../../contracts/src/index.mj
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_PLUGIN_SCHEMA_PATH = path.resolve(
   __dirname,
-  "../schema/plugin-extension-v2-runtime.schema.json"
+  "../../../contracts/schemas/plugin-extension-v2.schema.json"
 );
 export const RUNTIME_HOST_API_MATRIX_PATH = path.resolve(
   __dirname,

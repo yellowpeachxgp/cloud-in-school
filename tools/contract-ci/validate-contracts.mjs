@@ -1006,6 +1006,109 @@ for (const file of schemaFiles) {
   assert(typeof parsed.title === "string" && parsed.title.length > 0, `Schema ${file} must have a title`);
 }
 
+// Validate the W6 plugin contract surface that AUTO-022 deferred. These checks are
+// deliberately dependency-free structural assertions; runtime conformance tests
+// consume the same fixtures in cloud and Android.
+const pluginSchemaPath = path.join(schemaDir, "plugin-extension-v2.schema.json");
+assert(fs.existsSync(pluginSchemaPath), "contracts/schemas/plugin-extension-v2.schema.json must exist");
+const pluginSchema = JSON.parse(fs.readFileSync(pluginSchemaPath, "utf8"));
+for (const requiredKey of [
+  "schema_version",
+  "plugin_id",
+  "name",
+  "version",
+  "min_host_api",
+  "max_host_api",
+  "permissions",
+  "allowed_origins",
+  "ui_slots",
+  "commands",
+  "entry_artifacts"
+]) {
+  assert(
+    (pluginSchema.required || []).includes(requiredKey),
+    "plugin-extension-v2 contract schema must require snake_case " + requiredKey
+  );
+}
+for (const removedCamelCaseKey of ["format", "id", "hostApi", "types", "capabilities", "uiContributions"]) {
+  assert(
+    !(pluginSchema.required || []).includes(removedCamelCaseKey) && !pluginSchema.properties?.[removedCamelCaseKey],
+    "plugin-extension-v2 contract schema must not retain camelCase draft field " + removedCamelCaseKey
+  );
+}
+assert(
+  JSON.stringify(pluginSchema.properties?.schema_version?.enum || []) === JSON.stringify(["dis-extension/v2", "dis-plugin/v2"]),
+  "plugin schema_version enum must be dis-extension/v2 plus the dis-plugin/v2 compatibility alias"
+);
+assert(
+  JSON.stringify(pluginSchema.properties?.legacy_schema_version?.enum || []) === JSON.stringify(["dis-campus-plugin/v1"]),
+  "legacy_schema_version must be enum-limited to dis-campus-plugin/v1"
+);
+for (const key of ["min_host_api", "max_host_api"]) {
+  const spec = pluginSchema.properties?.[key] || {};
+  assert(spec.type === "integer" && spec.minimum === 1 && spec.maximum === 2147483647,
+    key + " must be an integer in 1..2147483647");
+}
+const artifactSizeSpec = pluginSchema.properties?.entry_artifacts?.items?.properties?.size_bytes || {};
+assert(
+  artifactSizeSpec.type === "integer" && artifactSizeSpec.minimum === 0 && artifactSizeSpec.maximum === 2147483647,
+  "entry_artifacts.size_bytes must be an integer in 0..2147483647"
+);
+for (const commandField of ["type", "route", "url", "artifact_path"]) {
+  assert(
+    Boolean(pluginSchema.properties?.commands?.items?.properties?.[commandField]),
+    "runtime declarative command field commands[]." + commandField + " must be registered in the contract schema"
+  );
+}
+
+const hostMatrixPath = path.join(rootDir, "contracts/compatibility/host-api-matrix.yaml");
+const hostMatrixText = fs.readFileSync(hostMatrixPath, "utf8");
+const host2Block = hostMatrixText.split("  - host_api: 2\n")[1] || "";
+const contractSlots = (host2Block.split("    supported_ui_slots:\n")[1] || "")
+  .split(/\r?\n/)
+  .filter((line) => line.startsWith("      - "))
+  .map((line) => line.slice("      - ".length).trim());
+assert(
+  JSON.stringify(contractSlots) === JSON.stringify([
+    "home.cards",
+    "campus.services",
+    "library.actions",
+    "parcel.cards",
+    "parcel.providers",
+    "settings.entries"
+  ]),
+  "host-api-matrix host_api 2 must expose exactly the six runtime-supported v2 slots"
+);
+assert(
+  host2Block.includes("dynamic_code_loading_allowed: false"),
+  "host-api-matrix host_api 2 must forbid dynamic code loading"
+);
+
+const pluginFixtureRoot = path.join(rootDir, "contracts/fixtures/plugins");
+const validFixtureDir = path.join(pluginFixtureRoot, "valid");
+const invalidFixtureDir = path.join(pluginFixtureRoot, "invalid");
+assert(fs.existsSync(validFixtureDir), "contracts/fixtures/plugins/valid must exist");
+assert(fs.existsSync(invalidFixtureDir), "contracts/fixtures/plugins/invalid must exist");
+const validFixtures = fs.readdirSync(validFixtureDir).filter((name) => name.endsWith(".json"));
+const invalidFixtures = fs.readdirSync(invalidFixtureDir).filter((name) => name.endsWith(".json"));
+assert(validFixtures.length >= 10, "plugin contract fixtures must include at least 10 valid cases");
+assert(invalidFixtures.length >= 48, "plugin contract fixtures must include at least 48 invalid cases");
+assert(validFixtures.length + invalidFixtures.length >= 58, "plugin contract fixture set must preserve the 58 runtime-aligned cases");
+for (const name of validFixtures) {
+  assert(name.startsWith("valid-"), "valid plugin fixture has invalid name prefix: " + name);
+}
+for (const name of invalidFixtures) {
+  assert(/^invalid-runtime_[a-z_]+-.+\.json$/.test(name), "invalid plugin fixture does not encode a runtime validation code: " + name);
+}
+assert(
+  new Set([...validFixtures, ...invalidFixtures]).size === validFixtures.length + invalidFixtures.length,
+  "plugin fixture names must be unique across valid/invalid groups"
+);
+assert(
+  catalogErrorCodes.has("PLUGIN_COMMAND_UNSUPPORTED"),
+  "error catalog must register PLUGIN_COMMAND_UNSUPPORTED"
+);
+
 console.log(
   `[CONTRACT-CI PASS] Verified SYSTEM_CONTRACT.md, strict duplicate-key scan across ${contractYamlFiles.length} YAML files, ${openApiPartitions.active.length} active + ${openApiPartitions.planned.length} planned + ${openApiPartitions.reserved.length} reserved OpenAPI 3.1.2 operations (100% lifecycle inventory parity), and ${schemaFiles.length} JSON Schema 2020-12 files.`
 );
