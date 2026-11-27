@@ -228,6 +228,7 @@ test("W4-01 invites: QR payload, use limit, expiry, revocation, accept replay, a
   assert.equal(acceptA.status, 201);
   assert.equal(acceptA.body.data.role, "MEMBER");
   assert.equal(acceptA.body.data.sharing_level, "NONE");
+  assert.notEqual(acceptA.body.data.display_name, memberA.user.display_name, "group display name must be a school-scoped pseudonym");
 
   const replayA = await app.inject({
     method: "POST",
@@ -441,6 +442,16 @@ test("W4-01 privacy: community data is exported and data-delete detaches members
     assert.notEqual(event.payload_json.cloud_user_id, owner.user.id);
     assert.notEqual(event.payload_json.actor_cloud_user_id, owner.user.id);
   }
+
+  const solo = setupUser(app, "owner_solo_delete");
+  const soloGroup = await createStudyGroup(app, solo);
+  const soloDeleted = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/data-delete",
+    headers: solo.auth
+  });
+  assert.equal(soloDeleted.status, 202);
+  assert.equal(app.store.groups.has(soloGroup.group_id), false, "sole-member caller-created group shell must be removed after data delete");
 });
 
 test("W4-01 member governance: cross-school accept is isolated, last owner cannot demote self, and admin removal emits ADMIN_REMOVED with sharing withdrawn", async () => {
