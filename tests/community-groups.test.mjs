@@ -992,7 +992,212 @@ test("W4-01 atomicity: data-delete is a single commit unit — pre-publish flush
 });
 
 
-test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserves object identity, and keeps async cross-await writes connected", async () => {
+test("W4-01 atomicity: moments mixed nested posts/comments/contact_requests rollback is complete", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-moments-atomic-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app, "owner_moments_atomic");
+    const other = setupUser(app, "other_moments_atomic");
+    const keptComment = {
+      id: "comment-keep",
+      author_user_id: other.user.id,
+      content: "保留评论",
+      created_at: new Date(BASE_NOW).toISOString(),
+      delivery: { nested: { witnesses: [{ value: "keep-comment" }] } }
+    };
+    const erasedComment = {
+      id: "comment-erased",
+      author_user_id: owner.user.id,
+      content: "应擦除评论",
+      created_at: new Date(BASE_NOW + 1).toISOString(),
+      delivery: { nested: { witnesses: [{ value: "erase-comment" }] } }
+    };
+    const keptRequest = {
+      id: "request-keep",
+      sender_user_id: other.user.id,
+      status: "PENDING",
+      created_at: new Date(BASE_NOW + 2).toISOString(),
+      thread: { nested: { messages: [{ body: "keep-request" }] } }
+    };
+    const erasedRequest = {
+      id: "request-erased",
+      sender_user_id: owner.user.id,
+      status: "PENDING",
+      created_at: new Date(BASE_NOW + 3).toISOString(),
+      thread: { nested: { messages: [{ body: "erase-request" }] } }
+    };
+    app.store.momentsState.posts = [
+      {
+        id: "post-owned-by-erased-user",
+        owner_cloud_user_id: owner.user.id,
+        content: "删号用户自己的帖子",
+        created_at: new Date(BASE_NOW + 4).toISOString(),
+        comments: [keptComment, erasedComment],
+        contact_requests: [keptRequest, erasedRequest],
+        blocked_user_ids: []
+      },
+      {
+        id: "post-owned-by-surviving-user",
+        owner_cloud_user_id: other.user.id,
+        content: "其他用户帖子",
+        created_at: new Date(BASE_NOW + 5).toISOString(),
+        comments: [keptComment, erasedComment],
+        contact_requests: [keptRequest, erasedRequest],
+        blocked_user_ids: []
+      }
+    ];
+    app.store.momentsState.book_listings = [
+      { id: "book-erased", owner_cloud_user_id: owner.user.id, title: "应删除教材" },
+      { id: "book-keep", owner_cloud_user_id: other.user.id, title: "保留教材" }
+    ];
+    app.store.momentsState.anti_lost_tags = [
+      { id: "tag-erased", owner_cloud_user_id: owner.user.id, label: "应删除标签" },
+      { id: "tag-keep", owner_cloud_user_id: other.user.id, label: "保留标签" }
+    ];
+    app.store.flushSnapshotStrictSync();
+    const foreignPostRef = app.store.momentsState.posts[1];
+    const keptCommentRef = keptComment;
+    const keptRequestRef = keptRequest;
+
+    app.store._persistFaultInject = "tmp_write";
+    const failed = await app.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner.auth
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+
+    // 发布前故障必须保留完整混合 nested moments 世界：数组不能被截断成 0，
+    // 别人的 post/comments/contact_requests 与嵌套字段都必须原样可恢复。
+    assert.equal(app.store.momentsState.posts.length, 2, "posts array must not be truncated by rollback");
+    assert.equal(app.store.momentsState.posts[1], foreignPostRef);
+    assert.equal(app.store.momentsState.posts[1].comments.length, 2, "mixed nested comments must roll back completely");
+    assert.equal(app.store.momentsState.posts[1].contact_requests.length, 2, "mixed nested contact requests must roll back completely");
+    assert.equal(app.store.momentsState.posts[1].comments[0], keptCommentRef);
+    assert.equal(app.store.momentsState.posts[1].contact_requests[0], keptRequestRef);
+    assert.equal(app.store.momentsState.posts[1].comments[0].delivery.nested.witnesses[0].value, "keep-comment");
+    assert.equal(app.store.momentsState.book_listings.length, 2);
+    assert.equal(app.store.momentsState.anti_lost_tags.length, 2);
+
+    const diskProbe = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assert.equal(diskProbe.store.momentsState.posts.length, 2, "unpublished moments purge must not reach disk");
+    assert.equal(diskProbe.store.momentsState.posts[1].comments.length, 2);
+    assert.equal(diskProbe.store.momentsState.posts[1].contact_requests.length, 2);
+    clearTimeout(diskProbe.store._snapshotFlushTimer);
+
+    app.store._persistFaultInject = null;
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner.auth
+    });
+    assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
+    assert.equal(deleted.body.data.moments_purged.removed_posts, 1);
+    assert.equal(deleted.body.data.moments_purged.scrubbed_comments, 1, "the erased user's comment is scrubbed from the surviving post");
+    assert.equal(deleted.body.data.moments_purged.scrubbed_requests, 1, "the erased user's request is scrubbed from the surviving post");
+    assert.equal(app.store.momentsState.posts.length, 1);
+    assert.equal(app.store.momentsState.posts[0], foreignPostRef, "surviving post object identity is preserved during memory commit");
+    assert.equal(app.store.momentsState.posts[0].comments.length, 1);
+    assert.equal(app.store.momentsState.posts[0].comments[0], keptCommentRef, "surviving nested comment object identity is preserved");
+    assert.equal(app.store.momentsState.posts[0].comments[0].id, "comment-keep");
+    assert.equal(app.store.momentsState.posts[0].contact_requests.length, 1);
+    assert.equal(app.store.momentsState.posts[0].contact_requests[0], keptRequestRef, "surviving nested contact request object identity is preserved");
+    assert.equal(app.store.momentsState.posts[0].contact_requests[0].id, "request-keep");
+    assert.deepEqual(
+      app.store.momentsState.book_listings.map((row) => row.id),
+      ["book-keep"]
+    );
+    assert.deepEqual(
+      app.store.momentsState.anti_lost_tags.map((row) => row.id),
+      ["tag-keep"]
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("W4-01 atomicity: nested and returned thenables are rejected, and async continuations never land", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-thenable-atomic-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const store = new CloudDatabaseStore({ snapshotPath, requireDurableSnapshot: true });
+    const userId = crypto.randomUUID();
+    store.users.set(userId, {
+      id: userId,
+      issuer: "https://issuer.example",
+      subject: "thenable-subject",
+      username: "thenable-user",
+      display_name: "thenable-user",
+      status: "ACTIVE",
+      auth_version: 1,
+      created_at: new Date(BASE_NOW).toISOString(),
+      nested_probe: { child: { values: [{ marker: "pre-commit" }] } }
+    });
+    store.flushSnapshotStrictSync();
+    const userRef = store.users.get(userId);
+
+    let nestedInnerExecuted = false;
+    assert.throws(
+      () => store.runDataDeleteAtomicCommitUnit((staging) => {
+        store.runDataDeleteAtomicCommitUnit(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          nestedInnerExecuted = true;
+          staging.users.get(userId).auth_version = 77;
+        });
+      }),
+      (err) => err?.code === "CONFLICT" && /nested data-delete/.test(err.message),
+      "depth>0 nested commit units must be rejected before the async body can start"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(nestedInnerExecuted, false, "nested async body must never execute");
+    assert.equal(userRef.auth_version, 1);
+    assert.equal(userRef.status, "ACTIVE");
+
+    let continuationRan = false;
+    assert.throws(
+      () => store.runDataDeleteAtomicCommitUnit((staging) => {
+        const stagingUser = staging.users.get(userId);
+        stagingUser.auth_version = 77;
+        stagingUser.status = "DELETED";
+        return (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          continuationRan = true;
+          stagingUser.auth_version = 78;
+          stagingUser.status = "ASYNC_ESCAPED";
+        })();
+      }),
+      (err) => err?.code === "INVALID_ARGUMENT" && /thenables are rejected/.test(err.message),
+      "a returned thenable must reject the whole data-delete candidate"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(continuationRan, true, "the isolated continuation may run only inside the discarded replica");
+    assert.equal(userRef.auth_version, 1, "async continuation must not land auth_version=77/78 in live state");
+    assert.equal(userRef.status, "ACTIVE", "async continuation must not land status in live state");
+    assert.equal(userRef.nested_probe.child.values[0].marker, "pre-commit");
+
+    let legacyExecuted = false;
+    assert.throws(
+      () => store.runAtomicCommitUnit(() => {
+        legacyExecuted = true;
+      }),
+      (err) => err?.code === "INVALID_ARGUMENT" && /retired/.test(err.message),
+      "the retired generic overlay entry must fail closed"
+    );
+    assert.equal(legacyExecuted, false, "retired generic overlay must never execute caller code");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("W4-01 atomicity scale: data-delete candidate rollback handles 200k events and preserves nested object identity", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-delete-scale-"));
   const snapshotPath = path.join(tmpDir, "cloud-state.json");
   try {
@@ -1006,7 +1211,13 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
       display_name: "scale-user",
       status: "ACTIVE",
       auth_version: 1,
-      created_at: new Date(BASE_NOW).toISOString()
+      created_at: new Date(BASE_NOW).toISOString(),
+      nested_probe: {
+        child: {
+          values: [{ marker: "scale-nested-object" }],
+          metadata: { depth: 2 }
+        }
+      }
     };
     store.users.set(userId, user);
     for (let index = 0; index < 200000; index += 1) {
@@ -1021,26 +1232,29 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
     store.flushSnapshotStrictSync();
 
     const userRef = store.users.get(userId);
+    const nestedRef = userRef.nested_probe.child;
     const outboxRef = store.outboxEvents;
     const firstEventRef = store.outboxEvents[0];
     const auditLength = store.auditEvents.length;
+    let stagingUserRef = null;
     const externalReferenceWrite = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       userRef.auth_version = 99;
     })();
     store._persistFaultInject = "tmp_write";
     assert.throws(
-      () => store.runAtomicCommitUnit(() => {
-        const transactionalUser = store.users.get(userId);
+      () => store.runDataDeleteAtomicCommitUnit((staging) => {
+        stagingUserRef = staging.users.get(userId);
+        const transactionalUser = staging.users.get(userId);
         transactionalUser.status = "DELETED";
-        store.outboxEvents.push({
+        staging.outboxEvents.push({
           id: "scale-event-overflow",
           aggregate_type: "scale_probe",
           event_type: "scale.probed",
           payload_json: { index: 200000, cloud_user_id: userId },
           created_at: new Date(BASE_NOW + 200000).toISOString()
         });
-        store.recordAudit({
+        staging.recordAudit({
           actor_kind: "USER",
           actor_ref: userId,
           action: "SCALE_ATOMIC_DELETE_PROBE",
@@ -1053,22 +1267,51 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
       "pre-publish failure must surface as a retryable storage failure"
     );
 
-    assert.equal(store.users.get(userId), userRef, "rollback must preserve row object identity");
-    assert.equal(userRef.status, "ACTIVE", "discard of the write overlay restores the pre-delete value without cloning");
-    assert.equal(store.outboxEvents, outboxRef, "rollback must preserve the live event array identity");
-    assert.equal(store.outboxEvents.length, 200000, "no partial event append may survive the aborted unit");
+    assert.equal(store.users.get(userId), userRef, "pre-publish failure never swaps the live row object");
+    assert.equal(userRef.status, "ACTIVE", "live state is untouched by the discarded candidate");
+    assert.equal(store.outboxEvents, outboxRef, "pre-publish failure preserves the live event array identity");
+    assert.equal(store.outboxEvents.length, 200000, "no partial event append may survive the rejected candidate");
     assert.equal(store.outboxEvents[0], firstEventRef, "existing event rows keep their object identity");
     assert.equal(store.outboxEvents.some((event) => event.id === "scale-event-overflow"), false);
-    assert.equal(store.auditEvents.length, auditLength, "no partial audit append may survive the aborted unit");
+    assert.equal(store.auditEvents.length, auditLength, "no partial audit append may survive the rejected candidate");
     await externalReferenceWrite;
     assert.equal(userRef.auth_version, 99, "original reference write across await must remain connected after rollback");
 
     store._persistFaultInject = null;
     store.flushSnapshotStrictSync();
+    store.runDataDeleteAtomicCommitUnit((staging) => {
+      stagingUserRef = staging.users.get(userId);
+      staging.users.get(userId).status = "DELETED";
+      staging.outboxEvents.push({
+        id: "scale-event-overflow",
+        aggregate_type: "scale_probe",
+        event_type: "scale.probed",
+        payload_json: { index: 200000, cloud_user_id: userId },
+        created_at: new Date(BASE_NOW + 200000).toISOString()
+      });
+    });
+
+    assert.equal(store.users.get(userId), userRef, "successful memory commit preserves row object identity");
+    assert.equal(userRef.status, "DELETED");
+    assert.equal(userRef.nested_probe.child, nestedRef, "successful memory commit preserves nested object identity");
+    assert.equal(userRef.nested_probe.child.values[0].marker, "scale-nested-object");
+    assert.equal(store.outboxEvents, outboxRef, "successful memory commit preserves top-level array identity");
+    assert.equal(store.outboxEvents.length, 200001);
+    assert.equal(store.outboxEvents[0], firstEventRef);
+
+    const postCommitEscape = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      stagingUserRef.auth_version = 88;
+      stagingUserRef.status = "ASYNC_ESCAPED";
+    })();
+    await postCommitEscape;
+    assert.equal(userRef.auth_version, 99, "post-commit writes to the discarded replica must not land");
+    assert.equal(userRef.status, "DELETED", "post-commit replica writes must not corrupt committed state");
 
     const restarted = new CloudDatabaseStore({ snapshotPath, requireDurableSnapshot: true });
     assert.equal(restarted.users.get(userId).auth_version, 99, "original reference write across await must be durable after restart");
-    assert.equal(restarted.outboxEvents.length, 200000);
+    assert.equal(restarted.users.get(userId).status, "DELETED");
+    assert.equal(restarted.outboxEvents.length, 200001);
     clearTimeout(restarted._snapshotFlushTimer);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

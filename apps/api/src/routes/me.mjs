@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { route } from "./route-table.mjs";
+import { revokeAllUserSessionsInStore } from "../../../../packages/identity/src/index.mjs";
+import { CommunityService } from "../../../../packages/community/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -242,24 +244,22 @@ export function createMeRoutes(ctx) {
   }),
 
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
-    // Single atomic commit unit: the halt/purge/revoke mutations and their one
-    // durable flush succeed or fail together. Mutations are buffered in the
-    // store's copy-on-write overlay; a pre-publish flush failure discards that
-    // overlay so memory never diverges from the unpublished disk snapshot,
-    // while a post-publish failure surfaces STORAGE_COMMIT_UNKNOWN without
-    // rollback, matching the single-operation commit protocol.
-    const outcome = await store.runAtomicCommitUnit(() => {
-      const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
-      const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
-      const communityPurged = community?.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+    // Data-delete专用原子路径：先在隔离纯数据副本中计算完整删后世界，
+    // 单次耐久发布成功后才换 live 状态；发布前故障不触碰 live。这里不复用
+    // 已退役的通用 copy-on-write overlay，也不给突变体异步逃逸的机会。
+    const outcome = store.runDataDeleteAtomicCommitUnit((staging) => {
+      const stagingCommunity = new CommunityService(staging);
+      const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
+      const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+      const communityPurged = stagingCommunity.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
-      identity.revokeAllUserSessions(auth.cloudUserId, {
+      revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
         unlinkXpeach: false,
         reason: "USER_DATA_DELETE",
         nowMs
       });
-      const user = store.users.get(auth.cloudUserId);
+      const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
       return { cascade, momentsPurged, communityPurged };
     });

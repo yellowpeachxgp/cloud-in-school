@@ -588,7 +588,7 @@ export function simulateMigration0004OnCatalog(
   };
 }
 
-const ATOMIC_MAP_FIELDS = Object.freeze([
+const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
   "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
   "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
@@ -597,494 +597,250 @@ const ATOMIC_MAP_FIELDS = Object.freeze([
   "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
   "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
 ]);
-const ATOMIC_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
+const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
-function atomicIsObject(value) {
-  return value !== null && (typeof value === "object" || typeof value === "function");
+function dataDeleteIsObject(value) {
+  return value !== null && typeof value === "object";
 }
 
-function atomicCanWrap(value) {
-  if (!atomicIsObject(value)) return false;
-  if (Array.isArray(value) || value instanceof Set || value instanceof Map) return true;
+function dataDeleteContainerKind(value) {
+  if (!dataDeleteIsObject(value)) return null;
+  if (Array.isArray(value)) return "array";
+  if (value instanceof Map) return "map";
+  if (value instanceof Set) return "set";
   const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+  return proto === Object.prototype || proto === null ? "object" : null;
 }
 
-function atomicShallowCopy(value) {
-  if (Array.isArray(value)) return value.slice();
-  if (value instanceof Set) return new Set(value);
-  if (value instanceof Map) return new Map(value);
-  const copy = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
-  return Object.assign(copy, value);
+function dataDeleteAssertDescriptorValue(value, key, descriptor) {
+  if (!descriptor || !Object.hasOwn(descriptor, "value")) {
+    throw new Error(
+      "data-delete 原子候选包含访问器属性 " + String(key) + "；删号计算只接受纯数据对象图"
+    );
+  }
+  return descriptor;
 }
 
-class AtomicTransactionalMap extends Map {
-  constructor(transaction, liveMap) {
-    super();
-    this.transaction = transaction;
-    this.liveMap = liveMap;
-    this.copy = null;
+function cloneDataDeleteValue(value, liveToClone, cloneToLive) {
+  if (!dataDeleteIsObject(value)) return value;
+  const existing = liveToClone.get(value);
+  if (existing) return existing;
+  const kind = dataDeleteContainerKind(value);
+  if (!kind) {
+    throw new Error("data-delete 原子候选包含不可克隆的非纯数据对象；拒绝猜测删后世界");
   }
 
-  _source() {
-    return this.copy || this.liveMap;
-  }
+  let copy;
+  if (kind === "array") copy = [];
+  else if (kind === "map") copy = new Map();
+  else if (kind === "set") copy = new Set();
+  else copy = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
+  liveToClone.set(value, copy);
+  cloneToLive.set(copy, value);
 
-  _mutable() {
-    if (!this.copy) this.copy = new Map(this.liveMap);
-    return this.copy;
-  }
-
-  get size() {
-    return this._source().size;
-  }
-
-  get(key) {
-    return this.transaction.wrapValue(this._source().get(key));
-  }
-
-  has(key) {
-    return this._source().has(key);
-  }
-
-  set(key, value) {
-    this._mutable().set(key, this.transaction.prepareOverlayValue(value));
-    return this;
-  }
-
-  delete(key) {
-    if (!this.copy && !this.liveMap.has(key)) return false;
-    return this._mutable().delete(key);
-  }
-
-  clear() {
-    if (this._source().size === 0) return;
-    this.copy = new Map();
-  }
-
-  *keys() {
-    yield* this._source().keys();
-  }
-
-  *values() {
-    for (const value of this._source().values()) {
-      yield this.transaction.wrapValue(value);
+  if (kind === "array") {
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === "length") continue;
+      const descriptor = dataDeleteAssertDescriptorValue(
+        value,
+        key,
+        Reflect.getOwnPropertyDescriptor(value, key)
+      );
+      Reflect.defineProperty(copy, key, {
+        ...descriptor,
+        value: cloneDataDeleteValue(descriptor.value, liveToClone, cloneToLive)
+      });
     }
+    copy.length = value.length;
+    return copy;
   }
-
-  *entries() {
-    for (const [key, value] of this._source().entries()) {
-      yield [key, this.transaction.wrapValue(value)];
+  if (kind === "map") {
+    for (const [key, item] of value.entries()) {
+      copy.set(
+        cloneDataDeleteValue(key, liveToClone, cloneToLive),
+        cloneDataDeleteValue(item, liveToClone, cloneToLive)
+      );
     }
+    return copy;
   }
-
-  forEach(callback, thisArg = undefined) {
-    for (const [key, value] of this._source().entries()) {
-      callback.call(thisArg, this.transaction.wrapValue(value), key, this);
+  if (kind === "set") {
+    for (const item of value.values()) {
+      copy.add(cloneDataDeleteValue(item, liveToClone, cloneToLive));
     }
+    return copy;
   }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = dataDeleteAssertDescriptorValue(
+      value,
+      key,
+      Reflect.getOwnPropertyDescriptor(value, key)
+    );
+    Reflect.defineProperty(copy, key, {
+      ...descriptor,
+      value: cloneDataDeleteValue(descriptor.value, liveToClone, cloneToLive)
+    });
+  }
+  return copy;
+}
 
-  [Symbol.iterator]() {
-    return this.entries();
+function syncDataDeleteArray(target, source, materialize) {
+  const sourceKeys = new Set(Reflect.ownKeys(source));
+  for (const key of Reflect.ownKeys(target)) {
+    if (key !== "length" && !sourceKeys.has(key)) delete target[key];
+  }
+  for (const key of sourceKeys) {
+    if (key === "length") continue;
+    const descriptor = dataDeleteAssertDescriptorValue(
+      source,
+      key,
+      Reflect.getOwnPropertyDescriptor(source, key)
+    );
+    target[key] = materialize(descriptor.value);
+  }
+  target.length = source.length;
+}
+
+function syncDataDeleteObject(target, source, materialize) {
+  const sourceKeys = new Set(Reflect.ownKeys(source));
+  for (const key of Reflect.ownKeys(target)) {
+    if (!sourceKeys.has(key)) delete target[key];
+  }
+  for (const key of sourceKeys) {
+    const descriptor = dataDeleteAssertDescriptorValue(
+      source,
+      key,
+      Reflect.getOwnPropertyDescriptor(source, key)
+    );
+    target[key] = materialize(descriptor.value);
   }
 }
 
-class AtomicCommitTransaction {
+function syncDataDeleteMap(target, source, materialize) {
+  const nextEntries = [];
+  for (const [key, item] of source.entries()) {
+    nextEntries.push([materialize(key), materialize(item)]);
+  }
+  const nextKeys = new Set(nextEntries.map(([key]) => key));
+  for (const key of Array.from(target.keys())) {
+    if (!nextKeys.has(key)) target.delete(key);
+  }
+  for (const [key, item] of nextEntries) target.set(key, item);
+}
+
+function syncDataDeleteSet(target, source, materialize) {
+  const nextItems = [];
+  for (const item of source.values()) nextItems.push(materialize(item));
+  const nextSet = new Set(nextItems);
+  for (const item of Array.from(target.values())) {
+    if (!nextSet.has(item)) target.delete(item);
+  }
+  for (const item of nextItems) target.add(item);
+}
+
+function materializeDataDeleteCandidate(value, cloneToLive, memo) {
+  if (!dataDeleteIsObject(value)) return value;
+  const existing = memo.get(value);
+  if (existing) return existing;
+  const kind = dataDeleteContainerKind(value);
+  if (!kind) {
+    throw new Error("data-delete 原子候选包含不可落地的非纯数据对象");
+  }
+  const liveCounterpart = cloneToLive.get(value);
+  let target;
+  if (liveCounterpart && dataDeleteContainerKind(liveCounterpart) === kind) {
+    target = liveCounterpart;
+  } else if (kind === "array") {
+    target = [];
+  } else if (kind === "map") {
+    target = new Map();
+  } else if (kind === "set") {
+    target = new Set();
+  } else {
+    target = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
+  }
+  memo.set(value, target);
+
+  if (kind === "array") {
+    syncDataDeleteArray(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else if (kind === "map") {
+    syncDataDeleteMap(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else if (kind === "set") {
+    syncDataDeleteSet(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else {
+    syncDataDeleteObject(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  }
+  return target;
+}
+
+class DataDeleteAtomicTransition {
   constructor(store) {
     this.store = store;
-    this.originals = new Map();
-    this.transactionalMaps = new Map();
-    this.states = new WeakMap();
-    this.overlayNodes = new Set();
-    this.targetToProxy = new WeakMap();
-    this.proxyToTarget = new WeakMap();
-    this.overlayOwned = new WeakSet();
+    const replica = store._createDataDeleteReplica();
+    this.staging = replica.staging;
+    this.cloneToLive = replica.cloneToLive;
     this.closed = false;
   }
 
-  install() {
-    for (const field of ATOMIC_MAP_FIELDS) {
-      const liveMap = this.store[field];
-      if (!(liveMap instanceof Map)) continue;
-      this.originals.set(field, liveMap);
-      const transactionalMap = new AtomicTransactionalMap(this, liveMap);
-      this.transactionalMaps.set(field, transactionalMap);
-      this.store[field] = transactionalMap;
-    }
-    for (const field of ATOMIC_ARRAY_FIELDS) {
-      const liveArray = this.store[field];
-      if (!Array.isArray(liveArray)) continue;
-      this.originals.set(field, liveArray);
-      this.store[field] = this.wrapValue(liveArray);
-    }
-    if (atomicCanWrap(this.store.momentsState)) {
-      this.originals.set("momentsState", this.store.momentsState);
-      this.store.momentsState = this.wrapValue(this.store.momentsState);
-    }
-  }
-
-  uninstall() {
-    for (const [field, original] of this.originals.entries()) {
-      this.store[field] = original;
-    }
-  }
-
-  stateFor(target) {
-    return this.states.get(target) || null;
-  }
-
-  sourceFor(target) {
-    return this.stateFor(target)?.copy || target;
-  }
-
-  ensureCopy(target) {
-    let state = this.states.get(target);
-    if (!state) {
-      state = { copy: null };
-      this.states.set(target, state);
-      this.overlayNodes.add(target);
-    }
-    if (!state.copy) state.copy = atomicShallowCopy(target);
-    return state.copy;
-  }
-
-  wrapValue(value) {
-    if (!atomicCanWrap(value)) return value;
-    if (this.proxyToTarget.has(value)) return value;
-    if (this.overlayOwned.has(value)) return value;
-    const existing = this.targetToProxy.get(value);
-    if (existing) return existing;
-    const tx = this;
-    const handler = {
-      get(target, prop, receiver) {
-        if (target instanceof Set) return tx.getSetMember(target, prop, receiver);
-        if (target instanceof Map) return tx.getMapMember(target, prop, receiver);
-        const source = tx.sourceFor(target);
-        return tx.wrapValue(Reflect.get(source, prop, receiver));
-      },
-      set(target, prop, value) {
-        if (tx.closed) {
-          target[prop] = tx.proxyToTarget.get(value) || value;
-          return true;
-        }
-        const copy = tx.ensureCopy(target);
-        copy[prop] = tx.prepareOverlayValue(value);
-        return true;
-      },
-      deleteProperty(target, prop) {
-        if (tx.closed) return delete target[prop];
-        const copy = tx.ensureCopy(target);
-        return delete copy[prop];
-      },
-      defineProperty(target, prop, descriptor) {
-        if (tx.closed) {
-          if (Object.hasOwn(descriptor, "value")) {
-            descriptor = { ...descriptor, value: tx.proxyToTarget.get(descriptor.value) || descriptor.value };
-          }
-          return Reflect.defineProperty(target, prop, descriptor);
-        }
-        const copy = tx.ensureCopy(target);
-        if (Object.hasOwn(descriptor, "value")) {
-          descriptor = { ...descriptor, value: tx.prepareOverlayValue(descriptor.value) };
-        }
-        return Reflect.defineProperty(copy, prop, descriptor);
-      },
-      has(target, prop) {
-        return Reflect.has(tx.sourceFor(target), prop);
-      },
-      ownKeys(target) {
-        return Reflect.ownKeys(tx.sourceFor(target));
-      },
-      getOwnPropertyDescriptor(target, prop) {
-        return Reflect.getOwnPropertyDescriptor(tx.sourceFor(target), prop);
-      },
-      getPrototypeOf(target) {
-        return Object.getPrototypeOf(target);
-      },
-      setPrototypeOf() {
-        return false;
-      }
-    };
-    const proxy = new Proxy(value, handler);
-    this.targetToProxy.set(value, proxy);
-    this.proxyToTarget.set(proxy, value);
-    return proxy;
-  }
-
-  getSetMember(target, prop, receiver) {
-    const tx = this;
-    const source = this.sourceFor(target);
-    if (prop === "size") return source.size;
-    if (prop === "add") {
-      return (value) => {
-        if (tx.closed) target.add(tx.proxyToTarget.get(value) || value);
-        else tx.ensureCopy(target).add(tx.prepareOverlayValue(value));
-        return receiver;
-      };
-    }
-    if (prop === "delete") {
-      return (value) => {
-        const raw = tx.proxyToTarget.get(value) || value;
-        if (!source.has(raw)) return false;
-        if (tx.closed) return target.delete(raw);
-        return tx.ensureCopy(target).delete(raw);
-      };
-    }
-    if (prop === "clear") {
-      return () => {
-        if (source.size === 0) return;
-        if (tx.closed) {
-          target.clear();
-          return;
-        }
-        const copy = tx.ensureCopy(target);
-        copy.clear();
-      };
-    }
-    if (prop === "has") {
-      return (value) => source.has(tx.proxyToTarget.get(value) || value);
-    }
-    if (prop === "values" || prop === "keys" || prop === Symbol.iterator) {
-      return function* values() {
-        for (const item of source.values()) yield tx.wrapValue(item);
-      };
-    }
-    if (prop === "entries") {
-      return function* entries() {
-        for (const item of source.values()) {
-          const wrapped = tx.wrapValue(item);
-          yield [wrapped, wrapped];
-        }
-      };
-    }
-    if (prop === "forEach") {
-      return (callback, thisArg = undefined) => {
-        for (const item of source.values()) {
-          const wrapped = tx.wrapValue(item);
-          callback.call(thisArg, wrapped, wrapped, receiver);
-        }
-      };
-    }
-    return Reflect.get(source, prop, receiver);
-  }
-
-  getMapMember(target, prop, receiver) {
-    const tx = this;
-    const source = this.sourceFor(target);
-    if (prop === "size") return source.size;
-    if (prop === "get") {
-      return (key) => tx.wrapValue(source.get(key));
-    }
-    if (prop === "set") {
-      return (key, value) => {
-        if (tx.closed) target.set(key, tx.proxyToTarget.get(value) || value);
-        else tx.ensureCopy(target).set(key, tx.prepareOverlayValue(value));
-        return receiver;
-      };
-    }
-    if (prop === "delete") {
-      return (key) => {
-        if (!source.has(key)) return false;
-        if (tx.closed) return target.delete(key);
-        return tx.ensureCopy(target).delete(key);
-      };
-    }
-    if (prop === "clear") {
-      return () => {
-        if (source.size === 0) return;
-        if (tx.closed) {
-          target.clear();
-          return;
-        }
-        tx.ensureCopy(target).clear();
-      };
-    }
-    if (prop === "has") return (key) => source.has(key);
-    if (prop === "keys") {
-      return function* keys() {
-        yield* source.keys();
-      };
-    }
-    if (prop === "values") {
-      return function* values() {
-        for (const value of source.values()) yield tx.wrapValue(value);
-      };
-    }
-    if (prop === "entries" || prop === Symbol.iterator) {
-      return function* entries() {
-        for (const [key, value] of source.entries()) {
-          yield [key, tx.wrapValue(value)];
-        }
-      };
-    }
-    if (prop === "forEach") {
-      return (callback, thisArg = undefined) => {
-        for (const [key, value] of source.entries()) {
-          callback.call(thisArg, tx.wrapValue(value), key, receiver);
-        }
-      };
-    }
-    return Reflect.get(source, prop, receiver);
-  }
-
-  adoptChildValue(value, seen, stack) {
-    const unwrapped = this.proxyToTarget.get(value);
-    if (unwrapped) return unwrapped;
-    if (!atomicCanWrap(value)) return value;
-    if (this.overlayOwned.has(value) || this.targetToProxy.has(value) || this.states.has(value)) {
-      return value;
-    }
-    if (seen.has(value)) return value;
-    this.overlayOwned.add(value);
-    seen.add(value);
-    stack.push(value);
-    return value;
-  }
-
-  prepareOverlayValue(value) {
-    const unwrappedRoot = this.proxyToTarget.get(value);
-    if (unwrappedRoot) return unwrappedRoot;
-    if (!atomicCanWrap(value)) return value;
-    if (this.overlayOwned.has(value) || this.targetToProxy.has(value) || this.states.has(value)) {
-      return value;
-    }
-    this.overlayOwned.add(value);
-    const seen = new WeakSet([value]);
-    const stack = [value];
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (Array.isArray(current)) {
-        for (let index = 0; index < current.length; index += 1) {
-          current[index] = this.adoptChildValue(current[index], seen, stack);
-        }
-      } else if (current instanceof Set) {
-        for (const item of Array.from(current.values())) {
-          const next = this.adoptChildValue(item, seen, stack);
-          if (next !== item) {
-            current.delete(item);
-            current.add(next);
-          }
-        }
-      } else if (current instanceof Map) {
-        for (const [key, item] of Array.from(current.entries())) {
-          const next = this.adoptChildValue(item, seen, stack);
-          if (next !== item) current.set(key, next);
-        }
-      } else {
-        for (const key of Reflect.ownKeys(current)) {
-          const descriptor = Reflect.getOwnPropertyDescriptor(current, key);
-          if (!descriptor || !Object.hasOwn(descriptor, "value") || descriptor.writable !== true) continue;
-          current[key] = this.adoptChildValue(descriptor.value, seen, stack);
-        }
-      }
-    }
-    return value;
-  }
-
-  materializeValue(value) {
-    return this.proxyToTarget.get(value) || value;
-  }
-
-  applyArrayOverlay(target, copy) {
-    if (target.length !== copy.length) target.length = copy.length;
-    for (let index = 0; index < copy.length; index += 1) {
-      if (index in copy) target[index] = this.materializeValue(copy[index]);
-      else delete target[index];
-    }
-    const copyKeys = new Set(Reflect.ownKeys(copy));
-    for (const key of Reflect.ownKeys(target)) {
-      if (!copyKeys.has(key) && key !== "length") delete target[key];
-    }
-    for (const key of copyKeys) {
-      if (key === "length" || /^(0|[1-9]\d*)$/.test(String(key))) continue;
-      target[key] = this.materializeValue(copy[key]);
-    }
-  }
-
-  applyObjectOverlay(target, copy) {
-    const copyKeys = new Set(Reflect.ownKeys(copy));
-    for (const key of Reflect.ownKeys(target)) {
-      if (!copyKeys.has(key)) delete target[key];
-    }
-    for (const key of copyKeys) {
-      target[key] = this.materializeValue(copy[key]);
-    }
-  }
-
-  applyNodeOverlay(target, copy) {
-    if (Array.isArray(target) && Array.isArray(copy)) {
-      this.applyArrayOverlay(target, copy);
-      return;
-    }
-    if (target instanceof Set && copy instanceof Set) {
-      for (const item of target.values()) {
-        if (!copy.has(item)) target.delete(item);
-      }
-      for (const item of copy.values()) {
-        const next = this.materializeValue(item);
-        if (!target.has(next)) target.add(next);
-      }
-      return;
-    }
-    if (target instanceof Map && copy instanceof Map) {
-      for (const key of target.keys()) {
-        if (!copy.has(key)) target.delete(key);
-      }
-      for (const [key, value] of copy.entries()) {
-        target.set(key, this.materializeValue(value));
-      }
-      return;
-    }
-    this.applyObjectOverlay(target, copy);
-  }
-
-  applyMapOverlay(liveMap, copy) {
-    for (const key of liveMap.keys()) {
-      if (!copy.has(key)) liveMap.delete(key);
-    }
-    for (const [key, value] of copy.entries()) {
-      liveMap.set(key, this.materializeValue(value));
-    }
-  }
-
-  clearOverlayStates() {
-    for (const target of this.overlayNodes) this.states.delete(target);
-    this.overlayNodes.clear();
-  }
-
-  abort() {
-    if (this.closed) return;
+  discard() {
     this.closed = true;
-    this.clearOverlayStates();
-    this.uninstall();
+  }
+
+  _applyToLive() {
+    const memo = new WeakMap();
+    const materialize = (value) => materializeDataDeleteCandidate(value, this.cloneToLive, memo);
+    for (const field of DATA_DELETE_MAP_FIELDS) {
+      const next = materialize(this.staging[field]);
+      if (this.store[field] !== next) this.store[field] = next;
+    }
+    for (const field of DATA_DELETE_ARRAY_FIELDS) {
+      const next = materialize(this.staging[field]);
+      if (this.store[field] !== next) this.store[field] = next;
+    }
+    this.store.momentsState = materialize(this.staging.momentsState);
     this.store._rebuildIndexes?.();
+  }
+
+  _applyCommittedMemoryState() {
+    try {
+      this._applyToLive();
+    } catch (cause) {
+      this.store.storageCommitUnknown = true;
+      const err = new ContractError(
+        "STORAGE_COMMIT_UNKNOWN",
+        "删号快照已发布，但内存换态失败；禁止重试覆盖，需隔离核验",
+        { durability: "UNKNOWN", retry_same_key: true }
+      );
+      err.commitPublished = true;
+      err.memory_commit_error = cause?.message || "memory commit failed";
+      throw err;
+    }
   }
 
   commit() {
-    if (this.closed) return;
+    if (this.closed) {
+      throw new ContractError("INVALID_ARGUMENT", "data-delete atomic transition is already closed");
+    }
     this.closed = true;
-    let firstError = null;
-    for (const target of this.overlayNodes) {
-      const copy = this.states.get(target)?.copy;
-      if (!copy) continue;
-      try {
-        this.applyNodeOverlay(target, copy);
-      } catch (err) {
-        if (!firstError) firstError = err;
-      }
+    if (this.store._snapshotFlushTimer) {
+      clearTimeout(this.store._snapshotFlushTimer);
+      this.store._snapshotFlushTimer = null;
     }
-    for (const [field, transactionalMap] of this.transactionalMaps.entries()) {
-      if (!transactionalMap.copy) continue;
-      try {
-        this.applyMapOverlay(this.originals.get(field), transactionalMap.copy);
-      } catch (err) {
-        if (!firstError) firstError = err;
+    try {
+      this.store._flushSnapshotSync({ strict: true, stateSource: this.staging });
+    } catch (err) {
+      if (err?.commitPublished === true) {
+        // The candidate may already be durable. Adopt the same candidate in
+        // memory; STORAGE_COMMIT_UNKNOWN remains a durability fence rather
+        // than a rollback signal.
+        try {
+          this._applyToLive();
+        } catch (commitErr) {
+          err.memory_commit_error = commitErr?.message || "memory commit failed";
+        }
       }
+      throw err;
     }
-    this.clearOverlayStates();
-    this.uninstall();
-    this.store._rebuildIndexes?.();
-    if (firstError) throw firstError;
+    this._applyCommittedMemoryState();
   }
 }
 
@@ -1442,6 +1198,38 @@ export class CloudDatabaseStore {
     }
   }
 
+  _createDataDeleteReplica() {
+    const liveToClone = new WeakMap();
+    const cloneToLive = new WeakMap();
+    const staging = Object.create(CloudDatabaseStore.prototype);
+    staging.snapshotPath = null;
+    staging.snapshotFs = this.snapshotFs;
+    staging.onPersistStage = null;
+    staging.storageCommitUnknown = false;
+    staging.requireDurableSnapshot = false;
+    staging.pricingMicropeach = this.pricingMicropeach;
+    staging.adminSsoSubjects = new Set(this.adminSsoSubjects || []);
+    staging.appliedMigrations = new Set(this.appliedMigrations || []);
+    staging._snapshotFlushTimer = null;
+    staging._snapshotTmpSeq = 0;
+    staging._persistFaultInject = null;
+    staging.lastPersistenceError = null;
+    // Inner service methods still call saveSnapshot/flushSnapshotStrictSync as
+    // part of their standalone contracts. The data-delete commit unit owns the
+    // single durable flush, so those calls are inert inside the isolated copy.
+    staging._commitUnitDepth = 1;
+    staging._dataDeleteCommitUnitActive = false;
+    for (const field of DATA_DELETE_MAP_FIELDS) {
+      staging[field] = cloneDataDeleteValue(this[field], liveToClone, cloneToLive);
+    }
+    for (const field of DATA_DELETE_ARRAY_FIELDS) {
+      staging[field] = cloneDataDeleteValue(this[field], liveToClone, cloneToLive);
+    }
+    staging.momentsState = cloneDataDeleteValue(this.momentsState, liveToClone, cloneToLive);
+    staging._rebuildIndexes();
+    return { staging, cloneToLive };
+  }
+
   saveSnapshot() {
     if (this._commitUnitDepth > 0) return;
     this.assertStorageWritable();
@@ -1474,74 +1262,56 @@ export class CloudDatabaseStore {
     this._flushSnapshotSync({ strict: true });
   }
 
-  // Atomic commit unit (W4-01 data-delete hardening). The unit uses a
-  // copy-on-write transaction overlay instead of clone-and-reinsert rollback:
-  // mutations performed through the store are buffered in shallow per-node
-  // overlays, the durable candidate is serialized from that overlay, and only a
-  // successful/published candidate is applied back to the live objects in
-  // place. Pre-publish failure simply discards the overlay, so rollback cannot
-  // be partial, cannot overflow the call stack while copying large event
-  // arrays, and never disconnects long-lived object references.
-  _finishAtomicCommitUnit(transaction, result) {
-    try {
-      if (this._snapshotFlushTimer) {
-        clearTimeout(this._snapshotFlushTimer);
-        this._snapshotFlushTimer = null;
-      }
-      this._flushSnapshotSync({ strict: true });
-    } catch (err) {
-      if (err && err.commitPublished === true) {
-        // The candidate may already be durable. Adopt the same candidate in
-        // memory; STORAGE_COMMIT_UNKNOWN remains a durability fence rather
-        // than a rollback signal.
-        try {
-          transaction.commit();
-        } catch (commitErr) {
-          err.memory_commit_error = commitErr?.message || "memory commit failed";
-        }
-      } else {
-        transaction.abort();
-      }
-      throw err;
-    }
-    transaction.commit();
-    return result;
-  }
-
-  runAtomicCommitUnit(fn) {
+  // Data-delete专用原子提交单元。通用 copy-on-write overlay 已退役：
+  // 先在隔离的纯数据副本中计算完整删后世界，再把该候选序列化为单次耐久
+  // 提交；只有候选成功发布后才换 live 状态。发布前故障不触碰 live，发布后
+  // 故障按 commit-unknown 采用同一候选，绝不制造第三种内存状态。
+  runDataDeleteAtomicCommitUnit(fn) {
     if (typeof fn !== "function") {
-      throw new ContractError("INVALID_ARGUMENT", "runAtomicCommitUnit requires a mutation function");
+      throw new ContractError("INVALID_ARGUMENT", "runDataDeleteAtomicCommitUnit requires a mutation function");
     }
-    if (this._commitUnitDepth > 0) return fn();
-    this._commitUnitDepth = 1;
-    const transaction = new AtomicCommitTransaction(this);
-    transaction.install();
+    if (this._dataDeleteCommitUnitActive) {
+      throw new ContractError(
+        "CONFLICT",
+        "nested data-delete atomic commit units are rejected before any mutation executes"
+      );
+    }
+    this.assertStorageWritable();
+    this._dataDeleteCommitUnitActive = true;
+    const transition = new DataDeleteAtomicTransition(this);
     let result;
     try {
-      result = fn();
+      result = fn(transition.staging);
     } catch (err) {
-      transaction.abort();
-      this._commitUnitDepth = 0;
+      transition.discard();
+      this._dataDeleteCommitUnitActive = false;
       throw err;
     }
     if (result && typeof result.then === "function") {
-      // Atomicity relies on the mutation body being synchronous: while it runs
-      // the Node event loop cannot interleave unrelated writes with the overlay.
-      // Reject thenables explicitly instead of publishing too early or letting
-      // an unrelated request accidentally write into this unit's overlay.
-      transaction.abort();
-      this._commitUnitDepth = 0;
-      result.then(() => {}, () => {});
+      transition.discard();
+      this._dataDeleteCommitUnitActive = false;
+      try { result.then(() => {}, () => {}); } catch { /* thenable rejection is still isolated */ }
       throw new ContractError(
         "INVALID_ARGUMENT",
-        "runAtomicCommitUnit requires a synchronous mutation function; async mutation bodies are rejected"
+        "data-delete atomic mutations must be synchronous; nested or returned thenables are rejected"
       );
     }
     try {
-      return this._finishAtomicCommitUnit(transaction, result);
+      transition.commit();
+      return result;
     } finally {
-      this._commitUnitDepth = 0;
+      this._dataDeleteCommitUnitActive = false;
     }
+  }
+
+  // Compatibility fence for the removed generic transaction overlay. It must
+  // never execute caller code: an async continuation captured before removal
+  // cannot be allowed to write into live state half-committed.
+  runAtomicCommitUnit() {
+    throw new ContractError(
+      "INVALID_ARGUMENT",
+      "generic copy-on-write atomic commit units are retired; use the dedicated data-delete atomic path"
+    );
   }
 
   pruneAuthEphemera(nowMs = Date.now()) {
@@ -1667,8 +1437,9 @@ export class CloudDatabaseStore {
     }
   }
 
-  _flushSnapshotSync({ strict = false } = {}) {
+  _flushSnapshotSync({ strict = false, stateSource = null } = {}) {
     this.assertStorageWritable();
+    const source = stateSource || this;
     if (!this.snapshotPath) {
       if (strict && this.requireDurableSnapshot) {
         throw new ContractError(
@@ -1677,16 +1448,16 @@ export class CloudDatabaseStore {
         );
       }
       if (!this.requireDurableSnapshot) {
-        for (const p of this.reservationPlans.values()) {
+        for (const p of source.reservationPlans.values()) {
           if (p?._stopPersistencePending) delete p._stopPersistencePending;
         }
-        for (const j of this.reservationJobs.values()) {
+        for (const j of source.reservationJobs.values()) {
           if (j?._stopPersistencePending) delete j._stopPersistencePending;
         }
       }
       return;
     }
-    this.pruneAuthEphemera();
+    source.pruneAuthEphemera();
     let tmp = null;
     let published = false;
     let intentWritten = false;
@@ -1718,41 +1489,41 @@ export class CloudDatabaseStore {
       };
       const data = {
         storage_protocol: 2,
-        users: Array.from(this.users.entries()),
-        userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
-        userSsoRoles: Array.from(this.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
-        authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
-        exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
-        deviceSessions: Array.from(this.deviceSessions.entries()),
-        schoolBindings: Array.from(this.schoolBindings.entries()),
-        encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
-        consents: Array.from(this.consents.entries()),
-        reservationPlans: Array.from(this.reservationPlans.entries()).map(serializeRecord),
-        reservationJobs: Array.from(this.reservationJobs.entries()).map(serializeRecord),
-        scheduleEvents: Array.from(this.scheduleEvents.entries()),
-        schoolReservations: Array.from(this.schoolReservations.entries()),
-        reservationAttempts: Array.from(this.reservationAttempts.entries()),
-        reservationOrders: Array.from(this.reservationOrders.entries()),
-        financeOperations: Array.from(this.financeOperations.entries()),
-        refundRequests: Array.from(this.refundRequests.entries()),
-        parcels: Array.from(this.parcels.entries()),
-        parcelEvents: Array.from(this.parcelEvents.entries()),
-        parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
-        parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
-        pluginInstallations: Array.from(this.pluginInstallations.entries()),
-        schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
-        campusContent: Array.from(this.campusContent.entries()),
-        groups: Array.from(this.groups.entries()),
-        groupMembers: Array.from(this.groupMembers.entries()),
-        groupInvites: Array.from(this.groupInvites.entries()),
-        momentsState: this.momentsState,
-        notifications: Array.from(this.notifications.entries()),
+        users: Array.from(source.users.entries()),
+        userRoles: Array.from(source.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        userSsoRoles: Array.from(source.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        authTransactions: Array.from(source.authTransactions.entries()).slice(-200),
+        exchangeTickets: Array.from(source.exchangeTickets.entries()).slice(-200),
+        deviceSessions: Array.from(source.deviceSessions.entries()),
+        schoolBindings: Array.from(source.schoolBindings.entries()),
+        encryptedCredentials: Array.from(source.encryptedCredentials.entries()),
+        consents: Array.from(source.consents.entries()),
+        reservationPlans: Array.from(source.reservationPlans.entries()).map(serializeRecord),
+        reservationJobs: Array.from(source.reservationJobs.entries()).map(serializeRecord),
+        scheduleEvents: Array.from(source.scheduleEvents.entries()),
+        schoolReservations: Array.from(source.schoolReservations.entries()),
+        reservationAttempts: Array.from(source.reservationAttempts.entries()),
+        reservationOrders: Array.from(source.reservationOrders.entries()),
+        financeOperations: Array.from(source.financeOperations.entries()),
+        refundRequests: Array.from(source.refundRequests.entries()),
+        parcels: Array.from(source.parcels.entries()),
+        parcelEvents: Array.from(source.parcelEvents.entries()),
+        parcelSourceConnections: Array.from(source.parcelSourceConnections.entries()),
+        parcelSyncJobs: Array.from(source.parcelSyncJobs.entries()),
+        pluginInstallations: Array.from(source.pluginInstallations.entries()),
+        schoolIntegrations: Array.from(source.schoolIntegrations.entries()),
+        campusContent: Array.from(source.campusContent.entries()),
+        groups: Array.from(source.groups.entries()),
+        groupMembers: Array.from(source.groupMembers.entries()),
+        groupInvites: Array.from(source.groupInvites.entries()),
+        momentsState: source.momentsState,
+        notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
         // original result after restart — never a duplicate, never lost.
-        idempotencyRecords: Array.from(this.idempotencyRecords.entries()),
-        priceQuotes: Array.from(this.priceQuotes.entries()),
-        outboxEvents: this.outboxEvents,
-        auditEvents: this.auditEvents.slice(-500)
+        idempotencyRecords: Array.from(source.idempotencyRecords.entries()),
+        priceQuotes: Array.from(source.priceQuotes.entries()),
+        outboxEvents: source.outboxEvents,
+        auditEvents: source.auditEvents.slice(-500)
       };
       this._snapshotTmpSeq = (this._snapshotTmpSeq || 0) + 1;
       tmp = `${this.snapshotPath}.tmp.${process.pid}.${this._snapshotTmpSeq}`;
@@ -1794,10 +1565,10 @@ export class CloudDatabaseStore {
         stage = "intent_clear_fsync"; this._syncSnapshotDirectory(stage);
       } catch (err) { err.persistStage = err.persistStage || stage; throw err; }
       this._unknownSnapshotHash = undefined;
-      for (const p of this.reservationPlans.values()) {
+      for (const p of source.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;
       }
-      for (const j of this.reservationJobs.values()) {
+      for (const j of source.reservationJobs.values()) {
         if (j?._stopPersistencePending) delete j._stopPersistencePending;
       }
     } catch (err) {
