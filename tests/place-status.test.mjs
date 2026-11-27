@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createCampusCloudApp as createCampusCloudAppBase } from "../apps/api/src/app.mjs";
+import { applyOperationsSchoolGrantBootstrap } from "../apps/api/src/operations-grants.mjs";
 import { PLACE_STATUS_DELETED_USER_TOMBSTONE } from "../packages/place-status/src/index.mjs";
 
 const BASE_NOW = Date.parse("2026-11-27T10:00:00.000Z");
@@ -1104,4 +1105,91 @@ test("W4-04 erasure: flag detail is removed from foreign review receipt replay a
   assert.equal(moderatorDeleted.body.data.place_status_purged.operations_grants_deleted, 1);
   assert.equal(app.store.hasOperationsSchoolScope(moderator.user.id, "haut", "place.status.moderate"), false);
   assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).review_note, null, "reviewer deletion must erase reviewer-authored free text");
+});
+
+test("W4-04 moderation provisioning: startup-managed operations grant survives snapshot restart and revokes when removed", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-place-ops-grant-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  const storeOptions = { snapshotPath, requireDurableSnapshot: true };
+  const readQueue = (app, user) => app.inject({
+    method: "GET",
+    url: "/api/v1/admin/place-report-flags?school_id=haut&status=OPEN",
+    headers: user.auth
+  });
+  try {
+    const app1 = createTestApp({ storeOptions });
+    const author = setupUser(app1, "author_ops_bootstrap");
+    const flagger = setupUser(app1, "flagger_ops_bootstrap");
+    const moderator = setupUser(app1, "moderator_ops_bootstrap", { bind: false });
+
+    const report = await createReport(app1, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
+    assert.equal(report.status, 201, JSON.stringify(report.body));
+    const flag = await app1.inject({
+      method: "POST",
+      url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+      headers: writeHeaders(flagger),
+      body: { reason: "INCORRECT", detail: "启动配置授权供给回归" }
+    });
+    assert.equal(flag.status, 201, JSON.stringify(flag.body));
+
+    const before = await readQueue(app1, moderator);
+    assert.equal(before.status, 403, JSON.stringify(before.body));
+    assert.equal(before.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+    assert.throws(
+      () => applyOperationsSchoolGrantBootstrap(app1.store, JSON.stringify([{
+        cloud_user_id: crypto.randomUUID(),
+        school_id: "haut",
+        permission: "place.status.moderate",
+        granted_by_ref: "unknown-user-negative"
+      }])),
+      /unknown cloud user/
+    );
+    assert.throws(
+      () => applyOperationsSchoolGrantBootstrap(app1.store, JSON.stringify([{
+        cloud_user_id: moderator.user.id,
+        school_id: "haut",
+        permission: "group.repair.manage",
+        granted_by_ref: "undeclared-permission-negative"
+      }])),
+      /declared operations_school_scope/
+    );
+
+    const configured = JSON.stringify([{
+      cloud_user_id: moderator.user.id,
+      school_id: "haut",
+      permission: "place.status.moderate",
+      granted_by_ref: "ops-bootstrap-test"
+    }]);
+    const applied = applyOperationsSchoolGrantBootstrap(app1.store, configured, { nowMs: BASE_NOW });
+    assert.deepEqual(applied, { granted: 1, already_active: 0, ref_updated: 0, revoked: 0 });
+    const after = await readQueue(app1, moderator);
+    assert.equal(after.status, 200, JSON.stringify(after.body));
+    assert.equal(after.body.data.length, 1);
+
+    const app2 = createTestApp({ storeOptions });
+    const restarted = await readQueue(app2, moderator);
+    assert.equal(restarted.status, 200, JSON.stringify(restarted.body));
+    assert.equal(restarted.body.data.length, 1, "standard snapshot startup must read the durable operations grant");
+    const grant = Array.from(app2.store.operationsSchoolGrants.values()).find((row) =>
+      row.cloud_user_id === moderator.user.id && row.school_id === "haut" && row.permission === "place.status.moderate" && row.status === "ACTIVE"
+    );
+    assert.ok(grant);
+    assert.ok(String(grant.granted_by_ref).startsWith("ops-env:"));
+
+    const removed = applyOperationsSchoolGrantBootstrap(app2.store, "[]", { nowMs: BASE_NOW + 1000 });
+    assert.deepEqual(removed, { granted: 0, already_active: 0, ref_updated: 0, revoked: 1 });
+    const revoked = await readQueue(app2, moderator);
+    assert.equal(revoked.status, 403, JSON.stringify(revoked.body));
+    assert.equal(revoked.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+
+    const app3 = createTestApp({ storeOptions });
+    const revokedAfterRestart = await readQueue(app3, moderator);
+    assert.equal(revokedAfterRestart.status, 403, JSON.stringify(revokedAfterRestart.body));
+    assert.equal(app3.store.hasOperationsSchoolScope(moderator.user.id, "haut", "place.status.moderate"), false);
+    assert.ok(app3.store.auditEvents.some((event) =>
+      event.action === "OPERATIONS_SCHOOL_GRANT_BOOTSTRAP" && event.outcome === "REVOKED"
+    ), "bootstrap revocation must be audit-recorded");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

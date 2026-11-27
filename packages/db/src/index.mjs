@@ -2232,6 +2232,17 @@ export class CloudDatabaseStore {
     return revoked;
   }
 
+  revokeOperationsSchoolGrant(grantId, nowMs = Date.now()) {
+    const grant = this.operationsSchoolGrants.get(grantId);
+    if (!grant || grant.status !== "ACTIVE" || grant.revoked_at) return false;
+    const ts = new Date(nowMs).toISOString();
+    grant.status = "REVOKED";
+    grant.updated_at = ts;
+    grant.revoked_at = ts;
+    this.saveSnapshot();
+    return true;
+  }
+
   hasOperationsSchoolScope(cloudUserId, schoolId, permission) {
     const userId = String(cloudUserId || "").trim();
     const scopedSchoolId = String(schoolId || "").trim();
