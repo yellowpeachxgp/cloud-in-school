@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { route } from "./route-table.mjs";
+import { revokeAllUserSessionsInStore } from "../../../../packages/identity/src/index.mjs";
+import { CommunityService } from "../../../../packages/community/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -12,6 +14,7 @@ export function createMeRoutes(ctx) {
     identity,
     financeService,
     parcelHub,
+    community,
     syncUserToSso
   } = ctx;
 
@@ -219,6 +222,11 @@ export function createMeRoutes(ctx) {
     const momentsPosts = (ms.posts || []).filter((p) => p?.owner_cloud_user_id === auth.cloudUserId);
     const momentsBooks = (ms.book_listings || []).filter((b) => b?.owner_cloud_user_id === auth.cloudUserId);
     const momentsTags = (ms.anti_lost_tags || []).filter((t) => t?.owner_cloud_user_id === auth.cloudUserId);
+    const communityExport = community?.exportUserData?.(auth.cloudUserId) || {
+      community_groups: [],
+      community_group_members: [],
+      community_group_invites: []
+    };
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
@@ -229,34 +237,43 @@ export function createMeRoutes(ctx) {
         parcels,
         moments_posts: momentsPosts,
         moments_books: momentsBooks,
-        moments_anti_lost_tags: momentsTags
+        moments_anti_lost_tags: momentsTags,
+        ...communityExport
       })
     };
   }),
 
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
-    const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
-    const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
-    const pluginPurged = store.purgeUserPluginData?.(auth.cloudUserId) || null;
-    // Plans/bindings were already halted above with the USER_DATA_DELETE audit
-    // reason; only revoke sessions here (unlinkXpeach stays false).
-    identity.revokeAllUserSessions(auth.cloudUserId, {
-      unlinkXpeach: false,
-      reason: "USER_DATA_DELETE",
-      nowMs
+    // Data-delete专用原子路径：先在隔离纯数据副本中计算完整删后世界，
+    // 单次耐久发布成功后才换 live 状态；发布前故障不触碰 live。这里不复用
+    // 已退役的通用 copy-on-write overlay，也不给突变体异步逃逸的机会。
+    const outcome = store.runDataDeleteAtomicCommitUnit((staging) => {
+      const stagingCommunity = new CommunityService(staging);
+      const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
+      const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+      const communityPurged = stagingCommunity.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+      const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
+      // Plans/bindings were already halted above with the USER_DATA_DELETE audit
+      // reason; only revoke sessions here (unlinkXpeach stays false).
+      revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
+        unlinkXpeach: false,
+        reason: "USER_DATA_DELETE",
+        nowMs
+      });
+      const user = staging.users.get(auth.cloudUserId);
+      if (user) user.status = "DELETED";
+      return { cascade, momentsPurged, communityPurged, pluginPurged };
     });
-    const user = store.users.get(auth.cloudUserId);
-    if (user) user.status = "DELETED";
-    store.flushSnapshotStrictSync?.();
     return {
       status: 202,
       code: "DATA_DELETE_ACCEPTED",
       data: {
         cloud_user_id: auth.cloudUserId,
         status: "DELETED",
-        cancelled_job_ids: cascade.cancelledJobIds,
-        moments_purged: momentsPurged,
-        plugin_purged: pluginPurged
+        cancelled_job_ids: outcome.cascade.cancelledJobIds,
+        moments_purged: outcome.momentsPurged,
+        community_purged: outcome.communityPurged,
+        plugin_purged: outcome.pluginPurged
       }
     };
   })
