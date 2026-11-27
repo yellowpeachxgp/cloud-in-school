@@ -14,7 +14,7 @@ function isPlainObject(value) {
 }
 
 export function fenToJsonValue(value) {
-  const big = value instanceof BigInt ? value : BigInt(value);
+  const big = typeof value === "bigint" ? value : BigInt(value);
   return big >= SAFE_MIN && big <= SAFE_MAX ? Number(big) : big.toString();
 }
 
@@ -23,7 +23,7 @@ export function fenToStorageValue(value) {
 }
 
 export function fenToBigInt(value) {
-  if (value instanceof BigInt) return value;
+  if (typeof value === "bigint") return value;
   if (typeof value === "number") {
     if (!Number.isInteger(value) || !Number.isSafeInteger(value)) {
       throw ledgerError("ARITHMETIC_OVERFLOW", "integer fen value is outside the exactly representable runtime integer range");
@@ -39,7 +39,7 @@ export function parseLedgerAmountInput(value, field, { literal = null, allowZero
     throw ledgerError("BAD_REQUEST", field + " must be a plain integer fen literal, not a floating-point or exponent literal");
   }
   let big;
-  if (value instanceof BigInt) {
+  if (typeof value === "bigint") {
     big = value;
   } else if (typeof value === "number") {
     if (!Number.isInteger(value)) {
@@ -106,13 +106,13 @@ function normalizeWeightMap(raw) {
       if (!row || typeof row !== "object") continue;
       const id = row.member_id ?? row.participant_member_id ?? row.participantId ?? row.participantId;
       const weight = row.weight ?? row.days;
-      out.set(validateParticipantId(id), weight instanceof BigInt ? weight : BigInt(weight));
+      out.set(validateParticipantId(id), typeof weight === "bigint" ? weight : BigInt(weight));
     }
     return out;
   }
   if (isPlainObject(raw)) {
     const out = new Map();
-    for (const [id, weight] of Object.entries(raw)) out.set(validateParticipantId(id), weight instanceof BigInt ? weight : BigInt(weight));
+    for (const [id, weight] of Object.entries(raw)) out.set(validateParticipantId(id), typeof weight === "bigint" ? weight : BigInt(weight));
     return out;
   }
   return new Map();

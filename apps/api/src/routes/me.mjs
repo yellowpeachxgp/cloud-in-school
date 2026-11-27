@@ -4,6 +4,7 @@ import { revokeAllUserSessionsInStore } from "../../../../packages/identity/src/
 import { CommunityService } from "../../../../packages/community/src/index.mjs";
 import { AvailabilityService } from "../../../../packages/availability/src/index.mjs";
 import { PlaceStatusService } from "../../../../packages/place-status/src/index.mjs";
+import { LedgerService } from "../../../../packages/ledger/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -19,6 +20,7 @@ export function createMeRoutes(ctx) {
     community,
     availability,
     placeStatus,
+    ledger,
     syncUserToSso
   } = ctx;
 
@@ -244,6 +246,16 @@ export function createMeRoutes(ctx) {
       place_status_report_flags: [],
       place_status_subscriptions: []
     };
+    const ledgerExport = ledger?.exportUserData?.(auth.cloudUserId) || {
+      ledger_entries: [],
+      ledger_settlements: [],
+      duty_rotas: [],
+      duty_tasks: [],
+      duty_swaps: [],
+      repair_tickets: [],
+      repair_ticket_revisions: [],
+      repair_reviews: []
+    };
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
@@ -257,7 +269,8 @@ export function createMeRoutes(ctx) {
         moments_anti_lost_tags: momentsTags,
         ...communityExport,
         ...availabilityExport,
-        ...placeStatusExport
+        ...placeStatusExport,
+        ...ledgerExport
       })
     };
   }),
@@ -270,12 +283,17 @@ export function createMeRoutes(ctx) {
       const stagingCommunity = new CommunityService(staging);
       const stagingAvailability = new AvailabilityService(staging);
       const stagingPlaceStatus = new PlaceStatusService(staging);
+      const stagingLedger = new LedgerService(staging);
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       // Availability erasure must run before membership rows are removed: its
       // busy blocks and votes are keyed by membership-period IDs.
       const availabilityPurged = stagingAvailability.purgeUserAvailabilityData?.(auth.cloudUserId, nowMs) || null;
       const communityPurged = stagingCommunity.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+      // Ledger erasure runs after community group/member deletion so groups whose
+      // final member was erased cascade exactly like SQL 0007 ON DELETE CASCADE;
+      // surviving group rows keep pseudonymous membership-period audit refs.
+      const ledgerPurged = stagingLedger.purgeUserLedgerData?.(auth.cloudUserId, nowMs) || null;
       const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
       const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
@@ -287,7 +305,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, availabilityPurged, communityPurged, pluginPurged, placeStatusPurged };
+      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged };
     });
     return {
       status: 202,
@@ -299,6 +317,7 @@ export function createMeRoutes(ctx) {
         moments_purged: outcome.momentsPurged,
         availability_purged: outcome.availabilityPurged,
         community_purged: outcome.communityPurged,
+        ledger_purged: outcome.ledgerPurged,
         plugin_purged: outcome.pluginPurged,
         place_status_purged: outcome.placeStatusPurged
       }

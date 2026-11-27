@@ -13,6 +13,7 @@ import { createMomentsExtensionRoutes } from "./moments.mjs";
 import { createCommunityRoutes } from "./community.mjs";
 import { createAvailabilityRoutes } from "./availability.mjs";
 import { createPlaceStatusRoutes } from "./place-status.mjs";
+import { createLedgerRoutes } from "./ledger.mjs";
 
 export function createCoreRoutes(ctx) {
   return [
@@ -29,6 +30,7 @@ export function createCoreRoutes(ctx) {
     ...createCampusContentRoutes(ctx),
     ...createCommunityRoutes(ctx),
     ...createAvailabilityRoutes(ctx),
+    ...createLedgerRoutes(ctx),
     ...createPlaceStatusRoutes(ctx)
   ];
 }
