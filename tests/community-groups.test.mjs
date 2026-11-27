@@ -179,6 +179,13 @@ test("W4-01 groups: CRUD validation, school scope, durable idempotent replay, an
 
   const second = await createStudyGroup(app, owner, BASE_NOW + 1000, { name: "第二学习组", description: "分页" });
   assert.ok(second.group_id);
+  const crossTargetKeyReplay = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + second.group_id,
+    headers: { ...owner.auth, "idempotency-key": patchKey },
+    body: { name: "幂等创建组·更新", description: null }
+  });
+  assert.equal(crossTargetKeyReplay.status, 409, "same idempotency key must not replay across a different target resource");
   const page1 = await app.inject({
     method: "GET",
     url: "/api/v1/groups?school_id=haut&type=study&limit=1",
