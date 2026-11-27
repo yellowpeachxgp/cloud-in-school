@@ -18,13 +18,9 @@ export function createPluginsRoutes(ctx) {
   })),
 
   route("POST", "/api/v1/plugins/install", "installSignedPlugin", "bearer", async ({ auth, body }) => {
-    if (Object.prototype.hasOwnProperty.call(body || {}, "public_key_base64")) {
-      // Trust is host configuration, never client input. Even an administrator
-      // cannot smuggle a replacement publisher key through the install route.
-      throw new ContractError(
-        "BAD_REQUEST",
-        "public_key_base64 is not accepted on plugin install; configure the publisher trust root on the host"
-      );
+    const suppliedPublicKeyBase64 = body?.public_key_base64;
+    if (suppliedPublicKeyBase64 !== undefined && typeof suppliedPublicKeyBase64 !== "string") {
+      throw new ContractError("BAD_REQUEST", "public_key_base64 must be a base64 Ed25519 SPKI string when supplied");
     }
     if (body?.manifest) {
       const canOverridePublicKey =
@@ -34,9 +30,14 @@ export function createPluginsRoutes(ctx) {
       // publisher-id → public-key trust root configured on the host. Admin
       // roles never bypass that root; the broker performs the authoritative
       // fail-closed check for every caller.
+      // A client-supplied public key is only a consistency proof for the
+      // current contract-transitional install shape. The broker compares it
+      // with the host-configured publisher trust root (or the non-production
+      // pinning rule); it never becomes trust input by itself.
       pluginBroker.registerPluginPackage({
         manifest: body.manifest,
         artifactMap: body.artifact_map || body.artifact_payloads || {},
+        publicKeyBase64: suppliedPublicKeyBase64 ?? null,
         actorUserId: auth.cloudUserId,
         isAdmin: canOverridePublicKey
       });
@@ -44,7 +45,8 @@ export function createPluginsRoutes(ctx) {
     const pluginId = body?.plugin_id || body?.manifest?.plugin_id;
     const inst = pluginBroker.installPluginForUser(auth.cloudUserId, pluginId, {
       version: body?.version || body?.manifest?.version,
-      schoolId: body?.school_id || undefined
+      schoolId: body?.school_id || undefined,
+      publicKeyBase64: suppliedPublicKeyBase64 ?? null
     });
     return { status: 201, code: "PLUGIN_INSTALLED", data: inst };
   }),

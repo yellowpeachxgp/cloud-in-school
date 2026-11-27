@@ -246,12 +246,13 @@ test("AC-16: broker carries no private key and production rejects unlisted publi
   assert.equal(accepted.plugin_id, "org.example.w601a-untrusted");
 });
 
-test("W6-01a trust root: install route rejects client-supplied public keys", async () => {
+test("W6-01a trust root: install route validates supplied public keys without trusting client input", async () => {
   const keyPair = generateEd25519KeyPair();
+  const wrongKey = generateEd25519KeyPair();
   const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
   const { headers } = createUserSession(app, "w601a_route_key_user", ["ADMIN"]);
   const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-route-key" });
-  const rejected = await app.inject({
+  const accepted = await app.inject({
     method: "POST",
     url: "/api/v1/plugins/install",
     headers,
@@ -261,13 +262,25 @@ test("W6-01a trust root: install route rejects client-supplied public keys", asy
       public_key_base64: keyPair.publicKeyBase64
     }
   });
-  assert.equal(rejected.status, 400);
-  assert.equal(rejected.body.error.code, "BAD_REQUEST");
+  assert.equal(accepted.status, 201, "a key consistent with the configured trust root remains contract-compatible");
   assert.equal(
-    app.pluginBroker.listAvailablePlugins().some((plugin) => plugin.plugin_id === "org.example.w601a-route-key"),
-    false,
-    "a rejected client-supplied key must not register the package"
+    app.pluginBroker.trustedPublicKeyForPublisher("dis-plugin-root-2026"),
+    keyPair.publicKeyBase64,
+    "accepting the consistency proof must not mutate or replace the host trust root"
   );
+
+  const mismatched = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/install",
+    headers,
+    body: {
+      manifest: fixture.manifest,
+      artifact_map: { "dist/data.txt": fixture.artifact },
+      public_key_base64: wrongKey.publicKeyBase64
+    }
+  });
+  assert.equal(mismatched.status, 400);
+  assert.equal(mismatched.body.code, "PLUGIN_SIGNATURE_INVALID");
 });
 
 test("W6-01a trust root: explicit publisher mapping rejects host-reference and key-confusion bypasses", () => {
@@ -366,6 +379,120 @@ test("W6-01a rollback: target package signature and artifact integrity are re-ve
   const rollback = attemptRollback();
   assert.equal(rollback.active_version, "1.0.0");
   assert.equal(activeVersion(), "1.0.0", "the intact signed target remains rollback-capable");
+});
+
+test("W6-01a pending confirmation: signature and artifact integrity are re-verified fail-closed", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_confirm_reverify_user");
+  const pluginId = "org.example.w601a-confirm-reverify";
+  const v1Permissions = ["ui.slot.render", "network.request"];
+  const v2Permissions = ["ui.slot.render", "network.request", "storage.scoped"];
+  const v1 = signedPlugin({ keyPair, pluginId, version: "1.0.0", permissions: v1Permissions });
+  const v2 = signedPlugin({ keyPair, pluginId, version: "1.1.0", permissions: v2Permissions });
+  assert.equal((await installFixture(app, headers, v1, keyPair.publicKeyBase64)).status, 201);
+  const pendingInstall = await installFixture(app, headers, v2, keyPair.publicKeyBase64);
+  assert.equal(pendingInstall.status, 201);
+  assert.equal(pendingInstall.body.data.status, "PENDING_PERMISSION_REVIEW");
+  assert.equal(pendingInstall.body.data.active_version, "1.0.0");
+  assert.equal(pendingInstall.body.data.pending_version, "1.1.0");
+
+  const stored = app.pluginBroker.packages.get(pluginId + "@1.1.0");
+  assert.ok(stored, "pending package must be persisted before tamper injection");
+  const originalManifest = JSON.parse(JSON.stringify(stored.manifest));
+  const originalArtifact = stored.artifactMap["dist/data.txt"];
+  const confirm = () => app.pluginBroker.confirmPendingPluginPermissions(user.id, pluginId, { schoolId: "haut" });
+  const installation = () => app.pluginBroker._findInstallation(user.id, pluginId, "haut")?.installation;
+  const assertStillPendingV1 = () => {
+    assert.equal(installation()?.active_version, "1.0.0");
+    assert.equal(installation()?.pending_version, "1.1.0");
+    assert.deepEqual(installation()?.granted_permissions, v1Permissions);
+  };
+
+  stored.artifactMap["dist/data.txt"] = Buffer.from("tampered pending artifact", "utf8").toString("base64");
+  assert.throws(confirm, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assertStillPendingV1();
+
+  stored.artifactMap["dist/data.txt"] = originalArtifact;
+  stored.manifest = { ...stored.manifest, name: "tampered pending manifest" };
+  assert.throws(confirm, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assertStillPendingV1();
+
+  stored.manifest = originalManifest;
+  const confirmed = confirm();
+  assert.equal(confirmed.active_version, "1.1.0");
+  assert.deepEqual(confirmed.granted_permissions, v2Permissions);
+});
+
+test("W6-01a revoke permission: active package signature and artifact integrity are re-verified fail-closed", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_revoke_reverify_user");
+  const pluginId = "org.example.w601a-revoke-reverify";
+  const fixture = signedPlugin({ keyPair, pluginId, version: "1.0.0" });
+  assert.equal((await installFixture(app, headers, fixture, keyPair.publicKeyBase64)).status, 201);
+
+  const stored = app.pluginBroker.packages.get(pluginId + "@1.0.0");
+  assert.ok(stored, "active package must be persisted before tamper injection");
+  const originalManifest = JSON.parse(JSON.stringify(stored.manifest));
+  const originalArtifact = stored.artifactMap["dist/data.txt"];
+  const revoke = () => app.pluginBroker.transitionUserPlugin(user.id, pluginId, {
+    action: "REVOKE_PERMISSION",
+    permission: "network.request",
+    schoolId: "haut"
+  });
+  const grants = () => app.pluginBroker._findInstallation(user.id, pluginId, "haut")?.installation?.granted_permissions;
+
+  stored.artifactMap["dist/data.txt"] = Buffer.from("tampered revoke artifact", "utf8").toString("base64");
+  assert.throws(revoke, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.ok(grants().includes("network.request"), "artifact tampering must leave grants unchanged");
+
+  stored.artifactMap["dist/data.txt"] = originalArtifact;
+  stored.manifest = { ...stored.manifest, name: "tampered revoke manifest" };
+  assert.throws(revoke, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.ok(grants().includes("network.request"), "manifest tampering must leave grants unchanged");
+
+  stored.manifest = originalManifest;
+  const saved = revoke();
+  assert.ok(!saved.granted_permissions.includes("network.request"));
+});
+
+test("W6-01a explicit-version install: target package signature and artifact integrity are re-verified fail-closed", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_install_reverify_user");
+  const pluginId = "org.example.w601a-install-reverify";
+  const v1 = signedPlugin({ keyPair, pluginId, version: "1.0.0" });
+  const v2 = signedPlugin({ keyPair, pluginId, version: "1.1.0" });
+  assert.equal((await installFixture(app, headers, v1, keyPair.publicKeyBase64)).status, 201);
+  app.pluginBroker.registerPluginPackage({
+    manifest: v2.manifest,
+    artifactMap: v2.artifactMap,
+    actorUserId: user.id
+  });
+
+  const stored = app.pluginBroker.packages.get(pluginId + "@1.1.0");
+  assert.ok(stored, "explicit target package must be persisted before tamper injection");
+  const originalManifest = JSON.parse(JSON.stringify(stored.manifest));
+  const originalArtifact = stored.artifactMap["dist/data.txt"];
+  const installExplicit = () => app.pluginBroker.installPluginForUser(user.id, pluginId, {
+    version: "1.1.0",
+    schoolId: "haut"
+  });
+  const activeVersion = () => app.pluginBroker._findInstallation(user.id, pluginId, "haut")?.installation?.active_version;
+
+  stored.artifactMap["dist/data.txt"] = Buffer.from("tampered explicit install artifact", "utf8").toString("base64");
+  assert.throws(installExplicit, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.equal(activeVersion(), "1.0.0", "artifact tampering must not activate the explicit target");
+
+  stored.artifactMap["dist/data.txt"] = originalArtifact;
+  stored.manifest = { ...stored.manifest, name: "tampered explicit install manifest" };
+  assert.throws(installExplicit, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.equal(activeVersion(), "1.0.0", "manifest tampering must not activate the explicit target");
+
+  stored.manifest = originalManifest;
+  const installed = installExplicit();
+  assert.equal(installed.active_version, "1.1.0");
 });
 
 test("W6-01a artifact parity: payloads undeclared by the signed manifest fail closed", () => {

@@ -1009,7 +1009,7 @@ export class PluginRegistryAndBroker {
     return result;
   }
 
-  installPluginForUser(userId, pluginId, { version = null, schoolId = DEFAULT_SCHOOL_ID } = {}) {
+  installPluginForUser(userId, pluginId, { version = null, schoolId = DEFAULT_SCHOOL_ID, publicKeyBase64 = null } = {}) {
     const scopedSchoolId = normalizeSchoolId(schoolId);
     const targetVersion = version || this.latestVersionByPlugin.get(pluginId);
     if (!targetVersion) {
@@ -1018,6 +1018,24 @@ export class PluginRegistryAndBroker {
     const pkg = this.packages.get(pluginPackageKey(pluginId, targetVersion));
     if (!pkg) {
       throw new ContractError("NOT_FOUND", "Plugin '" + pluginId + "@" + targetVersion + "' not found");
+    }
+    // Installation is an activation decision, not a cache read. Re-prove the
+    // exact persisted signed package against the current trust root and every
+    // declared artifact digest before deriving permissions or changing state,
+    // including when the caller explicitly selects a version.
+    this._verifyStoredPackageIntegrity(pkg);
+    if (publicKeyBase64 !== null && publicKeyBase64 !== undefined) {
+      const publisherId = publisherIdForManifest(pkg.manifest);
+      const effectivePublisherKey = this._publisherKeyForRegistration(
+        publisherId,
+        pkg.public_key_base64 || null
+      );
+      if (publicKeyBase64 !== effectivePublisherKey) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "Supplied publisher key does not match the effective publisher trust root or pinned key"
+        );
+      }
     }
 
     const installKey = pluginInstallationKey(userId, scopedSchoolId, pluginId);
@@ -1116,6 +1134,11 @@ export class PluginRegistryAndBroker {
         "Pending plugin version '" + pluginId + "@" + inst.pending_version + "' is no longer available"
       );
     }
+    // Confirmation activates the pending package. Apply the same fail-closed
+    // standard as rollback: re-resolve the publisher through the current trust
+    // root, re-verify the signature, and re-check every declared artifact before
+    // touching the active version or grant set.
+    this._verifyStoredPackageIntegrity(pendingPkg);
     const nowIso = new Date().toISOString();
     const targetPermissions = uniquePermissionList(pendingPkg.manifest.permissions);
     const confirmed = {
@@ -1174,7 +1197,14 @@ export class PluginRegistryAndBroker {
         throw new ContractError("BAD_REQUEST", "REVOKE_PERMISSION requires a permission field");
       }
       const activePkg = this.packages.get(pluginPackageKey(pluginId, inst.active_version));
-      if (!(activePkg?.manifest?.permissions || []).includes(permission)) {
+      if (!activePkg) {
+        throw new ContractError("NOT_FOUND", "Active plugin package missing for permission revocation");
+      }
+      // Revocation interprets the active manifest, so the persisted package must
+      // first re-prove publisher trust, signature validity, and all declared
+      // artifact digests. Tampering therefore fails closed without changing grants.
+      this._verifyStoredPackageIntegrity(activePkg);
+      if (!(activePkg.manifest.permissions || []).includes(permission)) {
         throw new ContractError(
           "BAD_REQUEST",
           "Permission '" + permission + "' is not declared by the active plugin version"

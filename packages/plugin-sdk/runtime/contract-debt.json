@@ -1,5 +1,5 @@
 {
-  "version": "w6-01a-contract-debt-2026-11-28",
+  "version": "w6-01a-contract-debt-2026-11-28-r2",
   "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface; every entry here must be resolved by the contract line before being presented as a published contract capability.",
   "debts": [
     {
@@ -32,16 +32,53 @@
       "resolution": "the contract line must move or recreate equivalent shared fixtures under contracts/fixtures/plugins/ when contracts/** is available; these runtime fixtures must not be cited as AC-02 contract fixtures"
     },
     {
+      "id": "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginInstallRequest",
+      "unregistered_runtime_fields": [
+        "artifact_map",
+        "version",
+        "school_id"
+      ],
+      "contradictory_contract_fields": [
+        "signature_base64: the published contract requires a detached signature field, while the runtime verifies manifest.signature.value_base64 inside the signed manifest",
+        "public_key_base64: the published contract requires client submission, while the runtime treats it only as an optional consistency proof that must equal the host-configured publisher trust root or non-production pinned key and never becomes trust input",
+        "artifact_payloads: the published contract uses this name, while the runtime canonical field is artifact_map and artifact_payloads remains only a transitional alias"
+      ],
+      "resolution": "the contract line must rewrite PluginInstallRequest around the signed manifest, canonical artifact_map, optional version/school_id, and trust-root semantics for public_key_base64; until then the runtime surface must not be described as contract-converged"
+    },
+    {
       "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
       "status": "OPEN_CONTRACT_DEBT",
       "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
-      "contract_target": "contracts/openapi/cloud-v1.yaml",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginLifecycleRequest",
       "unregistered_runtime_fields": [
-        "school_id",
         "REVOKE_PERMISSION",
+        "target_version",
+        "permission",
+        "scope",
+        "admin_kill_switch",
+        "school_id",
         "kill_switch_reason"
       ],
-      "resolution": "the contract line must register the account/school scoped lifecycle fields and revoke/kill-switch semantics or the runtime surface must remain undocumented and non-publicized"
+      "resolution": "the contract line must register the account/school scoped lifecycle fields, the REVOKE_PERMISSION action, explicit rollback target_version, and admin kill-switch semantics or the runtime surface must remain undocumented and non-publicized"
+    },
+    {
+      "id": "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginCommandInvokeRequest",
+      "unregistered_runtime_fields": [
+        "payload",
+        "requested_origin",
+        "school_id"
+      ],
+      "contradictory_contract_fields": [
+        "campus_profile_id: the published contract requires this field, while the runtime derives the account/school installation scope from the bearer cloud user plus school_id",
+        "input: the published contract uses this object name, while the runtime canonical object is payload and input remains only a transitional alias"
+      ],
+      "resolution": "the contract line must rewrite PluginCommandInvokeRequest around payload, requested_origin, and school_id scope selection; until then invoke is not contract-converged"
     }
   ]
 }

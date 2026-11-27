@@ -136,7 +136,9 @@ test("W6-01a contract debt: transitional runtime surfaces are explicitly registe
     "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
     "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
     "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
-    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION"
+    "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+    "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT"
   ]) {
     assert.ok(byId.has(id), "missing contract debt entry " + id);
     assert.equal(byId.get(id).status, "OPEN_CONTRACT_DEBT");
@@ -149,6 +151,25 @@ test("W6-01a contract debt: transitional runtime surfaces are explicitly registe
     byId.get("PLUGIN_RUNTIME_SCHEMA_TRANSITION").unregistered_runtime_fields,
     ["type", "route", "url", "artifact_path"],
     "declarative command runtime fields must be itemized rather than silently treated as contract-registered"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT").unregistered_runtime_fields,
+    ["artifact_map", "version", "school_id"],
+    "install runtime-only fields must be itemized"
+  );
+  assert.ok(
+    byId.get("PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT").contradictory_contract_fields.some((item) => item.startsWith("public_key_base64:")),
+    "the install public_key_base64 trust-root contradiction must be explicit"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION").unregistered_runtime_fields,
+    ["REVOKE_PERMISSION", "target_version", "permission", "scope", "admin_kill_switch", "school_id", "kill_switch_reason"],
+    "lifecycle runtime security extensions must be itemized completely"
+  );
+  assert.deepEqual(
+    byId.get("PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT").unregistered_runtime_fields,
+    ["payload", "requested_origin", "school_id"],
+    "invoke runtime-only fields must be itemized"
   );
 });
 

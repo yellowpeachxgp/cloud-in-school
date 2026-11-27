@@ -96,7 +96,7 @@ DISABLED
 ## 4.1 发布者信任根与持久化边界
 
 - 云端 Broker 不持有、生成或持久化任何发布者私钥；运行时只验证公钥签名。
-- 生产模式只接受宿主配置里的**显式 `publisher/key_id → Ed25519 SPKI base64 公钥` 映射**；`PLUGIN_TRUSTED_PUBLISHER_KEYS` 可写 JSON 对象（例如 `{"dis-official-examples-2026":"MCow..."}`）或逗号/空白分隔的 `publisher=public-key` 条目；只写裸公钥会因缺少 publisher 映射而启动失败。安装路由拒绝客户端提交 `public_key_base64`，管理员角色与 host-reference 标记也不能绕过该信任根。
+- 生产模式只接受宿主配置里的**显式 `publisher/key_id → Ed25519 SPKI base64 公钥` 映射**；`PLUGIN_TRUSTED_PUBLISHER_KEYS` 可写 JSON 对象（例如 `{"dis-official-examples-2026":"MCow..."}`）或逗号/空白分隔的 `publisher=public-key` 条目；只写裸公钥会因缺少 publisher 映射而启动失败。安装请求若携带 `public_key_base64`，它只是一致性证明：必须与宿主信任根（非生产兼容路径则为已钉扎公钥）完全一致，绝不作为信任输入替换信任根；管理员角色与 host-reference 标记也不能绕过该信任根。
 - 非生产模式为方便本地开发允许未列入信任根的公钥注册；同一 `plugin_id` 仍会被首次公钥固定，后续替换公钥失败。该宽松行为只在非生产有效，不得作为生产兼容承诺，也不代表 publisher 命名冲突在生产环境可绕过。
 - SQL 0011 定义 `plugin_publishers / plugin_versions / plugin_installations / plugin_permission_grants / plugin_storage_entries / plugin_cache_entries / plugin_runtime_states`；当前内存 Snapshot Store 镜像同一模型用于测试与开发部署。
 
