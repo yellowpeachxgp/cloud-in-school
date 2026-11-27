@@ -178,6 +178,53 @@ test("W4-03 money: largest remainder, lexicographic tie-break, negative abs-then
   ]);
 });
 
+test("W4-03 money: split-fixtures-v1 shared with Android core:ledger match fen-for-fen", () => {
+  const fixturePath = path.join(process.cwd(), "tests/fixtures/split-fixtures-v1.csv");
+  const lines = fs.readFileSync(fixturePath, "utf8").split(/\r?\n/).filter((line) => line && !line.startsWith("#"));
+  assert.equal(lines.length, 9, "split-fixtures-v1 currently carries nine shared cases");
+  for (const line of lines) {
+    const [caseId, mode, totalRaw, membersRaw, ruleSpec, expectedRaw] = line.split("|");
+    const members = membersRaw.split(",");
+    let rule;
+    if (mode === "EQUAL") rule = { type: "EQUAL" };
+    else if (mode === "SELECTED") rule = { type: "SELECTED", participant_member_ids: ruleSpec.split(",") };
+    else if (mode === "RATIO") {
+      rule = {
+        type: "RATIO",
+        weights: Object.fromEntries(ruleSpec.split(",").map((row) => {
+          const [id, weight] = row.split(":");
+          return [id, weight];
+        }))
+      };
+    } else if (mode === "STAY_DAYS") {
+      rule = {
+        type: "STAY_DAYS",
+        days: Object.fromEntries(ruleSpec.split(",").map((row) => {
+          const [id, days] = row.split(":");
+          return [id, days];
+        }))
+      };
+    } else {
+      throw new Error("unknown fixture mode " + mode);
+    }
+    const actual = splitLedgerSharesExact(totalRaw, members, rule);
+    const expected = expectedRaw.split(",").map((row) => {
+      const [participant, fen] = row.split("=");
+      return { participant_member_id: participant, amount_fen: BigInt(fen) };
+    });
+    assert.deepEqual(
+      actual.map((row) => [row.participant_member_id, row.amount_fen.toString()]),
+      expected.map((row) => [row.participant_member_id, row.amount_fen.toString()]),
+      caseId + " must match the shared Android fixture exactly"
+    );
+    assert.equal(
+      actual.reduce((sum, row) => sum + row.amount_fen, 0n).toString(),
+      totalRaw,
+      caseId + " must conserve the signed total"
+    );
+  }
+});
+
 test("W4-03 ledger: immutable entries, correction chain, zero-sum balances, two-party settlement, stale revision, and durable replay", async () => {
   const app = createTestApp();
   const ctx = await setupDormGroup(app, "ledger");

@@ -818,15 +818,15 @@ export class LedgerService extends DormCollaborationBase {
     const { settlement, group, member } = this._requireSettlementVisible(auth, settlementId);
     const party = this._partyForMember(settlement, member.id);
     if (!party) throw domainError("SETTLEMENT_PARTY_MISMATCH", "only the settlement debtor or creditor can confirm it");
-    if (body.basis_balance_revision !== settlement.basis_balance_revision || this._currentRevision(group) !== settlement.basis_balance_revision) {
-      throw domainError("SETTLEMENT_BALANCE_STALE", "ledger balances changed after this settlement was proposed");
+    if (["CONFIRMED", "CANCELLED"].includes(settlement.status)) {
+      throw domainError("SETTLEMENT_INVALID_STATE", "settlement is already terminal");
     }
     const already = party === "DEBTOR" ? Boolean(settlement.debtor_confirmed_at) : Boolean(settlement.creditor_confirmed_at);
     if (already) {
       return { status: 200, code: "SETTLEMENT_CONFIRMATION_REPLAYED", data: this._settlementView(settlement) };
     }
-    if (["CONFIRMED", "CANCELLED"].includes(settlement.status)) {
-      throw domainError("SETTLEMENT_INVALID_STATE", "settlement is already terminal");
+    if (body.basis_balance_revision !== settlement.basis_balance_revision || this._currentRevision(group) !== settlement.basis_balance_revision) {
+      throw domainError("SETTLEMENT_BALANCE_STALE", "ledger balances changed after this settlement was proposed");
     }
     return this._commitWithReceipt((undo) => {
       const ts = iso(nowMs);
