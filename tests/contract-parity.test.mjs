@@ -5,44 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import {
-  loadEndpointInventory,
+  REPO_ROOT,
   loadOpenApiText
 } from "../packages/contracts/src/index.mjs";
+import {
+  parseEndpointInventory,
+  parseOpenApiOperations,
+  partitionByStatus
+} from "../tools/contract-ci/contract-utils.mjs";
 import { CONSOLE_UI_VERSION, CONSOLE_VIEWS, renderConsoleHtml } from "../apps/console/src/main.mjs";
 import { MOMENTS_EXTENSION_CONTRACT_VERSION } from "../apps/api/src/routes/moments.mjs";
-
-const OPENAPI_HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options", "trace"]);
-
-function parseOpenApiOperations(yamlText) {
-  const operations = [];
-  let inPaths = false;
-  let currentPath = null;
-  let currentMethod = null;
-  for (const line of yamlText.split(/\r?\n/)) {
-    if (/^paths:\s*$/.test(line)) {
-      inPaths = true;
-      continue;
-    }
-    if (!inPaths) continue;
-    if (/^[^\s].*:\s*$/.test(line) && !line.startsWith("paths:")) break;
-    const pathMatch = line.match(/^  (\/[^\s].*):\s*$/);
-    if (pathMatch) {
-      currentPath = pathMatch[1];
-      currentMethod = null;
-      continue;
-    }
-    const methodMatch = line.match(/^    ([a-z]+):\s*$/);
-    if (methodMatch && OPENAPI_HTTP_METHODS.has(methodMatch[1])) {
-      currentMethod = methodMatch[1].toUpperCase();
-      continue;
-    }
-    const operationMatch = line.match(/^      operationId:\s*([A-Za-z0-9_]+)\s*$/);
-    if (operationMatch && currentPath && currentMethod) {
-      operations.push({ method: currentMethod, path: currentPath, operationId: operationMatch[1] });
-    }
-  }
-  return operations;
-}
 
 function routeKey(route) {
   return route.method + " " + route.path;
@@ -61,6 +33,20 @@ function sortedOperationIds(routes) {
   return routes.map((route) => route.operationId).sort();
 }
 
+function assertUniqueOperationIds(routes, label) {
+  const operationIds = routes.map((route) => route.operationId);
+  assert.equal(new Set(operationIds).size, operationIds.length, label + " operationIds must be unique");
+}
+
+function assertUniqueRouteKeys(routes, label) {
+  const keys = routes.map((route) => routeKey(route));
+  assert.equal(new Set(keys).size, keys.length, label + " method+path keys must be unique");
+}
+
+function loadInventoryOperations() {
+  return parseEndpointInventory(fs.readFileSync(path.join(REPO_ROOT, "contracts/endpoints/endpoint-inventory.yaml"), "utf8"));
+}
+
 const EXPECTED_MOMENTS_EXTENSION_ROUTES = Object.freeze([
   { method: "GET", path: "/api/v1/moments/snapshot", operationId: "getMomentsSnapshot", auth: "public" },
   { method: "POST", path: "/api/v1/moments/posts", operationId: "createMomentsPost", auth: "public" },
@@ -76,16 +62,30 @@ const EXPECTED_MOMENTS_EXTENSION_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/moments/anti-lost-tags/{tagCode}/report-found", operationId: "reportAntiLostTagFound", auth: "public" }
 ]);
 
-test("Contract Parity: core runtime, endpoint inventory, and OpenAPI operationIds are 100% bidirectional", () => {
+const EXPECTED_CT01_PLANNED_ROUTES = Object.freeze([
+  { method: "POST", path: "/api/v1/groups", operationId: "createGroup", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups", operationId: "listGroups", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}", operationId: "getGroup", auth: "bearer" },
+  { method: "PATCH", path: "/api/v1/groups/{groupId}", operationId: "updateGroup", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/groups/{groupId}", operationId: "deleteGroup", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/invites", operationId: "createGroupInvite", auth: "bearer" },
+  { method: "POST", path: "/api/v1/group-invites/{code}/accept", operationId: "acceptGroupInvite", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/groups/{groupId}/invites/{inviteId}", operationId: "revokeGroupInvite", auth: "bearer" },
+  { method: "GET", path: "/api/v1/groups/{groupId}/members", operationId: "listGroupMembers", auth: "bearer" },
+  { method: "PATCH", path: "/api/v1/groups/{groupId}/members/{memberId}", operationId: "updateGroupMember", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/groups/{groupId}/members/{memberId}", operationId: "removeGroupMember", auth: "bearer" }
+]);
+
+test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI operationIds are 100% bidirectional", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const allRegistered = app.getRegisteredRoutes();
-  const inventory = loadEndpointInventory();
-  const openApiOperations = parseOpenApiOperations(loadOpenApiText());
+  const inventory = partitionByStatus(loadInventoryOperations()).active;
+  const openApiOperations = partitionByStatus(parseOpenApiOperations(loadOpenApiText())).active;
 
-  assert.equal(inventory.length, 97, "endpoint-inventory.yaml must declare exactly 97 core operations");
-  assert.equal(openApiOperations.length, 97, "OpenAPI must declare exactly 97 core operations");
-  assert.equal(coreRegistered.length, 97, "CampusCloudApp must expose exactly 97 core operations");
+  assert.equal(inventory.length, 97, "endpoint-inventory.yaml must declare exactly 97 active core operations");
+  assert.equal(openApiOperations.length, 97, "OpenAPI must declare exactly 97 active core operations");
+  assert.equal(coreRegistered.length, 97, "CampusCloudApp must expose exactly 97 active core operations");
   assert.equal(allRegistered.length, 109, "CampusCloudApp must expose 97 core + 12 explicit extension operations");
 
   const coreByKey = byRouteKey(coreRegistered);
@@ -96,37 +96,37 @@ test("Contract Parity: core runtime, endpoint inventory, and OpenAPI operationId
     const key = routeKey(inv);
     const reg = coreByKey.get(key);
     const openApi = openApiByKey.get(key);
-    assert.ok(reg, "missing registered core route for inventory entry: " + key);
-    assert.ok(openApi, "missing OpenAPI operation for inventory entry: " + key);
-    assert.equal(reg.operationId, inv.operationId, "runtime operationId mismatch on " + key);
-    assert.equal(openApi.operationId, inv.operationId, "OpenAPI operationId mismatch on " + key);
-    assert.equal(reg.auth, inv.auth, "auth mode mismatch on " + key + " (" + reg.operationId + ")");
+    assert.ok(reg, "missing registered core route for active inventory entry: " + key);
+    assert.ok(openApi, "missing active OpenAPI operation for active inventory entry: " + key);
+    assert.equal(reg.operationId, inv.operationId, "runtime operationId mismatch on active " + key);
+    assert.equal(openApi.operationId, inv.operationId, "OpenAPI operationId mismatch on active " + key);
+    assert.equal(reg.auth, inv.auth, "auth mode mismatch on active " + key + " (" + reg.operationId + ")");
   }
 
   for (const openApi of openApiOperations) {
     const key = routeKey(openApi);
     const inv = inventoryByKey.get(key);
     const reg = coreByKey.get(key);
-    assert.ok(inv, "OpenAPI operation missing from endpoint inventory: " + key);
-    assert.ok(reg, "OpenAPI operation missing from runtime core routes: " + key);
-    assert.equal(inv.operationId, openApi.operationId, "inventory operationId mismatch on " + key);
-    assert.equal(reg.operationId, openApi.operationId, "runtime operationId mismatch on " + key);
+    assert.ok(inv, "active OpenAPI operation missing from active endpoint inventory: " + key);
+    assert.ok(reg, "active OpenAPI operation missing from runtime core routes: " + key);
+    assert.equal(inv.operationId, openApi.operationId, "inventory operationId mismatch on active " + key);
+    assert.equal(reg.operationId, openApi.operationId, "runtime operationId mismatch on active " + key);
   }
 
   for (const reg of coreRegistered) {
     const key = routeKey(reg);
-    assert.ok(inventoryByKey.has(key), "uninventoried shadow core route registered: " + key);
-    assert.ok(openApiByKey.has(key), "OpenAPI shadow core route registered: " + key);
+    assert.ok(inventoryByKey.has(key), "uninventoried shadow active core route registered: " + key);
+    assert.ok(openApiByKey.has(key), "active OpenAPI shadow core route registered: " + key);
   }
 
-  assert.deepEqual(sortedOperationIds(inventory), sortedOperationIds(coreRegistered), "inventory/runtime operationId sets must be identical");
-  assert.deepEqual(sortedOperationIds(openApiOperations), sortedOperationIds(coreRegistered), "OpenAPI/runtime operationId sets must be identical");
+  assert.deepEqual(sortedOperationIds(inventory), sortedOperationIds(coreRegistered), "active inventory/runtime operationId sets must be identical");
+  assert.deepEqual(sortedOperationIds(openApiOperations), sortedOperationIds(coreRegistered), "active OpenAPI/runtime operationId sets must be identical");
 });
 
 test("Contract Parity: moments extension runtime inventory is exact and explicitly pending INF-02 (AUTO-012)", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const extensionRegistered = app.getRegisteredExtensionRoutes();
-  const inventory = loadEndpointInventory();
+  const inventory = loadInventoryOperations();
   const openApiOperations = parseOpenApiOperations(loadOpenApiText());
   const coreRegistered = app.getRegisteredCoreRoutes();
 
@@ -879,4 +879,60 @@ test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fa
   assert.equal(m4.body.data.status, "APPROVED");
   assert.equal(m4.body.data.messages.length, 4);
   assert.equal(m4.body.data.initiator_contact, "微信: owner_wx_99");
+});
+
+test("Contract Parity: CT-01 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
+  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const coreRegistered = app.getRegisteredCoreRoutes();
+  const inventoryPartitions = partitionByStatus(loadInventoryOperations());
+  const openApiPartitions = partitionByStatus(parseOpenApiOperations(loadOpenApiText()));
+  assert.deepEqual(inventoryPartitions.unknown, [], "endpoint inventory must use only active/planned/reserved statuses");
+  assert.deepEqual(openApiPartitions.unknown, [], "OpenAPI x-dis-status must use only active/planned/reserved statuses");
+
+  const plannedInventory = inventoryPartitions.planned;
+  const plannedOpenApi = openApiPartitions.planned;
+  const reservedInventory = inventoryPartitions.reserved;
+  const reservedOpenApi = openApiPartitions.reserved;
+  assert.equal(plannedInventory.length, EXPECTED_CT01_PLANNED_ROUTES.length, "endpoint-inventory.yaml must declare exactly the 11 CT-01 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT01_PLANNED_ROUTES.length, "OpenAPI must declare exactly the 11 CT-01 planned operations");
+  assertUniqueOperationIds(coreRegistered, "active core runtime");
+  assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
+  assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
+  assertUniqueOperationIds(plannedInventory, "planned endpoint inventory");
+  assertUniqueOperationIds(plannedOpenApi, "planned OpenAPI");
+  assertUniqueRouteKeys(plannedInventory, "planned endpoint inventory");
+  assertUniqueRouteKeys(plannedOpenApi, "planned OpenAPI");
+
+  const ct01Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-01");
+  assert.equal(ct01Inventory.length, EXPECTED_CT01_PLANNED_ROUTES.length, "CT-01 inventory entries must be explicitly countable");
+  assert.deepEqual(
+    ct01Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT01_PLANNED_ROUTES,
+    "CT-01 planned inventory must exactly match the approved group/invite/member route slice"
+  );
+
+  const coreByKey = byRouteKey(coreRegistered);
+  const plannedInventoryByKey = byRouteKey(plannedInventory);
+  const plannedOpenApiByKey = byRouteKey(plannedOpenApi);
+  assert.deepEqual(sortedOperationIds(plannedInventory), sortedOperationIds(plannedOpenApi), "planned inventory/OpenAPI operationId sets must be identical");
+  for (const planned of plannedInventory) {
+    const key = routeKey(planned);
+    const openApi = plannedOpenApiByKey.get(key);
+    assert.ok(openApi, "planned inventory entry missing from planned OpenAPI operations: " + key);
+    assert.equal(openApi.operationId, planned.operationId, "planned OpenAPI operationId mismatch on " + key);
+    assert.equal(planned.status, "planned", "planned inventory entry must carry machine-readable status: " + key);
+    assert.ok(/^CT-[0-9]+$/.test(planned.contractCard || ""), "planned inventory entry must carry machine-readable contract_card: " + key);
+    assert.ok(planned.auth, "planned inventory entry must carry auth mode: " + key);
+    assert.ok(!coreByKey.has(key), "planned contract-only endpoint must not silently exist in runtime before W4 implementation: " + key);
+  }
+  for (const planned of plannedOpenApi) {
+    const key = routeKey(planned);
+    assert.ok(plannedInventoryByKey.has(key), "planned OpenAPI operation missing from planned endpoint inventory: " + key);
+    assert.equal(planned.status, "planned", "planned OpenAPI operation must carry x-dis-status planned: " + key);
+  }
+
+  console.log(
+    "[CONTRACT-PARITY] active=97 planned=" + plannedOpenApi.length +
+      " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length + " moments_extension=12"
+  );
 });
