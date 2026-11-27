@@ -39,6 +39,10 @@ tags:
     description: User notification inbox and read receipts
   - name: groups
     description: School-scoped study, dorm, club, and project groups, invites, and membership lifecycle
+  - name: availability
+    description: Privacy-minimizing quantized busy-block sharing and intersection queries inside school-scoped groups
+  - name: polls
+    description: Deadline-bound group time polls, votes, results, and confirmation events
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -1308,6 +1312,301 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/availability/me:
+    put:
+      operationId: replaceMyGroupAvailability
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.availability.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, AVAILABILITY_BLOCK_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.availability.updated, group.event.conflict_detected]
+      tags: [availability]
+      security:
+        - bearerAuth: []
+      summary: Replace the caller's quantized busy blocks in a group with a TTL-bounded share
+      description: |
+        Only time blocks are stored: no event titles, reasons, locations, or free-form notes. Each block must start and end on a 30-minute boundary, last at least 30 minutes, and have a duration that is a whole multiple of 30 minutes. Blocks are interpreted as busy; absence of a block is the member's represented free time. The upsert is an explicit self-service opt-in and sets the caller membership sharing_level to BUSY_BLOCKS_30MIN. The server computes expires_at from ttl_seconds; expiration makes the member UNKNOWN immediately. If a newly shared block overlaps a confirmed group event, the backend emits group.event.conflict_detected for user review and never reschedules automatically.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceGroupAvailabilityRequest'
+      responses:
+        '200':
+          description: Busy-block share replaced, or the durable idempotent replay of the original replacement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupAvailabilityShareEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: deleteMyGroupAvailability
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.availability.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.availability.updated]
+      tags: [availability]
+      security:
+        - bearerAuth: []
+      summary: Withdraw the caller's busy-block sharing in a group immediately
+      description: |
+        Deletes all caller busy blocks in the group, regardless of their previous TTL, and sets the caller membership sharing_level to NONE. The withdrawal is authoritative immediately for subsequent intersection queries and must not wait for cache expiry.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Busy-block sharing withdrawn, or the durable idempotent replay of the original withdrawal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/availability/query:
+    post:
+      operationId: queryGroupAvailability
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.availability.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, AVAILABILITY_QUERY_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [availability]
+      security:
+        - bearerAuth: []
+      summary: Find candidate time windows in which at least N selected group members are represented as free
+      description: |
+        The query is privacy-minimizing: it returns aggregate candidate windows and per-member AVAILABLE/BUSY/UNKNOWN states, never raw busy blocks. Members whose sharing_level is NONE, whose share expired, or who left the group are UNKNOWN and never count as available. To query all active members, pass the active member count as min_attendees; unknown members naturally prevent a full-consensus candidate. Candidate boundaries use granularity_minutes, which must be at least 30 minutes.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupAvailabilityQueryRequest'
+      responses:
+        '200':
+          description: Candidate windows satisfying duration, range, member-dimension, and quorum constraints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupAvailabilityQueryEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/polls:
+    post:
+      operationId: createGroupPoll
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.poll.create]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, POLL_OPTION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [polls]
+      security:
+        - bearerAuth: []
+      summary: Create a deadline-bound time poll with two or more quantized time options
+      description: |
+        Options are time windows only; no free-form event payload is stored in an option. Each option must start and end on a 30-minute boundary, last at least 30 minutes, and have a duration that is a whole multiple of 30 minutes. The poll accepts votes until voting_deadline_at unless it is confirmed earlier; after the deadline it becomes CLOSED and awaits confirmation.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGroupPollRequest'
+      responses:
+        '201':
+          description: Poll created in OPEN status with deadline and initial zero-vote results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupPollEnvelope'
+        '200':
+          description: Durable idempotent replay of the original poll creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupPollEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/polls/{pollId}:
+    get:
+      operationId: getGroupPoll
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.poll.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, POLL_NOT_FOUND, POLL_PERMISSION_DENIED]
+      tags: [polls]
+      security:
+        - bearerAuth: []
+      summary: Get one poll with options, deadline, per-option results, caller vote, and confirmation state
+      parameters:
+        - $ref: '#/components/parameters/PollIdParam'
+      responses:
+        '200':
+          description: Poll detail and current result snapshot visible to an active member in the same school scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupPollEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/polls/{pollId}/votes:
+    post:
+      operationId: upsertGroupPollVote
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.poll.vote]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, POLL_NOT_FOUND, POLL_PERMISSION_DENIED, POLL_VOTING_CLOSED, POLL_ALREADY_CONFIRMED, POLL_OPTION_NOT_FOUND, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [polls]
+      security:
+        - bearerAuth: []
+      summary: Cast or change the caller's single-choice vote before the voting deadline
+      description: |
+        One active membership has at most one vote per poll. Reusing the same Idempotency-Key replays the original accepted vote; a deliberate vote change uses a new key and is allowed only while the poll remains OPEN. Confirmed or deadline-closed polls never accept further changes.
+      parameters:
+        - $ref: '#/components/parameters/PollIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertGroupPollVoteRequest'
+      responses:
+        '200':
+          description: Vote accepted, updated, or replayed; response includes the vote and current result snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupPollVoteEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/polls/{pollId}/confirm:
+    post:
+      operationId: confirmGroupPoll
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
+      x-dis-permissions: [group.poll.confirm]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, POLL_NOT_FOUND, POLL_PERMISSION_DENIED, POLL_ALREADY_CONFIRMED, POLL_OPTION_NOT_FOUND, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [group.event.confirmed]
+      tags: [polls]
+      security:
+        - bearerAuth: []
+      summary: Confirm one poll option as the group event and close voting
+      description: |
+        The poll creator or a GROUP_OWNER/GROUP_ADMIN may confirm before or after the deadline. Confirmation is terminal, creates exactly one confirmed group event, closes voting, and emits group.event.confirmed. Confirmation never writes to a school system and never reschedules automatically when later busy-block conflicts are detected.
+      parameters:
+        - $ref: '#/components/parameters/PollIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmGroupPollRequest'
+      responses:
+        '201':
+          description: Poll confirmed and group.event.confirmed emitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmGroupPollEnvelope'
+        '200':
+          description: Durable idempotent replay of the original confirmation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmGroupPollEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -2403,6 +2702,13 @@ components:
       schema:
         type: string
         format: uuid
+    PollIdParam:
+      name: pollId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ParcelIdParam:
       name: parcelId
       in: path
@@ -3453,6 +3759,456 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GroupMember'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    AvailabilityBlock:
+      type: object
+      additionalProperties: false
+      required: [start_at, end_at]
+      properties:
+        start_at:
+          type: string
+          format: date-time
+          description: Inclusive busy-block start; must be aligned to a 30-minute boundary.
+        end_at:
+          type: string
+          format: date-time
+          description: Exclusive busy-block end; must be after start_at, aligned to a 30-minute boundary, and make the duration a whole multiple of 30 minutes.
+    ReplaceGroupAvailabilityRequest:
+      type: object
+      additionalProperties: false
+      required: [blocks, ttl_seconds]
+      properties:
+        blocks:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/AvailabilityBlock'
+          description: Replacement set of busy intervals. Overlapping or non-normalized blocks are rejected; titles, reasons, locations, and notes are outside this schema by design.
+        ttl_seconds:
+          type: integer
+          minimum: 1800
+          maximum: 7776000
+          description: Share lifetime in seconds (30 minutes through 90 days). The server computes expires_at and must not retain expired blocks.
+    GroupAvailabilityShare:
+      type: object
+      additionalProperties: false
+      required: [group_id, school_id, member_id, sharing_level, blocks, block_count, ttl_seconds, expires_at, updated_at]
+      properties:
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        member_id:
+          type: string
+          format: uuid
+        sharing_level:
+          $ref: '#/components/schemas/GroupSharingLevel'
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvailabilityBlock'
+        block_count:
+          type: integer
+          minimum: 0
+        ttl_seconds:
+          type: integer
+          minimum: 1800
+          maximum: 7776000
+        expires_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    GroupAvailabilityShareEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupAvailabilityShare'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupAvailabilityQueryRequest:
+      type: object
+      additionalProperties: false
+      required: [window_start_at, window_end_at, duration_minutes, min_attendees]
+      properties:
+        window_start_at:
+          type: string
+          format: date-time
+          description: Inclusive search window start; must be aligned to granularity_minutes.
+        window_end_at:
+          type: string
+          format: date-time
+          description: Exclusive search window end; must be after window_start_at and aligned to granularity_minutes.
+        duration_minutes:
+          type: integer
+          minimum: 30
+          multipleOf: 30
+          description: Required contiguous candidate duration in minutes.
+        min_attendees:
+          type: integer
+          minimum: 1
+          description: Minimum number of AVAILABLE members. Passing the active group member count requests an all-member consensus; UNKNOWN members do not count.
+        member_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+          description: Optional active member-dimension filter. When omitted, all active members in the group are evaluated; LEFT or REMOVED memberships are never included.
+        granularity_minutes:
+          type: integer
+          minimum: 30
+          multipleOf: 30
+          default: 30
+          description: Candidate grid granularity. Values below 30 minutes are forbidden to preserve the privacy-minimizing sharing granularity.
+    AvailabilityMemberStatus:
+      type: string
+      enum: [AVAILABLE, BUSY, UNKNOWN]
+      description: AVAILABLE means the member has an unexpired BUSY_BLOCKS_30MIN share and no overlapping shared busy block; BUSY means such a block overlaps; UNKNOWN means sharing is absent, withdrawn, expired, or otherwise insufficient and must never be treated as free.
+    GroupAvailabilityMemberResult:
+      type: object
+      additionalProperties: false
+      required: [member_id, status, sharing_level]
+      properties:
+        member_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/AvailabilityMemberStatus'
+        sharing_level:
+          $ref: '#/components/schemas/GroupSharingLevel'
+    GroupAvailabilityCandidate:
+      type: object
+      additionalProperties: false
+      required: [start_at, end_at, available_member_count, busy_member_count, unknown_member_count, total_member_count, member_results]
+      properties:
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        available_member_count:
+          type: integer
+          minimum: 0
+        busy_member_count:
+          type: integer
+          minimum: 0
+        unknown_member_count:
+          type: integer
+          minimum: 0
+        total_member_count:
+          type: integer
+          minimum: 0
+        member_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupAvailabilityMemberResult'
+          description: Per-member availability states for this candidate window; raw busy blocks are deliberately not returned.
+    GroupAvailabilityQueryResult:
+      type: object
+      additionalProperties: false
+      required: [group_id, school_id, window_start_at, window_end_at, duration_minutes, granularity_minutes, min_attendees, generated_at, candidates]
+      properties:
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        window_start_at:
+          type: string
+          format: date-time
+        window_end_at:
+          type: string
+          format: date-time
+        duration_minutes:
+          type: integer
+          minimum: 30
+        granularity_minutes:
+          type: integer
+          minimum: 30
+        min_attendees:
+          type: integer
+          minimum: 1
+        generated_at:
+          type: string
+          format: date-time
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupAvailabilityCandidate'
+    GroupAvailabilityQueryEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupAvailabilityQueryResult'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    GroupPollStatus:
+      type: string
+      enum: [OPEN, CLOSED, CONFIRMED]
+      description: OPEN accepts votes until voting_deadline_at or confirmation; CLOSED means the deadline passed and confirmation is pending; CONFIRMED is terminal.
+    GroupPollOptionInput:
+      type: object
+      additionalProperties: false
+      required: [start_at, end_at]
+      properties:
+        start_at:
+          type: string
+          format: date-time
+          description: Inclusive option start; must be aligned to a 30-minute boundary.
+        end_at:
+          type: string
+          format: date-time
+          description: Exclusive option end; must be after start_at, aligned to a 30-minute boundary, and make the duration a whole multiple of 30 minutes.
+    GroupPollOption:
+      type: object
+      additionalProperties: false
+      required: [option_id, start_at, end_at, vote_count, voter_member_ids]
+      properties:
+        option_id:
+          type: string
+          format: uuid
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        vote_count:
+          type: integer
+          minimum: 0
+        voter_member_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Membership-period IDs visible inside the group. They are not cloud user identifiers and become obsolete after a member leaves.
+    CreateGroupPollRequest:
+      type: object
+      additionalProperties: false
+      required: [title, options, voting_deadline_at]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        options:
+          type: array
+          minItems: 2
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/GroupPollOptionInput'
+          description: Two or more distinct candidate time windows. Exact duplicates are rejected; partial overlap is allowed because alternatives may use different start times or durations.
+        voting_deadline_at:
+          type: string
+          format: date-time
+          description: Exclusive voting deadline. It must be in the future at creation time and no later than the earliest option start.
+    GroupPoll:
+      type: object
+      additionalProperties: false
+      required: [poll_id, group_id, school_id, title, status, options, voting_deadline_at, created_by_member_id, created_at, closed_at, confirmed_at, confirmed_option_id, confirmed_event_id, my_vote_option_id]
+      properties:
+        poll_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        status:
+          $ref: '#/components/schemas/GroupPollStatus'
+        options:
+          type: array
+          minItems: 2
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/GroupPollOption'
+        voting_deadline_at:
+          type: string
+          format: date-time
+        created_by_member_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: [string, 'null']
+          format: date-time
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+        confirmed_option_id:
+          type: [string, 'null']
+          format: uuid
+        confirmed_event_id:
+          type: [string, 'null']
+          format: uuid
+        my_vote_option_id:
+          type: [string, 'null']
+          format: uuid
+    GroupPollEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupPoll'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    UpsertGroupPollVoteRequest:
+      type: object
+      additionalProperties: false
+      required: [option_id]
+      properties:
+        option_id:
+          type: string
+          format: uuid
+    GroupPollVote:
+      type: object
+      additionalProperties: false
+      required: [vote_id, poll_id, member_id, option_id, created_at, updated_at]
+      properties:
+        vote_id:
+          type: string
+          format: uuid
+          description: Stable vote row identifier for the (poll_id, member_id) pair; changing option_id updates the same vote rather than creating a second vote.
+        poll_id:
+          type: string
+          format: uuid
+        member_id:
+          type: string
+          format: uuid
+        option_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    GroupPollVoteResult:
+      type: object
+      additionalProperties: false
+      required: [vote, poll]
+      properties:
+        vote:
+          $ref: '#/components/schemas/GroupPollVote'
+        poll:
+          $ref: '#/components/schemas/GroupPoll'
+    GroupPollVoteEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/GroupPollVoteResult'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ConfirmGroupPollRequest:
+      type: object
+      additionalProperties: false
+      required: [option_id]
+      properties:
+        option_id:
+          type: string
+          format: uuid
+          description: Option selected as the final group event time. It does not need to be the strict plurality winner because the organizer may resolve a tie or constraint manually.
+    ConfirmedGroupEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, poll_id, option_id, group_id, school_id, start_at, end_at, status, confirmed_by_member_id, confirmed_at]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        poll_id:
+          type: string
+          format: uuid
+        option_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [CONFIRMED]
+        confirmed_by_member_id:
+          type: string
+          format: uuid
+        confirmed_at:
+          type: string
+          format: date-time
+    ConfirmGroupPollResult:
+      type: object
+      additionalProperties: false
+      required: [poll, confirmed_event]
+      properties:
+        poll:
+          $ref: '#/components/schemas/GroupPoll'
+        confirmed_event:
+          $ref: '#/components/schemas/ConfirmedGroupEvent'
+    ConfirmGroupPollEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/ConfirmGroupPollResult'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     ParcelListEnvelope:
