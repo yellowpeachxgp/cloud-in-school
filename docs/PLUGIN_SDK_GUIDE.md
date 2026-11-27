@@ -21,8 +21,7 @@
 3. **宿主不会加载或执行 `entry_artifacts` 中的 JavaScript、Dex、脚本或任意代码。**
    两个内置示例里的 `dist/index.mjs` 只是签名完整性示例字节；文件头也明确标注「不会被执行」。
    示例命令的可调用行为由宿主内置 reference handler 提供，不是从插件产物动态调用。
-4. 当前第三方 declarative command 的云端 broker 仍有遗留回显语义；它是兼容行为，不代表插件代码已被执行。
-   `open_host_route / open_url / show_data` 的严格声明式命令类型属于 W6-01a，不在本切片宣称完成。
+4. 第三方 declarative command 只允许 `open_host_route / open_url / show_data` 三类声明式语义：分别返回宿主白名单路由、受 `allowed_origins` 约束的 HTTPS 打开意图、或插件签名数据。未知或缺失类型返回 `PLUGIN_COMMAND_UNSUPPORTED`；响应不得回显调用方 payload。宿主内置 reference handler 只服务随宿主发布的示例，不从插件产物加载。
 5. 不支持远程 Dex、任意脚本热加载、反射宿主私有实现、共享校园登录凭据或财务密钥。
 
 ## 2. 清单字段表（运行时 snake_case）
@@ -39,7 +38,7 @@
 | `permissions` | string array | 只能包含 §5 权限目录中的 ID |
 | `allowed_origins` | string array | 只能是无路径 HTTPS origin，例如 `https://plugin.example.com`；不允许 `http:` 或路径 |
 | `ui_slots` | object array | 每项必须有 `slot_id / card_id / title / action_command`，可选 `subtitle`；`title` 为 1–60 字符且不能是纯空白（空白集同上，与 ECMAScript `\s` 一致） |
-| `commands` | object array | 每项必须有 `name`，可选 `description / required_permission` |
+| `commands` | object array | 每项必须有 `name`，可选 `description / required_permission`；第三方声明式命令另可声明 `type`（`open_host_route/open_url/show_data`）及对应 `route/url/artifact_path`。未知 `type` 可解析但调用时 fail-closed 为 `PLUGIN_COMMAND_UNSUPPORTED` |
 | `entry_artifacts` | object array | 每项必须有 `path / sha256 / size_bytes`；`size_bytes` 为 0–2147483647 的整数字面量（按现有内存内摘要核验实现选择最严合理上限，超大文件待未来流式契约另行设计） |
 
 可选字段：
@@ -92,7 +91,14 @@ DISABLED
   └─ UNINSTALL ─> UNINSTALLED
 ```
 
-首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。持久化、逐项撤权、学校作用域、卸载数据清理与故障隔离属于 W6-01a，本文不宣称已完成。
+首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
+
+## 4.1 发布者信任根与持久化边界
+
+- 云端 Broker 不持有、生成或持久化任何发布者私钥；运行时只验证公钥签名。
+- 生产模式只接受 `PLUGIN_TRUSTED_PUBLISHER_KEYS`（逗号/空白分隔的 SPKI base64 公钥清单）中的发布者公钥；管理员角色也不能绕过该信任根。随宿主内置的 reference 示例由宿主明确标记为 host reference，不等价于开放第三方信任。
+- 非生产模式为方便本地开发允许未列入信任根的公钥注册；同一 `plugin_id` 仍会被首次公钥固定，后续替换公钥失败。该宽松行为只在非生产有效，不得作为生产兼容承诺。
+- SQL 0011 定义 `plugin_publishers / plugin_versions / plugin_installations / plugin_permission_grants / plugin_storage_entries / plugin_cache_entries / plugin_runtime_states`；当前内存 Snapshot Store 镜像同一模型用于测试与开发部署。
 
 ## 5. 权限目录（声明 ≠ 能力已实现）
 
@@ -104,7 +110,7 @@ DISABLED
 |---|---|
 | `network.request` | 只允许访问 `allowed_origins` 中的 HTTPS origin；路径/方法/purpose 细粒度约束仍待 W6-01a 完整落地 |
 | `account.session` | 通过 Broker 使用特定学校/平台会话作用域；不暴露原始凭据 |
-| `storage.scoped` | **保留/未实现**：当前没有插件分区存储；不要因为目录中存在该 ID 就宣称可用 |
+| `storage.scoped` | 云端 Broker 已有按安装实例隔离的内部 scoped storage；Android 使用每 Profile 文件分区。该权限仍不是通用宿主 API，跨设备同步与容量配额待后续卡片 |
 | `notification.send` | 经宿主通知通道发送清理后的通知；实现接入仍不完整 |
 | `location.coarse` | 粗粒度校园位置，用于驿站/楼宇匹配 |
 | `library.booking.read` | 读取图书馆区域、座位快照和当前用户预约 |
@@ -168,14 +174,14 @@ npx dis-plugin verify ./my-campus-plugin
 
 | 命令 | 行为 |
 |---|---|
-| `init` | 生成 `dist/index.mjs`、公钥/私钥和已签名 `manifest.json` |
+| `init` | 生成 `dist/index.mjs`、公钥、插件目录 `.gitignore` 和已签名 `manifest.json`；私钥写入 `~/.dis-plugin/keys/<plugin-id>/`（或 `DIS_PLUGIN_KEY_HOME`），绝不写入插件目录 |
 | `validate` | 只做清单结构与语义校验，不验证签名 |
 | `sign` | 重新计算摘要并写入签名 |
 | `package` | 当前是 `sign` 的别名；ZIP 打包属于 W6-01b |
 | `verify` | 验证签名、摘要和安全路径 |
 | `test` | 当前是 `verify` 的别名；离线 simulate 属于 W6-01b |
 
-**密钥卫生警告**：当前 `init` 会把 `plugin-signing-private.key` 写在插件目录中。绝对不要提交、上传或分享该文件；如果只需要公开发布插件，提交的是 `manifest.json`、产物和 `plugin-signing-public.key`。CLI 把私钥迁出插件目录并生成 `.gitignore` 是 W6-01a/AC-24 的明确待办，本指南不把现状描述为安全终态。
+**密钥卫生规则**：`init` 生成的 `plugin-signing-private.key` 只保存在插件目录外的用户密钥目录；插件目录自带 `.gitignore` 作为第二道防线。绝对不要提交、上传或分享该私钥；公开发布只需要 `manifest.json`、声明的产物和 `plugin-signing-public.key`。`sign` 默认从外部密钥目录读取，也会先拒绝 `../x`、绝对路径、反斜杠或盘符等越界产物路径。
 
 ## 7. 内置示例与加载可观测性
 
