@@ -246,6 +246,18 @@ export function verifySignedPluginPackage({
     );
   }
 
+  const declaredArtifactPaths = new Set();
+  for (const declared of normalized.entry_artifacts || []) {
+    declaredArtifactPaths.add(assertSafeRelativeArtifactPath(declared.path));
+  }
+  const undeclaredArtifacts = Object.keys(artifactMap || {}).filter((artifactPath) => !declaredArtifactPaths.has(artifactPath));
+  if (undeclaredArtifacts.length > 0) {
+    throw new ContractError(
+      "PLUGIN_SIGNATURE_INVALID",
+      "Plugin artifact payload contains entries not declared in the signed manifest: " + undeclaredArtifacts.sort().join(", ")
+    );
+  }
+
   for (const declared of normalized.entry_artifacts || []) {
     const safePath = assertSafeRelativeArtifactPath(declared.path);
     const actualContent = artifactMap[safePath];

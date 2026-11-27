@@ -9,7 +9,8 @@ import { REPO_ROOT } from "../packages/contracts/src/index.mjs";
 import { generateEd25519KeyPair } from "../packages/crypto/src/index.mjs";
 import {
   PluginRegistryAndBroker,
-  buildSignedPluginManifest
+  buildSignedPluginManifest,
+  verifySignedPluginPackage
 } from "../packages/plugin-sdk/src/index.mjs";
 
 function createUserSession(app, subject, roles = null) {
@@ -328,6 +329,23 @@ test("W6-01a trust root: explicit publisher mapping rejects host-reference and k
     }),
     (error) => error?.code === "PLUGIN_SIGNATURE_INVALID",
     "isHostReference must not bypass the configured publisher trust root"
+  );
+});
+
+test("W6-01a artifact parity: payloads undeclared by the signed manifest fail closed", () => {
+  const keyPair = generateEd25519KeyPair();
+  const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-undeclared-artifact" });
+  assert.throws(
+    () => verifySignedPluginPackage({
+      manifest: fixture.manifest,
+      artifactMap: {
+        ...fixture.artifactMap,
+        "dist/undeclared.txt": "not covered by the signed manifest"
+      },
+      publicKeyBase64: keyPair.publicKeyBase64
+    }),
+    (error) => error?.code === "PLUGIN_SIGNATURE_INVALID" && /not declared/.test(error.message),
+    "cloud verification must match Android and reject undeclared artifact payloads"
   );
 });
 
