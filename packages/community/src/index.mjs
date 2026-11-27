@@ -879,7 +879,25 @@ export class CommunityService {
         mutateObject(target, { role: desiredRole }, undo);
       }
       if (hasSharing && desiredSharing !== target.sharing_level) {
-        mutateObject(target, { sharing_level: desiredSharing }, undo);
+        if (desiredSharing === "NONE") {
+          // AUTO-030 makes sharing_level self-service, but privacy minimization is
+          // stronger than the bare flag: a self-service withdrawal must delete the
+          // raw busy blocks in the same commit unit instead of merely hiding them
+          // until TTL expiry.
+          withdrawAvailabilityForMembershipTransition(
+            this.store,
+            group,
+            target,
+            auth.cloudUserId,
+            iso(nowMs),
+            undo
+          );
+        } else {
+          // Opting in through the membership flag records consent only; no busy
+          // block becomes visible until the member explicitly uploads a
+          // TTL-bounded replacement set through the availability endpoint.
+          mutateObject(target, { sharing_level: desiredSharing }, undo);
+        }
       }
       return { status: 200, code: "GROUP_MEMBER_UPDATED", data: this._memberView(target) };
     }, idem.receipt, nowMs);
