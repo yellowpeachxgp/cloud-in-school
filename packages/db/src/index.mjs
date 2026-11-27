@@ -943,6 +943,7 @@ export class CloudDatabaseStore {
   }
 
   saveSnapshot() {
+    if (this._commitUnitDepth > 0) return;
     this.assertStorageWritable();
     if (!this.snapshotPath) return;
     if (this._snapshotFlushTimer) return;
@@ -956,6 +957,7 @@ export class CloudDatabaseStore {
   }
 
   flushSnapshotSync() {
+    if (this._commitUnitDepth > 0) return;
     if (this._snapshotFlushTimer) {
       clearTimeout(this._snapshotFlushTimer);
       this._snapshotFlushTimer = null;
@@ -964,11 +966,85 @@ export class CloudDatabaseStore {
   }
 
   flushSnapshotStrictSync() {
+    if (this._commitUnitDepth > 0) return;
     if (this._snapshotFlushTimer) {
       clearTimeout(this._snapshotFlushTimer);
       this._snapshotFlushTimer = null;
     }
     this._flushSnapshotSync({ strict: true });
+  }
+
+  // Atomic commit unit (W4-01 data-delete hardening): all in-memory mutations
+  // inside fn run with inner flushes suppressed, exactly one strict flush is
+  // performed at the end, and a pre-publish failure rolls back every mutation
+  // so memory never diverges from the unpublished disk snapshot. A published
+  // (commit-unknown) outcome must NOT roll back: memory may already match the
+  // durable candidate and recovery is owned by the STORAGE_COMMIT_UNKNOWN
+  // fence, exactly like the single-operation commit protocol.
+  _captureMemoryState() {
+    const mapFields = [
+      "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
+      "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
+      "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
+      "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
+      "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
+      "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
+      "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+    ];
+    const capture = { maps: {}, outboxEvents: null, auditEvents: null, momentsState: null };
+    for (const field of mapFields) {
+      capture.maps[field] = Array.from(this[field].entries(), ([k, v]) => [k, structuredClone(v)]);
+    }
+    capture.outboxEvents = structuredClone(this.outboxEvents);
+    capture.auditEvents = structuredClone(this.auditEvents);
+    capture.momentsState = structuredClone(this.momentsState);
+    return capture;
+  }
+
+  _restoreMemoryState(capture) {
+    for (const [field, entries] of Object.entries(capture.maps)) {
+      const map = this[field];
+      map.clear();
+      for (const [k, v] of entries) map.set(k, v);
+    }
+    this.outboxEvents.splice(0, this.outboxEvents.length, ...capture.outboxEvents);
+    this.auditEvents.splice(0, this.auditEvents.length, ...capture.auditEvents);
+    if (this.momentsState && typeof this.momentsState === "object" && capture.momentsState && typeof capture.momentsState === "object") {
+      for (const key of Object.keys(this.momentsState)) delete this.momentsState[key];
+      Object.assign(this.momentsState, capture.momentsState);
+    } else {
+      this.momentsState = capture.momentsState;
+    }
+    this._rebuildIndexes();
+  }
+
+  runAtomicCommitUnit(fn) {
+    if (typeof fn !== "function") {
+      throw new ContractError("INVALID_ARGUMENT", "runAtomicCommitUnit requires a synchronous mutation function");
+    }
+    if (this._commitUnitDepth > 0) return fn();
+    this._commitUnitDepth = 1;
+    const capture = this._captureMemoryState();
+    try {
+      const result = fn();
+      if (this._snapshotFlushTimer) {
+        clearTimeout(this._snapshotFlushTimer);
+        this._snapshotFlushTimer = null;
+      }
+      this._flushSnapshotSync({ strict: true });
+      return result;
+    } catch (err) {
+      if (!(err && err.commitPublished === true)) {
+        try {
+          this._restoreMemoryState(capture);
+        } catch (restoreErr) {
+          err.rollback_error = restoreErr?.message || "memory rollback failed";
+        }
+      }
+      throw err;
+    } finally {
+      this._commitUnitDepth = 0;
+    }
   }
 
   pruneAuthEphemera(nowMs = Date.now()) {

@@ -664,3 +664,263 @@ test("W4-01 atomicity: pre-commit storage failure rolls back owner transfer and 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("W4-01 sharing privacy (AUTO-030): sharing_level is strict self-service; owner and admin patches of other members are always rejected", async () => {
+  const app = createTestApp();
+  const owner = setupUser(app, "owner_sharing");
+  const admin = setupUser(app, "admin_sharing");
+  const member = setupUser(app, "member_sharing");
+  const group = await createStudyGroup(app, owner);
+  const invite = await createInvite(app, owner, group.group_id, { maxUses: 4 });
+  assert.equal((await acceptInvite(app, admin, invite.code)).status, 201);
+  const acceptedMember = await acceptInvite(app, member, invite.code);
+  assert.equal(acceptedMember.status, 201);
+  const memberId = acceptedMember.body.data.member_id;
+
+  // Owner cannot open, change, or withdraw another member's sharing — even as a no-op.
+  for (const level of ["BUSY_BLOCKS_30MIN", "NONE"]) {
+    const ownerPatch = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/groups/" + group.group_id + "/members/" + memberId,
+      headers: { ...owner.auth, "idempotency-key": nextKey("owner-sharing-" + level) },
+      body: { sharing_level: level }
+    });
+    assert.equal(ownerPatch.status, 403, "owner patching another member sharing_level must be rejected");
+    assert.equal(ownerPatch.body.error.code, "GROUP_PERMISSION_DENIED");
+  }
+  assert.equal(app.store.groupMembers.get(memberId).sharing_level, "NONE", "rejected patches must not mutate sharing_level");
+
+  // A combined role+sharing payload is rejected atomically: the role part must not apply either.
+  const adminMemberRow = Array.from(app.store.groupMembers.values()).find(
+    (row) => row.group_id === group.group_id && row.cloud_user_id === admin.user.id && row.status === "ACTIVE"
+  );
+  const combined = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + adminMemberRow.id,
+    headers: { ...owner.auth, "idempotency-key": nextKey("combined-role-sharing") },
+    body: { role: "ADMIN", sharing_level: "BUSY_BLOCKS_30MIN" }
+  });
+  assert.equal(combined.status, 403);
+  assert.equal(combined.body.error.code, "GROUP_PERMISSION_DENIED");
+  assert.equal(app.store.groupMembers.get(adminMemberRow.id).role, "MEMBER", "rejected combined patch must not apply the role part");
+  assert.equal(app.store.groupMembers.get(adminMemberRow.id).sharing_level, "NONE");
+
+  // Promote admin through a clean role-only patch, then verify the admin is equally denied.
+  const promote = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + adminMemberRow.id,
+    headers: { ...owner.auth, "idempotency-key": nextKey("promote-admin-clean") },
+    body: { role: "ADMIN" }
+  });
+  assert.equal(promote.status, 200);
+  const adminPatch = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + memberId,
+    headers: { ...admin.auth, "idempotency-key": nextKey("admin-sharing") },
+    body: { sharing_level: "BUSY_BLOCKS_30MIN" }
+  });
+  assert.equal(adminPatch.status, 403);
+  assert.equal(adminPatch.body.error.code, "GROUP_PERMISSION_DENIED");
+  assert.equal(app.store.groupMembers.get(memberId).sharing_level, "NONE");
+
+  // A plain member is equally denied on another member, while self-service stays available.
+  const memberOnAdmin = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + adminMemberRow.id,
+    headers: { ...member.auth, "idempotency-key": nextKey("member-on-admin-sharing") },
+    body: { sharing_level: "NONE" }
+  });
+  assert.equal(memberOnAdmin.status, 403);
+  const selfService = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + memberId,
+    headers: { ...member.auth, "idempotency-key": nextKey("self-service-sharing") },
+    body: { sharing_level: "BUSY_BLOCKS_30MIN" }
+  });
+  assert.equal(selfService.status, 200);
+  assert.equal(selfService.body.data.sharing_level, "BUSY_BLOCKS_30MIN");
+  assert.equal(app.store.groupMembers.get(memberId).sharing_level, "BUSY_BLOCKS_30MIN");
+});
+
+test("W4-01 erasure probe: data-delete scrubs community idempotency receipts — own receipts dropped, foreign replay payloads pseudonymized", async () => {
+  const app = createTestApp();
+  const owner = setupUser(app, "owner_erasure");
+  const member = setupUser(app, "member_erasure");
+  const group = await createStudyGroup(app, owner);
+  const invite = await createInvite(app, owner, group.group_id, { maxUses: 2 });
+  const accepted = await acceptInvite(app, member, invite.code);
+  assert.equal(accepted.status, 201);
+
+  // Promote the member to ADMIN and let them rename the group: their durable
+  // receipt payload then embeds the original created_by (the owner's id).
+  const ownerRow = Array.from(app.store.groupMembers.values()).find(
+    (row) => row.group_id === group.group_id && row.cloud_user_id === owner.user.id && row.status === "ACTIVE"
+  );
+  const promote = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + accepted.body.data.member_id,
+    headers: { ...owner.auth, "idempotency-key": nextKey("erasure-promote") },
+    body: { role: "ADMIN" }
+  });
+  assert.equal(promote.status, 200);
+  const renameKey = nextKey("erasure-rename");
+  const renamed = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id,
+    headers: { ...member.auth, "idempotency-key": renameKey },
+    body: { name: "改名后的互助组" }
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.body.data.created_by, owner.user.id, "pre-delete receipt payload embeds the creator id");
+
+  const keysBefore = Array.from(app.store.idempotencyRecords.keys());
+  assert.ok(keysBefore.some((key) => key.startsWith("createGroup|" + owner.user.id + "|")), "own createGroup receipt exists before delete");
+  assert.ok(keysBefore.some((key) => key.startsWith("createGroupInvite|" + owner.user.id + "|")), "own invite receipt exists before delete");
+
+  const deleted = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/data-delete",
+    headers: owner.auth
+  });
+  assert.equal(deleted.status, 202);
+  assert.ok(deleted.body.data.community_purged.idempotency_receipts_deleted >= 2, "own community receipts are dropped");
+  assert.ok(deleted.body.data.community_purged.idempotency_receipts_pseudonymized >= 1, "foreign receipts referencing the erased id are pseudonymized");
+
+  for (const key of app.store.idempotencyRecords.keys()) {
+    assert.ok(!key.includes(owner.user.id), "no idempotency receipt key may embed the erased user id: " + key);
+  }
+  for (const [key, record] of app.store.idempotencyRecords.entries()) {
+    assert.ok(
+      !JSON.stringify(record).includes(owner.user.id),
+      "no idempotency receipt payload may embed the erased user id: " + key
+    );
+  }
+
+  // The member's own durable receipt survives but replays the pseudonymized view.
+  const replay = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id,
+    headers: { ...member.auth, "idempotency-key": renameKey },
+    body: { name: "改名后的互助组" }
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.code, "REQUEST_DUPLICATE");
+  assert.equal(replay.body.data.created_by, COMMUNITY_DELETED_USER_TOMBSTONE, "replayed receipt must not re-expose the erased creator id");
+  assert.equal(app.store.groups.get(group.group_id).created_by, COMMUNITY_DELETED_USER_TOMBSTONE);
+  assert.ok(ownerRow, "ownership transfer fixture sanity");
+  const survivingOwner = Array.from(app.store.groupMembers.values()).find(
+    (row) => row.group_id === group.group_id && row.status === "ACTIVE"
+  );
+  assert.ok(survivingOwner, "an active successor must remain");
+  assert.equal(survivingOwner.cloud_user_id, member.user.id);
+  assert.equal(survivingOwner.role, "OWNER");
+});
+
+test("W4-01 atomicity: data-delete is a single commit unit — pre-publish flush failure rolls back every mutation; post-publish failure stays commit-unknown", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-delete-atomic-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app, "owner_delete_atomic");
+    const member = setupUser(app, "member_delete_atomic");
+    const group = await createStudyGroup(app, owner);
+    const invite = await createInvite(app, owner, group.group_id, { maxUses: 2 });
+    assert.equal((await acceptInvite(app, member, invite.code)).status, 201);
+    app.store._persistFaultInject = "tmp_write";
+    const failed = await app.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner.auth
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+
+    // Memory must be fully rolled back: nothing halfway erased, nothing halfway revoked.
+    assert.equal(app.store.users.get(owner.user.id).status, "ACTIVE", "user status must roll back");
+    assert.equal(app.store.groups.get(group.group_id).created_by, owner.user.id, "group ownership must roll back");
+    const ownerMembership = Array.from(app.store.groupMembers.values()).find(
+      (row) => row.group_id === group.group_id && row.cloud_user_id === owner.user.id
+    );
+    assert.ok(ownerMembership, "membership row must roll back");
+    assert.equal(ownerMembership.status, "ACTIVE");
+    assert.equal(ownerMembership.role, "OWNER", "ownership transfer must roll back");
+    // Re-read through the store: rollback repopulates collections with cloned
+    // pre-delete records, so assertions must not use pre-delete object references.
+    const rolledBinding = Array.from(app.store.schoolBindings.values()).find(
+      (row) => row.cloud_user_id === owner.user.id
+    );
+    const rolledSession = Array.from(app.store.deviceSessions.values()).find(
+      (row) => row.cloud_user_id === owner.user.id
+    );
+    assert.equal(rolledBinding.revoked_at, null, "school binding revocation must roll back");
+    assert.equal(rolledBinding.status, "DELEGATED_ACTIVE");
+    assert.equal(rolledSession.revoked_at, null, "session revocation must roll back");
+    assert.equal(
+      Array.from(app.store.groupInvites.values()).some((row) => row.created_by === owner.user.id),
+      true,
+      "invite rows must roll back"
+    );
+    assert.ok(
+      Array.from(app.store.idempotencyRecords.keys()).some((key) => key.startsWith("createGroup|" + owner.user.id + "|")),
+      "idempotency receipts must roll back"
+    );
+
+    // The durable snapshot never published the half-delete: a fresh restart still sees the pre-delete world.
+    const diskProbe = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assert.equal(diskProbe.store.users.get(owner.user.id).status, "ACTIVE");
+    assert.equal(diskProbe.store.groups.get(group.group_id).created_by, owner.user.id);
+    clearTimeout(diskProbe.store._snapshotFlushTimer);
+
+    // With the fault cleared the same request succeeds as one atomic unit and persists everywhere.
+    app.store._persistFaultInject = null;
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner.auth
+    });
+    assert.equal(deleted.status, 202);
+    assert.equal(app.store.users.get(owner.user.id).status, "DELETED");
+    const restarted = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assert.equal(restarted.store.users.get(owner.user.id).status, "DELETED", "delete must be durable after restart");
+    assert.equal(restarted.store.groups.get(group.group_id).created_by, COMMUNITY_DELETED_USER_TOMBSTONE);
+    assert.equal(
+      Array.from(restarted.store.groupMembers.values()).some((row) => row.cloud_user_id === owner.user.id),
+      false
+    );
+    for (const key of restarted.store.idempotencyRecords.keys()) {
+      assert.ok(!key.includes(owner.user.id), "restarted receipts must not embed the erased user id");
+    }
+    clearTimeout(restarted.store._snapshotFlushTimer);
+
+    // Post-publish failure is commit-unknown by design: memory is NOT rolled back because
+    // the durable candidate may already carry the fully-erased state.
+    const app2 = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner2 = setupUser(app2, "owner_delete_unknown");
+    const group2 = await createStudyGroup(app2, owner2);
+    app2.store._persistFaultInject = "dir_fsync";
+    const unknown = await app2.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner2.auth
+    });
+    assert.equal(unknown.status, 503);
+    assert.equal(unknown.body.error.code, "STORAGE_COMMIT_UNKNOWN");
+    assert.equal(app2.store.users.get(owner2.user.id).status, "DELETED", "post-publish unknown must not roll memory back");
+    assert.equal(app2.store.groups.has(group2.group_id), false, "post-publish unknown keeps the erased memory state");
+    clearTimeout(app2.store._snapshotFlushTimer);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

@@ -242,28 +242,35 @@ export function createMeRoutes(ctx) {
   }),
 
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
-    const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
-    const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
-    const communityPurged = community?.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
-    // Plans/bindings were already halted above with the USER_DATA_DELETE audit
-    // reason; only revoke sessions here (unlinkXpeach stays false).
-    identity.revokeAllUserSessions(auth.cloudUserId, {
-      unlinkXpeach: false,
-      reason: "USER_DATA_DELETE",
-      nowMs
+    // Single atomic commit unit: the halt/purge/revoke mutations and their one
+    // durable flush succeed or fail together. A pre-publish flush failure rolls
+    // every mutation back so memory never diverges from the unpublished disk
+    // snapshot; a post-publish failure surfaces STORAGE_COMMIT_UNKNOWN without
+    // rollback, matching the single-operation commit protocol.
+    const outcome = store.runAtomicCommitUnit(() => {
+      const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
+      const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+      const communityPurged = community?.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+      // Plans/bindings were already halted above with the USER_DATA_DELETE audit
+      // reason; only revoke sessions here (unlinkXpeach stays false).
+      identity.revokeAllUserSessions(auth.cloudUserId, {
+        unlinkXpeach: false,
+        reason: "USER_DATA_DELETE",
+        nowMs
+      });
+      const user = store.users.get(auth.cloudUserId);
+      if (user) user.status = "DELETED";
+      return { cascade, momentsPurged, communityPurged };
     });
-    const user = store.users.get(auth.cloudUserId);
-    if (user) user.status = "DELETED";
-    store.flushSnapshotStrictSync?.();
     return {
       status: 202,
       code: "DATA_DELETE_ACCEPTED",
       data: {
         cloud_user_id: auth.cloudUserId,
         status: "DELETED",
-        cancelled_job_ids: cascade.cancelledJobIds,
-        moments_purged: momentsPurged,
-        community_purged: communityPurged
+        cancelled_job_ids: outcome.cascade.cancelledJobIds,
+        moments_purged: outcome.momentsPurged,
+        community_purged: outcome.communityPurged
       }
     };
   })

@@ -113,6 +113,42 @@ function pseudonymFor(cloudUserId, schoolId) {
   return "校园·" + animal + " " + serial;
 }
 
+const COMMUNITY_IDEMPOTENCY_OPS = Object.freeze([
+  "createGroup",
+  "updateGroup",
+  "deleteGroup",
+  "createGroupInvite",
+  "acceptGroupInvite",
+  "revokeGroupInvite",
+  "updateGroupMember",
+  "removeGroupMember"
+]);
+
+// Exact-match walk: replaces string values equal to the erased user id with the
+// tombstone. Community receipt payloads never embed the id as a substring of a
+// larger token (ids are always whole-field UUIDs), so exact replacement is both
+// precise and collision-free.
+function pseudonymizeUserIdRefs(value, cloudUserId, tombstone, counter) {
+  if (typeof value === "string") {
+    if (value === cloudUserId) {
+      counter.count += 1;
+      return tombstone;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => pseudonymizeUserIdRefs(entry, cloudUserId, tombstone, counter));
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value)) {
+      out[key] = pseudonymizeUserIdRefs(value[key], cloudUserId, tombstone, counter);
+    }
+    return out;
+  }
+  return value;
+}
+
 function sortedByTimeThenId(rows, timeField) {
   return [...rows].sort((a, b) => {
     const at = Date.parse(a[timeField] || 0);
@@ -779,6 +815,16 @@ export class CommunityService {
       throw new ContractError("GROUP_MEMBER_NOT_FOUND", "Group membership does not exist or is not active");
     }
     const self = target.cloud_user_id === auth.cloudUserId;
+    // AUTO-030 strict self-service: busy-block sharing is the member's own privacy
+    // consent. Neither owners nor admins may grant, change, or withdraw another
+    // member's sharing_level; management actions only ever force NONE as a
+    // system-side effect of leave/removal (never through this endpoint).
+    if (hasSharing && !self) {
+      throw new ContractError(
+        "GROUP_PERMISSION_DENIED",
+        "sharing_level is strict self-service: only the member themselves may change their own busy-block sharing level"
+      );
+    }
     if (self) {
       if (hasRole && desiredRole !== target.role) {
         if (target.role === "OWNER") {
@@ -999,6 +1045,36 @@ export class CommunityService {
       if (touched) eventsScrubbed += 1;
     }
 
+    // Erasure must cover durable idempotency receipts as well: replay payloads
+    // are frozen copies of group/member/invite views that can still carry the
+    // erased creator's id (created_by / cloud_user_id), and the cache keys of
+    // the erased user's own community receipts embed the id verbatim.
+    // Own community receipts are dropped outright — a deleted account can never
+    // legitimately replay them; receipts belonging to other users are kept but
+    // pseudonymized in place so their idempotent replay stays intact without
+    // re-exposing the erased id.
+    let receiptsDeleted = 0;
+    let receiptsPseudonymized = 0;
+    if (this.store.idempotencyRecords instanceof Map) {
+      const ownPrefixes = COMMUNITY_IDEMPOTENCY_OPS.map((op) => op + "|" + cloudUserId + "|");
+      for (const [key, record] of Array.from(this.store.idempotencyRecords.entries())) {
+        if (ownPrefixes.some((prefix) => key.startsWith(prefix))) {
+          this.store.idempotencyRecords.delete(key);
+          receiptsDeleted += 1;
+          continue;
+        }
+        if (!record || typeof record !== "object") continue;
+        const counter = { count: 0 };
+        if (record.data !== undefined) {
+          record.data = pseudonymizeUserIdRefs(record.data, cloudUserId, DELETED_USER_TOMBSTONE, counter);
+        }
+        if (record.headers !== undefined) {
+          record.headers = pseudonymizeUserIdRefs(record.headers, cloudUserId, DELETED_USER_TOMBSTONE, counter);
+        }
+        if (counter.count > 0) receiptsPseudonymized += 1;
+      }
+    }
+
     this.store._rebuildIndexes?.();
     return {
       memberships_removed: membershipsRemoved,
@@ -1006,7 +1082,9 @@ export class CommunityService {
       groups_archived: groupsArchived,
       groups_deleted: groupsDeleted,
       invites_deleted: invitesDeleted,
-      events_scrubbed: eventsScrubbed
+      events_scrubbed: eventsScrubbed,
+      idempotency_receipts_deleted: receiptsDeleted,
+      idempotency_receipts_pseudonymized: receiptsPseudonymized
     };
   }
 }
