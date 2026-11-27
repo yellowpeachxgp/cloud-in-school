@@ -46,7 +46,7 @@
         "public_key_base64: the published contract requires client submission, while the runtime treats it only as an optional consistency proof that must equal the host-configured publisher trust root or non-production pinned key and never becomes trust input",
         "artifact_payloads: the published contract uses this name, while the runtime canonical field is artifact_map and artifact_payloads remains only a transitional alias"
       ],
-      "resolution": "the contract line must rewrite PluginInstallRequest around the signed manifest, canonical artifact_map, optional version/school_id, and trust-root semantics for public_key_base64; until then the runtime surface must not be described as contract-converged"
+      "resolution": "the contract line must rewrite PluginInstallRequest around the signed manifest, canonical artifact_map, school_id, and trust-root semantics for public_key_base64; transitional plugin_id/version selectors are not part of the proposed target because the signed manifest is the sole package identity and version evidence. Until then the runtime surface must not be described as contract-converged"
     },
     {
       "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
