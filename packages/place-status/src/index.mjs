@@ -110,6 +110,13 @@ function parseDateTimeMs(value, field, error = badRequest) {
   return ms;
 }
 
+function parseBooleanQuery(raw, field, defaultValue) {
+  if (raw == null || raw === "") return defaultValue;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw badRequest(field + " must be a boolean");
+}
+
 function parseLimit(raw, fallback = 20) {
   if (raw == null || raw === "") return fallback;
   if (!/^\d+$/.test(String(raw))) throw badRequest("limit must be an integer");
@@ -671,6 +678,14 @@ export class PlaceStatusService {
     return this._latestPerReporter(rows).some((row) => row.id === report.id);
   }
 
+  _hasDueReports(nowMs, { placeRefs = null } = {}) {
+    return Array.from(this.store.placeReports.values()).some((report) =>
+      !report.ttl_expiry_accounted_at &&
+      Date.parse(report.expires_at) <= nowMs &&
+      (!placeRefs || placeRefs.has(report.place_ref))
+    );
+  }
+
   _expireDueReportsCommitted(nowMs, undo, { placeRefs = null } = {}) {
     const due = Array.from(this.store.placeReports.values())
       .filter((report) =>
@@ -845,13 +860,16 @@ export class PlaceStatusService {
     const metricRaw = query.get("metric");
     const metric = metricRaw ? requireString(metricRaw, "metric") : null;
     if (metric && !METRICS.has(metric)) throw badRequest("metric is not supported");
-    const includeExpired = query.get("include_expired") !== "false";
+    const includeExpired = parseBooleanQuery(query.get("include_expired"), "include_expired", true);
     const limit = parseLimit(query.get("limit"));
     const cursor = query.get("cursor") || null;
-    this._commitWithReceipt((undo) => {
-      this._expireDueReportsCommitted(nowMs, undo, { placeRefs: new Set([place.place_ref]) });
-      return { status: 200, code: "PLACE_STATUS_EXPIRY_SWEPT", data: null };
-    }, null, nowMs);
+    const historyPlaceRefs = new Set([place.place_ref]);
+    if (this._hasDueReports(nowMs, { placeRefs: historyPlaceRefs })) {
+      this._commitWithReceipt((undo) => {
+        this._expireDueReportsCommitted(nowMs, undo, { placeRefs: historyPlaceRefs });
+        return { status: 200, code: "PLACE_STATUS_EXPIRY_SWEPT", data: null };
+      }, null, nowMs);
+    }
     const rows = this._reportsFor(place.place_ref, metric, place.school_id)
       .filter((report) => report.aggregation_eligible !== false)
       .filter((report) => includeExpired || Date.parse(report.expires_at) > nowMs)
@@ -873,7 +891,7 @@ export class PlaceStatusService {
     if (Boolean(rawRefs) === Boolean(rawBbox)) throw badRequest("exactly one of place_refs or bbox is required");
     const metrics = requireUniqueEnumList(query.get("metrics"), METRICS, "metrics") || Array.from(METRICS);
     const placeTypes = requireUniqueEnumList(query.get("place_types"), PLACE_TYPES, "place_types");
-    const includeExpired = query.get("include_expired") === "true";
+    const includeExpired = parseBooleanQuery(query.get("include_expired"), "include_expired", false);
     const limit = parseLimit(query.get("limit"));
     const cursor = query.get("cursor") || null;
     let places = [];
@@ -897,10 +915,12 @@ export class PlaceStatusService {
     }
     if (placeTypes) places = places.filter((place) => placeTypes.includes(place.place_type));
     const placeRefSet = new Set(places.map((place) => place.place_ref));
-    this._commitWithReceipt((undo) => {
-      this._expireDueReportsCommitted(nowMs, undo, { placeRefs: placeRefSet });
-      return { status: 200, code: "PLACE_STATUS_EXPIRY_SWEPT", data: null };
-    }, null, nowMs);
+    if (this._hasDueReports(nowMs, { placeRefs: placeRefSet })) {
+      this._commitWithReceipt((undo) => {
+        this._expireDueReportsCommitted(nowMs, undo, { placeRefs: placeRefSet });
+        return { status: 200, code: "PLACE_STATUS_EXPIRY_SWEPT", data: null };
+      }, null, nowMs);
+    }
 
     const rows = [];
     for (const place of places) {
@@ -978,6 +998,10 @@ export class PlaceStatusService {
       };
       setMapCommitted(this.store.placeStatusSubscriptions, subscription.id, subscription, undo);
       this.store.indexUserScoped?.("placeStatusSubscriptions", subscription.id, auth.cloudUserId);
+      undo.push(() => {
+        const byUser = this.store._idxIdsByUser?.get?.("placeStatusSubscriptions")?.get?.(auth.cloudUserId);
+        byUser?.delete?.(subscription.id);
+      });
       return {
         status: 201,
         code: "PLACE_STATUS_SUBSCRIPTION_CREATED",
@@ -1151,9 +1175,10 @@ export class PlaceStatusService {
       }, undo);
       let reportEligibilityChanged = false;
       if (action === "EXCLUDE_INCORRECT" || action === "EXCLUDE_ABUSE") {
-        if (report.aggregation_eligible !== false || report.moderation_state !== action) {
+        const excludedState = action === "EXCLUDE_INCORRECT" ? "EXCLUDED_INCORRECT" : "EXCLUDED_ABUSE";
+        if (report.aggregation_eligible !== false || report.moderation_state !== excludedState) {
           reportEligibilityChanged = report.aggregation_eligible !== false;
-          mutateObject(report, { moderation_state: action, aggregation_eligible: false }, undo);
+          mutateObject(report, { moderation_state: excludedState, aggregation_eligible: false }, undo);
         }
       } else if (report.moderation_state === "UNDER_REVIEW") {
         const stillOpen = Array.from(this.store.placeReportFlags.values()).some(
