@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS campus_graph_places (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT campus_graph_places_identity_shape_check
     CHECK (place_ref = school_id || '/' || campus_id || '/' || place_type || '/' || slug),
+  CONSTRAINT campus_graph_places_ref_school_unique
+    UNIQUE (place_ref, school_id),
   CONSTRAINT campus_graph_places_scope_unique
     UNIQUE (place_ref, school_id, campus_id, place_type)
 );
@@ -67,6 +69,13 @@ CREATE TABLE IF NOT EXISTS place_reports (
   CONSTRAINT place_reports_place_scope_fk
     FOREIGN KEY (place_ref, school_id, campus_id, place_type)
     REFERENCES campus_graph_places (place_ref, school_id, campus_id, place_type),
+  CONSTRAINT place_reports_identity_scope_unique
+    UNIQUE (report_id, place_ref, school_id),
+  CONSTRAINT place_reports_correction_target_scope_unique
+    UNIQUE (report_id, place_ref, school_id, metric),
+  CONSTRAINT place_reports_correction_same_scope_fk
+    FOREIGN KEY (corrects_report_id, place_ref, school_id, metric)
+    REFERENCES place_reports (report_id, place_ref, school_id, metric),
   CONSTRAINT place_reports_metric_state_shape_check CHECK (
     (metric = 'ACCESS' AND state IN ('OPEN', 'CLOSED', 'RESTRICTED')) OR
     (metric = 'OPERATION' AND state IN ('WORKING', 'DEGRADED', 'OUT_OF_SERVICE')) OR
@@ -115,12 +124,23 @@ CREATE TABLE IF NOT EXISTS place_status_view (
     CHECK (aggregation_algorithm = 'LATEST_PER_REPORTER_ANY_DIVERGENCE_CONTESTED_V1'),
   official_realtime_status BOOLEAN NOT NULL DEFAULT FALSE CHECK (official_realtime_status = FALSE),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT place_status_view_metric_state_shape_check CHECK (
+    effective_state IN ('CONTESTED', 'UNKNOWN') OR
+    (metric = 'ACCESS' AND effective_state IN ('OPEN', 'CLOSED', 'RESTRICTED')) OR
+    (metric = 'OPERATION' AND effective_state IN ('WORKING', 'DEGRADED', 'OUT_OF_SERVICE')) OR
+    (metric = 'OCCUPANCY' AND effective_state IN ('QUIET', 'MODERATE', 'CROWDED', 'FULL')) OR
+    (metric = 'SAFETY' AND effective_state IN ('SAFE', 'HAZARD'))
+  ),
+  CONSTRAINT place_status_view_unknown_reason_shape_check CHECK (
+    (effective_state = 'UNKNOWN' AND unknown_reason IS NOT NULL) OR
+    (effective_state <> 'UNKNOWN' AND unknown_reason IS NULL)
+  ),
   PRIMARY KEY (school_id, place_ref, metric)
 );
 
 CREATE TABLE IF NOT EXISTS place_report_flags (
   flag_id UUID PRIMARY KEY,
-  report_id UUID NOT NULL REFERENCES place_reports(report_id),
+  report_id UUID NOT NULL,
   place_ref TEXT NOT NULL,
   school_id TEXT NOT NULL,
   reason TEXT NOT NULL CHECK (reason IN ('INCORRECT', 'STALE', 'ABUSE', 'PII', 'SPAM', 'OTHER')),
@@ -132,6 +152,9 @@ CREATE TABLE IF NOT EXISTS place_report_flags (
   review_action TEXT CHECK (review_action IS NULL OR review_action IN ('KEEP_VISIBLE', 'EXCLUDE_INCORRECT', 'EXCLUDE_ABUSE', 'REJECT_FLAG')),
   review_note TEXT CHECK (review_note IS NULL OR char_length(review_note) BETWEEN 1 AND 500),
   reviewer_cloud_user_id UUID,
+  CONSTRAINT place_report_flags_report_scope_fk
+    FOREIGN KEY (report_id, place_ref, school_id)
+    REFERENCES place_reports (report_id, place_ref, school_id),
   CONSTRAINT place_report_flags_review_shape_check CHECK (
     (status = 'OPEN' AND reviewed_at IS NULL AND review_action IS NULL AND reviewer_cloud_user_id IS NULL) OR
     (status <> 'OPEN' AND reviewed_at IS NOT NULL AND review_action IS NOT NULL AND reviewer_cloud_user_id IS NOT NULL)
@@ -150,13 +173,16 @@ CREATE INDEX IF NOT EXISTS place_report_flags_report_idx
   ON place_report_flags (report_id, flagger_cloud_user_id, status);
 CREATE INDEX IF NOT EXISTS place_report_flags_flagger_idx
   ON place_report_flags (flagger_cloud_user_id, school_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS place_report_flags_single_open_per_flagger
+  ON place_report_flags (report_id, flagger_cloud_user_id)
+  WHERE status = 'OPEN';
 
 CREATE TABLE IF NOT EXISTS place_status_subscriptions (
   subscription_id UUID PRIMARY KEY,
   cloud_user_id UUID NOT NULL REFERENCES cloud_users(id) ON DELETE CASCADE,
   school_id TEXT NOT NULL,
   target_type TEXT NOT NULL CHECK (target_type IN ('PLACE', 'AREA')),
-  place_ref TEXT REFERENCES campus_graph_places(place_ref),
+  place_ref TEXT,
   min_latitude DOUBLE PRECISION CHECK (min_latitude IS NULL OR min_latitude BETWEEN -90 AND 90),
   min_longitude DOUBLE PRECISION CHECK (min_longitude IS NULL OR min_longitude BETWEEN -180 AND 180),
   max_latitude DOUBLE PRECISION CHECK (max_latitude IS NULL OR max_latitude BETWEEN -90 AND 90),
@@ -168,6 +194,9 @@ CREATE TABLE IF NOT EXISTS place_status_subscriptions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   cancelled_at TIMESTAMPTZ,
+  CONSTRAINT place_status_subscriptions_place_scope_fk
+    FOREIGN KEY (place_ref, school_id)
+    REFERENCES campus_graph_places (place_ref, school_id),
   CONSTRAINT place_status_subscriptions_target_shape_check CHECK (
     (target_type = 'PLACE' AND place_ref IS NOT NULL AND min_latitude IS NULL AND min_longitude IS NULL AND max_latitude IS NULL AND max_longitude IS NULL) OR
     (target_type = 'AREA' AND place_ref IS NULL AND min_latitude IS NOT NULL AND min_longitude IS NOT NULL AND max_latitude IS NOT NULL AND max_longitude IS NOT NULL AND min_latitude < max_latitude AND min_longitude < max_longitude)

@@ -123,6 +123,37 @@ INSERT INTO operations_school_grants (
 );
 EOSQL
 
+# Aggregate metric/state matrix is fixed as well: OCCUPANCY cannot aggregate as ACCESS state OPEN.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_view (school_id, place_ref, metric, aggregation_revision, effective_state) VALUES ('haut', 'haut/lianhuajie/building/5', 'OCCUPANCY', 1, 'OPEN');" >/dev/null 2>&1; then
+  echo "FAIL: OCCUPANCY aggregate accepted ACCESS state OPEN"; exit 1;
+fi
+
+# UNKNOWN must always carry an explicit machine-readable reason.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_view (school_id, place_ref, metric, aggregation_revision, effective_state) VALUES ('haut', 'haut/lianhuajie/building/5', 'ACCESS', 1, 'UNKNOWN');" >/dev/null 2>&1; then
+  echo "FAIL: UNKNOWN aggregate without unknown_reason accepted"; exit 1;
+fi
+psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_view (school_id, place_ref, metric, aggregation_revision, effective_state, unknown_reason) VALUES ('haut', 'haut/lianhuajie/building/5', 'ACCESS', 1, 'UNKNOWN', 'NO_REPORTS');" >/dev/null
+
+# A correction target must be same school + same place + same metric.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_reports (report_id, place_ref, school_id, campus_id, place_type, metric, state, observed_at, expires_at, ttl_seconds, report_kind, corrects_report_id, reporter_cloud_user_id, reporter_key) VALUES ('77777777-7777-4777-8777-777777777777', 'haut/lianhuajie/room/5-111', 'haut', 'lianhuajie', 'room', 'ACCESS', 'OPEN', '2026-11-27T09:55:00+00:00', '2026-11-27T11:55:00+00:00', 7200, 'CORRECTION', '55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', 'cross-metric-correction');" >/dev/null 2>&1; then
+  echo "FAIL: cross-metric correction target accepted"; exit 1;
+fi
+
+# Flag school/place columns must match the referenced report exactly.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_report_flags (flag_id, report_id, place_ref, school_id, reason, status, flagger_cloud_user_id) VALUES ('abababab-abab-4aba-8aba-abababababab', '55555555-5555-4555-8555-555555555555', 'haut/lianhuajie/room/5-111', 'other-university', 'STALE', 'OPEN', '11111111-1111-4111-8111-111111111111');" >/dev/null 2>&1; then
+  echo "FAIL: cross-school flag row accepted"; exit 1;
+fi
+
+# PLACE subscriptions must keep school_id consistent with their target object.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_subscriptions (subscription_id, cloud_user_id, school_id, target_type, place_ref, metrics, status) VALUES ('cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd', '22222222-2222-4222-8222-222222222222', 'other-university', 'PLACE', 'haut/lianhuajie/room/5-111', '[\"OCCUPANCY\"]'::jsonb, 'ACTIVE');" >/dev/null 2>&1; then
+  echo "FAIL: cross-school PLACE subscription accepted"; exit 1;
+fi
+
+# One caller can have only one OPEN flag for the same report.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_report_flags (flag_id, report_id, place_ref, school_id, reason, status, flagger_cloud_user_id) VALUES ('bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc', '55555555-5555-4555-8555-555555555555', 'haut/lianhuajie/room/5-111', 'haut', 'STALE', 'OPEN', '22222222-2222-4222-8222-222222222222');" >/dev/null 2>&1; then
+  echo "FAIL: duplicate OPEN flag accepted"; exit 1;
+fi
+
 # The aggregate representation can never claim an official realtime feed.
 if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_view (school_id, place_ref, metric, aggregation_revision, effective_state, official_realtime_status) VALUES ('haut', 'haut/lianhuajie/room/5-111', 'ACCESS', 1, 'OPEN', TRUE);" >/dev/null 2>&1; then
   echo "FAIL: official realtime status true accepted"; exit 1;
