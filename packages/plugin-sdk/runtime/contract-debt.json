@@ -1,5 +1,5 @@
 {
-  "version": "w6-01a-contract-debt-2026-11-28-r2",
+  "version": "w6-01a-contract-debt-2026-11-28-r3",
   "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface; every entry here must be resolved by the contract line before being presented as a published contract capability.",
   "debts": [
     {
@@ -60,7 +60,8 @@
         "scope",
         "admin_kill_switch",
         "school_id",
-        "kill_switch_reason"
+        "kill_switch_reason",
+        "QUARANTINED"
       ],
       "resolution": "the contract line must register the account/school scoped lifecycle fields, the REVOKE_PERMISSION action, explicit rollback target_version, and admin kill-switch semantics or the runtime surface must remain undocumented and non-publicized"
     },

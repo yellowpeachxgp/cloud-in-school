@@ -20,6 +20,9 @@ import {
 // wider contract-surface list and is intentionally not edited by this card
 // while CT-01 owns contracts/**.
 export const SUPPORTED_UI_SLOTS = RUNTIME_UI_SLOTS;
+export const PLUGIN_PACKAGE_SECURITY_TRUSTED = "TRUSTED";
+export const PLUGIN_PACKAGE_SECURITY_COMPROMISED = "COMPROMISED";
+export const PLUGIN_INSTALLATION_QUARANTINED = "QUARANTINED";
 
 const PLUGIN_MANIFEST_JSON_PARSE_OPTIONS = Object.freeze({
   rejectDuplicateKeys: true,
@@ -612,6 +615,11 @@ export class PluginRegistryAndBroker {
     // Volatile host-owned reference handlers only. They are intentionally not
     // persisted and are never deserialized from plugin artifacts.
     this.commandHandlersByPackage = new Map();
+    // Successful cryptographic verification cache. Keys always include a digest
+    // of the exact persisted manifest + artifact payload bytes plus the effective
+    // trust-root key, so any post-cache mutation forces a fresh verification.
+    this.packageVerificationCache = new Map();
+    this.packageVerificationCacheLimit = 256;
     this.latestVersionByPlugin = new Map();
     this.versionsByPlugin = new Map();
     this.ownerKeyByPlugin = new Map();
@@ -659,6 +667,7 @@ export class PluginRegistryAndBroker {
     this.versionsByPlugin.clear();
     this.ownerKeyByPlugin.clear();
     this.ownerUserByPlugin.clear();
+    let markedTrusted = false;
     for (const [key, pkg] of this.packages.entries()) {
       const pluginId = pkg?.plugin_id || pkg?.manifest?.plugin_id;
       const version = pkg?.version || pkg?.manifest?.version;
@@ -666,12 +675,22 @@ export class PluginRegistryAndBroker {
       try {
         // Snapshot contents are durable data, not proof of trust. Re-resolve the
         // publisher through the current configured root and re-verify the stored
-        // signed payload before making a restored version installable.
-        this._verifyStoredPackageIntegrity(pkg);
+        // signed payload before making a restored version installable. Failure is
+        // not just an index skip: the version and its active installations enter
+        // explicit quarantine so later invoke/UI paths cannot read them as active.
+        this._verifyStoredPackageIntegrityOrQuarantine(pkg, {
+          packageKey: key,
+          source: "restart-restore"
+        });
       } catch {
         // Revoked, re-keyed, or tampered packages fail closed: they remain in the
         // durable snapshot for audit/forensics but receive no runtime index.
         continue;
+      }
+      if (!pkg.security_state) {
+        pkg.security_state = PLUGIN_PACKAGE_SECURITY_TRUSTED;
+        this.packages.set(key, pkg);
+        markedTrusted = true;
       }
       const list = this.versionsByPlugin.get(pluginId) || [];
       if (!list.includes(version)) list.push(version);
@@ -684,24 +703,217 @@ export class PluginRegistryAndBroker {
         this.ownerUserByPlugin.set(pluginId, pkg.registered_by_cloud_user_id);
       }
     }
+    if (markedTrusted) this._persist();
   }
 
   trustedPublicKeyForPublisher(publisherId) {
     return this.trustedPublisherKeyById.get(String(publisherId || "")) || null;
   }
 
-  _verifyStoredPackageIntegrity(pkg) {
+  _packageVerificationCacheKey(pkg, verificationKey) {
+    const artifactParts = [];
+    for (const artifactPath of Object.keys(pkg?.artifactMap || {}).sort()) {
+      artifactParts.push(artifactPath + "\u0000" + String(pkg.artifactMap[artifactPath]));
+    }
+    const contentDigest = sha256Hex(Buffer.from([
+      canonicalManifestText(pkg?.manifest || {}),
+      artifactParts.join("\u0001"),
+      String(pkg?.plugin_id || ""),
+      String(pkg?.version || ""),
+      String(pkg?.publisher_id || ""),
+      String(pkg?.signature_base64 || ""),
+      String(pkg?.public_key_base64 || "")
+    ].join("\u0002"), "utf8"));
+    // The content digest is mandatory: a verification hit is valid only for the
+    // exact bytes that were verified. Trust-root key and host API are included so
+    // configuration changes cannot reuse a stale positive decision.
+    return [this.hostApiVersion, verificationKey, contentDigest].join(":");
+  }
+
+  _cachePackageVerification(cacheKey, normalizedManifest) {
+    if (this.packageVerificationCache.size >= this.packageVerificationCacheLimit) {
+      const oldestKey = this.packageVerificationCache.keys().next().value;
+      this.packageVerificationCache.delete(oldestKey);
+    }
+    this.packageVerificationCache.set(cacheKey, normalizedManifest);
+  }
+
+  _verifyStoredPackageIntegrityCached(pkg) {
     const publisherId = publisherIdForManifest(pkg?.manifest || {});
     const verificationKey = this._publisherKeyForRegistration(
       publisherId,
       pkg?.public_key_base64 || null
     );
-    return verifySignedPluginPackage({
+    const cacheKey = this._packageVerificationCacheKey(pkg, verificationKey);
+    if (this.packageVerificationCache.has(cacheKey)) {
+      return this.packageVerificationCache.get(cacheKey);
+    }
+    const normalized = this._verifyStoredPackageIntegrity(pkg, {
+      publisherId,
+      verificationKey
+    });
+    this._cachePackageVerification(cacheKey, normalized);
+    return normalized;
+  }
+
+  _verifyStoredPackageIntegrityOrQuarantine(pkg, { packageKey = null, source = "runtime-use" } = {}) {
+    const hadQuarantineState = Boolean(
+      pkg?.security_state && pkg.security_state !== PLUGIN_PACKAGE_SECURITY_TRUSTED
+    );
+    try {
+      // Even a previously quarantined record is re-proven from bytes rather than
+      // trusted because of its marker. If the exact signed content later verifies
+      // again, the package may leave quarantine; the historical compromise audit
+      // remains durable. This keeps fail-closed tamper handling without turning a
+      // repaired valid signed package into a permanent immutable-version brick.
+      const normalized = this._verifyStoredPackageIntegrityCached(pkg);
+      if (hadQuarantineState && pkg?.security_state !== PLUGIN_PACKAGE_SECURITY_TRUSTED) {
+        pkg.security_state = PLUGIN_PACKAGE_SECURITY_TRUSTED;
+        delete pkg.security_reason;
+        delete pkg.security_failure_message;
+        delete pkg.quarantined_at;
+        delete pkg.quarantine_source;
+        if (packageKey) this.packages.set(packageKey, pkg);
+        this._audit({
+          action: "PLUGIN_PACKAGE_QUARANTINE_RELEASED",
+          resource_kind: "plugin_version",
+          resource_ref: packageKey || pluginPackageKey(pkg.plugin_id, pkg.version),
+          detail: {
+            plugin_id: pkg.plugin_id || normalized.plugin_id,
+            version: pkg.version || normalized.version,
+            source
+          }
+        });
+        this._persist();
+      }
+      return normalized;
+    } catch (error) {
+      this._quarantinePackage(pkg, error, { packageKey, source });
+      throw error;
+    }
+  }
+
+  _quarantinePackage(pkg, error, { packageKey = null, source = "runtime-use" } = {}) {
+    if (!pkg || typeof pkg !== "object") {
+      return { package_key: null, quarantined_installations: [] };
+    }
+    const pluginId = pkg.plugin_id || pkg.manifest?.plugin_id || "unknown-plugin";
+    const version = pkg.version || pkg.manifest?.version || "unknown-version";
+    const key = packageKey || pluginPackageKey(pluginId, version);
+    const nowIso = new Date().toISOString();
+    const firstTransition = pkg.security_state !== PLUGIN_PACKAGE_SECURITY_COMPROMISED;
+    if (firstTransition) {
+      pkg.security_state = PLUGIN_PACKAGE_SECURITY_COMPROMISED;
+      pkg.security_reason = error?.code || "PLUGIN_SIGNATURE_INVALID";
+      pkg.security_failure_message = String(error?.message || "persisted plugin package verification failed").slice(0, 240);
+      pkg.quarantined_at = nowIso;
+      pkg.quarantine_source = source;
+      this.packages.set(key, pkg);
+    }
+
+    // Restore-time isolation is explicit installation state. Runtime invoke/UI
+    // detection also fails closed on every use, but does not rewrite the user's
+    // installation state underneath lifecycle operations; this preserves the
+    // reviewed activation/revoke/rollback semantics once the exact signed bytes
+    // verify again.
+    const shouldQuarantineInstallations = source === "restart-restore";
+    const newlyQuarantined = [];
+    for (const [installationKey, installation] of this.userInstallations.entries()) {
+      if (!shouldQuarantineInstallations) break;
+      if (installation?.plugin_id !== pluginId || installation?.active_version !== version) continue;
+      if (installation.status === PLUGIN_INSTALLATION_QUARANTINED) continue;
+      const shaped = installationResponseShape({
+        ...installation,
+        pre_quarantine_status: installation.status,
+        status: PLUGIN_INSTALLATION_QUARANTINED,
+        quarantine_reason: "ACTIVE_PACKAGE_COMPROMISED",
+        quarantined_at: nowIso,
+        updated_at: nowIso
+      });
+      this.userInstallations.set(installationKey, shaped);
+      this._syncPermissionGrantRows(shaped);
+      newlyQuarantined.push(shaped);
+    }
+
+    if (firstTransition) {
+      this._audit({
+        action: "PLUGIN_PACKAGE_QUARANTINED",
+        resource_kind: "plugin_version",
+        resource_ref: key,
+        outcome: "FAIL_CLOSED",
+        detail: {
+          plugin_id: pluginId,
+          version,
+          security_state: PLUGIN_PACKAGE_SECURITY_COMPROMISED,
+          reason: pkg.security_reason,
+          source,
+          quarantined_installations: newlyQuarantined.length
+        }
+      });
+    }
+    for (const installation of newlyQuarantined) {
+      this._audit({
+        action: "PLUGIN_INSTALLATION_QUARANTINED",
+        resource_kind: "plugin_installation",
+        resource_ref: installation.installation_id,
+        outcome: "FAIL_CLOSED",
+        detail: {
+          plugin_id: pluginId,
+          version,
+          school_id: installation.school_id,
+          installation_status: PLUGIN_INSTALLATION_QUARANTINED,
+          reason: "ACTIVE_PACKAGE_COMPROMISED",
+          source
+        }
+      });
+    }
+    if (firstTransition || newlyQuarantined.length > 0) this._persist();
+    return {
+      package_key: key,
+      quarantined_installations: newlyQuarantined.map((installation) => installation.installation_id)
+    };
+  }
+
+  _verifyStoredPackageIntegrity(pkg, { publisherId = null, verificationKey = null } = {}) {
+    const effectivePublisherId = publisherId || publisherIdForManifest(pkg?.manifest || {});
+    const effectiveVerificationKey = verificationKey || this._publisherKeyForRegistration(
+      effectivePublisherId,
+      pkg?.public_key_base64 || null
+    );
+    const normalized = verifySignedPluginPackage({
       manifest: pkg?.manifest,
       artifactMap: artifactMapForVerification(pkg?.artifactMap || {}),
-      publicKeyBase64: verificationKey,
+      publicKeyBase64: effectiveVerificationKey,
       hostApiVersion: this.hostApiVersion
     });
+    if (pkg?.plugin_id && pkg.plugin_id !== normalized.plugin_id) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Persisted plugin version record plugin_id does not match its signed manifest"
+      );
+    }
+    if (pkg?.version && pkg.version !== normalized.version) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Persisted plugin version record version does not match its signed manifest"
+      );
+    }
+    if (pkg?.publisher_id && pkg.publisher_id !== publisherIdForManifest(normalized)) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Persisted plugin version record publisher does not match its signed manifest"
+      );
+    }
+    const normalizedSignature = typeof normalized.signature === "string"
+      ? normalized.signature
+      : normalized.signature?.value_base64 || "";
+    if (pkg?.signature_base64 && normalizedSignature && pkg.signature_base64 !== normalizedSignature) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Persisted plugin version signature metadata does not match its signed manifest"
+      );
+    }
+    return normalized;
   }
 
   _publisherKeyForRegistration(publisherId, suppliedPublicKeyBase64 = null) {
@@ -914,6 +1126,13 @@ export class PluginRegistryAndBroker {
 
     const existingPackage = this.packages.get(key);
     if (existingPackage) {
+      // Re-registration is also a use of durable state. A tampered persisted copy
+      // must be quarantined and rejected before any immutable-version comparison;
+      // a valid incoming copy never silently repairs or overwrites that evidence.
+      this._verifyStoredPackageIntegrityOrQuarantine(existingPackage, {
+        packageKey: key,
+        source: "registration"
+      });
       if (
         existingPackage.public_key_base64 !== publicKeyBase64 ||
         canonicalManifestText(existingPackage.manifest) !== canonicalManifestText(verified)
@@ -966,6 +1185,7 @@ export class PluginRegistryAndBroker {
       artifactMap: persistedArtifacts,
       signature_base64: verified.signature?.value_base64 || "",
       public_key_base64: publicKeyBase64,
+      security_state: PLUGIN_PACKAGE_SECURITY_TRUSTED,
       registered_by_cloud_user_id: actorUserId || null,
       registered_at: new Date().toISOString()
     };
@@ -1023,7 +1243,10 @@ export class PluginRegistryAndBroker {
     // exact persisted signed package against the current trust root and every
     // declared artifact digest before deriving permissions or changing state,
     // including when the caller explicitly selects a version.
-    this._verifyStoredPackageIntegrity(pkg);
+    this._verifyStoredPackageIntegrityOrQuarantine(pkg, {
+      packageKey: pluginPackageKey(pluginId, targetVersion),
+      source: "install"
+    });
     if (publicKeyBase64 !== null && publicKeyBase64 !== undefined) {
       const publisherId = publisherIdForManifest(pkg.manifest);
       const effectivePublisherKey = this._publisherKeyForRegistration(
@@ -1072,6 +1295,13 @@ export class PluginRegistryAndBroker {
         detail: { plugin_id: pluginId, school_id: scopedSchoolId, version: targetVersion }
       });
       return record;
+    }
+
+    if (existing.status === PLUGIN_INSTALLATION_QUARANTINED) {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "Plugin installation is quarantined after persisted package integrity failure; uninstall it before any new installation"
+      );
     }
 
     const currentGranted = uniquePermissionList(existing.granted_permissions);
@@ -1138,7 +1368,10 @@ export class PluginRegistryAndBroker {
     // standard as rollback: re-resolve the publisher through the current trust
     // root, re-verify the signature, and re-check every declared artifact before
     // touching the active version or grant set.
-    this._verifyStoredPackageIntegrity(pendingPkg);
+    this._verifyStoredPackageIntegrityOrQuarantine(pendingPkg, {
+      packageKey: pluginPackageKey(pluginId, inst.pending_version),
+      source: "permission-confirmation"
+    });
     const nowIso = new Date().toISOString();
     const targetPermissions = uniquePermissionList(pendingPkg.manifest.permissions);
     const confirmed = {
@@ -1172,6 +1405,13 @@ export class PluginRegistryAndBroker {
     const { key: installKey, installation: inst } = found;
     const nowIso = new Date().toISOString();
 
+    if (inst.status === PLUGIN_INSTALLATION_QUARANTINED && action !== "UNINSTALL") {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "Plugin installation is quarantined after persisted package integrity failure; only UNINSTALL cleanup is allowed"
+      );
+    }
+
     if (action === "ENABLE") {
       // PENDING_PERMISSION_REVIEW is a distinct approval gate. In that state
       // the lifecycle ENABLE action is the explicit user confirmation.
@@ -1203,7 +1443,10 @@ export class PluginRegistryAndBroker {
       // Revocation interprets the active manifest, so the persisted package must
       // first re-prove publisher trust, signature validity, and all declared
       // artifact digests. Tampering therefore fails closed without changing grants.
-      this._verifyStoredPackageIntegrity(activePkg);
+      this._verifyStoredPackageIntegrityOrQuarantine(activePkg, {
+        packageKey: pluginPackageKey(pluginId, inst.active_version),
+        source: "permission-revocation"
+      });
       if (!(activePkg.manifest.permissions || []).includes(permission)) {
         throw new ContractError(
           "BAD_REQUEST",
@@ -1236,7 +1479,10 @@ export class PluginRegistryAndBroker {
       // persisted copy is durable evidence, not trusted input: a revoked publisher,
       // tampered manifest, missing artifact, or digest mismatch makes rollback
       // fail closed without changing the currently active version.
-      this._verifyStoredPackageIntegrity(rollbackPkg);
+      this._verifyStoredPackageIntegrityOrQuarantine(rollbackPkg, {
+        packageKey: pluginPackageKey(pluginId, rollbackVer),
+        source: "rollback"
+      });
       const rollbackPermissions = uniquePermissionList(rollbackPkg.manifest.permissions);
       inst.previous_version = inst.active_version;
       inst.active_version = rollbackVer;
@@ -1317,6 +1563,17 @@ export class PluginRegistryAndBroker {
       const pkg = this.packages.get(pluginPackageKey(inst.plugin_id, inst.active_version));
       if (!pkg) continue;
       if (!(inst.granted_permissions || []).includes("ui.slot.render")) continue;
+      try {
+        // UI descriptors are security-sensitive output derived from the signed
+        // manifest. Re-prove the exact persisted package before reading even one
+        // slot field; successful decisions are cached by a content-digest key.
+        this._verifyStoredPackageIntegrityOrQuarantine(pkg, {
+          packageKey: pluginPackageKey(inst.plugin_id, inst.active_version),
+          source: "ui-descriptor"
+        });
+      } catch {
+        continue;
+      }
 
       for (const slot of pkg.manifest.ui_slots || []) {
         if (slotId && slot.slot_id !== slotId) continue;
@@ -1445,6 +1702,14 @@ export class PluginRegistryAndBroker {
     if (!pkg) {
       throw new ContractError("NOT_FOUND", "Active plugin package missing");
     }
+    // Invocation is a use of persisted signed artifacts, never a trusted cache
+    // read. Re-verify publisher trust, signature, and every declared artifact
+    // before interpreting the manifest. The memory cache key includes the exact
+    // content digest, so post-restore tampering cannot reuse a stale pass.
+    this._verifyStoredPackageIntegrityOrQuarantine(pkg, {
+      packageKey: pluginPackageKey(pluginId, inst.active_version),
+      source: "command-invoke"
+    });
 
     const cmdSpec = (pkg.manifest.commands || []).find((c) => c.name === commandName);
     if (!cmdSpec) {

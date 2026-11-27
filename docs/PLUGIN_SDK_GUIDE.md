@@ -89,9 +89,12 @@ DISABLED
   ├─ ENABLE ─> ENABLED；若仍有 pending_version，先回到 PENDING_PERMISSION_REVIEW
   ├─ same-permission reinstall/upgrade ─> DISABLED(不会被静默重新启用)
   └─ UNINSTALL ─> UNINSTALLED
+
+QUARANTINED
+  └─ UNINSTALL ─> UNINSTALLED（其余 lifecycle 一律拒绝；重启恢复时只有 active_version 未过验的安装会进入该状态）
 ```
 
-首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。显式版本安装、待审权限确认、逐项撤权和回滚在读取持久化包前都会重新解析当前信任根、重验签名与全部声明产物摘要；持久化数据只是证据，不是信任输入。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
+首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。显式版本安装、待审权限确认、逐项撤权、回滚、命令 invoke 和 UI descriptor 输出在读取持久化包前都会重新解析当前信任根、重验签名与全部声明产物摘要；持久化数据只是证据，不是信任输入。重启恢复时未过验的 package 会标为 `COMPROMISED`，正在使用该版本的 installation 会标为 `QUARANTINED`：不可 invoke、不产生 UI descriptor、只能卸载清理，并写入 `PLUGIN_PACKAGE_QUARANTINED` / `PLUGIN_INSTALLATION_QUARANTINED` 审计。为控制重复验签成本，运行时使用内存成功验签缓存；缓存键必须包含有效信任根公钥、host API 以及持久化 manifest、artifact payload 和版本元数据的内容摘要，任何篡改都会使缓存键改变并触发重验。若之后字节恢复为同一签名包且重验通过，package 可脱离 quarantine；历史审计不会删除，restart 时已 QUARANTINED 的 installation 仍需卸载清理而不会自动恢复启用。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
 
 ## 4.1 发布者信任根与持久化边界
 

@@ -192,6 +192,16 @@ test("AC-15: package versions, installations, grants, and key pins survive an ap
     );
     const persistedInvoke = await invokeFixture(app2, headers, "org.example.w601a-restart");
     assert.equal(persistedInvoke.status, 200);
+    assert.equal(
+      app2.pluginBroker.getResolvedUiSlotDescriptors(user.id, null, { schoolId: "haut" }).length,
+      1,
+      "an intact signed package must keep its UI slot after restart"
+    );
+    assert.equal(
+      app2.store.auditEvents.some((event) => String(event.action || "").includes("QUARANTINED")),
+      false,
+      "an intact signed package must not produce quarantine audit noise"
+    );
 
     const replacementKey = generateEd25519KeyPair();
     const replacement = signedPlugin({ keyPair: replacementKey, pluginId: "org.example.w601a-restart" });
@@ -207,6 +217,94 @@ test("AC-15: package versions, installations, grants, and key pins survive an ap
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("B4 restart tamper: unverified snapshot package is quarantined before invoke or UI use", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w601a-b4-restart-"));
+  let app1 = null;
+  let app2 = null;
+  try {
+    const snapshotPath = path.join(tmpDir, "snapshot.json");
+    const keyPair = generateEd25519KeyPair();
+    const pluginId = "org.example.w601a-b4-restart";
+    const fixture = signedPlugin({ keyPair, pluginId });
+    app1 = createCampusCloudApp(trustedPluginAppOptions(keyPair, {
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    }));
+    const { user, headers } = createUserSession(app1, "w601a_b4_restart_user");
+    assert.equal((await installFixture(app1, headers, fixture, keyPair.publicKeyBase64)).status, 201);
+    app1.store.flushSnapshotStrictSync();
+
+    const rawSnapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+    const packageKey = pluginId + "@1.0.0";
+    const versionEntry = (rawSnapshot.pluginVersions || []).find(([key]) => key === packageKey);
+    assert.ok(versionEntry, "signed package version must be present in the durable snapshot");
+    versionEntry[1].artifactMap["dist/data.txt"] = Buffer.from("tampered restart artifact", "utf8").toString("base64");
+    fs.writeFileSync(snapshotPath, JSON.stringify(rawSnapshot), "utf8");
+
+    app2 = createCampusCloudApp(trustedPluginAppOptions(keyPair, {
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    }));
+    const restoredPackage = app2.pluginBroker.packages.get(packageKey);
+    assert.equal(restoredPackage?.security_state, "COMPROMISED");
+    assert.equal(app2.pluginBroker.versionsByPlugin.has(pluginId), false, "tampered package must not receive a runtime registry index");
+
+    const found = app2.pluginBroker._findInstallation(user.id, pluginId, "haut");
+    assert.ok(found, "the installation evidence remains available for audit and cleanup");
+    assert.equal(found.installation.status, "QUARANTINED");
+    assert.equal(found.installation.pre_quarantine_status, "ENABLED");
+
+    const denied = await invokeFixture(app2, headers, pluginId);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error.code, "PLUGIN_PERMISSION_DENIED");
+    assert.equal(
+      app2.pluginBroker.getResolvedUiSlotDescriptors(user.id, null, { schoolId: "haut" }).length,
+      0,
+      "quarantined installations must not emit UI slot descriptors"
+    );
+
+    const packageAudit = app2.store.auditEvents.find((event) => event.action === "PLUGIN_PACKAGE_QUARANTINED");
+    const installationAudit = app2.store.auditEvents.find((event) => event.action === "PLUGIN_INSTALLATION_QUARANTINED");
+    assert.ok(packageAudit, "package quarantine must be audited");
+    assert.equal(packageAudit.outcome, "FAIL_CLOSED");
+    assert.equal(packageAudit.detail?.security_state, "COMPROMISED");
+    assert.ok(installationAudit, "installation quarantine must be audited");
+    assert.equal(installationAudit.outcome, "FAIL_CLOSED");
+    assert.equal(installationAudit.detail?.installation_status, "QUARANTINED");
+  } finally {
+    for (const app of [app1, app2]) {
+      if (app?.store?._snapshotFlushTimer) clearTimeout(app.store._snapshotFlushTimer);
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("B4 runtime defense: invoke and UI re-verify the active signed package before use", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_b4_runtime_user");
+  const pluginId = "org.example.w601a-b4-runtime";
+  const fixture = signedPlugin({ keyPair, pluginId });
+  assert.equal((await installFixture(app, headers, fixture, keyPair.publicKeyBase64)).status, 201);
+  assert.equal((await invokeFixture(app, headers, pluginId)).status, 200);
+  assert.equal(app.pluginBroker.getResolvedUiSlotDescriptors(user.id, null, { schoolId: "haut" }).length, 1);
+
+  const stored = app.pluginBroker.packages.get(pluginId + "@1.0.0");
+  assert.ok(stored, "active package must be persisted before tamper injection");
+  stored.artifactMap["dist/data.txt"] = Buffer.from("tampered active artifact", "utf8").toString("base64");
+
+  const denied = await invokeFixture(app, headers, pluginId);
+  assert.equal(denied.status, 400);
+  assert.equal(denied.body.error.code, "PLUGIN_SIGNATURE_INVALID");
+  assert.equal(
+    app.pluginBroker.getResolvedUiSlotDescriptors(user.id, null, { schoolId: "haut" }).length,
+    0,
+    "a package that fails use-time verification must not emit UI descriptors"
+  );
+  const audit = app.store.auditEvents.find((event) => event.action === "PLUGIN_PACKAGE_QUARANTINED");
+  assert.ok(audit, "runtime tamper detection must be audited");
+  assert.equal(audit.outcome, "FAIL_CLOSED");
+  assert.equal(audit.detail?.security_state, "COMPROMISED");
 });
 
 test("AC-16: broker carries no private key and production rejects unlisted publisher keys", () => {
