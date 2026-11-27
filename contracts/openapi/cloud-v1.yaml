@@ -3154,7 +3154,7 @@ components:
     RefundLegacyReconcileQueueItem:
       type: object
       additionalProperties: false
-      required: [order_id, event_key, status, attempt_count, last_error_code, created_at, updated_at]
+      required: [order_id, event_key, status, attempt_count, created_at, updated_at]
       properties:
         order_id:
           type: string
