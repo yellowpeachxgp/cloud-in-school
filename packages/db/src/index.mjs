@@ -588,6 +588,506 @@ export function simulateMigration0004OnCatalog(
   };
 }
 
+const ATOMIC_MAP_FIELDS = Object.freeze([
+  "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
+  "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
+  "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
+  "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
+  "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
+  "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
+  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+]);
+const ATOMIC_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
+
+function atomicIsObject(value) {
+  return value !== null && (typeof value === "object" || typeof value === "function");
+}
+
+function atomicCanWrap(value) {
+  if (!atomicIsObject(value)) return false;
+  if (Array.isArray(value) || value instanceof Set || value instanceof Map) return true;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function atomicShallowCopy(value) {
+  if (Array.isArray(value)) return value.slice();
+  if (value instanceof Set) return new Set(value);
+  if (value instanceof Map) return new Map(value);
+  const copy = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
+  return Object.assign(copy, value);
+}
+
+class AtomicTransactionalMap extends Map {
+  constructor(transaction, liveMap) {
+    super();
+    this.transaction = transaction;
+    this.liveMap = liveMap;
+    this.copy = null;
+  }
+
+  _source() {
+    return this.copy || this.liveMap;
+  }
+
+  _mutable() {
+    if (!this.copy) this.copy = new Map(this.liveMap);
+    return this.copy;
+  }
+
+  get size() {
+    return this._source().size;
+  }
+
+  get(key) {
+    return this.transaction.wrapValue(this._source().get(key));
+  }
+
+  has(key) {
+    return this._source().has(key);
+  }
+
+  set(key, value) {
+    this._mutable().set(key, this.transaction.prepareOverlayValue(value));
+    return this;
+  }
+
+  delete(key) {
+    if (!this.copy && !this.liveMap.has(key)) return false;
+    return this._mutable().delete(key);
+  }
+
+  clear() {
+    if (this._source().size === 0) return;
+    this.copy = new Map();
+  }
+
+  *keys() {
+    yield* this._source().keys();
+  }
+
+  *values() {
+    for (const value of this._source().values()) {
+      yield this.transaction.wrapValue(value);
+    }
+  }
+
+  *entries() {
+    for (const [key, value] of this._source().entries()) {
+      yield [key, this.transaction.wrapValue(value)];
+    }
+  }
+
+  forEach(callback, thisArg = undefined) {
+    for (const [key, value] of this._source().entries()) {
+      callback.call(thisArg, this.transaction.wrapValue(value), key, this);
+    }
+  }
+
+  [Symbol.iterator]() {
+    return this.entries();
+  }
+}
+
+class AtomicCommitTransaction {
+  constructor(store) {
+    this.store = store;
+    this.originals = new Map();
+    this.transactionalMaps = new Map();
+    this.states = new WeakMap();
+    this.overlayNodes = new Set();
+    this.targetToProxy = new WeakMap();
+    this.proxyToTarget = new WeakMap();
+    this.overlayOwned = new WeakSet();
+    this.closed = false;
+  }
+
+  install() {
+    for (const field of ATOMIC_MAP_FIELDS) {
+      const liveMap = this.store[field];
+      if (!(liveMap instanceof Map)) continue;
+      this.originals.set(field, liveMap);
+      const transactionalMap = new AtomicTransactionalMap(this, liveMap);
+      this.transactionalMaps.set(field, transactionalMap);
+      this.store[field] = transactionalMap;
+    }
+    for (const field of ATOMIC_ARRAY_FIELDS) {
+      const liveArray = this.store[field];
+      if (!Array.isArray(liveArray)) continue;
+      this.originals.set(field, liveArray);
+      this.store[field] = this.wrapValue(liveArray);
+    }
+    if (atomicCanWrap(this.store.momentsState)) {
+      this.originals.set("momentsState", this.store.momentsState);
+      this.store.momentsState = this.wrapValue(this.store.momentsState);
+    }
+  }
+
+  uninstall() {
+    for (const [field, original] of this.originals.entries()) {
+      this.store[field] = original;
+    }
+  }
+
+  stateFor(target) {
+    return this.states.get(target) || null;
+  }
+
+  sourceFor(target) {
+    return this.stateFor(target)?.copy || target;
+  }
+
+  ensureCopy(target) {
+    let state = this.states.get(target);
+    if (!state) {
+      state = { copy: null };
+      this.states.set(target, state);
+      this.overlayNodes.add(target);
+    }
+    if (!state.copy) state.copy = atomicShallowCopy(target);
+    return state.copy;
+  }
+
+  wrapValue(value) {
+    if (!atomicCanWrap(value)) return value;
+    if (this.proxyToTarget.has(value)) return value;
+    if (this.overlayOwned.has(value)) return value;
+    const existing = this.targetToProxy.get(value);
+    if (existing) return existing;
+    const tx = this;
+    const handler = {
+      get(target, prop, receiver) {
+        if (target instanceof Set) return tx.getSetMember(target, prop, receiver);
+        if (target instanceof Map) return tx.getMapMember(target, prop, receiver);
+        const source = tx.sourceFor(target);
+        return tx.wrapValue(Reflect.get(source, prop, receiver));
+      },
+      set(target, prop, value) {
+        if (tx.closed) {
+          target[prop] = tx.proxyToTarget.get(value) || value;
+          return true;
+        }
+        const copy = tx.ensureCopy(target);
+        copy[prop] = tx.prepareOverlayValue(value);
+        return true;
+      },
+      deleteProperty(target, prop) {
+        if (tx.closed) return delete target[prop];
+        const copy = tx.ensureCopy(target);
+        return delete copy[prop];
+      },
+      defineProperty(target, prop, descriptor) {
+        if (tx.closed) {
+          if (Object.hasOwn(descriptor, "value")) {
+            descriptor = { ...descriptor, value: tx.proxyToTarget.get(descriptor.value) || descriptor.value };
+          }
+          return Reflect.defineProperty(target, prop, descriptor);
+        }
+        const copy = tx.ensureCopy(target);
+        if (Object.hasOwn(descriptor, "value")) {
+          descriptor = { ...descriptor, value: tx.prepareOverlayValue(descriptor.value) };
+        }
+        return Reflect.defineProperty(copy, prop, descriptor);
+      },
+      has(target, prop) {
+        return Reflect.has(tx.sourceFor(target), prop);
+      },
+      ownKeys(target) {
+        return Reflect.ownKeys(tx.sourceFor(target));
+      },
+      getOwnPropertyDescriptor(target, prop) {
+        return Reflect.getOwnPropertyDescriptor(tx.sourceFor(target), prop);
+      },
+      getPrototypeOf(target) {
+        return Object.getPrototypeOf(target);
+      },
+      setPrototypeOf() {
+        return false;
+      }
+    };
+    const proxy = new Proxy(value, handler);
+    this.targetToProxy.set(value, proxy);
+    this.proxyToTarget.set(proxy, value);
+    return proxy;
+  }
+
+  getSetMember(target, prop, receiver) {
+    const tx = this;
+    const source = this.sourceFor(target);
+    if (prop === "size") return source.size;
+    if (prop === "add") {
+      return (value) => {
+        if (tx.closed) target.add(tx.proxyToTarget.get(value) || value);
+        else tx.ensureCopy(target).add(tx.prepareOverlayValue(value));
+        return receiver;
+      };
+    }
+    if (prop === "delete") {
+      return (value) => {
+        const raw = tx.proxyToTarget.get(value) || value;
+        if (!source.has(raw)) return false;
+        if (tx.closed) return target.delete(raw);
+        return tx.ensureCopy(target).delete(raw);
+      };
+    }
+    if (prop === "clear") {
+      return () => {
+        if (source.size === 0) return;
+        if (tx.closed) {
+          target.clear();
+          return;
+        }
+        const copy = tx.ensureCopy(target);
+        copy.clear();
+      };
+    }
+    if (prop === "has") {
+      return (value) => source.has(tx.proxyToTarget.get(value) || value);
+    }
+    if (prop === "values" || prop === "keys" || prop === Symbol.iterator) {
+      return function* values() {
+        for (const item of source.values()) yield tx.wrapValue(item);
+      };
+    }
+    if (prop === "entries") {
+      return function* entries() {
+        for (const item of source.values()) {
+          const wrapped = tx.wrapValue(item);
+          yield [wrapped, wrapped];
+        }
+      };
+    }
+    if (prop === "forEach") {
+      return (callback, thisArg = undefined) => {
+        for (const item of source.values()) {
+          const wrapped = tx.wrapValue(item);
+          callback.call(thisArg, wrapped, wrapped, receiver);
+        }
+      };
+    }
+    return Reflect.get(source, prop, receiver);
+  }
+
+  getMapMember(target, prop, receiver) {
+    const tx = this;
+    const source = this.sourceFor(target);
+    if (prop === "size") return source.size;
+    if (prop === "get") {
+      return (key) => tx.wrapValue(source.get(key));
+    }
+    if (prop === "set") {
+      return (key, value) => {
+        if (tx.closed) target.set(key, tx.proxyToTarget.get(value) || value);
+        else tx.ensureCopy(target).set(key, tx.prepareOverlayValue(value));
+        return receiver;
+      };
+    }
+    if (prop === "delete") {
+      return (key) => {
+        if (!source.has(key)) return false;
+        if (tx.closed) return target.delete(key);
+        return tx.ensureCopy(target).delete(key);
+      };
+    }
+    if (prop === "clear") {
+      return () => {
+        if (source.size === 0) return;
+        if (tx.closed) {
+          target.clear();
+          return;
+        }
+        tx.ensureCopy(target).clear();
+      };
+    }
+    if (prop === "has") return (key) => source.has(key);
+    if (prop === "keys") {
+      return function* keys() {
+        yield* source.keys();
+      };
+    }
+    if (prop === "values") {
+      return function* values() {
+        for (const value of source.values()) yield tx.wrapValue(value);
+      };
+    }
+    if (prop === "entries" || prop === Symbol.iterator) {
+      return function* entries() {
+        for (const [key, value] of source.entries()) {
+          yield [key, tx.wrapValue(value)];
+        }
+      };
+    }
+    if (prop === "forEach") {
+      return (callback, thisArg = undefined) => {
+        for (const [key, value] of source.entries()) {
+          callback.call(thisArg, tx.wrapValue(value), key, receiver);
+        }
+      };
+    }
+    return Reflect.get(source, prop, receiver);
+  }
+
+  adoptChildValue(value, seen, stack) {
+    const unwrapped = this.proxyToTarget.get(value);
+    if (unwrapped) return unwrapped;
+    if (!atomicCanWrap(value)) return value;
+    if (this.overlayOwned.has(value) || this.targetToProxy.has(value) || this.states.has(value)) {
+      return value;
+    }
+    if (seen.has(value)) return value;
+    this.overlayOwned.add(value);
+    seen.add(value);
+    stack.push(value);
+    return value;
+  }
+
+  prepareOverlayValue(value) {
+    const unwrappedRoot = this.proxyToTarget.get(value);
+    if (unwrappedRoot) return unwrappedRoot;
+    if (!atomicCanWrap(value)) return value;
+    if (this.overlayOwned.has(value) || this.targetToProxy.has(value) || this.states.has(value)) {
+      return value;
+    }
+    this.overlayOwned.add(value);
+    const seen = new WeakSet([value]);
+    const stack = [value];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (Array.isArray(current)) {
+        for (let index = 0; index < current.length; index += 1) {
+          current[index] = this.adoptChildValue(current[index], seen, stack);
+        }
+      } else if (current instanceof Set) {
+        for (const item of Array.from(current.values())) {
+          const next = this.adoptChildValue(item, seen, stack);
+          if (next !== item) {
+            current.delete(item);
+            current.add(next);
+          }
+        }
+      } else if (current instanceof Map) {
+        for (const [key, item] of Array.from(current.entries())) {
+          const next = this.adoptChildValue(item, seen, stack);
+          if (next !== item) current.set(key, next);
+        }
+      } else {
+        for (const key of Reflect.ownKeys(current)) {
+          const descriptor = Reflect.getOwnPropertyDescriptor(current, key);
+          if (!descriptor || !Object.hasOwn(descriptor, "value") || descriptor.writable !== true) continue;
+          current[key] = this.adoptChildValue(descriptor.value, seen, stack);
+        }
+      }
+    }
+    return value;
+  }
+
+  materializeValue(value) {
+    return this.proxyToTarget.get(value) || value;
+  }
+
+  applyArrayOverlay(target, copy) {
+    if (target.length !== copy.length) target.length = copy.length;
+    for (let index = 0; index < copy.length; index += 1) {
+      if (index in copy) target[index] = this.materializeValue(copy[index]);
+      else delete target[index];
+    }
+    const copyKeys = new Set(Reflect.ownKeys(copy));
+    for (const key of Reflect.ownKeys(target)) {
+      if (!copyKeys.has(key) && key !== "length") delete target[key];
+    }
+    for (const key of copyKeys) {
+      if (key === "length" || /^(0|[1-9]\d*)$/.test(String(key))) continue;
+      target[key] = this.materializeValue(copy[key]);
+    }
+  }
+
+  applyObjectOverlay(target, copy) {
+    const copyKeys = new Set(Reflect.ownKeys(copy));
+    for (const key of Reflect.ownKeys(target)) {
+      if (!copyKeys.has(key)) delete target[key];
+    }
+    for (const key of copyKeys) {
+      target[key] = this.materializeValue(copy[key]);
+    }
+  }
+
+  applyNodeOverlay(target, copy) {
+    if (Array.isArray(target) && Array.isArray(copy)) {
+      this.applyArrayOverlay(target, copy);
+      return;
+    }
+    if (target instanceof Set && copy instanceof Set) {
+      for (const item of target.values()) {
+        if (!copy.has(item)) target.delete(item);
+      }
+      for (const item of copy.values()) {
+        const next = this.materializeValue(item);
+        if (!target.has(next)) target.add(next);
+      }
+      return;
+    }
+    if (target instanceof Map && copy instanceof Map) {
+      for (const key of target.keys()) {
+        if (!copy.has(key)) target.delete(key);
+      }
+      for (const [key, value] of copy.entries()) {
+        target.set(key, this.materializeValue(value));
+      }
+      return;
+    }
+    this.applyObjectOverlay(target, copy);
+  }
+
+  applyMapOverlay(liveMap, copy) {
+    for (const key of liveMap.keys()) {
+      if (!copy.has(key)) liveMap.delete(key);
+    }
+    for (const [key, value] of copy.entries()) {
+      liveMap.set(key, this.materializeValue(value));
+    }
+  }
+
+  clearOverlayStates() {
+    for (const target of this.overlayNodes) this.states.delete(target);
+    this.overlayNodes.clear();
+  }
+
+  abort() {
+    if (this.closed) return;
+    this.closed = true;
+    this.clearOverlayStates();
+    this.uninstall();
+    this.store._rebuildIndexes?.();
+  }
+
+  commit() {
+    if (this.closed) return;
+    this.closed = true;
+    let firstError = null;
+    for (const target of this.overlayNodes) {
+      const copy = this.states.get(target)?.copy;
+      if (!copy) continue;
+      try {
+        this.applyNodeOverlay(target, copy);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    for (const [field, transactionalMap] of this.transactionalMaps.entries()) {
+      if (!transactionalMap.copy) continue;
+      try {
+        this.applyMapOverlay(this.originals.get(field), transactionalMap.copy);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    this.clearOverlayStates();
+    this.uninstall();
+    this.store._rebuildIndexes?.();
+    if (firstError) throw firstError;
+  }
+}
+
 export class CloudDatabaseStore {
   constructor({
     snapshotPath = null,
@@ -974,74 +1474,73 @@ export class CloudDatabaseStore {
     this._flushSnapshotSync({ strict: true });
   }
 
-  // Atomic commit unit (W4-01 data-delete hardening): all in-memory mutations
-  // inside fn run with inner flushes suppressed, exactly one strict flush is
-  // performed at the end, and a pre-publish failure rolls back every mutation
-  // so memory never diverges from the unpublished disk snapshot. A published
-  // (commit-unknown) outcome must NOT roll back: memory may already match the
-  // durable candidate and recovery is owned by the STORAGE_COMMIT_UNKNOWN
-  // fence, exactly like the single-operation commit protocol.
-  _captureMemoryState() {
-    const mapFields = [
-      "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
-      "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
-      "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
-      "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
-      "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
-      "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
-      "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
-    ];
-    const capture = { maps: {}, outboxEvents: null, auditEvents: null, momentsState: null };
-    for (const field of mapFields) {
-      capture.maps[field] = Array.from(this[field].entries(), ([k, v]) => [k, structuredClone(v)]);
-    }
-    capture.outboxEvents = structuredClone(this.outboxEvents);
-    capture.auditEvents = structuredClone(this.auditEvents);
-    capture.momentsState = structuredClone(this.momentsState);
-    return capture;
-  }
-
-  _restoreMemoryState(capture) {
-    for (const [field, entries] of Object.entries(capture.maps)) {
-      const map = this[field];
-      map.clear();
-      for (const [k, v] of entries) map.set(k, v);
-    }
-    this.outboxEvents.splice(0, this.outboxEvents.length, ...capture.outboxEvents);
-    this.auditEvents.splice(0, this.auditEvents.length, ...capture.auditEvents);
-    if (this.momentsState && typeof this.momentsState === "object" && capture.momentsState && typeof capture.momentsState === "object") {
-      for (const key of Object.keys(this.momentsState)) delete this.momentsState[key];
-      Object.assign(this.momentsState, capture.momentsState);
-    } else {
-      this.momentsState = capture.momentsState;
-    }
-    this._rebuildIndexes();
-  }
-
-  runAtomicCommitUnit(fn) {
-    if (typeof fn !== "function") {
-      throw new ContractError("INVALID_ARGUMENT", "runAtomicCommitUnit requires a synchronous mutation function");
-    }
-    if (this._commitUnitDepth > 0) return fn();
-    this._commitUnitDepth = 1;
-    const capture = this._captureMemoryState();
+  // Atomic commit unit (W4-01 data-delete hardening). The unit uses a
+  // copy-on-write transaction overlay instead of clone-and-reinsert rollback:
+  // mutations performed through the store are buffered in shallow per-node
+  // overlays, the durable candidate is serialized from that overlay, and only a
+  // successful/published candidate is applied back to the live objects in
+  // place. Pre-publish failure simply discards the overlay, so rollback cannot
+  // be partial, cannot overflow the call stack while copying large event
+  // arrays, and never disconnects long-lived object references.
+  _finishAtomicCommitUnit(transaction, result) {
     try {
-      const result = fn();
       if (this._snapshotFlushTimer) {
         clearTimeout(this._snapshotFlushTimer);
         this._snapshotFlushTimer = null;
       }
       this._flushSnapshotSync({ strict: true });
-      return result;
     } catch (err) {
-      if (!(err && err.commitPublished === true)) {
+      if (err && err.commitPublished === true) {
+        // The candidate may already be durable. Adopt the same candidate in
+        // memory; STORAGE_COMMIT_UNKNOWN remains a durability fence rather
+        // than a rollback signal.
         try {
-          this._restoreMemoryState(capture);
-        } catch (restoreErr) {
-          err.rollback_error = restoreErr?.message || "memory rollback failed";
+          transaction.commit();
+        } catch (commitErr) {
+          err.memory_commit_error = commitErr?.message || "memory commit failed";
         }
+      } else {
+        transaction.abort();
       }
       throw err;
+    }
+    transaction.commit();
+    return result;
+  }
+
+  runAtomicCommitUnit(fn) {
+    if (typeof fn !== "function") {
+      throw new ContractError("INVALID_ARGUMENT", "runAtomicCommitUnit requires a mutation function");
+    }
+    if (this._commitUnitDepth > 0) return fn();
+    this._commitUnitDepth = 1;
+    const transaction = new AtomicCommitTransaction(this);
+    transaction.install();
+    let result;
+    try {
+      result = fn();
+    } catch (err) {
+      transaction.abort();
+      this._commitUnitDepth = 0;
+      throw err;
+    }
+    if (result && typeof result.then === "function") {
+      // Async mutation functions are supported for callers that await the
+      // returned promise. The store remains inside the copy-on-write unit for
+      // the whole async body, so object references captured across await stay
+      // connected to the transactional overlay until commit/abort.
+      return Promise.resolve(result).then(
+        () => this._finishAtomicCommitUnit(transaction, result),
+        (err) => {
+          transaction.abort();
+          throw err;
+        }
+      ).finally(() => {
+        this._commitUnitDepth = 0;
+      });
+    }
+    try {
+      return this._finishAtomicCommitUnit(transaction, result);
     } finally {
       this._commitUnitDepth = 0;
     }

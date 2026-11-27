@@ -968,6 +968,7 @@ export class CommunityService {
     let groupsDeleted = 0;
     let invitesDeleted = 0;
     let eventsScrubbed = 0;
+    let cascadedMembershipsRemoved = 0;
 
     for (const member of userMemberships) {
       const group = this.store.groups.get(member.group_id);
@@ -1021,6 +1022,19 @@ export class CommunityService {
       if (group.created_by !== cloudUserId) continue;
       const activeCount = this._activeMembersForGroup(group.id).length;
       if (activeCount === 0) {
+        // Deleting the final group shell must mirror migration 0005's
+        // ON DELETE CASCADE contract. Archived groups keep LEFT/REMOVED
+        // membership-period rows for users other than the account being
+        // erased; deleting only the shell would orphan those rows and fail
+        // snapshot commit validation with a 503. Remove every historical
+        // member row for the dead group before removing the shell. Live
+        // groups with active members are still tombstoned below rather than
+        // cascading other users' data.
+        for (const memberRow of Array.from(this.store.groupMembers.values())) {
+          if (memberRow.group_id === group.id && this.store.groupMembers.delete(memberRow.id)) {
+            cascadedMembershipsRemoved += 1;
+          }
+        }
         for (const invite of Array.from(this.store.groupInvites.values())) {
           if (invite.group_id === group.id) this.store.groupInvites.delete(invite.id);
         }
@@ -1081,6 +1095,7 @@ export class CommunityService {
       ownership_transfers: ownershipTransfers,
       groups_archived: groupsArchived,
       groups_deleted: groupsDeleted,
+      cascaded_memberships_removed: cascadedMembershipsRemoved,
       invites_deleted: invitesDeleted,
       events_scrubbed: eventsScrubbed,
       idempotency_receipts_deleted: receiptsDeleted,

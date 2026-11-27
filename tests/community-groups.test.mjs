@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { COMMUNITY_DELETED_USER_TOMBSTONE } from "../packages/community/src/index.mjs";
+import { CloudDatabaseStore } from "../packages/db/src/index.mjs";
 
 const BASE_NOW = Date.parse("2026-11-27T10:00:00.000Z");
 let keySeq = 0;
@@ -454,6 +455,71 @@ test("W4-01 privacy: community data is exported and data-delete detaches members
   assert.equal(app.store.groups.has(soloGroup.group_id), false, "sole-member caller-created group shell must be removed after data delete");
 });
 
+
+test("W4-01 privacy regression: deleting the creator of an archived group cascades dead LEFT history instead of orphaning snapshot rows", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-archived-delete-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app, "owner_archived_delete");
+    const member = setupUser(app, "member_archived_delete");
+    const group = await createStudyGroup(app, owner);
+    const invite = await createInvite(app, owner, group.group_id, { maxUses: 2 });
+    assert.equal((await acceptInvite(app, member, invite.code)).status, 201);
+
+    const archive = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/groups/" + group.group_id,
+      headers: { ...owner.auth, "idempotency-key": nextKey("archive-before-delete") }
+    });
+    assert.equal(archive.status, 200, JSON.stringify(archive.body));
+    assert.equal(archive.body.data.memberships_ended, 2);
+    assert.equal(
+      Array.from(app.store.groupMembers.values()).filter((row) => row.group_id === group.group_id && row.status === "LEFT").length,
+      2,
+      "archive keeps two historical LEFT membership periods before erasure"
+    );
+
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/api/v1/me/data-delete",
+      headers: owner.auth
+    });
+    assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
+    assert.equal(deleted.body.data.community_purged.groups_deleted, 1);
+    assert.equal(deleted.body.data.community_purged.memberships_removed, 1, "the erased user's own row is counted once");
+    assert.equal(
+      deleted.body.data.community_purged.cascaded_memberships_removed,
+      1,
+      "the other user's dead LEFT history cascades with the orphaning group shell"
+    );
+    assert.equal(app.store.groups.has(group.group_id), false);
+    assert.equal(
+      Array.from(app.store.groupMembers.values()).some((row) => row.group_id === group.group_id),
+      false,
+      "no historical member row may remain orphaned after the group shell is removed"
+    );
+
+    const restarted = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assert.equal(restarted.store.groups.has(group.group_id), false);
+    assert.equal(
+      Array.from(restarted.store.groupMembers.values()).some((row) => row.group_id === group.group_id),
+      false,
+      "restarted snapshot validation must not see archived-group member orphans"
+    );
+    clearTimeout(restarted.store._snapshotFlushTimer);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 test("W4-01 member governance: cross-school accept is isolated, last owner cannot demote self, and admin removal emits ADMIN_REMOVED with sharing withdrawn", async () => {
   const app = createTestApp();
   const owner = setupUser(app, "owner_governance");
@@ -847,8 +913,8 @@ test("W4-01 atomicity: data-delete is a single commit unit — pre-publish flush
     assert.ok(ownerMembership, "membership row must roll back");
     assert.equal(ownerMembership.status, "ACTIVE");
     assert.equal(ownerMembership.role, "OWNER", "ownership transfer must roll back");
-    // Re-read through the store: rollback repopulates collections with cloned
-    // pre-delete records, so assertions must not use pre-delete object references.
+    // Re-read through the store: rollback is overlay discard, so live row
+    // object identity is preserved rather than replaced by cloned records.
     const rolledBinding = Array.from(app.store.schoolBindings.values()).find(
       (row) => row.cloud_user_id === owner.user.id
     );
@@ -920,6 +986,90 @@ test("W4-01 atomicity: data-delete is a single commit unit — pre-publish flush
     assert.equal(app2.store.users.get(owner2.user.id).status, "DELETED", "post-publish unknown must not roll memory back");
     assert.equal(app2.store.groups.has(group2.group_id), false, "post-publish unknown keeps the erased memory state");
     clearTimeout(app2.store._snapshotFlushTimer);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
+test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserves object identity, and keeps async cross-await writes connected", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-delete-scale-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const store = new CloudDatabaseStore({ snapshotPath, requireDurableSnapshot: true });
+    const userId = crypto.randomUUID();
+    const user = {
+      id: userId,
+      issuer: "https://issuer.example",
+      subject: "scale-subject",
+      username: "scale-user",
+      display_name: "scale-user",
+      status: "ACTIVE",
+      auth_version: 1,
+      created_at: new Date(BASE_NOW).toISOString()
+    };
+    store.users.set(userId, user);
+    for (let index = 0; index < 200000; index += 1) {
+      store.outboxEvents.push({
+        id: "scale-event-" + index,
+        aggregate_type: "scale_probe",
+        event_type: "scale.probed",
+        payload_json: { index, cloud_user_id: userId },
+        created_at: new Date(BASE_NOW + index).toISOString()
+      });
+    }
+    store.flushSnapshotStrictSync();
+
+    const userRef = store.users.get(userId);
+    const outboxRef = store.outboxEvents;
+    const firstEventRef = store.outboxEvents[0];
+    const auditLength = store.auditEvents.length;
+    store._persistFaultInject = "tmp_write";
+    assert.throws(
+      () => store.runAtomicCommitUnit(() => {
+        const transactionalUser = store.users.get(userId);
+        transactionalUser.status = "DELETED";
+        store.outboxEvents.push({
+          id: "scale-event-overflow",
+          aggregate_type: "scale_probe",
+          event_type: "scale.probed",
+          payload_json: { index: 200000, cloud_user_id: userId },
+          created_at: new Date(BASE_NOW + 200000).toISOString()
+        });
+        store.recordAudit({
+          actor_kind: "USER",
+          actor_ref: userId,
+          action: "SCALE_ATOMIC_DELETE_PROBE",
+          resource_kind: "user",
+          resource_ref: userId,
+          outcome: "USER_DATA_DELETE"
+        });
+      }),
+      (err) => err?.code === "STORAGE_PERSISTENCE_FAILED",
+      "pre-publish failure must surface as a retryable storage failure"
+    );
+
+    assert.equal(store.users.get(userId), userRef, "rollback must preserve row object identity");
+    assert.equal(userRef.status, "ACTIVE", "discard of the write overlay restores the pre-delete value without cloning");
+    assert.equal(store.outboxEvents, outboxRef, "rollback must preserve the live event array identity");
+    assert.equal(store.outboxEvents.length, 200000, "no partial event append may survive the aborted unit");
+    assert.equal(store.outboxEvents[0], firstEventRef, "existing event rows keep their object identity");
+    assert.equal(store.outboxEvents.some((event) => event.id === "scale-event-overflow"), false);
+    assert.equal(store.auditEvents.length, auditLength, "no partial audit append may survive the aborted unit");
+
+    store._persistFaultInject = null;
+    await store.runAtomicCommitUnit(async () => {
+      const transactionalUser = store.users.get(userId);
+      await Promise.resolve();
+      transactionalUser.status = "DISABLED";
+    });
+    assert.equal(store.users.get(userId), userRef, "async commit must still apply in place to the original row object");
+    assert.equal(userRef.status, "DISABLED", "write through a reference captured across await must not be lost");
+
+    const restarted = new CloudDatabaseStore({ snapshotPath, requireDurableSnapshot: true });
+    assert.equal(restarted.store.users.get(userId).status, "DISABLED", "async cross-await write must be durable after restart");
+    assert.equal(restarted.store.outboxEvents.length, 200000);
+    clearTimeout(restarted._snapshotFlushTimer);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
