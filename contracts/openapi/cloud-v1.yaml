@@ -51,6 +51,12 @@ tags:
     description: Dorm repair records, explicit status transitions, and reporter reviews
   - name: place-status
     description: Campus Graph place status reports, TTL-aware divergence aggregation, subscriptions, flags, and review correction
+  - name: ugc
+    description: Reserved (D2) forum boards, posts, replies, search, and user reports; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
+  - name: moderation
+    description: Reserved (D2) operations review queue and audited dispositions; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
+  - name: media
+    description: Reserved (D2) media upload slots with EXIF stripping and WebP conversion intent; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -3196,6 +3202,210 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/boards:
+    get:
+      operationId: listBoards
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: List school-scoped forum boards (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the school-scoped forum boards visible to the caller. Issue #45 suggests default boards such as course discussion, second-hand trading, lost-and-found, and help Q&A with management-side curation; the lost-and-found private-chat need of issue #9 folds into the same reserved surface per decision D2 rather than a separate messaging API.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/boards/{boardId}/posts:
+    get:
+      operationId: listBoardPosts
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: List posts of one board (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the posts of one board in reverse chronological order with cursor pagination, exposing only per-school pseudonymous aliases and never cloud user identifiers.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/BoardIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts:
+    post:
+      operationId: createPost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Create a forum post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint creates one plain-text post with a title, body, and up to three server-hosted images per issue #45, only after the moderation precheck described by the reserved moderation surface passes. Public display uses per-school pseudonymous aliases over a server-side identity anchor of (cloud_user_id, school_id).
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts/{postId}:
+    get:
+      operationId: getPost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Get one post with floor-structured replies (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint returns one post together with its floor-structured replies, including explicit quote-reply links; content whose author deleted the account displays as a detached anonymized author per the D2 retention direction.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts/{postId}:
+    delete:
+      operationId: deletePost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Delete own post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint deletes the caller's own post as an author self-service surface; administrative removal, pinning, and locking would be separate audited moderation dispositions, never this endpoint.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts/{postId}/replies:
+    post:
+      operationId: createPostReply
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Append a floor reply to a post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint appends one floor reply to a post, optionally quoting another reply, after the same moderation precheck; replies are the public conversation structure that the lost-and-found chat need of issue #9 would use instead of private direct messaging.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/search/posts:
+    get:
+      operationId: searchPosts
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Full-text search posts (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint full-text searches post titles and bodies inside the caller school scope only, never across school boundaries.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/reports:
+    post:
+      operationId: createReport
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.report]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: File a user report (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint files one user report against a post, reply, or media object so the operations moderation queue can review it with audit evidence; filing a report never hides or mutates the target content by itself.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/moderation/queue:
+    get:
+      operationId: listModerationQueue
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.moderate]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [moderation, admin]
+      summary: List the moderation review queue (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the operations review queue of pending user reports and precheck-flagged content for one school scope; the queue is the compliance precondition of any public UGC launch, not an optional add-on.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/moderation/{itemId}/actions:
+    post:
+      operationId: createModerationAction
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.moderate]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [moderation, admin]
+      summary: Apply an audited moderation disposition (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint applies one audited moderation disposition (keep visible, hide, delete, or reject the report) to one queue item; every disposition would be written to the security audit events and would emit ugc.post.moderated whenever it affects a post, while never rewriting user content.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/ModerationItemIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/media/uploads:
+    post:
+      operationId: createMediaUpload
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.media.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [media]
+      summary: Mint a media upload slot (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint mints one upload slot for a post image; the server would strip EXIF metadata, convert the payload to WebP, store it under a random object id in a private non-listable bucket, and serve it back only through signed URLs, because external image links are forbidden by the issue #45 baseline.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/media/uploads/{uploadId}/complete:
+    post:
+      operationId: completeMediaUpload
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.media.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [media]
+      summary: Complete a media upload slot (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint marks one upload slot as completed after the binary payload lands, triggering the server-side EXIF stripping and WebP conversion pipeline before the object becomes referenceable by posts.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/MediaUploadIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -4368,6 +4578,34 @@ components:
       schema:
         type: string
         format: uuid
+    BoardIdParam:
+      name: boardId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PostIdParam:
+      name: postId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ModerationItemIdParam:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MediaUploadIdParam:
+      name: uploadId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ParcelIdParam:
       name: parcelId
       in: path
@@ -4423,6 +4661,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
+    NotImplemented:
+      description: Uniform reserved endpoint response (decision D2); the feature is not enabled, nothing is persisted, and every request receives the identical FEATURE_NOT_ENABLED envelope regardless of authentication state, query parameters, headers, or request body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FeatureNotEnabledErrorEnvelope'
   schemas:
     ResponseMeta:
       type: object
@@ -4462,6 +4706,42 @@ components:
           type: string
         error:
           $ref: '#/components/schemas/ErrorDetail'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    FeatureNotEnabledErrorEnvelope:
+      type: object
+      required: [ok, code, request_id, error, meta]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        code:
+          type: string
+          const: FEATURE_NOT_ENABLED
+        request_id:
+          type: string
+        error:
+          type: object
+          required: [code, message, retryable, detail]
+          properties:
+            code:
+              type: string
+              const: FEATURE_NOT_ENABLED
+            message:
+              type: string
+            user_action:
+              type: string
+            retryable:
+              type: boolean
+              const: false
+            detail:
+              type: object
+              required: [feature]
+              properties:
+                feature:
+                  type: string
+                  const: community.forum
+                  description: Stable feature identifier shared with the Android community.forum feature flag and the community.boards reserved plugin slot; the reserved surface covers both forum (#45) and private messaging (#9) per decision D2.
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     HealthResponse:
