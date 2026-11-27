@@ -1,0 +1,79 @@
+{
+  "version": "w6-contract-lifecycle-2026-11-28-r1",
+  "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface. Records are retained for audit even after the contract line closes them.",
+  "debts": [
+    {
+      "id": "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/schema/plugin-extension-v2-runtime.schema.json",
+      "contract_target": "contracts/schemas/plugin-extension-v2.schema.json",
+      "unregistered_runtime_fields": [
+        "type",
+        "route",
+        "url",
+        "artifact_path"
+      ],
+      "resolution": "Deferred to the AUTO-022 schema/fixture phase: the contract line must either register the snake_case runtime command fields in contracts/** or remove them from runtime before they are documented as published contract fields."
+    },
+    {
+      "id": "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/runtime/host-api-matrix.json",
+      "contract_target": "contracts/compatibility/host-api-matrix.yaml",
+      "unregistered_runtime_fields": [],
+      "resolution": "Deferred to the AUTO-022 schema/fixture phase: the contract line must converge the authoritative host-api matrix with the six runtime-supported v2 slots and dynamic_code_loading_allowed=false."
+    },
+    {
+      "id": "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
+      "status": "OPEN_CONTRACT_DEBT",
+      "runtime_fact_source": "packages/plugin-sdk/test-fixtures/runtime-plugin-manifests/",
+      "contract_target": "contracts/fixtures/plugins/",
+      "unregistered_runtime_fields": [],
+      "resolution": "Deferred to the AUTO-022 schema/fixture phase: the contract line must move or recreate equivalent shared fixtures under contracts/fixtures/plugins/; runtime fixtures must not be cited as AC-02 contract fixtures."
+    },
+    {
+      "id": "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+      "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginInstallRequest",
+      "resolved_contract_fields": [
+        "artifact_map",
+        "school_id",
+        "public_key_base64"
+      ],
+      "resolution_evidence": "PluginInstallRequest now requires only the signed manifest, registers canonical artifact_map and school_id, removes detached signature evidence, and documents public_key_base64 strictly as an optional consistency proof rather than trust input."
+    },
+    {
+      "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+      "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginLifecycleRequest",
+      "resolved_contract_fields": [
+        "REVOKE_PERMISSION",
+        "target_version",
+        "permission",
+        "scope",
+        "admin_kill_switch",
+        "school_id",
+        "kill_switch_reason",
+        "QUARANTINED",
+        "pre_quarantine_status",
+        "quarantine_reason",
+        "quarantined_at"
+      ],
+      "resolution_evidence": "PluginLifecycleRequest and response schemas now register account/school scoped lifecycle fields, REVOKE_PERMISSION, rollback target_version, admin kill-switch isolation output, and restart-time QUARANTINED evidence fields."
+    },
+    {
+      "id": "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT",
+      "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
+      "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
+      "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginCommandInvokeRequest",
+      "resolved_contract_fields": [
+        "payload",
+        "requested_origin",
+        "school_id"
+      ],
+      "resolution_evidence": "PluginCommandInvokeRequest now uses canonical payload/requested_origin/school_id scope selection, removes campus_profile_id and input from the published shape, documents non-echo declarative output, and PLUGIN_COMMAND_UNSUPPORTED is registered in contracts/errors/error-catalog.yaml."
+    }
+  ]
+}
