@@ -120,3 +120,53 @@ errors:
     retryable: true
     user_action: RETRY_WITH_SAME_IDEMPOTENCY_KEY_TO_RECONCILE
     description: 快照提交耐久性待核验；保持原键和原请求，禁止换键重建。
+  - code: BAD_REQUEST
+    http_status: 400
+    retryable: false
+    user_action: FIX_REQUEST_FIELDS
+    description: Request parameters or JSON body failed schema validation.
+  - code: GROUP_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_GROUP_ID
+    description: Group does not exist, is archived, or is not visible in the caller school scope.
+  - code: GROUP_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_GROUP_ROLE
+    description: Caller lacks the required group owner, admin, member, or self-service authorization.
+  - code: SCHOOL_SCOPE_MISMATCH
+    http_status: 403
+    retryable: false
+    user_action: SWITCH_SCHOOL_PROFILE
+    description: Requested resource belongs to a different school_id isolation scope.
+  - code: GROUP_INVITE_INVALID
+    http_status: 404
+    retryable: false
+    user_action: REQUEST_NEW_INVITE
+    description: Group invite code does not exist, was revoked, or does not match the group school scope.
+  - code: GROUP_INVITE_EXPIRED
+    http_status: 410
+    retryable: false
+    user_action: REQUEST_NEW_INVITE
+    description: Group invite code passed its expiration time.
+  - code: GROUP_INVITE_EXHAUSTED
+    http_status: 409
+    retryable: false
+    user_action: REQUEST_NEW_INVITE
+    description: Group invite code reached its maximum use count.
+  - code: GROUP_ALREADY_MEMBER
+    http_status: 409
+    retryable: false
+    user_action: OPEN_EXISTING_GROUP
+    description: User already has an active membership in this group and school scope.
+  - code: GROUP_MEMBER_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_MEMBER_ID
+    description: Group membership does not exist or is not active in the caller school scope.
+  - code: GROUP_LAST_OWNER_REQUIRED
+    http_status: 409
+    retryable: false
+    user_action: TRANSFER_OWNER_BEFORE_LEAVING
+    description: The last group owner cannot leave, be removed, or be demoted before ownership transfer.

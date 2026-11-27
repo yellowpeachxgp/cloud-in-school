@@ -72,3 +72,86 @@ Authorization: Bearer <second_finance_admin_access_token>
 ### 8. Execute Approved Refund Request (idempotent convergence)
 POST http://127.0.0.1:4100/api/v1/admin/refund-requests/44444444-4444-4444-8444-444444444444/execute
 Authorization: Bearer <finance_admin_access_token>
+
+
+### 9. CT-01 List Groups In School Scope (planned)
+GET http://127.0.0.1:4100/api/v1/groups?school_id=haut&type=study&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 10. CT-01 Create Study Group (planned)
+POST http://127.0.0.1:4100/api/v1/groups
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: group_create_demo_0001
+
+{
+  "school_id": "haut",
+  "type": "study",
+  "name": "操作系统期末互助组",
+  "description": "只共享 30 分钟粒度忙闲块的学习小组"
+}
+
+### 11. CT-01 Get Group Detail (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 12. CT-01 Update Group Display Metadata (planned)
+PATCH http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: group_patch_demo_0001
+
+{
+  "name": "操作系统期末冲刺组",
+  "description": "考试周复习与空闲时间协调"
+}
+
+### 13. CT-01 Archive Group (planned)
+DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
+Authorization: Bearer <cloud_access_token>
+Idempotency-Key: group_delete_demo_0001
+
+### 14. CT-01 Create Expiring Use-Limited Group Invite (planned)
+POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/invites
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: group_invite_create_demo_0001
+
+{
+  "expires_at": "2026-12-01T12:00:00+08:00",
+  "max_uses": 8,
+  "label": "期末互助组邀请"
+}
+
+### 15. CT-01 Accept Group Invite Code Or QR Payload (planned)
+POST http://127.0.0.1:4100/api/v1/group-invites/AbC123xy/accept
+Authorization: Bearer <cloud_access_token>
+Idempotency-Key: group_invite_accept_demo_0001
+
+### 16. CT-01 Revoke Group Invite (planned)
+DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/invites/66666666-6666-4666-8666-666666666666
+Authorization: Bearer <cloud_access_token>
+Idempotency-Key: group_invite_revoke_demo_0001
+
+### 17. CT-01 List Group Members (planned)
+GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members?limit=50
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 18. CT-01 Update Group Member Role Or Sharing Level (planned)
+PATCH http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members/77777777-7777-4777-8777-777777777777
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: group_member_patch_demo_0001
+
+{
+  "role": "ADMIN",
+  "sharing_level": "BUSY_BLOCKS_30MIN"
+}
+
+### 19. CT-01 Remove Member Or Leave Group (planned)
+DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members/77777777-7777-4777-8777-777777777777
+Authorization: Bearer <cloud_access_token>
+Idempotency-Key: group_member_delete_demo_0001
