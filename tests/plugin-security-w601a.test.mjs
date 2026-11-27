@@ -332,6 +332,42 @@ test("W6-01a trust root: explicit publisher mapping rejects host-reference and k
   );
 });
 
+test("W6-01a rollback: target package signature and artifact integrity are re-verified fail-closed", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_rollback_reverify_user");
+  const pluginId = "org.example.w601a-rollback-reverify";
+  const v1 = signedPlugin({ keyPair, pluginId, version: "1.0.0" });
+  const v2 = signedPlugin({ keyPair, pluginId, version: "1.1.0" });
+  assert.equal((await installFixture(app, headers, v1, keyPair.publicKeyBase64)).status, 201);
+  assert.equal((await installFixture(app, headers, v2, keyPair.publicKeyBase64)).status, 201);
+
+  const stored = app.pluginBroker.packages.get(pluginId + "@1.0.0");
+  assert.ok(stored, "rollback target must be persisted before tamper injection");
+  const originalManifest = JSON.parse(JSON.stringify(stored.manifest));
+  const originalArtifact = stored.artifactMap["dist/data.txt"];
+  const attemptRollback = () => app.pluginBroker.transitionUserPlugin(user.id, pluginId, {
+    action: "ROLLBACK",
+    targetVersion: "1.0.0",
+    schoolId: "haut"
+  });
+  const activeVersion = () => app.pluginBroker._findInstallation(user.id, pluginId, "haut")?.installation?.active_version;
+
+  stored.artifactMap["dist/data.txt"] = Buffer.from("tampered rollback artifact", "utf8").toString("base64");
+  assert.throws(attemptRollback, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.equal(activeVersion(), "1.1.0", "artifact digest tampering must leave the current version active");
+
+  stored.artifactMap["dist/data.txt"] = originalArtifact;
+  stored.manifest = { ...stored.manifest, name: "tampered rollback manifest" };
+  assert.throws(attemptRollback, (error) => error?.code === "PLUGIN_SIGNATURE_INVALID");
+  assert.equal(activeVersion(), "1.1.0", "manifest signature tampering must leave the current version active");
+
+  stored.manifest = originalManifest;
+  const rollback = attemptRollback();
+  assert.equal(rollback.active_version, "1.0.0");
+  assert.equal(activeVersion(), "1.0.0", "the intact signed target remains rollback-capable");
+});
+
 test("W6-01a artifact parity: payloads undeclared by the signed manifest fail closed", () => {
   const keyPair = generateEd25519KeyPair();
   const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-undeclared-artifact" });

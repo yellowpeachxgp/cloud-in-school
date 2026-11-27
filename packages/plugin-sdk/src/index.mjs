@@ -655,21 +655,11 @@ export class PluginRegistryAndBroker {
       const pluginId = pkg?.plugin_id || pkg?.manifest?.plugin_id;
       const version = pkg?.version || pkg?.manifest?.version;
       if (!pluginId || !version) continue;
-      const publisherId = publisherIdForManifest(pkg?.manifest || {});
       try {
         // Snapshot contents are durable data, not proof of trust. Re-resolve the
         // publisher through the current configured root and re-verify the stored
         // signed payload before making a restored version installable.
-        const verificationKey = this._publisherKeyForRegistration(
-          publisherId,
-          pkg.public_key_base64 || null
-        );
-        verifySignedPluginPackage({
-          manifest: pkg.manifest,
-          artifactMap: artifactMapForVerification(pkg.artifactMap || {}),
-          publicKeyBase64: verificationKey,
-          hostApiVersion: this.hostApiVersion
-        });
+        this._verifyStoredPackageIntegrity(pkg);
       } catch {
         // Revoked, re-keyed, or tampered packages fail closed: they remain in the
         // durable snapshot for audit/forensics but receive no runtime index.
@@ -690,6 +680,20 @@ export class PluginRegistryAndBroker {
 
   trustedPublicKeyForPublisher(publisherId) {
     return this.trustedPublisherKeyById.get(String(publisherId || "")) || null;
+  }
+
+  _verifyStoredPackageIntegrity(pkg) {
+    const publisherId = publisherIdForManifest(pkg?.manifest || {});
+    const verificationKey = this._publisherKeyForRegistration(
+      publisherId,
+      pkg?.public_key_base64 || null
+    );
+    return verifySignedPluginPackage({
+      manifest: pkg?.manifest,
+      artifactMap: artifactMapForVerification(pkg?.artifactMap || {}),
+      publicKeyBase64: verificationKey,
+      hostApiVersion: this.hostApiVersion
+    });
   }
 
   _publisherKeyForRegistration(publisherId, suppliedPublicKeyBase64 = null) {
@@ -1189,6 +1193,11 @@ export class PluginRegistryAndBroker {
           "No valid rollback version available for plugin '" + pluginId + "'"
         );
       }
+      // Rollback must re-prove the exact target package before activation. The
+      // persisted copy is durable evidence, not trusted input: a revoked publisher,
+      // tampered manifest, missing artifact, or digest mismatch makes rollback
+      // fail closed without changing the currently active version.
+      this._verifyStoredPackageIntegrity(rollbackPkg);
       const rollbackPermissions = uniquePermissionList(rollbackPkg.manifest.permissions);
       inst.previous_version = inst.active_version;
       inst.active_version = rollbackVer;
