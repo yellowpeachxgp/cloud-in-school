@@ -509,3 +509,84 @@ Idempotency-Key: repair_review_demo_0001
   "rating": 4,
   "comment": "处理及时，后续继续观察是否复漏"
 }
+
+### 54. CT-04 Report Place Occupancy Status (planned)
+POST http://127.0.0.1:4100/api/v1/places/haut%2Flianhuajie%2Froom%2F5-111/reports
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: place_report_create_demo_0001
+
+{
+  "metric": "OCCUPANCY",
+  "state": "CROWDED",
+  "observed_at": "2026-11-27T12:20:00+08:00",
+  "report_kind": "OBSERVATION",
+  "note": "自习座位基本坐满"
+}
+
+### 55. CT-04 List Place Report And Correction History (planned)
+GET http://127.0.0.1:4100/api/v1/places/haut%2Flianhuajie%2Froom%2F5-111/reports?metric=OCCUPANCY&include_expired=true&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 56. CT-04 Query Aggregated Place Status By References (planned)
+GET http://127.0.0.1:4100/api/v1/places/status?school_id=haut&place_refs=haut%2Flianhuajie%2Froom%2F5-111&metrics=OCCUPANCY,ACCESS
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 57. CT-04 Query Aggregated Place Status By Coarse BBox (planned)
+GET http://127.0.0.1:4100/api/v1/places/status?school_id=haut&bbox=34.820,113.540,34.850,113.570&place_types=room,facility&metrics=OCCUPANCY,OPERATION
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 58. CT-04 Create Place Status Subscription (planned)
+POST http://127.0.0.1:4100/api/v1/places/status/subscriptions
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: place_subscription_create_demo_0001
+
+{
+  "school_id": "haut",
+  "target": {
+    "type": "PLACE",
+    "place_ref": "haut/lianhuajie/room/5-111"
+  },
+  "metrics": ["OCCUPANCY", "ACCESS"]
+}
+
+### 59. CT-04 List Place Status Subscriptions (planned)
+GET http://127.0.0.1:4100/api/v1/places/status/subscriptions?school_id=haut&status=ACTIVE&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 60. CT-04 Cancel Place Status Subscription (planned)
+DELETE http://127.0.0.1:4100/api/v1/places/status/subscriptions/abababab-abab-4bab-8bab-abababababab
+Authorization: Bearer <cloud_access_token>
+Idempotency-Key: place_subscription_delete_demo_0001
+
+### 61. CT-04 Flag Incorrect Place Report (planned)
+POST http://127.0.0.1:4100/api/v1/place-reports/cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd/flag
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: place_report_flag_demo_0001
+
+{
+  "reason": "INCORRECT",
+  "detail": "20:10 现场门口仍开放，原上报已过期"
+}
+
+### 62. CT-04 List Place Report Flag Review Queue (planned)
+GET http://127.0.0.1:4100/api/v1/admin/place-report-flags?school_id=haut&status=OPEN&limit=20
+Authorization: Bearer <operations_admin_access_token>
+Accept: application/json
+
+### 63. CT-04 Review Place Report Flag And Recompute Aggregate (planned)
+POST http://127.0.0.1:4100/api/v1/admin/place-report-flags/efefefef-efef-4fef-8fef-efefefefefef/review
+Authorization: Bearer <operations_admin_access_token>
+Content-Type: application/json
+Idempotency-Key: place_report_review_demo_0001
+
+{
+  "action": "EXCLUDE_INCORRECT",
+  "review_note": "两名用户现场纠错且原报告已过观察时效，排除后重新聚合"
+}
