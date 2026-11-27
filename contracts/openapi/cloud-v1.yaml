@@ -49,6 +49,8 @@ tags:
     description: Dorm duty rotation schedules, generated tasks, swaps, and peer completion confirmation
   - name: repairs
     description: Dorm repair records, explicit status transitions, and reporter reviews
+  - name: place-status
+    description: Campus Graph place status reports, TTL-aware divergence aggregation, subscriptions, flags, and review correction
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -2742,6 +2744,453 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/places/{placeRef}/reports:
+    post:
+      operationId: createPlaceStatusReport
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.report]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_REPORT_INVALID, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [place.status.changed]
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: Report one observed status for a Campus Graph place entity
+      description: |
+        Creates one immutable user-reported observation for one metric of a Campus Graph entity. The place reference is the W1-07 stable identity <schoolId>/<campusId>/<type>/<slug> and must be percent-encoded as one path segment. Supported entity types are campus/building/floor/room/facility/entrance/indoor_node; a classroom is represented as room.
+        Corrections are append-only: CORRECTION requires corrects_report_id and never rewrites the target. Aggregation uses the latest eligible report per reporter for the same place+metric. If effective_state changes, place.status.changed is emitted; idempotent replay never emits a duplicate. Reports remain USER_REPORTED evidence and never claim an official realtime feed. The server must apply the same PII-sensitive UGC precheck direction as other community surfaces before accepting free-text notes. Reports, flags, and subscriptions are included in the caller data export/delete coverage; public responses expose only per-school pseudonymous aliases, never cloud user UUIDs or campus login identifiers.
+      parameters:
+        - $ref: '#/components/parameters/PlaceRefParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlaceStatusReportRequest'
+      responses:
+        '201':
+          description: Place status report accepted with server-assigned metric TTL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusReportEnvelope'
+        '200':
+          description: Durable idempotent replay of the original report result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusReportEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listPlaceStatusReports
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: List visible report and correction history for one place
+      description: |
+        Returns report history in reverse chronological order. Expired rows remain auditable, moderation-excluded rows are omitted from the normal user view, and correction chains stay explicit so disagreement is explainable.
+      parameters:
+        - $ref: '#/components/parameters/PlaceRefParam'
+        - name: metric
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PlaceStatusMetric'
+        - name: include_expired
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Visible report history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusReportListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/places/status:
+    get:
+      operationId: queryPlaceStatus
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: Query TTL-aware aggregated place status
+      description: |
+        Exactly one of place_refs or bbox is required. place_refs is a comma-separated list of W1-07 stable graph ids. bbox is minLat,minLng,maxLat,maxLng in WGS-84 decimal degrees and is only a coarse query filter; it must not become a stored movement trace.
+        Results are grouped by place+metric. An explicitly requested place_ref that is unknown in the school Campus Graph snapshot fails the whole request with PLACE_NOT_FOUND; bbox queries simply return an empty page when no known entity intersects the area. Expired data is UNKNOWN. Contradictory unexpired reports are never collapsed into false consensus: effective_state becomes CONTESTED and divergent_states contains every simultaneous state with counts.
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: place_refs
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            uniqueItems: true
+            items:
+              $ref: '#/components/schemas/PlaceRefValue'
+        - name: bbox
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 120
+            description: Coarse WGS-84 bounding box as minLat,minLng,maxLat,maxLng; exactly one of bbox or place_refs is required.
+            example: '34.820,113.540,34.850,113.570'
+        - name: place_types
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              $ref: '#/components/schemas/PlaceEntityType'
+        - name: metrics
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              $ref: '#/components/schemas/PlaceStatusMetric'
+        - name: include_expired
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Aggregated place status page with explicit divergence and provenance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusQueryEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/places/status/subscriptions:
+    post:
+      operationId: createPlaceStatusSubscription
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.subscribe]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_SUBSCRIPTION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: Subscribe to place status changes for one place or coarse area
+      description: |
+        Creates a durable user-owned subscription. v1 delivery is IN_APP_NOTIFICATION only: matching place.status.changed facts are routed into the existing notification inbox/outbox. This endpoint does not open a websocket, webhook, or external push channel. AREA subscriptions use a coarse bounding box evaluated at event time and do not store a continuous location trace.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlaceStatusSubscriptionRequest'
+      responses:
+        '201':
+          description: Place status subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusSubscriptionEnvelope'
+        '200':
+          description: Durable idempotent replay of the original subscription result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusSubscriptionEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listPlaceStatusSubscriptions
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.subscribe]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH]
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: List caller-owned place status subscriptions
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PlaceStatusSubscriptionStatus'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Caller-owned subscription page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceStatusSubscriptionListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/places/status/subscriptions/{subscriptionId}:
+    delete:
+      operationId: deletePlaceStatusSubscription
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.subscribe]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_SUBSCRIPTION_NOT_FOUND, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: Cancel one caller-owned place status subscription
+      description: |
+        Cancellation is durable and stops future notification fan-out. Replaying the same Idempotency-Key returns the original acknowledgement; another user subscription is indistinguishable from not found.
+      parameters:
+        - $ref: '#/components/parameters/PlaceStatusSubscriptionIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Subscription cancelled or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAckEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/place-reports/{reportId}/flag:
+    post:
+      operationId: flagPlaceStatusReport
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.flag]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_REPORT_FLAG_INVALID, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [place-status]
+      security:
+        - bearerAuth: []
+      summary: Flag a place status report for review
+      description: |
+        A flag is a review request, not a vote and not an automatic truth override. It never rewrites the referenced report and does not by itself remove the report from aggregation. Repeated identical flags by the same caller are idempotently folded; independent users may flag the same report.
+      parameters:
+        - $ref: '#/components/parameters/PlaceReportIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlaceReportFlagRequest'
+      responses:
+        '201':
+          description: Flag accepted for review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceReportFlagEnvelope'
+        '200':
+          description: Durable idempotent replay of the original flag result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceReportFlagEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/admin/place-report-flags:
+    get:
+      operationId: listPlaceReportFlags
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.moderate]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_STATUS_PERMISSION_DENIED]
+      tags: [place-status, admin]
+      security:
+        - bearerAuth: []
+      summary: List place report flags for school-scoped review
+      description: |
+        Review queues are school-scoped and auditable. This endpoint exposes only place-status report metadata; it is not the reserved general UGC moderation queue and does not enable forum or private-message features.
+      parameters:
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PlaceReportFlagStatus'
+        - name: place_ref
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PlaceRefValue'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Review queue page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceReportFlagListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/place-report-flags/{flagId}/review:
+    post:
+      operationId: reviewPlaceReportFlag
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-permissions: [place.status.moderate]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REPORT_FLAG_NOT_FOUND, PLACE_REPORT_REVIEW_INVALID, PLACE_STATUS_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [place.status.changed]
+      tags: [place-status, admin]
+      security:
+        - bearerAuth: []
+      summary: Review a flag and keep or exclude the referenced report
+      description: |
+        Moderation never edits user observations and never fabricates a corrected status. KEEP_VISIBLE or REJECT_FLAG leaves the report aggregation-eligible; EXCLUDE_INCORRECT or EXCLUDE_ABUSE makes only that report ineligible, after which the aggregate is recomputed from remaining eligible reports. If recomputation changes effective_state, place.status.changed is emitted. The response includes the post-review aggregate view so clients can correct display without pretending the original report was rewritten.
+      parameters:
+        - $ref: '#/components/parameters/PlaceReportFlagIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewPlaceReportFlagRequest'
+      responses:
+        '200':
+          description: Review decision applied with post-review aggregate view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceReportFlagReviewEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -3881,6 +4330,34 @@ components:
         format: uuid
     RepairIdParam:
       name: repairId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PlaceRefParam:
+      name: placeRef
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/PlaceRefValue'
+      description: W1-07 Campus Graph stable id percent-encoded as one path segment.
+    PlaceReportIdParam:
+      name: reportId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PlaceReportFlagIdParam:
+      name: flagId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PlaceStatusSubscriptionIdParam:
+      name: subscriptionId
       in: path
       required: true
       schema:
@@ -6494,6 +6971,580 @@ components:
           type: string
         data:
           $ref: '#/components/schemas/RepairReview'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceEntityType:
+      type: string
+      enum: [campus, building, floor, room, facility, entrance, indoor_node]
+      description: W1-07 Campus Graph entity type segment. A classroom is a room; facility and entrance are distinct stable entity types.
+    PlaceRefValue:
+      type: string
+      minLength: 11
+      maxLength: 256
+      pattern: '^[A-Za-z0-9_-]{1,128}/[A-Za-z0-9_-]{1,128}/(campus|building|floor|room|facility|entrance|indoor_node)/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+      example: haut/lianhuajie/room/5-111
+      description: Stable Campus Graph identity <schoolId>/<campusId>/<type>/<slug>; display names are never identity segments.
+    PlaceStatusMetric:
+      type: string
+      enum: [ACCESS, OPERATION, OCCUPANCY, SAFETY]
+      description: ACCESS=open/closed/restricted; OPERATION=working/degraded/out-of-service; OCCUPANCY=quiet/moderate/crowded/full; SAFETY=safe/hazard. v1 TTL is fixed by metric.
+    PlaceStatusObservationState:
+      type: string
+      enum: [OPEN, CLOSED, RESTRICTED, WORKING, DEGRADED, OUT_OF_SERVICE, QUIET, MODERATE, CROWDED, FULL, SAFE, HAZARD]
+    PlaceStatusEffectiveState:
+      type: string
+      enum: [OPEN, CLOSED, RESTRICTED, WORKING, DEGRADED, OUT_OF_SERVICE, QUIET, MODERATE, CROWDED, FULL, SAFE, HAZARD, CONTESTED, UNKNOWN]
+    PlaceStatusReportKind:
+      type: string
+      enum: [OBSERVATION, CORRECTION]
+    CreatePlaceStatusReportRequest:
+      type: object
+      additionalProperties: false
+      required: [metric, state, observed_at, report_kind]
+      properties:
+        metric:
+          $ref: '#/components/schemas/PlaceStatusMetric'
+        state:
+          $ref: '#/components/schemas/PlaceStatusObservationState'
+        observed_at:
+          type: string
+          format: date-time
+          description: Observation time. The server rejects future timestamps beyond a five-minute clock tolerance and implausibly old observations.
+        report_kind:
+          $ref: '#/components/schemas/PlaceStatusReportKind'
+        corrects_report_id:
+          type: string
+          format: uuid
+          description: Required for CORRECTION and forbidden for OBSERVATION; the target report is never rewritten.
+        note:
+          type: string
+          maxLength: 280
+          description: Short evidence note. Clients must warn against entering student numbers, phone numbers, occupants, or other PII.
+      allOf:
+        - if:
+            properties:
+              metric:
+                const: ACCESS
+            required: [metric]
+          then:
+            properties:
+              state:
+                enum: [OPEN, CLOSED, RESTRICTED]
+        - if:
+            properties:
+              metric:
+                const: OPERATION
+            required: [metric]
+          then:
+            properties:
+              state:
+                enum: [WORKING, DEGRADED, OUT_OF_SERVICE]
+        - if:
+            properties:
+              metric:
+                const: OCCUPANCY
+            required: [metric]
+          then:
+            properties:
+              state:
+                enum: [QUIET, MODERATE, CROWDED, FULL]
+        - if:
+            properties:
+              metric:
+                const: SAFETY
+            required: [metric]
+          then:
+            properties:
+              state:
+                enum: [SAFE, HAZARD]
+        - if:
+            properties:
+              report_kind:
+                const: CORRECTION
+            required: [report_kind]
+          then:
+            required: [corrects_report_id]
+        - if:
+            properties:
+              report_kind:
+                const: OBSERVATION
+            required: [report_kind]
+          then:
+            not:
+              required: [corrects_report_id]
+      example:
+        metric: OCCUPANCY
+        state: CROWDED
+        observed_at: '2026-11-27T12:20:00+08:00'
+        report_kind: OBSERVATION
+        note: 自习座位基本坐满
+    PlaceStatusModerationState:
+      type: string
+      enum: [VISIBLE, UNDER_REVIEW, EXCLUDED_INCORRECT, EXCLUDED_ABUSE]
+    PlaceStatusReport:
+      type: object
+      additionalProperties: false
+      required: [report_id, place_ref, school_id, campus_id, place_type, metric, state, observed_at, reported_at, expires_at, ttl_seconds, report_kind, corrects_report_id, corrected_by_report_ids, reporter_alias, is_own_report, note, moderation_state, aggregation_eligible]
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        place_ref:
+          $ref: '#/components/schemas/PlaceRefValue'
+        school_id:
+          type: string
+        campus_id:
+          type: string
+        place_type:
+          $ref: '#/components/schemas/PlaceEntityType'
+        metric:
+          $ref: '#/components/schemas/PlaceStatusMetric'
+        state:
+          $ref: '#/components/schemas/PlaceStatusObservationState'
+        observed_at:
+          type: string
+          format: date-time
+        reported_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Server-computed expiry. Data after this instant is history, never current truth.
+        ttl_seconds:
+          type: integer
+          enum: [1800, 3600, 7200, 86400]
+          description: 'Fixed v1 metric TTL: OCCUPANCY=1800, SAFETY=3600, ACCESS=7200, OPERATION=86400.'
+        report_kind:
+          $ref: '#/components/schemas/PlaceStatusReportKind'
+        corrects_report_id:
+          type: [string, 'null']
+          format: uuid
+        corrected_by_report_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        reporter_alias:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Per-school pseudonymous alias; never SSO username, student number, phone number, or cloud user UUID.
+        is_own_report:
+          type: boolean
+        note:
+          type: [string, 'null']
+          maxLength: 280
+        moderation_state:
+          $ref: '#/components/schemas/PlaceStatusModerationState'
+        aggregation_eligible:
+          type: boolean
+    PlaceStatusReportEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/PlaceStatusReport'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceStatusReportListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaceStatusReport'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceStatusDivergence:
+      type: object
+      additionalProperties: false
+      required: [state, report_count, reporter_count, latest_observed_at]
+      properties:
+        state:
+          $ref: '#/components/schemas/PlaceStatusObservationState'
+        report_count:
+          type: integer
+          minimum: 1
+          description: Count of unexpired eligible per-reporter-latest reports supporting this state.
+        reporter_count:
+          type: integer
+          minimum: 1
+          description: Count of distinct reporters supporting this state after per-reporter deduplication.
+        latest_observed_at:
+          type: string
+          format: date-time
+    PlaceStatusProvenance:
+      type: object
+      additionalProperties: false
+      required: [kind, freshness, source_count, latest_reported_at]
+      properties:
+        kind:
+          type: string
+          enum: [USER_REPORTED, NO_DATA]
+          description: v1 has no official realtime feed; even a note citing an official notice remains user-entered evidence.
+        freshness:
+          type: string
+          enum: [FRESH, STALE, UNKNOWN]
+        source_count:
+          type: integer
+          minimum: 0
+        latest_reported_at:
+          type: [string, 'null']
+          format: date-time
+    PlaceStatusView:
+      type: object
+      additionalProperties: false
+      required: [place_ref, school_id, campus_id, place_type, metric, effective_state, divergent_states, active_report_count, reporter_count, latest_reported_at, expires_at, ttl_seconds, aggregation_revision, aggregation_algorithm, unknown_reason, provenance]
+      properties:
+        place_ref:
+          $ref: '#/components/schemas/PlaceRefValue'
+        school_id:
+          type: string
+        campus_id:
+          type: string
+        place_type:
+          $ref: '#/components/schemas/PlaceEntityType'
+        metric:
+          $ref: '#/components/schemas/PlaceStatusMetric'
+        effective_state:
+          $ref: '#/components/schemas/PlaceStatusEffectiveState'
+        divergent_states:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaceStatusDivergence'
+          description: Every simultaneous unexpired eligible state; clients must render contradictory states together when CONTESTED.
+        active_report_count:
+          type: integer
+          minimum: 0
+        reporter_count:
+          type: integer
+          minimum: 0
+        latest_reported_at:
+          type: [string, 'null']
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        ttl_seconds:
+          type: integer
+          enum: [1800, 3600, 7200, 86400]
+        aggregation_revision:
+          type: integer
+          minimum: 0
+        aggregation_algorithm:
+          type: string
+          const: LATEST_PER_REPORTER_ANY_DIVERGENCE_CONTESTED_V1
+        unknown_reason:
+          type: [string, 'null']
+          enum: [NO_REPORTS, ALL_EXPIRED, ALL_EXCLUDED, null]
+          description: 'Present for UNKNOWN: NO_REPORTS, ALL_EXPIRED, or ALL_EXCLUDED.'
+        provenance:
+          $ref: '#/components/schemas/PlaceStatusProvenance'
+    PlaceStatusQueryEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaceStatusView'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceGeoBoundingBox:
+      type: object
+      additionalProperties: false
+      required: [min_latitude, min_longitude, max_latitude, max_longitude]
+      properties:
+        min_latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        min_longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        max_latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        max_longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+      description: Coarse WGS-84 event-time filter with min strictly below max; never a stored movement trace.
+    PlaceStatusSubscriptionTargetType:
+      type: string
+      enum: [PLACE, AREA]
+    PlaceStatusSubscriptionTarget:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/PlaceStatusSubscriptionTargetType'
+        place_ref:
+          $ref: '#/components/schemas/PlaceRefValue'
+        bbox:
+          $ref: '#/components/schemas/PlaceGeoBoundingBox'
+        place_types:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/PlaceEntityType'
+      allOf:
+        - if:
+            properties:
+              type:
+                const: PLACE
+            required: [type]
+          then:
+            required: [place_ref]
+            not:
+              required: [bbox]
+        - if:
+            properties:
+              type:
+                const: AREA
+            required: [type]
+          then:
+            required: [bbox]
+            not:
+              required: [place_ref]
+    PlaceStatusSubscriptionStatus:
+      type: string
+      enum: [ACTIVE, CANCELLED]
+    CreatePlaceStatusSubscriptionRequest:
+      type: object
+      additionalProperties: false
+      required: [school_id, target, metrics]
+      properties:
+        school_id:
+          type: string
+          minLength: 1
+        target:
+          $ref: '#/components/schemas/PlaceStatusSubscriptionTarget'
+        metrics:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/PlaceStatusMetric'
+      example:
+        school_id: haut
+        target:
+          type: PLACE
+          place_ref: haut/lianhuajie/room/5-111
+        metrics: [OCCUPANCY, ACCESS]
+    PlaceStatusSubscription:
+      type: object
+      additionalProperties: false
+      required: [subscription_id, school_id, target, metrics, delivery_channel, status, created_at, updated_at, cancelled_at]
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        target:
+          $ref: '#/components/schemas/PlaceStatusSubscriptionTarget'
+        metrics:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PlaceStatusMetric'
+        delivery_channel:
+          type: string
+          const: IN_APP_NOTIFICATION
+        status:
+          $ref: '#/components/schemas/PlaceStatusSubscriptionStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        cancelled_at:
+          type: [string, 'null']
+          format: date-time
+    PlaceStatusSubscriptionEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/PlaceStatusSubscription'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceStatusSubscriptionListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaceStatusSubscription'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceReportFlagReason:
+      type: string
+      enum: [INCORRECT, STALE, ABUSE, PII, SPAM, OTHER]
+    CreatePlaceReportFlagRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          $ref: '#/components/schemas/PlaceReportFlagReason'
+        detail:
+          type: string
+          maxLength: 500
+          description: Reviewer-facing detail. Do not include secrets or additional PII.
+      example:
+        reason: INCORRECT
+        detail: 20:10 现场门口仍开放，原上报已过期
+    PlaceReportFlagStatus:
+      type: string
+      enum: [OPEN, RESOLVED_KEEP_VISIBLE, RESOLVED_EXCLUDED, REJECTED]
+    PlaceReportReviewAction:
+      type: string
+      enum: [KEEP_VISIBLE, EXCLUDE_INCORRECT, EXCLUDE_ABUSE, REJECT_FLAG]
+    PlaceReportFlag:
+      type: object
+      additionalProperties: false
+      required: [flag_id, report_id, place_ref, school_id, reason, detail, status, created_at, reviewed_at, review_action, review_note]
+      properties:
+        flag_id:
+          type: string
+          format: uuid
+        report_id:
+          type: string
+          format: uuid
+        place_ref:
+          $ref: '#/components/schemas/PlaceRefValue'
+        school_id:
+          type: string
+        reason:
+          $ref: '#/components/schemas/PlaceReportFlagReason'
+        detail:
+          type: [string, 'null']
+          maxLength: 500
+        status:
+          $ref: '#/components/schemas/PlaceReportFlagStatus'
+        created_at:
+          type: string
+          format: date-time
+        reviewed_at:
+          type: [string, 'null']
+          format: date-time
+        review_action:
+          type: [string, 'null']
+          enum: [KEEP_VISIBLE, EXCLUDE_INCORRECT, EXCLUDE_ABUSE, REJECT_FLAG, null]
+          description: Terminal moderation action when reviewed; one of PlaceReportReviewAction.
+        review_note:
+          type: [string, 'null']
+          maxLength: 500
+    PlaceReportFlagEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/PlaceReportFlag'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    PlaceReportFlagListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaceReportFlag'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ReviewPlaceReportFlagRequest:
+      type: object
+      additionalProperties: false
+      required: [action, review_note]
+      properties:
+        action:
+          $ref: '#/components/schemas/PlaceReportReviewAction'
+        review_note:
+          type: string
+          minLength: 1
+          maxLength: 500
+    PlaceReportFlagReviewResult:
+      type: object
+      additionalProperties: false
+      required: [flag, status_view]
+      properties:
+        flag:
+          $ref: '#/components/schemas/PlaceReportFlag'
+        status_view:
+          $ref: '#/components/schemas/PlaceStatusView'
+    PlaceReportFlagReviewEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/PlaceReportFlagReviewResult'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     ParcelListEnvelope:
