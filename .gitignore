@@ -15,4 +15,7 @@ coverage/
 /secrets/
 *.pem
 *.key
+# Only the reference plugin verifier public keys may be committed. Private keys
+# remain covered by the *.key rule above and must never enter the repository.
+!examples/**/plugin-signing-public.key
 .data/

@@ -225,6 +225,21 @@ export function verifySignedPluginPackage({
   return normalized;
 }
 
+function uniquePermissionList(permissions) {
+  return [...new Set(Array.isArray(permissions) ? permissions : [])];
+}
+
+function intersectPermissionLists(grantedPermissions, declaredPermissions) {
+  const granted = new Set(uniquePermissionList(grantedPermissions));
+  return uniquePermissionList(declaredPermissions).filter((permission) => granted.has(permission));
+}
+
+function isOperationallyEnabled(installation) {
+  // PENDING_PERMISSION_REVIEW means the *new* version is not active yet. The
+  // previously active version must continue to run with its old grant set.
+  return installation?.status === "ENABLED" || installation?.status === "PENDING_PERMISSION_REVIEW";
+}
+
 export class PluginRegistryAndBroker {
   constructor({ publicKeyBase64 = null, privateKeyBase64 = null, hostApiVersion = 2 } = {}) {
     if (!publicKeyBase64 || !privateKeyBase64) {
@@ -329,23 +344,108 @@ export class PluginRegistryAndBroker {
     const installKey = `${userId}:${pluginId}`;
     const existing = this.userInstallations.get(installKey);
     const nowIso = new Date().toISOString();
+    const targetPermissions = uniquePermissionList(pkg.manifest.permissions);
+
+    if (!existing) {
+      // Initial installation is the user's explicit consent point. Upgrades are
+      // treated differently below: newly declared permissions are never granted
+      // silently while an older version continues to run.
+      const record = {
+        installation_id: crypto.randomUUID(),
+        user_id: userId,
+        plugin_id: pluginId,
+        active_version: targetVersion,
+        previous_version: null,
+        pending_version: null,
+        pending_permissions: [],
+        status: "ENABLED",
+        granted_permissions: targetPermissions,
+        installed_at: nowIso,
+        updated_at: nowIso
+      };
+      this.userInstallations.set(installKey, record);
+      return record;
+    }
+
+    const currentGranted = uniquePermissionList(existing.granted_permissions);
+    const addedPermissions = targetPermissions.filter((permission) => !currentGranted.includes(permission));
+
+    if (addedPermissions.length > 0) {
+      // Fail-closed upgrade path (W6-HOTFIX/S1): keep the old active version
+      // and its already-approved grant set until the user explicitly confirms
+      // the permission delta. Never mix the new version with partial new grants.
+      const record = {
+        ...existing,
+        active_version: existing.active_version,
+        previous_version: existing.previous_version || null,
+        pending_version: targetVersion,
+        pending_permissions: addedPermissions,
+        // A disabled installation must stay disabled while the upgrade is
+        // staged. Its first explicit ENABLE resumes the review state; it does
+        // not confirm the new permissions by itself.
+        status: existing.status === "DISABLED" ? "DISABLED" : "PENDING_PERMISSION_REVIEW",
+        granted_permissions: currentGranted,
+        updated_at: nowIso
+      };
+      this.userInstallations.set(installKey, record);
+      return record;
+    }
 
     const record = {
-      installation_id: existing?.installation_id || crypto.randomUUID(),
-      user_id: userId,
-      plugin_id: pluginId,
+      ...existing,
       active_version: targetVersion,
       previous_version:
-        existing && existing.active_version !== targetVersion
+        existing.active_version !== targetVersion
           ? existing.active_version
-          : existing?.previous_version || null,
-      status: "ENABLED",
-      granted_permissions: [...(pkg.manifest.permissions || [])],
-      installed_at: existing?.installed_at || nowIso,
+          : existing.previous_version || null,
+      pending_version: null,
+      pending_permissions: [],
+      // Reinstalling or applying a same-permission upgrade must never reactivate
+      // a disabled installation. Only an explicit lifecycle ENABLE may do that.
+      status: existing.status === "DISABLED" ? "DISABLED" : "ENABLED",
+      // Permission grants are always the approved set intersected with what the
+      // active version actually declares; a silent re-install must not re-grant
+      // permissions that are no longer declared or approved.
+      granted_permissions: intersectPermissionLists(currentGranted, targetPermissions),
       updated_at: nowIso
     };
     this.userInstallations.set(installKey, record);
     return record;
+  }
+
+  confirmPendingPluginPermissions(userId, pluginId) {
+    const installKey = `${userId}:${pluginId}`;
+    const inst = this.userInstallations.get(installKey);
+    if (!inst) {
+      throw new ContractError("NOT_FOUND", `Plugin '${pluginId}' is not installed for user`);
+    }
+    if (inst.status !== "PENDING_PERMISSION_REVIEW" || !inst.pending_version) {
+      throw new ContractError("BAD_REQUEST", `Plugin '${pluginId}' has no pending permission review`);
+    }
+    const pendingPkg = this.packages.get(`${pluginId}@${inst.pending_version}`);
+    if (!pendingPkg) {
+      throw new ContractError(
+        "BAD_REQUEST",
+        `Pending plugin version '${pluginId}@${inst.pending_version}' is no longer available`
+      );
+    }
+    const nowIso = new Date().toISOString();
+    const targetPermissions = uniquePermissionList(pendingPkg.manifest.permissions);
+    const confirmed = {
+      ...inst,
+      previous_version:
+        inst.active_version !== inst.pending_version ? inst.active_version : inst.previous_version || null,
+      active_version: inst.pending_version,
+      pending_version: null,
+      pending_permissions: [],
+      status: "ENABLED",
+      // Confirmation approves the complete permission set declared by the
+      // pending version, including the previously granted permissions it keeps.
+      granted_permissions: targetPermissions,
+      updated_at: nowIso
+    };
+    this.userInstallations.set(installKey, confirmed);
+    return confirmed;
   }
 
   transitionUserPlugin(userId, pluginId, { action, targetVersion = null }) {
@@ -357,7 +457,17 @@ export class PluginRegistryAndBroker {
 
     const nowIso = new Date().toISOString();
     if (action === "ENABLE") {
-      inst.status = "ENABLED";
+      // PENDING_PERMISSION_REVIEW is a distinct approval gate. In that state
+      // the lifecycle ENABLE action is the explicit user confirmation.
+      if (inst.status === "PENDING_PERMISSION_REVIEW") {
+        return this.confirmPendingPluginPermissions(userId, pluginId);
+      }
+      // Disabling pauses a pending review. The first ENABLE from DISABLED only
+      // resumes the review state with the old version and old grant set; a
+      // second ENABLE while PENDING_PERMISSION_REVIEW is the explicit confirmation
+      // that authorizes the pending version. ENABLE must never silently confirm
+      // or discard the pending permission delta.
+      inst.status = inst.pending_version ? "PENDING_PERMISSION_REVIEW" : "ENABLED";
       inst.updated_at = nowIso;
       return inst;
     }
@@ -368,15 +478,25 @@ export class PluginRegistryAndBroker {
     }
     if (action === "ROLLBACK") {
       const rollbackVer = targetVersion || inst.previous_version;
-      if (!rollbackVer || !this.packages.has(`${pluginId}@${rollbackVer}`)) {
+      const rollbackPkg = rollbackVer ? this.packages.get(`${pluginId}@${rollbackVer}`) : null;
+      if (!rollbackVer || !rollbackPkg) {
         throw new ContractError(
           "BAD_REQUEST",
           `No valid rollback version available for plugin '${pluginId}'`
         );
       }
+      const rollbackPermissions = uniquePermissionList(rollbackPkg.manifest.permissions);
       inst.previous_version = inst.active_version;
       inst.active_version = rollbackVer;
-      inst.status = "ENABLED";
+      inst.pending_version = null;
+      inst.pending_permissions = [];
+      // W6-HOTFIX/S2: rollback is fail-closed. Grants that only existed for the
+      // newer version are removed immediately; the surviving set is exactly
+      // granted ∩ target-version-declared.
+      inst.granted_permissions = intersectPermissionLists(inst.granted_permissions, rollbackPermissions);
+      // Rollback changes the selected version, not the user's enablement intent.
+      // A disabled installation remains disabled until an explicit ENABLE.
+      inst.status = inst.status === "DISABLED" ? "DISABLED" : "ENABLED";
       inst.updated_at = nowIso;
       return inst;
     }
@@ -395,7 +515,7 @@ export class PluginRegistryAndBroker {
   getResolvedUiSlotDescriptors(userId, slotId = null) {
     const descriptors = [];
     for (const inst of this.userInstallations.values()) {
-      if (inst.user_id !== userId || inst.status !== "ENABLED") continue;
+      if (inst.user_id !== userId || !isOperationallyEnabled(inst)) continue;
       const pkg = this.packages.get(`${inst.plugin_id}@${inst.active_version}`);
       if (!pkg) continue;
       if (!(inst.granted_permissions || []).includes("ui.slot.render")) continue;
@@ -425,7 +545,7 @@ export class PluginRegistryAndBroker {
   }) {
     const installKey = `${userId}:${pluginId}`;
     const inst = this.userInstallations.get(installKey);
-    if (!inst || inst.status !== "ENABLED") {
+    if (!inst || !isOperationallyEnabled(inst)) {
       throw new ContractError(
         "PLUGIN_PERMISSION_DENIED",
         `Plugin '${pluginId}' is not installed and enabled for user`
