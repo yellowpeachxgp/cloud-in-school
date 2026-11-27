@@ -94,7 +94,9 @@ DISABLED
 
 ## 5. 权限目录（声明 ≠ 能力已实现）
 
-当前权限 ID 以 `contracts/permissions/permission-catalog.yaml` 为契约目录；运行时 Schema 同步枚举。声明权限只表示请求能力，是否真正可用取决于宿主 Broker 与对应功能实现。
+当前权限 ID 以 `contracts/permissions/permission-catalog.yaml` 为契约目录。插件运行时 Schema 枚举覆盖其中 `scope: plugin`、`scope: host_and_plugin` 与 `scope: host_only_gated` 的条目（后两者的授予仍受宿主门禁约束）；`scope: user_school_scope` 的条目是组队等领域功能的用户态权限，**插件清单声明它们会被运行时以 `runtime_permission_unknown` 拒绝**。声明权限只表示请求能力，是否真正可用取决于宿主 Broker 与对应功能实现。
+
+插件可声明权限（运行时 Schema 枚举集合）：
 
 | 权限 | 当前语义与诚实状态 |
 |---|---|
@@ -109,6 +111,17 @@ DISABLED
 | `parcel.ai.invoke` | BYOK/用户单独同意的 AI 调用，默认关闭 |
 | `ui.slot.render` | 渲染声明式扩展卡片描述符的基础权限 |
 | `parcel.write.import` | 校园驿站类插件提交规范化包裹快照；仍需授权与审计 |
+
+用户-学校作用域（`scope: user_school_scope`，组队契约域；**不是插件可声明权限**，此处仅为完整性登记）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
+| `group.read` | 读取同一 school_id 作用域内当前用户可见的小组与活跃成员关系 |
+| `group.create` | 完成校园绑定后在对应 school_id 作用域创建学习/宿舍/社团/项目小组 |
+| `group.join` | 在匹配的 school_id 作用域内接受有效小组邀请或扫码载荷 |
+| `group.manage` | 更新或归档小组；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
+| `group.invite.manage` | 创建或吊销限时、限次小组邀请；要求 GROUP_OWNER/GROUP_ADMIN 授权 |
+| `group.member.manage` | 管理成员角色、共享级别、移出或自助退出；school 作用域隔离强制 |
 
 ## 6. CLI（`dis-plugin`）
 
