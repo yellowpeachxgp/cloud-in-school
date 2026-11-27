@@ -60,7 +60,7 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
   function lineInfo(index) {
     const raw = lines[index];
     if (!raw || /^\s*$/.test(raw)) return null;
-    if (raw.includes("\t")) {
+    if (/^ *\t/.test(raw)) {
       errors.push(label + ":" + (index + 1) + ": tab indentation is unsupported in contract YAML");
     }
     const indent = (raw.match(/^ */) || [""])[0].length;
@@ -144,8 +144,11 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
   }
 
   function containsFlowMappingStart(value) {
+    let first = 0;
+    while (first < value.length && /\s/.test(value[first])) first += 1;
+    if (value[first] !== "{" && value[first] !== "[") return false;
     let quote = null;
-    for (let index = 0; index < value.length; index += 1) {
+    for (let index = first; index < value.length; index += 1) {
       const char = value[index];
       if (quote) {
         if (char === quote) {
@@ -183,6 +186,25 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
     return index;
   }
 
+  function isPlainScalarValue(value) {
+    return value !== "" && !isBlockScalarValue(value) && !/^[\[\]{}"']/.test(value);
+  }
+
+  function skipPlainScalarContinuation(startIndex, parentIndent) {
+    let index = startIndex + 1;
+    while (index < lines.length) {
+      const raw = lines[index];
+      if (!raw || /^\s*$/.test(raw)) {
+        index += 1;
+        continue;
+      }
+      const indent = (raw.match(/^ */) || [""])[0].length;
+      if (indent <= parentIndent) break;
+      index += 1;
+    }
+    return index;
+  }
+
   function registerKey(keys, key, line) {
     if (keys.has(key)) {
       duplicates.push(label + ":" + line + ": duplicate mapping key " + JSON.stringify(key) + " (first at line " + keys.get(key) + ")");
@@ -199,6 +221,9 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
     if (value === "") {
       const next = nextInfo(lineIndex + 1);
       if (next && next.indent > keyIndent) return parseBlock(next.index, next.indent);
+      if (next && next.indent === keyIndent && parseSequenceItem(next)) return parseSequence(next.index, next.indent);
+    } else if (isPlainScalarValue(value)) {
+      return skipPlainScalarContinuation(lineIndex, keyIndent);
     }
     return lineIndex + 1;
   }
@@ -251,6 +276,11 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       }
       if (isBlockScalarValue(item.body)) {
         index = skipBlockScalar(index, indent);
+        continue;
+      }
+      if (containsFlowMappingStart(item.body)) {
+        errors.push(label + ":" + info.line + ": unsupported flow mapping in sequence item; duplicate keys cannot be proven absent");
+        index += 1;
         continue;
       }
       const parsedInlineKey = parseMappingKey(item.body);
@@ -323,6 +353,54 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   assert(
     flowMappingControl.errors.length > 0,
     "duplicate-key scanner must fail closed on unsupported flow mappings"
+  );
+  const flowSequenceControl = analyzeYamlDuplicateKeys(
+    "items:\n  - {required: [name], required: [description]}\n",
+    "flow-sequence-control.yaml"
+  );
+  assert(
+    flowSequenceControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on flow mappings in sequence items"
+  );
+  const indentlessSequenceNegative = analyzeYamlDuplicateKeys(
+    "root:\n  additionalProperties: false\n  enum:\n  - KEEP_VISIBLE\n  additionalProperties: true\n",
+    "indentless-sequence-negative.yaml"
+  );
+  assert(
+    indentlessSequenceNegative.errors.length === 0 && indentlessSequenceNegative.duplicates.length === 1,
+    "duplicate-key scanner must preserve mapping scope across indentless sequences"
+  );
+  const compactIndentlessSequenceNegative = analyzeYamlDuplicateKeys(
+    "items:\n  - additionalProperties: false\n    anyOf:\n    - type: object\n    additionalProperties: true\n",
+    "compact-indentless-sequence-negative.yaml"
+  );
+  assert(
+    compactIndentlessSequenceNegative.errors.length === 0 && compactIndentlessSequenceNegative.duplicates.length === 1,
+    "duplicate-key scanner must preserve compact sequence-item mapping scope across indentless sequences"
+  );
+  const plainPlaceholderControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: Uses {boardId}, {postId} as plain text\n",
+    "plain-placeholder-control.yaml"
+  );
+  assert(
+    plainPlaceholderControl.errors.length === 0 && plainPlaceholderControl.duplicates.length === 0,
+    "duplicate-key scanner must allow comma-separated placeholders in plain scalars"
+  );
+  const wrappedScalarControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: first line\n    continuation text\n  sibling: true\n",
+    "wrapped-scalar-control.yaml"
+  );
+  assert(
+    wrappedScalarControl.errors.length === 0 && wrappedScalarControl.duplicates.length === 0,
+    "duplicate-key scanner must consume wrapped plain-scalar continuations"
+  );
+  const tabCommentControl = analyzeYamlDuplicateKeys(
+    "# comment with\ttab\nroot: true\n",
+    "tab-comment-control.yaml"
+  );
+  assert(
+    tabCommentControl.errors.length === 0 && tabCommentControl.duplicates.length === 0,
+    "duplicate-key scanner must allow tabs inside comments"
   );
 }
 
