@@ -43,6 +43,12 @@ tags:
     description: Privacy-minimizing quantized busy-block sharing and intersection queries inside school-scoped groups
   - name: polls
     description: Deadline-bound group time polls, votes, results, and confirmation events
+  - name: ledger
+    description: Append-only integer-fen group ledger, deterministic shares, balances, and two-party settlement confirmation
+  - name: duty
+    description: Dorm duty rotation schedules, generated tasks, swaps, and peer completion confirmation
+  - name: repairs
+    description: Dorm repair records, explicit status transitions, and reporter reviews
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -1607,6 +1613,1017 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/ledger/entries:
+    post:
+      operationId: createLedgerEntry
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, EMPTY_PARTICIPANTS, DUPLICATE_PARTICIPANT, UNKNOWN_PARTICIPANT, INVALID_RATIO_WEIGHT, INVALID_STAY_DAYS, NO_EFFECTIVE_PARTICIPANTS, ARITHMETIC_OVERFLOW, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [ledger.entry.created]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Append a shared expense or refund posting with deterministic integer-fen splitting
+      description: |
+        Creates one immutable ledger posting. amount_fen is a signed integer minor unit (分); positive values represent a cost paid for the group and negative values represent a refund or reversal-direction posting. No payment, transfer, wallet debit, or collection is executed. The server calculates shares with the same pure-JVM core:ledger algorithm: exact rational floor first, then distribute remaining one-fen units by descending fractional remainder and ascending participant_member_id on ties. Output shares are sorted by participant_member_id, independent of input order.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLedgerEntryRequest'
+      responses:
+        '201':
+          description: Ledger posting appended and deterministic shares calculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerEntryEnvelope'
+        '200':
+          description: Durable idempotent replay of the original posting creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerEntryEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listLedgerEntries
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: List immutable ledger postings and append-only corrections for audit history
+      description: |
+        Returns postings in reverse chronological creation order. Original postings are never rewritten; corrections are separate postings linked by corrects_entry_id. Clients must use this history view to explain changes instead of hiding correction entries.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - name: corrects_entry_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Ledger posting history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerEntryListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/groups/{groupId}/ledger/entries/{entryId}/amend:
+    post:
+      operationId: amendLedgerEntry
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, LEDGER_ENTRY_NOT_FOUND, EMPTY_PARTICIPANTS, DUPLICATE_PARTICIPANT, UNKNOWN_PARTICIPANT, INVALID_RATIO_WEIGHT, INVALID_STAY_DAYS, NO_EFFECTIVE_PARTICIPANTS, ARITHMETIC_OVERFLOW, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [ledger.entry.amended]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Append a signed correction posting linked to an earlier ledger entry
+      description: |
+        Never edits or deletes the referenced posting. amount_fen is the signed delta to apply and may be negative; a full reversal uses the inverse amount and normally the same payer and split rule as the original. Corrections can target either an original posting or an earlier correction, forming an auditable chain. A correction increments the group balance revision; any still-unconfirmed settlement based on an older revision becomes stale and must be cancelled and proposed again for fresh two-party confirmation.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/LedgerEntryIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AmendLedgerEntryRequest'
+      responses:
+        '201':
+          description: Correction posting appended and ledger.entry.amended emitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerEntryEnvelope'
+        '200':
+          description: Durable idempotent replay of the original correction result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerEntryEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/ledger/balances:
+    get:
+      operationId: getLedgerBalances
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Get per-member integer-fen balances and the revision used for settlement proposals
+      description: |
+        Balance sign convention is positive = the member is owed reimbursement, negative = the member owes the group. For every posting, the payer effect is +amount_fen and each participant effect is -share_amount_fen; a mutually confirmed settlement adds +amount_fen to the debtor and -amount_fen to the creditor as an out-of-band settlement record. The member balance sum must always be exactly zero. No payment execution is implied.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: Current member balances, exact zero-sum invariant, and monotonic balance revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerBalanceEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/groups/{groupId}/settlements:
+    post:
+      operationId: createSettlement
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.settlement.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, SAME_SETTLEMENT_PARTIES, NON_POSITIVE_SETTLEMENT_AMOUNT, SETTLEMENT_AMOUNT_INVALID, SETTLEMENT_BALANCE_STALE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Propose an out-of-band settlement record requiring debtor and creditor confirmation
+      description: |
+        Records only an intended settlement direction and amount; it does not move money or prove that money moved. debtor_member_id and creditor_member_id must differ, amount_fen must be strictly positive, and basis_balance_revision must come from the current balances response. The amount must not exceed the debtor negative balance magnitude or the creditor positive balance at that revision. The new record starts in PENDING_BOTH_CONFIRMATIONS.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSettlementRequest'
+      responses:
+        '201':
+          description: Settlement proposal created in PENDING_BOTH_CONFIRMATIONS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementEnvelope'
+        '200':
+          description: Durable idempotent replay of the original settlement proposal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listSettlements
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: List settlement confirmation records and terminal states for audit history
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/SettlementStatus'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Settlement history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/settlements/{settlementId}:
+    get:
+      operationId: getSettlement
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.ledger.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Get one settlement record visible to a group member in the same school scope
+      parameters:
+        - $ref: '#/components/parameters/SettlementIdParam'
+      responses:
+        '200':
+          description: Settlement detail including both party confirmation timestamps
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/settlements/{settlementId}/confirm:
+    post:
+      operationId: confirmSettlement
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.settlement.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED, SETTLEMENT_PARTY_MISMATCH, SETTLEMENT_INVALID_STATE, SETTLEMENT_BALANCE_STALE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [settlement.confirmed]
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Confirm one side of a settlement; the second distinct party confirmation makes it terminal
+      description: |
+        The actor is resolved from the cloud session and must be the debtor or creditor. Repeating the same party confirmation is an idempotent no-op. When the second distinct party confirms, status becomes CONFIRMED, settlement.confirmed is emitted, and the out-of-band settlement is applied to member balances. CONFIRMED is not payment success evidence. If any ledger correction or other balance change advanced the revision after proposal, confirmation fails with SETTLEMENT_BALANCE_STALE; cancel this record and create a fresh proposal requiring both confirmations again.
+      parameters:
+        - $ref: '#/components/parameters/SettlementIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmSettlementRequest'
+      responses:
+        '200':
+          description: Confirmation accepted, replayed, or both confirmations completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/settlements/{settlementId}/cancel:
+    post:
+      operationId: cancelSettlement
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-permissions: [group.settlement.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED, SETTLEMENT_PARTY_MISMATCH, SETTLEMENT_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [ledger]
+      security:
+        - bearerAuth: []
+      summary: Cancel a still-unconfirmed settlement without deleting audit history
+      description: |
+        Either the debtor or creditor may cancel before CONFIRMED. CANCELLED and CONFIRMED are terminal; cancellation never deletes the proposal or prior party confirmation timestamps.
+      parameters:
+        - $ref: '#/components/parameters/SettlementIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelSettlementRequest'
+      responses:
+        '200':
+          description: Settlement cancelled or durable idempotent replay returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/rotas:
+    post:
+      operationId: createDutyRota
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Create a rotating duty schedule and generate its initial duty tasks
+      description: |
+        rotation_member_ids is the ordered rotation. WEEKLY schedules require at least one day_of_week; DAILY schedules ignore days_of_week. Generated tasks are deterministic server-side projections, and existing tasks are not rewritten when the rota later changes.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDutyRotaRequest'
+      responses:
+        '201':
+          description: Duty rota created and initial deterministic tasks generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyRotaEnvelope'
+        '200':
+          description: Durable idempotent replay of the original rota creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyRotaEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listDutyRotas
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: List duty rotation schedules in a group
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DutyRotaStatus'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Duty rota list page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyRotaListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/rotas/{rotaId}:
+    get:
+      operationId: getDutyRota
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Get one duty rotation schedule and generation cursor
+      parameters:
+        - $ref: '#/components/parameters/RotaIdParam'
+      responses:
+        '200':
+          description: Duty rota detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyRotaEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    patch:
+      operationId: updateDutyRota
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Update future rotation scheduling metadata without rewriting existing duty tasks
+      description: |
+        Changes to rotation order, active dates, frequency, or status apply only to tasks generated after the update. Existing duty tasks remain auditable and must be changed through swap resolution or completion flows.
+      parameters:
+        - $ref: '#/components/parameters/RotaIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDutyRotaRequest'
+      responses:
+        '200':
+          description: Duty rota updated or durable idempotent replay returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyRotaEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/duty-tasks:
+    get:
+      operationId: listDutyTasks
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: List generated duty tasks with assignment and completion confirmation state
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DutyTaskStatus'
+        - name: assigned_member_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: from_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Duty task list page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyTaskListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/duty-tasks/{taskId}/complete:
+    post:
+      operationId: completeDutyTask
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [duty.task.completed]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Mark the caller-assigned duty task as completed pending peer confirmation
+      description: |
+        Only the currently assigned member may complete the task. Repeating completion by the same member is idempotent. Completion is not final until a different active group member confirms it.
+      parameters:
+        - $ref: '#/components/parameters/DutyTaskIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteDutyTaskRequest'
+      responses:
+        '200':
+          description: Duty task marked COMPLETED or completion replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyTaskEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/duty-tasks/{taskId}/confirm:
+    post:
+      operationId: confirmDutyTaskCompletion
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.confirm]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_CONFIRMATION_NOT_ALLOWED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [duty.task.confirmed]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Confirm another member's completed duty task
+      description: |
+        The confirmer must be an active group member different from the assignee. The task must currently be COMPLETED. Confirmation is terminal for the task and emits duty.task.confirmed.
+      parameters:
+        - $ref: '#/components/parameters/DutyTaskIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmDutyTaskRequest'
+      responses:
+        '200':
+          description: Duty task completion confirmed or replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyTaskEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/rotas/{rotaId}/swaps:
+    post:
+      operationId: requestDutySwap
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [duty.swap.requested]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Request a one-task duty swap or cover by another active group member
+      description: |
+        The requester must be the current assignee or a GROUP_OWNER/GROUP_ADMIN. target_member_id is required so responsibility is explicit; open-ended broadcasting is not part of v1. The task is not reassigned until the target member or an owner/admin accepts the request.
+      parameters:
+        - $ref: '#/components/parameters/RotaIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestDutySwapRequest'
+      responses:
+        '201':
+          description: Duty swap request created in PENDING status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutySwapEnvelope'
+        '200':
+          description: Durable idempotent replay of the original swap request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutySwapEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/duty-swaps/{swapId}/resolve:
+    post:
+      operationId: resolveDutySwap
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_SWAP_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SWAP_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [duty.swap.resolved]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Accept, reject, or cancel a pending duty swap request
+      description: |
+        The target member may ACCEPT or REJECT; the requester may CANCEL; a GROUP_OWNER/GROUP_ADMIN may ACCEPT or REJECT when members dispute. ACCEPT atomically reassigns the duty task. Terminal swap records remain visible for audit and are never rewritten.
+      parameters:
+        - $ref: '#/components/parameters/DutySwapIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveDutySwapRequest'
+      responses:
+        '200':
+          description: Duty swap resolved or durable idempotent replay returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutySwapEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/groups/{groupId}/repairs:
+    post:
+      operationId: createRepairTicket
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [repair.created]
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: Submit a dorm repair record for group coordination
+      description: |
+        This is a shared record and coordination workflow only. It does not submit a work order to a school, property operator, or external contractor and must not be presented as an official repair request.
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRepairTicketRequest'
+      responses:
+        '201':
+          description: Repair ticket created in OPEN status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketEnvelope'
+        '200':
+          description: Durable idempotent replay of the original repair ticket creation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listRepairTickets
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: List dorm repair records and workflow states
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RepairStatus'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Repair ticket list page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/repairs/{repairId}:
+    get:
+      operationId: getRepairTicket
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED]
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: Get repair ticket detail, status history summary, and review state
+      parameters:
+        - $ref: '#/components/parameters/RepairIdParam'
+      responses:
+        '200':
+          description: Repair ticket detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    patch:
+      operationId: updateRepairTicket
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: Update repair description metadata while the ticket is still editable
+      description: |
+        The reporter or a GROUP_OWNER/GROUP_ADMIN may edit title, category, location, and description only while status is OPEN or TRIAGED. Edits are revisioned in audit history; status transitions use the dedicated status endpoint.
+      parameters:
+        - $ref: '#/components/parameters/RepairIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRepairTicketRequest'
+      responses:
+        '200':
+          description: Repair ticket updated or durable idempotent replay returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/repairs/{repairId}/status:
+    post:
+      operationId: transitionRepairStatus
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_STATUS_TRANSITION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [repair.status_changed]
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: Transition a repair ticket through the explicit group coordination state machine
+      description: |
+        Valid transitions are OPEN→TRIAGED or REJECTED, TRIAGED→IN_PROGRESS or REJECTED, IN_PROGRESS→RESOLVED, and RESOLVED→CLOSED after a reporter review exists. REJECTED and CLOSED are terminal. These states only reflect group records and never claim completion by an external maintenance provider.
+      parameters:
+        - $ref: '#/components/parameters/RepairIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionRepairStatusRequest'
+      responses:
+        '200':
+          description: Repair status transitioned or durable idempotent replay returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/repairs/{repairId}/review:
+    post:
+      operationId: submitRepairReview
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.repair.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_REVIEW_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [repair.reviewed]
+      tags: [repairs]
+      security:
+        - bearerAuth: []
+      summary: Let the reporter rate a resolved repair record exactly once
+      description: |
+        Only the reporter may review, and only after status RESOLVED. One repair has at most one review; the same Idempotency-Key replays the original review, while a new key cannot rewrite it. After review exists, a manager may close the ticket through the status endpoint.
+      parameters:
+        - $ref: '#/components/parameters/RepairIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRepairReviewRequest'
+      responses:
+        '201':
+          description: Repair review created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairReviewEnvelope'
+        '200':
+          description: Durable idempotent replay of the original review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairReviewEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -2704,6 +3721,48 @@ components:
         format: uuid
     PollIdParam:
       name: pollId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    LedgerEntryIdParam:
+      name: entryId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SettlementIdParam:
+      name: settlementId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RotaIdParam:
+      name: rotaId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DutyTaskIdParam:
+      name: taskId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DutySwapIdParam:
+      name: swapId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RepairIdParam:
+      name: repairId
       in: path
       required: true
       schema:
@@ -4209,6 +5268,1021 @@ components:
           type: string
         data:
           $ref: '#/components/schemas/ConfirmGroupPollResult'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    LedgerAmountFen:
+      type: integer
+      format: int64
+      description: Signed integer amount in fen (分). Floating-point values are forbidden; zero is allowed only where the field description explicitly permits it.
+    LedgerSplitRuleType:
+      type: string
+      enum: [EQUAL, SELECTED, RATIOS, STAY_DAYS]
+    LedgerRatioWeight:
+      type: object
+      additionalProperties: false
+      required: [member_id, weight]
+      properties:
+        member_id:
+          type: string
+          format: uuid
+        weight:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000
+          description: Dimensionless non-negative integer weight. Zero excludes the member; negative values are invalid.
+    LedgerStayDays:
+      type: object
+      additionalProperties: false
+      required: [member_id, days]
+      properties:
+        member_id:
+          type: string
+          format: uuid
+        days:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 366
+          description: Non-negative integer occupied-stay days. Zero excludes the member; negative values are invalid.
+    LedgerSplitRule:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/LedgerSplitRuleType'
+        participant_member_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+          description: Required for SELECTED and forbidden for other types. Every listed member must be an active group member and duplicates are rejected.
+        ratio_weights:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/LedgerRatioWeight'
+          description: Required for RATIOS and forbidden for other types. Unlisted active members have weight zero; at least one positive weight is required.
+        stay_days:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/LedgerStayDays'
+          description: Required for STAY_DAYS and forbidden for other types. Unlisted active members have zero days; at least one positive day count is required.
+      description: EQUAL splits across all active group members; SELECTED equally across explicit members; RATIOS and STAY_DAYS use integer weights. The server applies the Android core:ledger largest-remainder rule exactly.
+    LedgerSplitShare:
+      type: object
+      additionalProperties: false
+      required: [participant_member_id, amount_fen]
+      properties:
+        participant_member_id:
+          type: string
+          format: uuid
+          description: Stable membership-period participant id used for deterministic lexicographic tie-breaking.
+        amount_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+    LedgerEntryKind:
+      type: string
+      enum: [EXPENSE, REFUND, CORRECTION]
+    CreateLedgerEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [title, amount_fen, paid_by_member_id, occurred_at, split_rule]
+      properties:
+        entry_kind:
+          type: string
+          enum: [EXPENSE, REFUND]
+          default: EXPENSE
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        note:
+          type: string
+          maxLength: 500
+        amount_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+          description: Signed non-zero posting amount in fen. Positive is a group cost paid by paid_by_member_id; negative is a refund or reversal-direction posting.
+        paid_by_member_id:
+          type: string
+          format: uuid
+        occurred_at:
+          type: string
+          format: date-time
+        split_rule:
+          $ref: '#/components/schemas/LedgerSplitRule'
+    AmendLedgerEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, amount_fen, paid_by_member_id, occurred_at, split_rule]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: User-visible audit reason for the append-only correction.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        amount_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+          description: Signed non-zero delta in fen. Use the inverse amount, payer, and split rule of the original posting for a full reversal.
+        paid_by_member_id:
+          type: string
+          format: uuid
+        occurred_at:
+          type: string
+          format: date-time
+        split_rule:
+          $ref: '#/components/schemas/LedgerSplitRule'
+    LedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [entry_id, group_id, school_id, entry_kind, corrects_entry_id, correction_reason, title, note, amount_fen, paid_by_member_id, occurred_at, split_rule, shares, created_by_member_id, created_at]
+      properties:
+        entry_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        entry_kind:
+          $ref: '#/components/schemas/LedgerEntryKind'
+        corrects_entry_id:
+          type: [string, 'null']
+          format: uuid
+        correction_reason:
+          type: [string, 'null']
+          maxLength: 240
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        note:
+          type: [string, 'null']
+          maxLength: 500
+        amount_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+        paid_by_member_id:
+          type: string
+          format: uuid
+        occurred_at:
+          type: string
+          format: date-time
+        split_rule:
+          $ref: '#/components/schemas/LedgerSplitRule'
+        shares:
+          type: array
+          items:
+            $ref: '#/components/schemas/LedgerSplitShare'
+          description: Deterministic largest-remainder shares sorted ascending by participant_member_id. Their sum must exactly equal amount_fen, including negative totals.
+        created_by_member_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+    LedgerEntryEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/LedgerEntry'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    LedgerEntryListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LedgerEntry'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    LedgerMemberBalance:
+      type: object
+      additionalProperties: false
+      required: [member_id, posting_credit_fen, share_cost_fen, outbound_settlement_fen, inbound_settlement_fen, balance_fen]
+      properties:
+        member_id:
+          type: string
+          format: uuid
+        posting_credit_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+          description: Sum of signed amount_fen for postings where this member is payer.
+        share_cost_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+          description: Sum of deterministic shares allocated to this member.
+        outbound_settlement_fen:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Confirmed out-of-band settlement amounts for which this member is debtor; increases balance_fen because recorded debt is reduced.
+        inbound_settlement_fen:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Confirmed out-of-band settlement amounts for which this member is creditor; decreases balance_fen because recorded receivable is reduced.
+        balance_fen:
+          $ref: '#/components/schemas/LedgerAmountFen'
+          description: posting_credit_fen - share_cost_fen + outbound_settlement_fen - inbound_settlement_fen. Positive means the member is owed; negative means the member owes.
+    LedgerBalanceResult:
+      type: object
+      additionalProperties: false
+      required: [group_id, school_id, balance_revision, generated_at, zero_sum_check_fen, members]
+      properties:
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        balance_revision:
+          type: integer
+          minimum: 0
+          description: Monotonic group ledger revision incremented by postings, corrections, and confirmed settlements. Settlement proposals pin this revision.
+        generated_at:
+          type: string
+          format: date-time
+        zero_sum_check_fen:
+          type: integer
+          format: int64
+          const: 0
+          description: Sum of all member balance_fen values; must always be exactly zero.
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/LedgerMemberBalance'
+    LedgerBalanceEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/LedgerBalanceResult'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SettlementStatus:
+      type: string
+      enum: [PENDING_BOTH_CONFIRMATIONS, PENDING_DEBTOR_CONFIRMATION, PENDING_CREDITOR_CONFIRMATION, CONFIRMED, CANCELLED]
+      description: Exact status vocabulary shared with Android core:ledger. CONFIRMED means both parties confirmed a ledger record, not payment success.
+    SettlementParty:
+      type: string
+      enum: [DEBTOR, CREDITOR]
+    CreateSettlementRequest:
+      type: object
+      additionalProperties: false
+      required: [debtor_member_id, creditor_member_id, amount_fen, basis_balance_revision]
+      properties:
+        debtor_member_id:
+          type: string
+          format: uuid
+        creditor_member_id:
+          type: string
+          format: uuid
+        amount_fen:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Strictly positive settlement amount in fen, matching core:ledger NON_POSITIVE_SETTLEMENT_AMOUNT semantics.
+        basis_balance_revision:
+          type: integer
+          minimum: 0
+          description: Revision returned by getLedgerBalances. Any later balance revision makes this proposal stale for confirmation.
+        note:
+          type: string
+          maxLength: 240
+    Settlement:
+      type: object
+      additionalProperties: false
+      required: [settlement_id, group_id, school_id, debtor_member_id, creditor_member_id, amount_fen, basis_balance_revision, status, note, created_by_member_id, created_at, debtor_confirmed_at, creditor_confirmed_at, confirmed_at, cancelled_at, cancelled_by_party, cancelled_by_member_id]
+      properties:
+        settlement_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        debtor_member_id:
+          type: string
+          format: uuid
+        creditor_member_id:
+          type: string
+          format: uuid
+        amount_fen:
+          type: integer
+          format: int64
+          minimum: 1
+        basis_balance_revision:
+          type: integer
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/SettlementStatus'
+        note:
+          type: [string, 'null']
+          maxLength: 240
+        created_by_member_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        debtor_confirmed_at:
+          type: [string, 'null']
+          format: date-time
+        creditor_confirmed_at:
+          type: [string, 'null']
+          format: date-time
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+        cancelled_at:
+          type: [string, 'null']
+          format: date-time
+        cancelled_by_party:
+          type: [string, 'null']
+          description: DEBTOR or CREDITOR when cancelled.
+        cancelled_by_member_id:
+          type: [string, 'null']
+          format: uuid
+    SettlementEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/Settlement'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SettlementListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Settlement'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ConfirmSettlementRequest:
+      type: object
+      additionalProperties: false
+      required: [basis_balance_revision]
+      properties:
+        basis_balance_revision:
+          type: integer
+          minimum: 0
+          description: Must equal the revision pinned in the settlement and still match the current group balance revision at confirmation time.
+    CancelSettlementRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 240
+    DutyFrequency:
+      type: string
+      enum: [DAILY, WEEKLY]
+    DutyRotaStatus:
+      type: string
+      enum: [ACTIVE, PAUSED, ARCHIVED]
+    CreateDutyRotaRequest:
+      type: object
+      additionalProperties: false
+      required: [title, rotation_member_ids, frequency, start_date, time_zone]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+        rotation_member_ids:
+          type: array
+          minItems: 2
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+          description: Ordered active members. Rotation order is significant and preserved.
+        frequency:
+          $ref: '#/components/schemas/DutyFrequency'
+        days_of_week:
+          type: array
+          maxItems: 7
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+          description: ISO weekday numbers required for WEEKLY; ignored for DAILY.
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        time_zone:
+          type: string
+          description: IANA time zone used to interpret due dates, normally the school time zone.
+        generate_weeks_ahead:
+          type: integer
+          minimum: 1
+          maximum: 12
+          default: 2
+    UpdateDutyRotaRequest:
+      type: object
+      additionalProperties: false
+      anyOf:
+        - required: [title]
+        - required: [description]
+        - required: [rotation_member_ids]
+        - required: [frequency]
+        - required: [days_of_week]
+        - required: [end_date]
+        - required: [status]
+        - required: [generate_weeks_ahead]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: [string, 'null']
+          maxLength: 500
+        rotation_member_ids:
+          type: array
+          minItems: 2
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        frequency:
+          $ref: '#/components/schemas/DutyFrequency'
+        days_of_week:
+          type: array
+          maxItems: 7
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+        end_date:
+          type: [string, 'null']
+          format: date
+        status:
+          $ref: '#/components/schemas/DutyRotaStatus'
+        generate_weeks_ahead:
+          type: integer
+          minimum: 1
+          maximum: 12
+    DutyRota:
+      type: object
+      additionalProperties: false
+      required: [rota_id, group_id, school_id, title, description, rotation_member_ids, frequency, days_of_week, start_date, end_date, time_zone, generate_weeks_ahead, status, next_rotation_index, generated_through_date, created_by_member_id, created_at, updated_at]
+      properties:
+        rota_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: [string, 'null']
+          maxLength: 500
+        rotation_member_ids:
+          type: array
+          minItems: 2
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
+        frequency:
+          $ref: '#/components/schemas/DutyFrequency'
+        days_of_week:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: [string, 'null']
+          format: date
+        time_zone:
+          type: string
+        generate_weeks_ahead:
+          type: integer
+          minimum: 1
+          maximum: 12
+        status:
+          $ref: '#/components/schemas/DutyRotaStatus'
+        next_rotation_index:
+          type: integer
+          minimum: 0
+        generated_through_date:
+          type: [string, 'null']
+          format: date
+        created_by_member_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DutyRotaEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/DutyRota'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DutyRotaListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DutyRota'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DutyTaskStatus:
+      type: string
+      enum: [PENDING, COMPLETED, CONFIRMED, SKIPPED]
+    DutyTask:
+      type: object
+      additionalProperties: false
+      required: [task_id, rota_id, group_id, school_id, title, assigned_member_id, due_date, status, completion_note, completed_at, completed_by_member_id, confirmation_note, confirmed_at, confirmed_by_member_id, created_at, updated_at]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        rota_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 80
+        assigned_member_id:
+          type: string
+          format: uuid
+        due_date:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/DutyTaskStatus'
+        completion_note:
+          type: [string, 'null']
+          maxLength: 240
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        completed_by_member_id:
+          type: [string, 'null']
+          format: uuid
+        confirmation_note:
+          type: [string, 'null']
+          maxLength: 240
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+        confirmed_by_member_id:
+          type: [string, 'null']
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DutyTaskEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/DutyTask'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DutyTaskListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DutyTask'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    CompleteDutyTaskRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        completion_note:
+          type: string
+          maxLength: 240
+    ConfirmDutyTaskRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        confirmation_note:
+          type: string
+          maxLength: 240
+    DutySwapType:
+      type: string
+      enum: [SWAP, COVER]
+      description: SWAP means the target takes this task and future reverse arrangement is handled outside this record; COVER means the target covers this single occurrence.
+    DutySwapStatus:
+      type: string
+      enum: [PENDING, ACCEPTED, REJECTED, CANCELLED]
+    DutySwapAction:
+      type: string
+      enum: [ACCEPT, REJECT, CANCEL]
+    RequestDutySwapRequest:
+      type: object
+      additionalProperties: false
+      required: [duty_task_id, type, target_member_id]
+      properties:
+        duty_task_id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/DutySwapType'
+        target_member_id:
+          type: string
+          format: uuid
+          description: Explicit active member asked to swap or cover; must differ from the current assignee.
+        reason:
+          type: string
+          maxLength: 240
+    ResolveDutySwapRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          $ref: '#/components/schemas/DutySwapAction'
+        resolution_note:
+          type: string
+          maxLength: 240
+    DutySwap:
+      type: object
+      additionalProperties: false
+      required: [swap_id, rota_id, duty_task_id, group_id, school_id, type, requested_by_member_id, target_member_id, reason, status, resolution_note, resolved_by_member_id, created_at, resolved_at]
+      properties:
+        swap_id:
+          type: string
+          format: uuid
+        rota_id:
+          type: string
+          format: uuid
+        duty_task_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        type:
+          $ref: '#/components/schemas/DutySwapType'
+        requested_by_member_id:
+          type: string
+          format: uuid
+        target_member_id:
+          type: string
+          format: uuid
+        reason:
+          type: [string, 'null']
+          maxLength: 240
+        status:
+          $ref: '#/components/schemas/DutySwapStatus'
+        resolution_note:
+          type: [string, 'null']
+          maxLength: 240
+        resolved_by_member_id:
+          type: [string, 'null']
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: [string, 'null']
+          format: date-time
+    DutySwapEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/DutySwap'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    RepairCategory:
+      type: string
+      enum: [PLUMBING, ELECTRICAL, FURNITURE, NETWORK, CLEANING, SAFETY, OTHER]
+    RepairStatus:
+      type: string
+      enum: [OPEN, TRIAGED, IN_PROGRESS, RESOLVED, REJECTED, CLOSED]
+      description: Group coordination state only; it never asserts status in any school or property maintenance system.
+    CreateRepairTicketRequest:
+      type: object
+      additionalProperties: false
+      required: [title, category, location_text, description]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        category:
+          $ref: '#/components/schemas/RepairCategory'
+        location_text:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    UpdateRepairTicketRequest:
+      type: object
+      additionalProperties: false
+      anyOf:
+        - required: [title]
+        - required: [category]
+        - required: [location_text]
+        - required: [description]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        category:
+          $ref: '#/components/schemas/RepairCategory'
+        location_text:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    RepairTicket:
+      type: object
+      additionalProperties: false
+      required: [repair_id, group_id, school_id, title, category, location_text, description, reporter_member_id, assigned_member_id, status, resolution_note, review_id, created_at, updated_at, triaged_at, started_at, resolved_at, rejected_at, closed_at]
+      properties:
+        repair_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        category:
+          $ref: '#/components/schemas/RepairCategory'
+        location_text:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        reporter_member_id:
+          type: string
+          format: uuid
+        assigned_member_id:
+          type: [string, 'null']
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RepairStatus'
+        resolution_note:
+          type: [string, 'null']
+          maxLength: 500
+        review_id:
+          type: [string, 'null']
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        triaged_at:
+          type: [string, 'null']
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        resolved_at:
+          type: [string, 'null']
+          format: date-time
+        rejected_at:
+          type: [string, 'null']
+          format: date-time
+        closed_at:
+          type: [string, 'null']
+          format: date-time
+    RepairTicketEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/RepairTicket'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    RepairTicketListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairTicket'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    TransitionRepairStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [to_status]
+      properties:
+        to_status:
+          $ref: '#/components/schemas/RepairStatus'
+        note:
+          type: string
+          maxLength: 500
+        assigned_member_id:
+          type: string
+          format: uuid
+    SubmitRepairReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [rating]
+      properties:
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+          maxLength: 500
+    RepairReview:
+      type: object
+      additionalProperties: false
+      required: [review_id, repair_id, group_id, school_id, reviewer_member_id, rating, comment, created_at]
+      properties:
+        review_id:
+          type: string
+          format: uuid
+        repair_id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        school_id:
+          type: string
+        reviewer_member_id:
+          type: string
+          format: uuid
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: [string, 'null']
+          maxLength: 500
+        created_at:
+          type: string
+          format: date-time
+    RepairReviewEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/RepairReview'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     ParcelListEnvelope:

@@ -210,3 +210,158 @@ errors:
     retryable: false
     user_action: FIX_POLL_OPTIONS_OR_DEADLINE
     description: Poll options must be distinct quantized time windows and the deadline must be in the future and no later than the earliest option start.
+  - code: EMPTY_PARTICIPANTS
+    http_status: 400
+    retryable: false
+    user_action: FIX_LEDGER_SPLIT_PARTICIPANTS
+    description: Ledger split requires at least one participant; shared with Android core:ledger validation semantics.
+  - code: DUPLICATE_PARTICIPANT
+    http_status: 400
+    retryable: false
+    user_action: REMOVE_DUPLICATE_PARTICIPANT
+    description: Ledger split participant identifiers must be unique.
+  - code: UNKNOWN_PARTICIPANT
+    http_status: 400
+    retryable: false
+    user_action: CHECK_GROUP_MEMBER_ID
+    description: Ledger split rule references a participant who is not an active member of the group scope.
+  - code: INVALID_RATIO_WEIGHT
+    http_status: 400
+    retryable: false
+    user_action: FIX_RATIO_WEIGHTS
+    description: Ledger ratio weights must be non-negative integers and at least one weight must be positive.
+  - code: INVALID_STAY_DAYS
+    http_status: 400
+    retryable: false
+    user_action: FIX_STAY_DAYS
+    description: Ledger stay-day weights must be non-negative integers and at least one day count must be positive.
+  - code: NO_EFFECTIVE_PARTICIPANTS
+    http_status: 400
+    retryable: false
+    user_action: SELECT_POSITIVE_WEIGHT_PARTICIPANTS
+    description: Ledger split rule selects no participant with a positive weight.
+  - code: EMPTY_IDENTIFIER
+    http_status: 400
+    retryable: false
+    user_action: FIX_LEDGER_IDENTIFIER
+    description: Ledger participant or settlement identifiers must not be empty; shared with Android core:ledger validation semantics.
+  - code: INVALID_IDENTIFIER
+    http_status: 400
+    retryable: false
+    user_action: FIX_LEDGER_IDENTIFIER
+    description: Ledger opaque identifiers must use printable non-whitespace ASCII so lexicographic tie-breaking is cross-platform stable.
+  - code: ARITHMETIC_OVERFLOW
+    http_status: 400
+    retryable: false
+    user_action: REDUCE_AMOUNT_OR_WEIGHTS
+    description: Integer-fen ledger arithmetic cannot be represented safely in signed 64-bit fen; silent wrapping is forbidden.
+  - code: SAME_SETTLEMENT_PARTIES
+    http_status: 400
+    retryable: false
+    user_action: CHOOSE_DIFFERENT_SETTLEMENT_PARTIES
+    description: Settlement debtor and creditor must be different participants.
+  - code: NON_POSITIVE_SETTLEMENT_AMOUNT
+    http_status: 400
+    retryable: false
+    user_action: ENTER_POSITIVE_SETTLEMENT_AMOUNT
+    description: Settlement amount must be strictly positive integer fen; reverse direction requires swapping debtor and creditor.
+  - code: LEDGER_ENTRY_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_LEDGER_ENTRY_ID
+    description: Ledger entry does not exist or is not visible in the caller group and school scope.
+  - code: SETTLEMENT_AMOUNT_INVALID
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_BALANCES_AND_ADJUST_AMOUNT
+    description: Settlement amount exceeds the debtor negative balance magnitude or creditor positive balance at the pinned balance revision.
+  - code: SETTLEMENT_BALANCE_STALE
+    http_status: 409
+    retryable: false
+    user_action: CANCEL_AND_REPROPOSE_SETTLEMENT
+    description: Ledger balances changed after this settlement was proposed; cancel it and create a fresh proposal requiring both confirmations again.
+  - code: SETTLEMENT_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_SETTLEMENT_ID
+    description: Settlement does not exist or is not visible in the caller group and school scope.
+  - code: SETTLEMENT_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_SETTLEMENT_AUTHORIZATION
+    description: Caller is not an active group member allowed to access or mutate this settlement.
+  - code: SETTLEMENT_PARTY_MISMATCH
+    http_status: 403
+    retryable: false
+    user_action: USE_DEBTOR_OR_CREDITOR_ACCOUNT
+    description: Only the settlement debtor or creditor can confirm or cancel the settlement.
+  - code: SETTLEMENT_INVALID_STATE
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_SETTLEMENT_STATUS
+    description: Settlement is already terminal or the requested confirmation/cancellation is invalid for its current two-party state.
+  - code: DUTY_ROTA_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_DUTY_ROTA_ID
+    description: Duty rota does not exist or is not visible in the caller group and school scope.
+  - code: DUTY_TASK_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_DUTY_TASK_ID
+    description: Duty task does not exist or is not visible in the caller group and school scope.
+  - code: DUTY_SWAP_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_DUTY_SWAP_ID
+    description: Duty swap does not exist or is not visible in the caller group and school scope.
+  - code: DUTY_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_DUTY_ROLE_OR_ASSIGNMENT
+    description: Caller lacks the required duty assignee, target, requester, or group owner/admin authorization.
+  - code: DUTY_SCHEDULE_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_DUTY_SCHEDULE_OR_SWAP
+    description: Duty rotation members, weekdays, dates, generation horizon, or swap target failed validation.
+  - code: DUTY_TASK_INVALID_STATE
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_DUTY_TASK_STATUS
+    description: Duty task is not in a state that accepts the requested completion or confirmation transition.
+  - code: DUTY_CONFIRMATION_NOT_ALLOWED
+    http_status: 403
+    retryable: false
+    user_action: ASK_ANOTHER_MEMBER_TO_CONFIRM
+    description: Duty completion must be confirmed by an active member different from the assignee.
+  - code: DUTY_SWAP_INVALID_STATE
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_DUTY_SWAP_STATUS
+    description: Duty swap is terminal or the requested accept/reject/cancel action is invalid for its current state.
+  - code: REPAIR_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_REPAIR_ID
+    description: Repair ticket does not exist or is not visible in the caller group and school scope.
+  - code: REPAIR_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_REPAIR_ROLE
+    description: Caller lacks reporter, assignee, active member, or group owner/admin authorization for this repair operation.
+  - code: REPAIR_INVALID_STATE
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_REPAIR_STATUS
+    description: Repair ticket is no longer editable or does not accept the requested operation in its current state.
+  - code: REPAIR_STATUS_TRANSITION_INVALID
+    http_status: 409
+    retryable: false
+    user_action: CHECK_REPAIR_STATUS_FLOW
+    description: Requested repair status transition violates the explicit OPEN/TRIAGED/IN_PROGRESS/RESOLVED/CLOSED state machine.
+  - code: REPAIR_REVIEW_INVALID
+    http_status: 409
+    retryable: false
+    user_action: CHECK_REPAIR_REVIEW_STATE
+    description: Repair review is allowed only once by the reporter after RESOLVED; existing reviews cannot be rewritten.
