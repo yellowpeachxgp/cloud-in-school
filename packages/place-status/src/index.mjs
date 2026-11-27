@@ -446,28 +446,12 @@ export class PlaceStatusService {
     throw new ContractError("SCHOOL_SCOPE_MISMATCH", "Requested place status resource belongs to a different school_id isolation scope");
   }
 
-  _moderationRoles(auth) {
-    return new Set([...(auth.roles || []), ...(this.store.getUserRoles?.(auth.cloudUserId) || [])]);
-  }
-
-  _canWritePlaceModeration(auth) {
-    const user = this.store.users.get(auth.cloudUserId);
-    const roles = this._moderationRoles(auth);
-    return Boolean(
-      user?.role === "admin" ||
-      ["ADMIN", "OPERATOR", "PLATFORM_OWNER", "OPERATIONS_ADMIN", "SCHOOL_OPERATOR"].some((role) => roles.has(role))
-    );
-  }
-
-  _canReadPlaceModeration(auth) {
-    return this._canWritePlaceModeration(auth) || this._moderationRoles(auth).has("SECURITY_AUDITOR");
-  }
-
-  _requireModerator(auth, schoolId, { write = false } = {}) {
-    this._requireSchoolBinding(auth, schoolId);
-    const allowed = write ? this._canWritePlaceModeration(auth) : this._canReadPlaceModeration(auth);
+  _requireModerator(auth, schoolId) {
+    const cleanSchoolId = requireString(schoolId, "school_id", { max: 128 });
+    const allowed = typeof this.store.hasOperationsSchoolScope === "function" &&
+      this.store.hasOperationsSchoolScope(auth.cloudUserId, cleanSchoolId, "place.status.moderate");
     if (!allowed) {
-      throw new ContractError("PLACE_STATUS_PERMISSION_DENIED", "School-scoped place status moderation permission is required");
+      throw new ContractError("PLACE_STATUS_PERMISSION_DENIED", "Explicit operations_school_scope authorization for place.status.moderate is required in this school");
     }
   }
 
@@ -1207,7 +1191,7 @@ export class PlaceStatusService {
     if (idem.replay) return idem.replay;
     const flag = this.store.placeReportFlags.get(flagId);
     if (!flag) throw new ContractError("PLACE_REPORT_FLAG_NOT_FOUND", "Place report flag does not exist or is not visible in this reviewer school scope");
-    this._requireModerator(auth, flag.school_id, { write: true });
+    this._requireModerator(auth, flag.school_id);
     if (flag.status !== "OPEN") throw new ContractError("PLACE_REPORT_REVIEW_INVALID", "Place report flag is already terminal");
     requireNoUnknownFields(body, ["action", "review_note"], "ReviewPlaceReportFlagRequest");
     const action = requireString(body.action, "action");
@@ -1297,6 +1281,7 @@ export class PlaceStatusService {
     let reviewsDetached = 0;
     let subscriptionsDeleted = 0;
     let reviewNotesRedacted = 0;
+    let operationsGrantsDeleted = 0;
     const erasedFlagIds = new Set();
     for (const report of this.store.placeReports.values()) {
       if (report.cloud_user_id !== cloudUserId) continue;
@@ -1327,6 +1312,17 @@ export class PlaceStatusService {
     for (const subscription of Array.from(this.store.placeStatusSubscriptions.values())) {
       if (subscription.cloud_user_id === cloudUserId && this.store.placeStatusSubscriptions.delete(subscription.id)) {
         subscriptionsDeleted += 1;
+      }
+    }
+    if (this.store.operationsSchoolGrants instanceof Map) {
+      for (const grant of Array.from(this.store.operationsSchoolGrants.values())) {
+        if (
+          grant.cloud_user_id === cloudUserId &&
+          grant.permission === "place.status.moderate" &&
+          this.store.operationsSchoolGrants.delete(grant.id)
+        ) {
+          operationsGrantsDeleted += 1;
+        }
       }
     }
     let receiptsDeleted = 0;
@@ -1365,6 +1361,7 @@ export class PlaceStatusService {
       reviews_detached: reviewsDetached,
       review_notes_redacted: reviewNotesRedacted,
       subscriptions_deleted: subscriptionsDeleted,
+      operations_grants_deleted: operationsGrantsDeleted,
       idempotency_receipts_deleted: receiptsDeleted,
       idempotency_receipts_pseudonymized: receiptsPseudonymized,
       idempotency_receipt_flag_details_redacted: receiptFlagDetailsRedacted

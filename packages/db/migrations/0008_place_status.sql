@@ -181,4 +181,26 @@ CREATE INDEX IF NOT EXISTS place_status_subscriptions_user_idx
 CREATE INDEX IF NOT EXISTS place_status_subscriptions_event_match_idx
   ON place_status_subscriptions (school_id, status, target_type, place_ref);
 
+-- Explicit per-school operations authorization. A global operations role or an
+-- ordinary campus binding is never sufficient for place.status.moderate.
+CREATE TABLE IF NOT EXISTS operations_school_grants (
+  grant_id UUID PRIMARY KEY,
+  cloud_user_id UUID NOT NULL REFERENCES cloud_users(id) ON DELETE CASCADE,
+  school_id TEXT NOT NULL CHECK (char_length(school_id) BETWEEN 1 AND 128),
+  permission TEXT NOT NULL CHECK (permission ~ '^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$'),
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'REVOKED')),
+  granted_by_ref TEXT NOT NULL CHECK (char_length(granted_by_ref) BETWEEN 1 AND 128),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at TIMESTAMPTZ,
+  CONSTRAINT operations_school_grants_status_shape_check
+    CHECK ((status = 'REVOKED') = (revoked_at IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS operations_school_grants_active_unique
+  ON operations_school_grants (cloud_user_id, school_id, permission)
+  WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS operations_school_grants_scope_idx
+  ON operations_school_grants (cloud_user_id, school_id, permission, status);
+
 COMMIT;

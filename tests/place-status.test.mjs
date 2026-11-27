@@ -29,7 +29,7 @@ function createTestApp(options = {}) {
   return createCampusCloudApp({ requireAdminAccess: false, ...options });
 }
 
-function setupUser(app, label, { schoolId = "haut", bind = true, admin = false, nowMs = BASE_NOW } = {}) {
+function setupUser(app, label, { schoolId = "haut", bind = true, admin = false, operationsSchools = [], nowMs = BASE_NOW } = {}) {
   const user = app.store.findOrCreateCloudUser({
     issuer: app.identity.expectedIssuer,
     subject: "sub_" + label + "_" + crypto.randomUUID().slice(0, 8),
@@ -53,6 +53,9 @@ function setupUser(app, label, { schoolId = "haut", bind = true, admin = false, 
     };
     app.store.schoolBindings.set(binding.id, binding);
     app.store.indexUserScoped?.("schoolBindings", binding.id, user.id);
+  }
+  for (const operationsSchoolId of operationsSchools) {
+    app.store.grantOperationsSchoolScope(user.id, operationsSchoolId, "place.status.moderate", { grantedByRef: "place-status-test" });
   }
   return { user, session, auth: { authorization: "Bearer " + session.access_token } };
 }
@@ -447,7 +450,7 @@ test("W4-04 flags and moderation: queue is school-scoped, exclusion recomputes w
   const app = createTestApp();
   const author = setupUser(app, "author_moderation");
   const flagger = setupUser(app, "flagger_moderation");
-  const moderator = setupUser(app, "moderator_moderation", { admin: true });
+  const moderator = setupUser(app, "moderator_moderation", { bind: false, operationsSchools: ["haut"] });
   const regular = setupUser(app, "regular_moderation");
 
   const report = await createReport(app, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
@@ -640,7 +643,7 @@ test("W4-04 privacy: export/delete covers reports, flags, subscriptions, notes, 
   const app = createTestApp();
   const author = setupUser(app, "author_erasure_place");
   const flagger = setupUser(app, "flagger_erasure_place");
-  const moderator = setupUser(app, "moderator_erasure_place", { admin: true });
+  const moderator = setupUser(app, "moderator_erasure_place", { bind: false, operationsSchools: ["haut"] });
 
   const report = await createReport(app, author, { note: "我坐在后排靠窗", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
   assert.equal(report.status, 201, JSON.stringify(report.body));
@@ -872,7 +875,7 @@ test("W4-04 subscription fan-out: exact-place type filters and revoked bindings 
   assert.equal(notificationsFor(filteredSubscriber).length, 0);
 });
 
-test("W4-04 moderation authorization: read-only security auditor may inspect but cannot exclude reports", async () => {
+test("W4-04 moderation authorization: SECURITY_AUDITOR has no undeclared queue read or review write", async () => {
   const app = createTestApp();
   const author = setupUser(app, "author_auditor_scope");
   const flagger = setupUser(app, "flagger_auditor_scope");
@@ -894,8 +897,8 @@ test("W4-04 moderation authorization: read-only security auditor may inspect but
     url: "/api/v1/admin/place-report-flags?school_id=haut&status=OPEN",
     headers: auditor.auth
   });
-  assert.equal(queue.status, 200, JSON.stringify(queue.body));
-  assert.equal(queue.body.data.length, 1);
+  assert.equal(queue.status, 403, JSON.stringify(queue.body));
+  assert.equal(queue.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
 
   const review = await app.inject({
     method: "POST",
@@ -905,14 +908,92 @@ test("W4-04 moderation authorization: read-only security auditor may inspect but
   });
   assert.equal(review.status, 403);
   assert.equal(review.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+  assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).status, "OPEN");
   assert.equal(app.store.placeReports.get(report.body.data.report_id).aggregation_eligible, true);
+});
+
+test("W4-04 moderation authorization: global role plus ordinary binding cannot cross the explicit operations school scope", async () => {
+  const app = createTestApp();
+  const otherPlace = "other-university/main/room/a-101";
+  app.store.campusGraphPlaces.set(otherPlace, {
+    place_ref: otherPlace,
+    school_id: "other-university",
+    campus_id: "main",
+    place_type: "room",
+    slug: "a-101",
+    latitude: 0,
+    longitude: 0,
+    verification_level: "UNVERIFIED",
+    source_ref: "place-status-test-cross-school"
+  });
+  const author = setupUser(app, "author_cross_scope", { schoolId: "other-university" });
+  const flagger = setupUser(app, "flagger_cross_scope", { schoolId: "other-university" });
+  const operator = setupUser(app, "operator_cross_scope", { schoolId: "other-university" });
+  app.store.setUserRoles(operator.user.id, ["SCHOOL_OPERATOR"]);
+  app.store.grantOperationsSchoolScope(operator.user.id, "haut", "place.status.moderate", { grantedByRef: "place-status-test" });
+
+  const report = await app.inject({
+    method: "POST",
+    url: "/api/v1/places/" + encodeURIComponent(otherPlace) + "/reports",
+    headers: writeHeaders(author),
+    body: {
+      metric: "OCCUPANCY",
+      state: "CROWDED",
+      observed_at: new Date(BASE_NOW - 60_000).toISOString(),
+      report_kind: "OBSERVATION"
+    }
+  });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  const flag = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: { reason: "INCORRECT", detail: "跨校审核反例" }
+  });
+  assert.equal(flag.status, 201, JSON.stringify(flag.body));
+
+  const foreignQueue = await app.inject({
+    method: "GET",
+    url: "/api/v1/admin/place-report-flags?school_id=other-university&status=OPEN",
+    headers: operator.auth
+  });
+  assert.equal(foreignQueue.status, 403, JSON.stringify(foreignQueue.body));
+  assert.equal(foreignQueue.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+
+  const foreignReview = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(operator),
+    body: { action: "EXCLUDE_INCORRECT", review_note: "仅有全局角色和 ordinary binding 不得跨校审核" }
+  });
+  assert.equal(foreignReview.status, 403, JSON.stringify(foreignReview.body));
+  assert.equal(foreignReview.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+  assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).status, "OPEN");
+  assert.equal(app.store.placeReports.get(report.body.data.report_id).aggregation_eligible, true);
+
+  app.store.grantOperationsSchoolScope(operator.user.id, "other-university", "place.status.moderate", { grantedByRef: "place-status-test" });
+  const scopedQueue = await app.inject({
+    method: "GET",
+    url: "/api/v1/admin/place-report-flags?school_id=other-university&status=OPEN",
+    headers: operator.auth
+  });
+  assert.equal(scopedQueue.status, 200, JSON.stringify(scopedQueue.body));
+  assert.equal(scopedQueue.body.data.length, 1);
+  const scopedReview = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(operator),
+    body: { action: "KEEP_VISIBLE", review_note: "该校显式运营授权后允许复核" }
+  });
+  assert.equal(scopedReview.status, 200, JSON.stringify(scopedReview.body));
+  assert.equal(scopedReview.body.data.flag.status, "RESOLVED_KEEP_VISIBLE");
 });
 
 test("W4-04 moderation expiry attribution: overdue TTL is swept before exclusion so review does not absorb expiry", async () => {
   const app = createTestApp();
   const author = setupUser(app, "author_moderation_expiry");
   const flagger = setupUser(app, "flagger_moderation_expiry");
-  const moderator = setupUser(app, "moderator_moderation_expiry", { admin: true });
+  const moderator = setupUser(app, "moderator_moderation_expiry", { bind: false, operationsSchools: ["haut"] });
 
   const report = await createReport(app, author, {
     state: "CROWDED",
@@ -953,7 +1034,7 @@ test("W4-04 erasure: flag detail is removed from foreign review receipt replay a
   const app = createTestApp();
   const author = setupUser(app, "author_receipt_erasure");
   const flagger = setupUser(app, "flagger_receipt_erasure");
-  const moderator = setupUser(app, "moderator_receipt_erasure", { admin: true });
+  const moderator = setupUser(app, "moderator_receipt_erasure", { bind: false, operationsSchools: ["haut"] });
   const detail = "需要复核的旗标细节-7421";
 
   const report = await createReport(app, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
@@ -1000,5 +1081,7 @@ test("W4-04 erasure: flag detail is removed from foreign review receipt replay a
   assert.equal(moderatorDeleted.status, 202, JSON.stringify(moderatorDeleted.body));
   assert.equal(moderatorDeleted.body.data.place_status_purged.reviews_detached, 1);
   assert.equal(moderatorDeleted.body.data.place_status_purged.review_notes_redacted, 1);
+  assert.equal(moderatorDeleted.body.data.place_status_purged.operations_grants_deleted, 1);
+  assert.equal(app.store.hasOperationsSchoolScope(moderator.user.id, "haut", "place.status.moderate"), false);
   assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).review_note, null, "reviewer deletion must erase reviewer-authored free text");
 });

@@ -115,6 +115,12 @@ INSERT INTO place_status_subscriptions (
   'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '22222222-2222-4222-8222-222222222222',
   'haut', 'PLACE', 'haut/lianhuajie/room/5-111', '["OCCUPANCY"]'::jsonb, 'ACTIVE'
 );
+INSERT INTO operations_school_grants (
+  grant_id, cloud_user_id, school_id, permission, status, granted_by_ref
+) VALUES (
+  'dddddddd-dddd-4ddd-8ddd-dddddddddddd', '22222222-2222-4222-8222-222222222222',
+  'haut', 'place.status.moderate', 'ACTIVE', 'migration-test'
+);
 EOSQL
 
 # The aggregate representation can never claim an official realtime feed.
@@ -127,10 +133,15 @@ if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO place_status_subs
   echo "FAIL: AREA subscription without bbox accepted"; exit 1;
 fi
 
+# Per-school operations grants are explicit and at most one ACTIVE row exists per scope.
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO operations_school_grants (grant_id, cloud_user_id, school_id, permission, status, granted_by_ref) VALUES ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', '22222222-2222-4222-8222-222222222222', 'haut', 'place.status.moderate', 'ACTIVE', 'duplicate');" >/dev/null 2>&1; then
+  echo "FAIL: duplicate ACTIVE operations grant accepted"; exit 1;
+fi
+
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0008_place_status.down.sql >/dev/null
 # Repeating DOWN is safe.
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0008_place_status.down.sql >/dev/null
-remaining=$(psql -h /tmp -U postgres -Atc "SELECT count(*) FROM information_schema.tables WHERE table_name IN ('campus_graph_places','place_reports','place_status_view','place_report_flags','place_status_subscriptions');")
+remaining=$(psql -h /tmp -U postgres -Atc "SELECT count(*) FROM information_schema.tables WHERE table_name IN ('campus_graph_places','place_reports','place_status_view','place_report_flags','place_status_subscriptions','operations_school_grants');")
 [ "$remaining" = "0" ] || { echo "FAIL: down migration left tables behind: $remaining"; exit 1; }
 # UP after DOWN recreates the schema and bootstrap graph.
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0008_place_status.sql >/dev/null
