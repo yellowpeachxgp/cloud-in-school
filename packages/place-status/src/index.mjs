@@ -1187,11 +1187,11 @@ export class PlaceStatusService {
 
   reviewFlag(auth, params, body, headers, nowMs = Date.now()) {
     const flagId = requireUuid(params.flagId, "flagId");
-    const idem = this._idempotency("reviewPlaceReportFlag", auth, headers, body, { flagId });
-    if (idem.replay) return idem.replay;
     const flag = this.store.placeReportFlags.get(flagId);
     if (!flag) throw new ContractError("PLACE_REPORT_FLAG_NOT_FOUND", "Place report flag does not exist or is not visible in this reviewer school scope");
     this._requireModerator(auth, flag.school_id);
+    const idem = this._idempotency("reviewPlaceReportFlag", auth, headers, body, { flagId });
+    if (idem.replay) return idem.replay;
     if (flag.status !== "OPEN") throw new ContractError("PLACE_REPORT_REVIEW_INVALID", "Place report flag is already terminal");
     requireNoUnknownFields(body, ["action", "review_note"], "ReviewPlaceReportFlagRequest");
     const action = requireString(body.action, "action");

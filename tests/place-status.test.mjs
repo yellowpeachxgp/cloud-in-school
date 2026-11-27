@@ -979,14 +979,34 @@ test("W4-04 moderation authorization: global role plus ordinary binding cannot c
   });
   assert.equal(scopedQueue.status, 200, JSON.stringify(scopedQueue.body));
   assert.equal(scopedQueue.body.data.length, 1);
+  const reviewKey = nextKey("cross-scope-review");
+  const reviewBody = { action: "KEEP_VISIBLE", review_note: "该校显式运营授权后允许复核" };
   const scopedReview = await app.inject({
     method: "POST",
     url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
-    headers: writeHeaders(operator),
-    body: { action: "KEEP_VISIBLE", review_note: "该校显式运营授权后允许复核" }
+    headers: writeHeaders(operator, reviewKey),
+    body: reviewBody
   });
   assert.equal(scopedReview.status, 200, JSON.stringify(scopedReview.body));
   assert.equal(scopedReview.body.data.flag.status, "RESOLVED_KEEP_VISIBLE");
+
+  const authorizedReplay = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(operator, reviewKey),
+    body: reviewBody
+  });
+  assert.equal(authorizedReplay.status, 200, JSON.stringify(authorizedReplay.body));
+  assert.equal(authorizedReplay.body.code, "REQUEST_DUPLICATE");
+  assert.equal(app.store.revokeOperationsSchoolScope(operator.user.id, "other-university", "place.status.moderate"), 1);
+  const revokedReplay = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(operator, reviewKey),
+    body: reviewBody
+  });
+  assert.equal(revokedReplay.status, 403, JSON.stringify(revokedReplay.body));
+  assert.equal(revokedReplay.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
 });
 
 test("W4-04 moderation expiry attribution: overdue TTL is swept before exclusion so review does not absorb expiry", async () => {
