@@ -83,10 +83,10 @@ test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI oper
   const inventory = partitionByStatus(loadInventoryOperations()).active;
   const openApiOperations = partitionByStatus(parseOpenApiOperations(loadOpenApiText())).active;
 
-  assert.equal(inventory.length, 124, "endpoint-inventory.yaml must declare exactly 124 active core operations");
-  assert.equal(openApiOperations.length, 124, "OpenAPI must declare exactly 124 active core operations");
-  assert.equal(coreRegistered.length, 124, "CampusCloudApp must expose exactly 124 active core operations");
-  assert.equal(allRegistered.length, 136, "CampusCloudApp must expose 124 core + 12 explicit extension operations");
+  assert.equal(inventory.length, 151, "endpoint-inventory.yaml must declare exactly 151 active core operations");
+  assert.equal(openApiOperations.length, 151, "OpenAPI must declare exactly 151 active core operations");
+  assert.equal(coreRegistered.length, 151, "CampusCloudApp must expose exactly 151 active core operations");
+  assert.equal(allRegistered.length, 163, "CampusCloudApp must expose 151 core + 12 explicit extension operations");
 
   const coreByKey = byRouteKey(coreRegistered);
   const inventoryByKey = byRouteKey(inventory);

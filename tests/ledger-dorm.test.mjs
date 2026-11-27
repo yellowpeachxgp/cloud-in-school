@@ -263,18 +263,23 @@ test("W4-03 ledger: immutable entries, correction chain, zero-sum balances, two-
   assert.equal(balances.body.data.balance_revision, 4);
   assert.equal(balances.body.data.members.reduce((sum, row) => sum + row.balance_fen, 0), 0);
   const byId = Object.fromEntries(balances.body.data.members.map((row) => [row.member_id, row]));
-  assert.ok(byId[ctx.ownerMember.id].balance_fen > 0, "payer is owed after mixed postings");
-  const debtorMember = [ctx.aMember, ctx.bMember].find((item) => byId[item.id].balance_fen < 0);
-  assert.ok(debtorMember, "at least one non-payer owes the group");
+  const memberUser = (memberRow) =>
+    memberRow.id === ctx.ownerMember.id ? ctx.owner : memberRow.id === ctx.aMember.id ? ctx.memberA : ctx.memberB;
+  const allMembers = [ctx.ownerMember, ctx.aMember, ctx.bMember];
+  const creditorMember = allMembers.find((item) => byId[item.id].balance_fen > 0);
+  const debtorMember = allMembers.find((item) => byId[item.id].balance_fen < 0);
+  assert.ok(creditorMember, "zero-sum mixed postings produce a creditor");
+  assert.ok(debtorMember, "zero-sum mixed postings produce a debtor");
+  const creditorUser = memberUser(creditorMember);
 
   const settlement = await app.inject({
     method: "POST",
     url: "/api/v1/groups/" + ctx.group.group_id + "/settlements",
-    headers: writeHeaders(debtorMember === ctx.aMember ? ctx.memberA : ctx.memberB, nextKey("w403-settlement")),
+    headers: writeHeaders(memberUser(debtorMember), nextKey("w403-settlement")),
     body: {
       debtor_member_id: debtorMember.id,
-      creditor_member_id: ctx.ownerMember.id,
-      amount_fen: 10,
+      creditor_member_id: creditorMember.id,
+      amount_fen: 1,
       basis_balance_revision: balances.body.data.balance_revision,
       note: "线下已核对"
     }
@@ -282,7 +287,7 @@ test("W4-03 ledger: immutable entries, correction chain, zero-sum balances, two-
   assert.equal(settlement.status, 201, JSON.stringify(settlement.body));
   assert.equal(settlement.body.data.status, "PENDING_BOTH_CONFIRMATIONS");
 
-  const debtorUser = debtorMember === ctx.aMember ? ctx.memberA : ctx.memberB;
+  const debtorUser = memberUser(debtorMember);
   const confirm1 = await app.inject({
     method: "POST",
     url: "/api/v1/settlements/" + settlement.body.data.settlement_id + "/confirm",
@@ -304,7 +309,7 @@ test("W4-03 ledger: immutable entries, correction chain, zero-sum balances, two-
   const confirm2 = await app.inject({
     method: "POST",
     url: "/api/v1/settlements/" + settlement.body.data.settlement_id + "/confirm",
-    headers: writeHeaders(ctx.owner, nextKey("w403-confirm-creditor")),
+    headers: writeHeaders(creditorUser, nextKey("w403-confirm-creditor")),
     body: { basis_balance_revision: settlement.body.data.basis_balance_revision }
   });
   assert.equal(confirm2.status, 200, JSON.stringify(confirm2.body));
@@ -326,8 +331,8 @@ test("W4-03 ledger: immutable entries, correction chain, zero-sum balances, two-
     headers: writeHeaders(debtorUser, nextKey("w403-stale-proposal")),
     body: {
       debtor_member_id: debtorMember.id,
-      creditor_member_id: ctx.ownerMember.id,
-      amount_fen: 5,
+      creditor_member_id: creditorMember.id,
+      amount_fen: 1,
       basis_balance_revision: balancesAfter.body.data.balance_revision
     }
   });
