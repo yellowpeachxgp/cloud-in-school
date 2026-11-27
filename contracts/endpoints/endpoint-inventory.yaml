@@ -725,8 +725,29 @@ endpoints:
     status: planned
     contract_card: CT-03
   - method: POST
+    path: /api/v1/duty-tasks/{taskId}/skip
+    operationId: skipDutyTask
+    auth: bearer
+    owner: duty
+    status: planned
+    contract_card: CT-03
+  - method: POST
     path: /api/v1/rotas/{rotaId}/swaps
     operationId: requestDutySwap
+    auth: bearer
+    owner: duty
+    status: planned
+    contract_card: CT-03
+  - method: GET
+    path: /api/v1/rotas/{rotaId}/swaps
+    operationId: listDutySwaps
+    auth: bearer
+    owner: duty
+    status: planned
+    contract_card: CT-03
+  - method: GET
+    path: /api/v1/duty-swaps/{swapId}
+    operationId: getDutySwap
     auth: bearer
     owner: duty
     status: planned

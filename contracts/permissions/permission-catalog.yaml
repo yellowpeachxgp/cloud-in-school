@@ -106,7 +106,7 @@ permissions:
     default_granted: true
   - id: group.duty.read
     scope: user_school_scope
-    description: Read duty rotation schedules, generated tasks, assignment state, and completion confirmation state inside an active group.
+    description: Read duty rotation schedules, generated tasks, assignment state, completion confirmation state, and pending/terminal swap audit records inside an active group.
     default_granted: true
   - id: group.duty.write
     scope: user_school_scope
@@ -118,7 +118,7 @@ permissions:
     default_granted: true
   - id: group.duty.manage
     scope: user_school_scope
-    description: Create and update duty rotation schedules; requires GROUP_OWNER or GROUP_ADMIN authorization inside the group.
+    description: Create and update duty rotation schedules and mark still-pending tasks SKIPPED as the owner/admin leave disposition; requires GROUP_OWNER or GROUP_ADMIN authorization inside the group.
     default_granted: false
   - id: group.repair.read
     scope: user_school_scope

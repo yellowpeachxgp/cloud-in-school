@@ -908,7 +908,10 @@ const EXPECTED_CT03_PLANNED_ROUTES = Object.freeze([
   { method: "GET", path: "/api/v1/groups/{groupId}/duty-tasks", operationId: "listDutyTasks", auth: "bearer" },
   { method: "POST", path: "/api/v1/duty-tasks/{taskId}/complete", operationId: "completeDutyTask", auth: "bearer" },
   { method: "POST", path: "/api/v1/duty-tasks/{taskId}/confirm", operationId: "confirmDutyTaskCompletion", auth: "bearer" },
+  { method: "POST", path: "/api/v1/duty-tasks/{taskId}/skip", operationId: "skipDutyTask", auth: "bearer" },
   { method: "POST", path: "/api/v1/rotas/{rotaId}/swaps", operationId: "requestDutySwap", auth: "bearer" },
+  { method: "GET", path: "/api/v1/rotas/{rotaId}/swaps", operationId: "listDutySwaps", auth: "bearer" },
+  { method: "GET", path: "/api/v1/duty-swaps/{swapId}", operationId: "getDutySwap", auth: "bearer" },
   { method: "POST", path: "/api/v1/duty-swaps/{swapId}/resolve", operationId: "resolveDutySwap", auth: "bearer" },
   { method: "POST", path: "/api/v1/groups/{groupId}/repairs", operationId: "createRepairTicket", auth: "bearer" },
   { method: "GET", path: "/api/v1/groups/{groupId}/repairs", operationId: "listRepairTickets", auth: "bearer" },
@@ -932,8 +935,8 @@ test("Contract Parity: CT-01/CT-02/CT-03 planned group contracts are explicit, c
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 42 CT-01+CT-02+CT-03 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 42 CT-01+CT-02+CT-03 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the expected CT-01+CT-02+CT-03 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");

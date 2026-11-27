@@ -410,7 +410,17 @@ Idempotency-Key: duty_task_confirm_demo_0001
   "confirmation_note": "现场检查完成"
 }
 
-### 43. CT-03 Request Duty Cover Or Swap (planned)
+### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (planned)
+POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/skip
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: duty_task_skip_demo_0001
+
+{
+  "skip_reason": "请假且无人接受代值，宿舍管理员确认本次跳过"
+}
+
+### 44. CT-03 Request Duty Cover Or Swap (planned)
 POST http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -423,7 +433,17 @@ Idempotency-Key: duty_swap_request_demo_0001
   "reason": "当晚有实验课"
 }
 
-### 44. CT-03 Resolve Duty Swap Request (planned)
+### 45. CT-03 List Duty Swap Audit Records (planned)
+GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps?status=ACCEPTED&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 46. CT-03 Get Duty Swap Audit Record (planned)
+GET http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 47. CT-03 Resolve Duty Swap Request (planned)
 POST http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff/resolve
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -434,7 +454,7 @@ Idempotency-Key: duty_swap_resolve_demo_0001
   "resolution_note": "本次由我代值"
 }
 
-### 45. CT-03 Submit Dorm Repair Record (planned)
+### 48. CT-03 Submit Dorm Repair Record (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -447,17 +467,17 @@ Idempotency-Key: repair_create_demo_0001
   "description": "夜间滴水，地面有积水。此记录仅用于宿舍协作，不代表已向校方正式报修。"
 }
 
-### 46. CT-03 List Repair Records (planned)
+### 49. CT-03 List Repair Records (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs?status=OPEN&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 47. CT-03 Get Repair Detail (planned)
+### 50. CT-03 Get Repair Detail (planned)
 GET http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 48. CT-03 Update Editable Repair Metadata (planned)
+### 51. CT-03 Update Editable Repair Metadata (planned)
 PATCH http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -467,7 +487,7 @@ Idempotency-Key: repair_patch_demo_0001
   "description": "夜间滴水加快，已用盆接水。此记录仅用于宿舍协作，不代表校方受理状态。"
 }
 
-### 49. CT-03 Transition Repair Status (planned)
+### 52. CT-03 Transition Repair Status (planned)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/status
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -479,7 +499,7 @@ Idempotency-Key: repair_status_demo_0001
   "note": "先检查是否能临时紧固"
 }
 
-### 50. CT-03 Submit One-Time Repair Review (planned)
+### 53. CT-03 Submit One-Time Repair Review (planned)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/review
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json

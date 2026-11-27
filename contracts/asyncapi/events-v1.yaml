@@ -108,6 +108,12 @@ channels:
       operationId: publishDutyTaskConfirmedEvent
       message:
         $ref: '#/components/messages/DutyTaskEvent'
+  duty.task.skipped:
+    description: A group owner/admin marked a still-pending dorm duty task SKIPPED as the terminal leave disposition; it never counts as completion.
+    publish:
+      operationId: publishDutyTaskSkippedEvent
+      message:
+        $ref: '#/components/messages/DutyTaskEvent'
   duty.swap.requested:
     description: Duty swap or cover requested for one generated task; no reassignment occurs before acceptance.
     publish:
@@ -498,10 +504,10 @@ components:
             format: uuid
           event_key:
             type: string
-            pattern: '^dis:group:[0-9a-fA-F-]{36}:duty-task:[0-9a-fA-F-]{36}:(completed|confirmed):v1$'
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:duty-task:[0-9a-fA-F-]{36}:(completed|confirmed|skipped):v1$'
           event_type:
             type: string
-            enum: [completed, confirmed]
+            enum: [completed, confirmed, skipped]
           occurred_at:
             type: string
             format: date-time
@@ -530,7 +536,7 @@ components:
             format: date
           status:
             type: string
-            enum: [COMPLETED, CONFIRMED]
+            enum: [COMPLETED, CONFIRMED, SKIPPED]
     DutySwapEvent:
       name: DutySwapEvent
       payload:

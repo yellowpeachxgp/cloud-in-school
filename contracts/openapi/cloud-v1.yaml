@@ -1628,7 +1628,7 @@ paths:
         - bearerAuth: []
       summary: Append a shared expense or refund posting with deterministic integer-fen splitting
       description: |
-        Creates one immutable ledger posting. amount_fen is a signed integer minor unit (分); positive values represent a cost paid for the group and negative values represent a refund or reversal-direction posting. No payment, transfer, wallet debit, or collection is executed. The server calculates shares with the same pure-JVM core:ledger algorithm: exact rational floor first, then distribute remaining one-fen units by descending fractional remainder and ascending participant_member_id on ties. Output shares are sorted by participant_member_id, independent of input order.
+        Creates one immutable ledger posting. amount_fen is a signed integer minor unit (分); positive values represent a cost paid for the group and negative values represent a refund or reversal-direction posting. No payment, transfer, wallet debit, or collection is executed. The server calculates shares with the same pure-JVM core:ledger algorithm: for positive amounts, exact rational floor first, then distribute remaining one-fen units by descending fractional remainder and ascending participant_member_id on ties. For negative amounts, the server first applies the exact same largest-remainder rule to abs(amount_fen) and then negates every allocated share; floor is never applied directly to negative rationals. Output shares are sorted by participant_member_id, independent of input order.
       parameters:
         - $ref: '#/components/parameters/GroupIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -1716,7 +1716,7 @@ paths:
         - bearerAuth: []
       summary: Append a signed correction posting linked to an earlier ledger entry
       description: |
-        Never edits or deletes the referenced posting. amount_fen is the signed delta to apply and may be negative; a full reversal uses the inverse amount and normally the same payer and split rule as the original. Corrections can target either an original posting or an earlier correction, forming an auditable chain. A correction increments the group balance revision; any still-unconfirmed settlement based on an older revision becomes stale and must be cancelled and proposed again for fresh two-party confirmation.
+        Never edits or deletes the referenced posting. amount_fen is the signed delta to apply and may be negative; a full reversal uses the inverse amount, normally the same payer, and a split rule that reproduces the original effective participants and weights. Because EQUAL is evaluated against active membership at correction time, reversing an original EQUAL posting after membership changed requires an explicit SELECTED rule over the original share participants rather than reusing EQUAL. Negative deltas allocate abs(amount_fen) by the same largest-remainder rule and then negate every allocated share. Corrections can target either an original posting or an earlier correction, forming an auditable chain. A correction increments the group balance revision; any still-unconfirmed settlement based on an older revision becomes stale and must be cancelled and proposed again for fresh two-party confirmation.
       parameters:
         - $ref: '#/components/parameters/GroupIdParam'
         - $ref: '#/components/parameters/LedgerEntryIdParam'
@@ -2109,7 +2109,7 @@ paths:
         - bearerAuth: []
       summary: Update future rotation scheduling metadata without rewriting existing duty tasks
       description: |
-        Changes to rotation order, active dates, frequency, or status apply only to tasks generated after the update. Existing duty tasks remain auditable and must be changed through swap resolution or completion flows.
+        Changes to rotation order, active dates, frequency, or status apply only to tasks generated after the update. Existing duty tasks remain auditable and must be changed through swap resolution, owner/admin skip disposition, or completion flows.
       parameters:
         - $ref: '#/components/parameters/RotaIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -2207,7 +2207,7 @@ paths:
         - bearerAuth: []
       summary: Mark the caller-assigned duty task as completed pending peer confirmation
       description: |
-        Only the currently assigned member may complete the task. Repeating completion by the same member is idempotent. Completion is not final until a different active group member confirms it.
+        Only the currently assigned member may complete the task, and the task must still be PENDING unless this is an idempotent replay of that member's original completion. SKIPPED tasks can never be completed. Completion is not final until a different active group member confirms it.
       parameters:
         - $ref: '#/components/parameters/DutyTaskIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -2251,7 +2251,7 @@ paths:
         - bearerAuth: []
       summary: Confirm another member's completed duty task
       description: |
-        The confirmer must be an active group member different from the assignee. The task must currently be COMPLETED. Confirmation is terminal for the task and emits duty.task.confirmed.
+        The confirmer must be an active group member different from the assignee. The task must currently be COMPLETED. Confirmation is terminal for the task and emits duty.task.confirmed. CONFIRMED and SKIPPED tasks accept no later completion, confirmation, skip, or reassignment transition.
       parameters:
         - $ref: '#/components/parameters/DutyTaskIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -2264,6 +2264,50 @@ paths:
       responses:
         '200':
           description: Duty task completion confirmed or replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutyTaskEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/duty-tasks/{taskId}/skip:
+    post:
+      operationId: skipDutyTask
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.manage]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [duty.task.skipped]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Mark a pending duty task as skipped by owner/admin leave disposition
+      description: |
+        v1 does not model a separate multi-step leave approval object. A member who cannot perform a task should first request a swap or cover; if no cover is accepted, a GROUP_OWNER/GROUP_ADMIN may mark the still-PENDING task SKIPPED with a required audit reason. SKIPPED is terminal: it never counts as completed or confirmed, cannot later be completed, confirmed, skipped again, or reassigned, and does not silently change rotation order or future generated tasks. The skipped record remains visible in duty task list history.
+      parameters:
+        - $ref: '#/components/parameters/DutyTaskIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkipDutyTaskRequest'
+      responses:
+        '200':
+          description: Duty task marked SKIPPED or durable idempotent replay returned
           content:
             application/json:
               schema:
@@ -2295,7 +2339,7 @@ paths:
         - bearerAuth: []
       summary: Request a one-task duty swap or cover by another active group member
       description: |
-        The requester must be the current assignee or a GROUP_OWNER/GROUP_ADMIN. target_member_id is required so responsibility is explicit; open-ended broadcasting is not part of v1. The task is not reassigned until the target member or an owner/admin accepts the request.
+        The requester must be the current assignee or a GROUP_OWNER/GROUP_ADMIN. target_member_id is required so responsibility is explicit; open-ended broadcasting is not part of v1. The referenced task must still be PENDING when the request is created. The task is not reassigned until the target member or an owner/admin accepts the request.
       parameters:
         - $ref: '#/components/parameters/RotaIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -2330,6 +2374,80 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: listDutySwaps
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: List pending and terminal duty swap or cover audit records for one rota
+      description: |
+        Returns swap and cover records in reverse chronological creation order. PENDING, ACCEPTED, REJECTED, and CANCELLED records are all visible to authorized group members; terminal records are never rewritten or deleted.
+      parameters:
+        - $ref: '#/components/parameters/RotaIdParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DutySwapStatus'
+        - name: duty_task_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Duty swap audit history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutySwapListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/duty-swaps/{swapId}:
+    get:
+      operationId: getDutySwap
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-permissions: [group.duty.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_SWAP_NOT_FOUND, DUTY_PERMISSION_DENIED]
+      tags: [duty]
+      security:
+        - bearerAuth: []
+      summary: Get one pending or terminal duty swap audit record
+      description: |
+        Returns the current durable swap record. Terminal ACCEPTED, REJECTED, and CANCELLED records remain visible for audit and are never rewritten or deleted.
+      parameters:
+        - $ref: '#/components/parameters/DutySwapIdParam'
+      responses:
+        '200':
+          description: Duty swap audit record detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DutySwapEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/v1/duty-swaps/{swapId}/resolve:
     post:
       operationId: resolveDutySwap
@@ -2345,7 +2463,7 @@ paths:
         - bearerAuth: []
       summary: Accept, reject, or cancel a pending duty swap request
       description: |
-        The target member may ACCEPT or REJECT; the requester may CANCEL; a GROUP_OWNER/GROUP_ADMIN may ACCEPT or REJECT when members dispute. ACCEPT atomically reassigns the duty task. Terminal swap records remain visible for audit and are never rewritten.
+        The target member may ACCEPT or REJECT; the requester may CANCEL; a GROUP_OWNER/GROUP_ADMIN may ACCEPT or REJECT when members dispute. ACCEPT is valid only while the referenced duty task is still PENDING and atomically reassigns that pending task. If the task has become COMPLETED, CONFIRMED, or SKIPPED, ACCEPT fails with DUTY_SWAP_INVALID_STATE and never rewrites the terminal or completion-attributed assignment. Terminal swap records remain visible through the swap list/get audit endpoints and are never rewritten.
       parameters:
         - $ref: '#/components/parameters/DutySwapIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -5314,6 +5432,7 @@ components:
           $ref: '#/components/schemas/LedgerSplitRuleType'
         participant_member_ids:
           type: array
+          minItems: 1
           maxItems: 100
           uniqueItems: true
           items:
@@ -5322,17 +5441,64 @@ components:
           description: Required for SELECTED and forbidden for other types. Every listed member must be an active group member and duplicates are rejected.
         ratio_weights:
           type: array
+          minItems: 1
           maxItems: 100
           items:
             $ref: '#/components/schemas/LedgerRatioWeight'
           description: Required for RATIOS and forbidden for other types. Unlisted active members have weight zero; at least one positive weight is required.
         stay_days:
           type: array
+          minItems: 1
           maxItems: 100
           items:
             $ref: '#/components/schemas/LedgerStayDays'
           description: Required for STAY_DAYS and forbidden for other types. Unlisted active members have zero days; at least one positive day count is required.
-      description: EQUAL splits across all active group members; SELECTED equally across explicit members; RATIOS and STAY_DAYS use integer weights. The server applies the Android core:ledger largest-remainder rule exactly.
+      allOf:
+        - if:
+            properties:
+              type:
+                const: EQUAL
+            required: [type]
+          then:
+            not:
+              anyOf:
+                - required: [participant_member_ids]
+                - required: [ratio_weights]
+                - required: [stay_days]
+        - if:
+            properties:
+              type:
+                const: SELECTED
+            required: [type]
+          then:
+            required: [participant_member_ids]
+            not:
+              anyOf:
+                - required: [ratio_weights]
+                - required: [stay_days]
+        - if:
+            properties:
+              type:
+                const: RATIOS
+            required: [type]
+          then:
+            required: [ratio_weights]
+            not:
+              anyOf:
+                - required: [participant_member_ids]
+                - required: [stay_days]
+        - if:
+            properties:
+              type:
+                const: STAY_DAYS
+            required: [type]
+          then:
+            required: [stay_days]
+            not:
+              anyOf:
+                - required: [participant_member_ids]
+                - required: [ratio_weights]
+      description: EQUAL splits across all active group members at the time each posting is evaluated; SELECTED equally across explicit members; RATIOS and STAY_DAYS use integer weights. The server applies the Android core:ledger largest-remainder rule exactly. For negative totals the magnitude is allocated by largest remainder first and all resulting shares are then negated; floor is never applied directly to negative rationals.
     LedgerSplitShare:
       type: object
       additionalProperties: false
@@ -5365,6 +5531,8 @@ components:
           maxLength: 500
         amount_fen:
           $ref: '#/components/schemas/LedgerAmountFen'
+          not:
+            const: 0
           description: Signed non-zero posting amount in fen. Positive is a group cost paid by paid_by_member_id; negative is a refund or reversal-direction posting.
         paid_by_member_id:
           type: string
@@ -5390,7 +5558,9 @@ components:
           maxLength: 120
         amount_fen:
           $ref: '#/components/schemas/LedgerAmountFen'
-          description: Signed non-zero delta in fen. Use the inverse amount, payer, and split rule of the original posting for a full reversal.
+          not:
+            const: 0
+          description: Signed non-zero delta in fen. A full reversal uses the inverse amount, normally the same payer, and effective participants and weights identical to the original posting; for an original EQUAL rule after membership changed, use SELECTED with the original share participants rather than current-membership EQUAL. Negative deltas are allocated by applying largest remainder to abs(amount_fen), then negating every allocated share.
         paid_by_member_id:
           type: string
           format: uuid
@@ -5429,6 +5599,8 @@ components:
           maxLength: 500
         amount_fen:
           $ref: '#/components/schemas/LedgerAmountFen'
+          not:
+            const: 0
         paid_by_member_id:
           type: string
           format: uuid
@@ -5441,7 +5613,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LedgerSplitShare'
-          description: Deterministic largest-remainder shares sorted ascending by participant_member_id. Their sum must exactly equal amount_fen, including negative totals.
+          description: Deterministic largest-remainder shares sorted ascending by participant_member_id. Their sum must exactly equal amount_fen, including negative totals. Negative totals are produced by allocating abs(amount_fen) first and then negating every allocated share.
         created_by_member_id:
           type: string
           format: uuid
@@ -5879,10 +6051,11 @@ components:
     DutyTaskStatus:
       type: string
       enum: [PENDING, COMPLETED, CONFIRMED, SKIPPED]
+      description: Explicit state machine is PENDING→COMPLETED→CONFIRMED or PENDING→SKIPPED. CONFIRMED and SKIPPED are terminal; SKIPPED is the owner/admin leave disposition and never counts as completion.
     DutyTask:
       type: object
       additionalProperties: false
-      required: [task_id, rota_id, group_id, school_id, title, assigned_member_id, due_date, status, completion_note, completed_at, completed_by_member_id, confirmation_note, confirmed_at, confirmed_by_member_id, created_at, updated_at]
+      required: [task_id, rota_id, group_id, school_id, title, assigned_member_id, due_date, status, completion_note, completed_at, completed_by_member_id, confirmation_note, confirmed_at, confirmed_by_member_id, skip_reason, skipped_at, skipped_by_member_id, created_at, updated_at]
       properties:
         task_id:
           type: string
@@ -5923,6 +6096,17 @@ components:
           type: [string, 'null']
           format: date-time
         confirmed_by_member_id:
+          type: [string, 'null']
+          format: uuid
+        skip_reason:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 240
+          description: Required audit reason when status is SKIPPED; null for PENDING, COMPLETED, and CONFIRMED tasks.
+        skipped_at:
+          type: [string, 'null']
+          format: date-time
+        skipped_by_member_id:
           type: [string, 'null']
           format: uuid
         created_at:
@@ -5977,6 +6161,16 @@ components:
         confirmation_note:
           type: string
           maxLength: 240
+    SkipDutyTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [skip_reason]
+      properties:
+        skip_reason:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: User-visible audit reason for the owner/admin leave disposition, such as approved leave with no accepted cover.
     DutySwapType:
       type: string
       enum: [SWAP, COVER]
@@ -6071,6 +6265,23 @@ components:
           type: string
         data:
           $ref: '#/components/schemas/DutySwap'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    DutySwapListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DutySwap'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     RepairCategory:

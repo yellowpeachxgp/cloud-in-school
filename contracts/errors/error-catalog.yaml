@@ -329,7 +329,7 @@ errors:
     http_status: 409
     retryable: false
     user_action: REFRESH_DUTY_TASK_STATUS
-    description: Duty task is not in a state that accepts the requested completion or confirmation transition.
+    description: Duty task is not in a state that accepts the requested completion, confirmation, or owner/admin skip transition.
   - code: DUTY_CONFIRMATION_NOT_ALLOWED
     http_status: 403
     retryable: false
@@ -339,7 +339,7 @@ errors:
     http_status: 409
     retryable: false
     user_action: REFRESH_DUTY_SWAP_STATUS
-    description: Duty swap is terminal or the requested accept/reject/cancel action is invalid for its current state.
+    description: Duty swap is terminal, the requested accept/reject/cancel action is invalid for its current state, or acceptance is blocked because the referenced task is no longer PENDING.
   - code: REPAIR_NOT_FOUND
     http_status: 404
     retryable: false
