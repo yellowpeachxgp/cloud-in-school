@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { REPO_ROOT } from "../packages/contracts/src/index.mjs";
@@ -409,4 +410,260 @@ test("W6-01b AC-43: zero-to-publish tutorial steps run end-to-end in a clean dir
   for (const verb of ["keygen", "init", "validate", "simulate", "doctor", "sign", "pack", "verify"]) {
     assert.ok(guide.includes("dis-plugin " + verb), "guide documents dis-plugin " + verb);
   }
+});
+
+// ---------------------------------------------------------------------------
+// review 2026-11-27 hardening regressions
+// ---------------------------------------------------------------------------
+
+// Low-level zip assembler for negative fixtures: the production writer rightly
+// refuses to produce malicious archives, so these are built byte by byte with
+// full control over per-entry flags, sizes, CRC, local vs central names, and
+// the EOCD record.
+function assembleRawZip(entries, eocdOverrides = {}) {
+  const parts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const centralNameBytes = Buffer.from(entry.centralName, "utf8");
+    const localNameBytes = Buffer.from(entry.localName ?? entry.centralName, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(entry.flags ?? 0x0800, 6);
+    local.writeUInt16LE(entry.method ?? 8, 8);
+    local.writeUInt32LE(entry.crc >>> 0, 14);
+    local.writeUInt32LE(entry.compressedSize, 18);
+    local.writeUInt32LE(entry.uncompressedSize, 22);
+    local.writeUInt16LE(localNameBytes.length, 26);
+    local.writeUInt16LE(0, 28);
+    parts.push(local, localNameBytes, entry.payload);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(entry.flags ?? 0x0800, 8);
+    central.writeUInt16LE(entry.method ?? 8, 10);
+    central.writeUInt32LE(entry.crc >>> 0, 16);
+    central.writeUInt32LE(entry.compressedSize, 20);
+    central.writeUInt32LE(entry.uncompressedSize, 24);
+    central.writeUInt16LE(centralNameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(Buffer.concat([central, centralNameBytes]));
+    offset += local.length + localNameBytes.length + entry.payload.length;
+  }
+  const centralBlob = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(eocdOverrides.diskNumber ?? 0, 4);
+  eocd.writeUInt16LE(eocdOverrides.centralDisk ?? 0, 6);
+  eocd.writeUInt16LE(eocdOverrides.entryCountOnDisk ?? entries.length, 8);
+  eocd.writeUInt16LE(eocdOverrides.entryCount ?? entries.length, 10);
+  eocd.writeUInt32LE(eocdOverrides.centralSize ?? centralBlob.length, 12);
+  eocd.writeUInt32LE(eocdOverrides.centralOffset ?? offset, 16);
+  eocd.writeUInt16LE(0, 20);
+  return Buffer.concat([...parts, centralBlob, eocd]);
+}
+
+function deflateEntry(name, content, overrides = {}) {
+  const compressed = zlib.deflateRawSync(content, { level: 9 });
+  return {
+    centralName: name,
+    method: 8,
+    crc: crc32(content),
+    compressedSize: compressed.length,
+    uncompressedSize: content.length,
+    payload: compressed,
+    ...overrides
+  };
+}
+
+function validCraftedEntries() {
+  return [
+    deflateEntry("dist/index.mjs", Buffer.from("export const x = 1;\n", "utf8")),
+    deflateEntry("manifest.json", Buffer.from("{}", "utf8"))
+  ];
+}
+
+test("W6-01b zip reader negative: duplicate entries rejected, exact and case-insensitive", () => {
+  const exact = assembleRawZip([
+    deflateEntry("dist/a.txt", Buffer.from("one")),
+    deflateEntry("dist/a.txt", Buffer.from("two"))
+  ]);
+  assert.throws(() => readPluginPackageZip(exact), /[Dd]uplicate/);
+
+  const caseFolded = assembleRawZip([
+    deflateEntry("dist/A.txt", Buffer.from("one")),
+    deflateEntry("dist/a.txt", Buffer.from("two"))
+  ]);
+  assert.throws(() => readPluginPackageZip(caseFolded), /[Dd]uplicate/);
+});
+
+test("W6-01b zip reader negative: encrypted entries rejected", () => {
+  const evil = assembleRawZip([
+    deflateEntry("dist/index.mjs", Buffer.from("x"), { flags: 0x0800 | 0x0001 })
+  ]);
+  assert.throws(() => readPluginPackageZip(evil), /[Ee]ncrypted/);
+});
+
+test("W6-01b zip reader negative: ZIP64 markers rejected in EOCD and in entries", () => {
+  const zip64Count = assembleRawZip(validCraftedEntries(), { entryCount: 0xffff, entryCountOnDisk: 0xffff });
+  assert.throws(() => readPluginPackageZip(zip64Count), /ZIP64/);
+
+  const zip64EntrySize = assembleRawZip([
+    deflateEntry("dist/index.mjs", Buffer.from("x"), { uncompressedSize: 0xffffffff })
+  ]);
+  assert.throws(() => readPluginPackageZip(zip64EntrySize), /ZIP64/);
+});
+
+test("W6-01b zip reader negative: local header name mismatching central directory rejected", () => {
+  const mismatch = assembleRawZip([
+    deflateEntry("dist/index.mjs", Buffer.from("x"), { localName: "dist/evil!.mjs" })
+  ]);
+  assert.throws(() => readPluginPackageZip(mismatch), /does not match|mismatch/i);
+});
+
+test("W6-01b zip reader negative: crafted CRC corruption rejected", () => {
+  const corrupted = assembleRawZip([
+    deflateEntry("dist/index.mjs", Buffer.from("x"), { crc: crc32(Buffer.from("definitely-other")) })
+  ]);
+  assert.throws(() => readPluginPackageZip(corrupted), /CRC/);
+});
+
+test("W6-01b zip reader negative: stored entry with disagreeing size fields rejected before copy", () => {
+  const payload = Buffer.from("store-me");
+  const evil = assembleRawZip([{
+    centralName: "dist/raw.bin",
+    method: 0,
+    crc: crc32(payload),
+    compressedSize: payload.length + 7,
+    uncompressedSize: payload.length,
+    payload
+  }]);
+  assert.throws(() => readPluginPackageZip(evil), /disagree|mismatch|tamper/i);
+});
+
+test("W6-01b zip reader negative: zip-bomb lying about uncompressed size is rejected", () => {
+  // 8 MiB of zeros compresses to a few KiB; the central directory lies and
+  // declares a tiny 32 byte output. Bounded inflation must abort, never accept.
+  const bombContent = Buffer.alloc(8 * 1024 * 1024, 0x61);
+  const evil = assembleRawZip([
+    deflateEntry("assets/bomb.bin", bombContent, { uncompressedSize: 32 })
+  ]);
+  assert.throws(
+    () => readPluginPackageZip(evil),
+    /zip-bomb|exceeds its declared size|size mismatch/i
+  );
+});
+
+test("W6-01b zip reader negative: honestly declared oversize entries rejected before inflation", () => {
+  const evil = assembleRawZip([
+    deflateEntry("assets/big.bin", Buffer.from("x"), { uncompressedSize: 5 * 1024 * 1024 })
+  ]);
+  assert.throws(() => readPluginPackageZip(evil), /per-file size limit/);
+});
+
+test("W6-01b zip-bomb memory proof: bounded inflation aborts without materializing the stream", () => {
+  // Regression proof for the review finding (unbounded inflateRawSync cost RSS
+  // +210MB on a small-declared bomb). A fresh node process inflates a bomb whose
+  // real output is 128 MiB while the header lies about a tiny size; the child
+  // prints its RSS delta. Unbounded inflation would raise RSS by >= 128 MiB
+  // even though the size comparison still rejects afterwards.
+  const bombContent = Buffer.alloc(128 * 1024 * 1024, 0x62);
+  const evil = assembleRawZip([
+    deflateEntry("assets/bomb.bin", bombContent, { uncompressedSize: 64 })
+  ]);
+  const dir = tmpDir("dis-w601b-bomb-");
+  const zipPath = path.join(dir, "bomb.zip");
+  fs.writeFileSync(zipPath, evil);
+
+  const probe = [
+    "import fs from 'node:fs';",
+    "const mod = await import(process.env.BOMB_MODULE);",
+    "const buf = fs.readFileSync(process.env.BOMB_ZIP);",
+    "const before = process.memoryUsage().rss;",
+    "let error = null;",
+    "try { mod.readPluginPackageZip(buf); } catch (e) { error = (e && e.message) || String(e); }",
+    "const after = process.memoryUsage().rss;",
+    "console.log(JSON.stringify({ error, rssDeltaMb: (after - before) / 1024 / 1024 }));"
+  ].join("\n");
+  const moduleUrl = new URL("../packages/plugin-sdk/src/package-zip.mjs", import.meta.url).href;
+  const stdout = execFileSync("node", ["--input-type=module", "-e", probe], {
+    encoding: "utf8",
+    env: { ...process.env, BOMB_MODULE: moduleUrl, BOMB_ZIP: zipPath },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const report = JSON.parse(stdout.trim().split("\n").pop());
+  assert.ok(report.error, "bomb must be rejected, got no error");
+  assert.match(report.error, /zip-bomb|exceeds its declared size|size mismatch/i);
+  assert.ok(
+    report.rssDeltaMb < 32,
+    "bounded inflation must keep RSS delta small; got " + report.rssDeltaMb + " MiB (unbounded would be ~128 MiB)"
+  );
+});
+
+test("W6-01b keygen --force regression: rotation restores private key mode 0600", async () => {
+  const home = tmpDir("dis-w601b-home-");
+  const first = await runCliInProcess(["keygen", "--id", "org.example.rotate-case"], home);
+  assert.equal(first.exitCode, 0);
+  const report = JSON.parse(first.stdout);
+  const originalKey = fs.readFileSync(report.private_key_path, "utf8");
+
+  // Simulate a permissive keyring file (manual copy, restore from backup, ...).
+  fs.chmodSync(report.private_key_path, 0o644);
+  assert.equal(fs.statSync(report.private_key_path).mode & 0o777, 0o644);
+
+  const rotated = await runCliInProcess(["keygen", "--id", "org.example.rotate-case", "--force"], home);
+  assert.equal(rotated.exitCode, 0, rotated.stderr);
+  assert.equal(
+    fs.statSync(report.private_key_path).mode & 0o777,
+    0o600,
+    "private key must be owner-only again after --force rotation"
+  );
+  assert.notEqual(
+    fs.readFileSync(report.private_key_path, "utf8"),
+    originalKey,
+    "rotation must actually replace the key material"
+  );
+});
+
+test("W6-01b sign/pack negative: artifact symlink escaping the project is rejected", async () => {
+  const home = tmpDir("dis-w601b-home-");
+  const dir = scaffold("card", home);
+  const outsideDir = tmpDir("dis-w601b-outside-");
+  const secretPath = path.join(outsideDir, "secret.json");
+  fs.writeFileSync(secretPath, "{\n  \"secret\": true\n}\n", "utf8");
+
+  const victim = path.join(dir, "assets/card-data.json");
+  fs.rmSync(victim);
+  fs.symlinkSync(secretPath, victim);
+
+  const signResult = runCliOutofProcessResult(["sign", dir], home);
+  assert.notEqual(signResult.exitCode, 0, "sign must refuse a symlinked artifact");
+  assert.match(signResult.stderr, /symlink/);
+
+  const packResult = runCliOutofProcessResult(["pack", dir], home);
+  assert.notEqual(packResult.exitCode, 0, "pack must refuse a symlinked artifact");
+  assert.match(packResult.stderr, /symlink/);
+  assert.ok(!fs.existsSync(path.join(dir, "org.example.ac-card-1.0.0.zip")), "no zip may be produced");
+});
+
+test("W6-01b sign/pack negative: symlinked artifact directory escaping the project is rejected", async () => {
+  const home = tmpDir("dis-w601b-home-");
+  const dir = scaffold("card", home);
+  const outsideDir = tmpDir("dis-w601b-outside-dir-");
+  // Recreate the expected artifact layout outside the project.
+  const original = fs.readFileSync(path.join(dir, "assets/card-data.json"));
+  fs.writeFileSync(path.join(outsideDir, "card-data.json"), original);
+  fs.rmSync(path.join(dir, "assets"), { recursive: true });
+  fs.symlinkSync(outsideDir, path.join(dir, "assets"));
+
+  const signResult = runCliOutofProcessResult(["sign", dir], home);
+  assert.notEqual(signResult.exitCode, 0, "sign must refuse a symlinked artifact directory");
+  assert.match(signResult.stderr, /symlink/);
+
+  const packResult = runCliOutofProcessResult(["pack", dir], home);
+  assert.notEqual(packResult.exitCode, 0, "pack must refuse a symlinked artifact directory");
+  assert.match(packResult.stderr, /symlink/);
 });

@@ -78,6 +78,11 @@ export function keygenPublisherKeypair({ pluginId, force = false, env = process.
   const pair = generateEd25519KeyPair();
   fs.mkdirSync(path.dirname(privatePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(privatePath, pair.privateKeyBase64 + "\n", { encoding: "utf8", mode: 0o600 });
+  // writeFileSync's mode only applies when the file is first created; a --force
+  // rotation overwrites the existing inode and would silently keep whatever
+  // permissive bits the old file had. chmod unconditionally so the private key
+  // is owner-only after every rotation, not just after initial creation.
+  fs.chmodSync(privatePath, 0o600);
   fs.writeFileSync(publicPath, pair.publicKeyBase64 + "\n", { encoding: "utf8", mode: 0o644 });
   return {
     plugin_id: pluginId,

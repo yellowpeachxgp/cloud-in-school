@@ -7,7 +7,10 @@
 //     by path so identical content produces byte-identical archives (reproducible builds)
 //   - reader enforces the same safety envelope as the Android package pipeline: zip-slip /
 //     absolute path / backslash / NUL rejection, duplicate detection, entry count and size caps,
-//     central-directory-driven (never trusts local header sizes), CRC-32 and size verification.
+//     central-directory-driven (never trusts local header sizes), CRC-32 and size verification,
+//     and bounded inflation — output bytes are counted as the deflate stream is produced and
+//     decompression aborts at the declared-size cap, so a header lying about a tiny size can
+//     never trick the reader into materializing a zip bomb in memory.
 import zlib from "node:zlib";
 import { ContractError } from "../../contracts/src/index.mjs";
 import {
@@ -188,6 +191,36 @@ function zipStructureError(message, detail = {}) {
   });
 }
 
+// Zip-bomb protection (review 2026-11-27): never inflate without a hard output
+// cap. The previous implementation called inflateRawSync unbounded and compared
+// lengths afterwards, so an archive declaring a tiny uncompressed size still
+// inflated the full attacker-controlled stream into memory first (measured RSS
+// +210MB for a single entry). zlib's maxOutputLength counts output bytes as the
+// stream is produced and aborts with ERR_BUFFER_TOO_LARGE the moment the cap is
+// exceeded, so resident memory stays bounded by the cap rather than by the
+// stream (probe: 1 GiB deflate bomb with a 4 MiB cap aborts with ~6 MiB RSS
+// delta). The cap is the declared uncompressed size itself — already enforced
+// <= maxFileBytes before inflation — clamped into the valid option range
+// [1, ...]: honest entries always fit exactly, and any stream producing more
+// than declared is precisely the tamper case the size comparison rejects.
+function inflateEntryBounded(compressed, declaredSize, artifactPath) {
+  const cap = Math.max(1, Math.min(declaredSize, PLUGIN_PACKAGE_ZIP_LIMITS.maxFileBytes));
+  try {
+    return zlib.inflateRawSync(compressed, { maxOutputLength: cap });
+  } catch (error) {
+    if (error && error.code === "ERR_BUFFER_TOO_LARGE") {
+      throw zipStructureError(
+        "Zip entry uncompressed size mismatch with central directory (output exceeds declared size; bounded inflation zip-bomb protection)",
+        { artifact_path: artifactPath, declared_size: declaredSize }
+      );
+    }
+    throw zipStructureError("Zip entry deflate stream is corrupt", {
+      artifact_path: artifactPath,
+      inflate_error: error?.message || String(error)
+    });
+  }
+}
+
 /**
  * Strictly read a ZIP archive produced for plugin transport.
  * @param {Buffer} archive
@@ -331,13 +364,20 @@ export function readPluginPackageZip(archive) {
     }
     const compressed = buf.subarray(dataStart, dataEnd);
     let content;
-    try {
-      content = method === 0 ? Buffer.from(compressed) : zlib.inflateRawSync(compressed);
-    } catch (error) {
-      throw zipStructureError("Zip entry deflate stream is corrupt", {
-        artifact_path: entryPath,
-        inflate_error: error?.message || String(error)
-      });
+    if (method === 0) {
+      // STORE entries are uncompressed by definition, so their two sizes must be
+      // identical. Checking before copying keeps a lying header from turning the
+      // copy itself into an unbounded allocation.
+      if (compressedSize !== uncompressedSize) {
+        throw zipStructureError("Zip stored entry size fields disagree (tamper signal)", {
+          artifact_path: entryPath,
+          compressed_size: compressedSize,
+          uncompressed_size: uncompressedSize
+        });
+      }
+      content = Buffer.from(compressed);
+    } else {
+      content = inflateEntryBounded(compressed, uncompressedSize, entryPath);
     }
     if (content.length !== uncompressedSize) {
       throw zipStructureError("Zip entry uncompressed size mismatch with central directory", {

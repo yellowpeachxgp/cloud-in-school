@@ -152,6 +152,51 @@ function resolvePublicKeyForSource(source, explicitPub, env) {
   return null;
 }
 
+/**
+ * Symlink-escape hardening (review 2026-11-27): sign/pack embed artifact bytes
+ * verbatim into a signed, publishable package, so reading them must never
+ * follow a symlink. A malicious plugin checkout can carry
+ * assets/payload.json -> ../../../../etc/passwd; without this guard the file
+ * outside the project would be signed and packed. Policy: every path component
+ * below the plugin directory is lstat-checked and any symlink is rejected
+ * outright (even one pointing back inside the project — archived bytes must be
+ * the bytes in the project tree, not host-dependent), the final component must
+ * be a regular file, and the canonical realpath must stay inside the canonical
+ * plugin root as defense in depth.
+ */
+function readArtifactBytesSafely(pluginDir, safePath) {
+  const full = path.join(pluginDir, safePath);
+  const rel = path.relative(pluginDir, full);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error("artifact path escapes the plugin directory: " + safePath);
+  }
+  let cursor = pluginDir;
+  const segments = safePath.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    cursor = path.join(cursor, segments[index]);
+    let stat;
+    try {
+      stat = fs.lstatSync(cursor);
+    } catch {
+      throw new Error("declared artifact missing on disk: " + safePath);
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        "artifact path contains a symlink component (symlink-escape protection): " + safePath
+      );
+    }
+    if (index === segments.length - 1 && !stat.isFile()) {
+      throw new Error("artifact is not a regular file: " + safePath);
+    }
+  }
+  const rootReal = fs.realpathSync(pluginDir);
+  const fullReal = fs.realpathSync(full);
+  if (fullReal !== rootReal && !fullReal.startsWith(rootReal + path.sep)) {
+    throw new Error("artifact realpath escapes the plugin directory: " + safePath);
+  }
+  return fs.readFileSync(full);
+}
+
 function readArtifactsSafely(pluginDir, manifestDraft) {
   // S10 hardening: validate every declared artifact path BEFORE touching the
   // filesystem, so a malicious or broken manifest cannot make sign read
@@ -159,12 +204,7 @@ function readArtifactsSafely(pluginDir, manifestDraft) {
   const artifactMap = {};
   for (const art of manifestDraft.entry_artifacts || [{ path: "dist/index.mjs" }]) {
     const safePath = assertSafeRelativeArtifactPath(art.path);
-    const full = path.join(pluginDir, safePath);
-    const rel = path.relative(pluginDir, full);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new Error("artifact path escapes the plugin directory: " + safePath);
-    }
-    artifactMap[safePath] = fs.readFileSync(full);
+    artifactMap[safePath] = readArtifactBytesSafely(pluginDir, safePath);
   }
   return artifactMap;
 }
@@ -310,11 +350,9 @@ function commandPack({ target, flags, env }) {
   const artifactEntries = [];
   for (const declared of normalized.entry_artifacts || []) {
     const safePath = assertSafeRelativeArtifactPath(declared.path);
-    const full = path.join(dir, safePath);
-    if (!fs.existsSync(full)) {
-      throw new Error("declared artifact missing on disk: " + safePath);
-    }
-    artifactEntries.push([safePath, fs.readFileSync(full)]);
+    // Same symlink-escape protection as sign: packed bytes must come from the
+    // project tree itself, never from a symlink target outside it.
+    artifactEntries.push([safePath, readArtifactBytesSafely(dir, safePath)]);
   }
   const artifactMap = Object.fromEntries(artifactEntries);
 

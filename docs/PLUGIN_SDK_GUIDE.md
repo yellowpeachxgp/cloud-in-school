@@ -201,7 +201,7 @@ dis-plugin init ./my-datapack --id org.example.my-datapack --template datapack -
 
 1. 条目封闭集：`manifest.json`（磁盘上的原始字节）+ 可选 `plugin-signing-public.key` + 清单声明的全部产物；出现任何其他条目即拒绝。
 2. 确定性：条目按路径排序、deflate（不可压缩时回退 store）、DOS 时间戳固定 1980-01-01，同内容两次打包字节完全相同。
-3. 解包安全（云端 `readPluginPackageZip` 与 Android 包管线对齐）：拒绝 zip-slip / 绝对路径 / 反斜杠 / NUL / 重复条目（含大小写不敏感）/ 加密条目 / ZIP64 / 多盘；只支持 store 与 deflate；以中央目录为准并校验本地头文件名一致；逐条校验 CRC-32 与解压后长度；上限为 512 条目、单文件 4 MiB、解压总量 16 MiB（上限在解压**之前**按中央目录声明值执行，抵抗 zip bomb）。
+3. 解包安全（云端 `readPluginPackageZip` 与 Android 包管线对齐）：拒绝 zip-slip / 绝对路径 / 反斜杠 / NUL / 重复条目（含大小写不敏感）/ 加密条目 / ZIP64 / 多盘；只支持 store 与 deflate；以中央目录为准并校验本地头文件名一致；逐条校验 CRC-32 与解压后长度；上限为 512 条目、单文件 4 MiB、解压总量 16 MiB。**zip bomb 防护是限量解压**：声明值在解压前先做上限预检，解压本身也带着「声明解压长度」的硬输出上限进行，输出字节数边解压边计数、超限立即中止拒绝——即使中央目录谎报小尺寸，攻击者控制的 deflate 流也不会先被完整解压进内存（回归证据：128 MiB 炸弹的解压中止时 RSS 增量只有几 MiB）。store 条目的压缩/解压两个长度字段必须相等，否则在复制前拒绝。
 4. `unpackPluginPackage` 额外强制：清单严格解析 + 运行时校验 + 逐产物 SHA-256 比对，任一失败即拒绝整个包。
 
 ## 8. simulate 与 doctor
