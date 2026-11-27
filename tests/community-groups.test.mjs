@@ -1192,6 +1192,18 @@ test("W4-01 atomicity: nested and returned thenables are rejected, and async con
       "the retired generic overlay entry must fail closed"
     );
     assert.equal(legacyExecuted, false, "retired generic overlay must never execute caller code");
+
+    userRef.invalid_function_probe = () => "not-data";
+    assert.throws(
+      () => store.runDataDeleteAtomicCommitUnit(() => null),
+      /不可克隆的非纯数据对象/,
+      "non-data objects must fail closed before a candidate is built"
+    );
+    delete userRef.invalid_function_probe;
+    assert.doesNotThrow(
+      () => store.runDataDeleteAtomicCommitUnit(() => null),
+      "replica construction failure must not leave the commit-unit gate stuck"
+    );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

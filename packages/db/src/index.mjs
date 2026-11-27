@@ -600,7 +600,7 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
 function dataDeleteIsObject(value) {
-  return value !== null && typeof value === "object";
+  return value !== null && (typeof value === "object" || typeof value === "function");
 }
 
 function dataDeleteContainerKind(value) {
@@ -1278,7 +1278,13 @@ export class CloudDatabaseStore {
     }
     this.assertStorageWritable();
     this._dataDeleteCommitUnitActive = true;
-    const transition = new DataDeleteAtomicTransition(this);
+    let transition;
+    try {
+      transition = new DataDeleteAtomicTransition(this);
+    } catch (err) {
+      this._dataDeleteCommitUnitActive = false;
+      throw err;
+    }
     let result;
     try {
       result = fn(transition.staging);
