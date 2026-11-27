@@ -795,61 +795,61 @@ endpoints:
     operationId: createPlaceStatusReport
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: GET
     path: /api/v1/places/{placeRef}/reports
     operationId: listPlaceStatusReports
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: GET
     path: /api/v1/places/status
     operationId: queryPlaceStatus
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: POST
     path: /api/v1/places/status/subscriptions
     operationId: createPlaceStatusSubscription
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: GET
     path: /api/v1/places/status/subscriptions
     operationId: listPlaceStatusSubscriptions
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: DELETE
     path: /api/v1/places/status/subscriptions/{subscriptionId}
     operationId: deletePlaceStatusSubscription
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: POST
     path: /api/v1/place-reports/{reportId}/flag
     operationId: flagPlaceStatusReport
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: GET
     path: /api/v1/admin/place-report-flags
     operationId: listPlaceReportFlags
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04
   - method: POST
     path: /api/v1/admin/place-report-flags/{flagId}/review
     operationId: reviewPlaceReportFlag
     auth: bearer
     owner: place-status
-    status: planned
+    status: active
     contract_card: CT-04

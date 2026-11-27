@@ -2747,9 +2747,9 @@ paths:
   /api/v1/places/{placeRef}/reports:
     post:
       operationId: createPlaceStatusReport
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.report]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_REPORT_INVALID, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2799,9 +2799,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listPlaceStatusReports
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -2845,9 +2845,9 @@ paths:
   /api/v1/places/status:
     get:
       operationId: queryPlaceStatus
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -2937,9 +2937,9 @@ paths:
   /api/v1/places/status/subscriptions:
     post:
       operationId: createPlaceStatusSubscription
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_STATUS_SUBSCRIPTION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2984,9 +2984,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listPlaceStatusSubscriptions
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -3023,9 +3023,9 @@ paths:
   /api/v1/places/status/subscriptions/{subscriptionId}:
     delete:
       operationId: deletePlaceStatusSubscription
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_SUBSCRIPTION_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3058,9 +3058,9 @@ paths:
   /api/v1/place-reports/{reportId}/flag:
     post:
       operationId: flagPlaceStatusReport
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.flag]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_REPORT_FLAG_INVALID, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3109,9 +3109,9 @@ paths:
   /api/v1/admin/place-report-flags:
     get:
       operationId: listPlaceReportFlags
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.moderate]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status, admin]
@@ -3155,9 +3155,9 @@ paths:
   /api/v1/admin/place-report-flags/{flagId}/review:
     post:
       operationId: reviewPlaceReportFlag
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.moderate]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REPORT_FLAG_NOT_FOUND, PLACE_REPORT_REVIEW_INVALID, PLACE_STATUS_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required

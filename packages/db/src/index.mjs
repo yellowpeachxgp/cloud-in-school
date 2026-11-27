@@ -595,7 +595,9 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
   "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
   "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
-  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords",
+  "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
+  "placeStatusAggregates"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -913,6 +915,14 @@ export class CloudDatabaseStore {
     this.groupMembers = new Map(); // memberId -> membership-period record
     this.groupInvites = new Map(); // inviteId -> invite
 
+    // Place Status (W4-04): bootstrap Campus Graph snapshot, immutable user
+    // observations, flags, subscriptions, and aggregate revision state.
+    this.campusGraphPlaces = new Map(); // placeRef -> coarse graph entity
+    this.placeReports = new Map(); // reportId -> immutable observation + moderation eligibility
+    this.placeReportFlags = new Map(); // flagId -> review request
+    this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
+    this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -952,7 +962,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -1169,6 +1179,11 @@ export class CloudDatabaseStore {
       loadMap(this.groups, raw.groups);
       loadMap(this.groupMembers, raw.groupMembers);
       loadMap(this.groupInvites, raw.groupInvites);
+      loadMap(this.campusGraphPlaces, raw.campusGraphPlaces);
+      loadMap(this.placeReports, raw.placeReports);
+      loadMap(this.placeReportFlags, raw.placeReportFlags);
+      loadMap(this.placeStatusSubscriptions, raw.placeStatusSubscriptions);
+      loadMap(this.placeStatusAggregates, raw.placeStatusAggregates);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1403,6 +1418,26 @@ export class CloudDatabaseStore {
         throw new Error("群组邀请快照与学校作用域不一致");
       }
     }
+
+    const graphPlaces = new Map(raw.campusGraphPlaces || []);
+    const placeReports = new Map(raw.placeReports || []);
+    for (const [, report] of placeReports) {
+      const place = graphPlaces.get(report?.place_ref);
+      if (!place || place.school_id !== report.school_id || place.campus_id !== report.campus_id || place.place_type !== report.place_type) {
+        throw new Error("地点状态报告快照与 Campus Graph 学校作用域不一致");
+      }
+    }
+    for (const [, flag] of raw.placeReportFlags || []) {
+      const report = placeReports.get(flag?.report_id);
+      if (!report || report.school_id !== flag.school_id || report.place_ref !== flag.place_ref) {
+        throw new Error("地点状态举报快照与报告作用域不一致");
+      }
+    }
+    for (const [, subscription] of raw.placeStatusSubscriptions || []) {
+      if (subscription?.target?.type === "PLACE" && !graphPlaces.has(subscription.target.place_ref)) {
+        throw new Error("地点状态订阅快照引用了缺失的 Campus Graph 实体");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1522,6 +1557,11 @@ export class CloudDatabaseStore {
         groups: Array.from(source.groups.entries()),
         groupMembers: Array.from(source.groupMembers.entries()),
         groupInvites: Array.from(source.groupInvites.entries()),
+        campusGraphPlaces: Array.from(source.campusGraphPlaces.entries()),
+        placeReports: Array.from(source.placeReports.entries()),
+        placeReportFlags: Array.from(source.placeReportFlags.entries()),
+        placeStatusSubscriptions: Array.from(source.placeStatusSubscriptions.entries()),
+        placeStatusAggregates: Array.from(source.placeStatusAggregates.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
