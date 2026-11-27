@@ -124,6 +124,29 @@ DISABLED
 | `group.manage` | 更新或归档小组；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
 | `group.invite.manage` | 创建或吊销限时、限次小组邀请；要求 GROUP_OWNER/GROUP_ADMIN 授权 |
 | `group.member.manage` | 管理成员角色、共享级别、移出或自助退出；school 作用域隔离强制 |
+| `group.availability.write` | CT-02 planned 语义：上传、替换或撤销调用者自己的量化忙闲块分享；绝不能写其他成员忙闲 |
+| `group.availability.read` | CT-02 planned 语义：进行隐私最小化交集查询并读取成员 AVAILABLE/BUSY/UNKNOWN 状态；查询结果不暴露原始忙闲块 |
+| `group.poll.create` | CT-02 planned 语义：同一 school 作用域的活跃成员创建带截止时间的群组时间投票 |
+| `group.poll.read` | CT-02 planned 语义：读取投票选项、截止时间、各选项结果、调用者投票和确认状态 |
+| `group.poll.vote` | CT-02 planned 语义：在投票 OPEN 期间投出或修改调用者的单选投票 |
+| `group.poll.confirm` | CT-02 planned 语义：把投票选项确认为终态群组事项；限投票创建者或同 school 作用域 GROUP_OWNER/GROUP_ADMIN |
+
+CT-03 contract-first planned 权限（同样全部是 `scope: user_school_scope`；此处登记的是 CT-03 契约线授权语义，**不是插件可声明权限**，也不表示账本/值日/报修运行时实现已经 active）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
+| `group.ledger.read` | CT-03 planned 语义：读取同组同 school 作用域内只追加账本 postings、确定性分摊、成员余额和结算历史 |
+| `group.ledger.write` | CT-03 planned 语义：追加费用、退款或更正 postings；不执行支付，也不改写既有 postings |
+| `group.settlement.write` | CT-03 planned 语义：授权当事方提出、确认或取消结算记录；确认只记录双方认可，绝不移动资金 |
+| `group.duty.read` | CT-03 planned 语义：读取值日轮换计划、生成任务、分配状态和完成确认状态 |
+| `group.duty.write` | CT-03 planned 语义：完成分配给调用者的值日任务，并按当事方/组内角色规则请求或处理单任务换班/代班 |
+| `group.duty.confirm` | CT-03 planned 语义：确认其他活跃成员的值日任务完成；禁止自我确认 |
+| `group.duty.manage` | CT-03 planned 语义：创建和更新值日轮换计划；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
+| `group.repair.read` | CT-03 planned 语义：读取宿舍报修记录、流转状态和评价状态 |
+| `group.repair.write` | CT-03 planned 语义：提交报修记录、编辑仍可编辑的报修元数据并提交一次性评价；不联系外部维修系统 |
+| `group.repair.manage` | CT-03 planned 语义：分流、指派、推进、解决、驳回或关闭报修记录；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
+
+CT-02/CT-03 上述端点在契约中均为 `planned`；登记授权语义不表示忙闲、投票、账本、值日或报修运行时实现已经 active。这些条目全部是 `scope: user_school_scope` 的用户态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
 
 ## 6. CLI（`dis-plugin`）
 
