@@ -293,6 +293,27 @@ function pseudonymizeUserIdRefs(value, cloudUserId, tombstone, counter) {
   return value;
 }
 
+function redactFlagDetailRefs(value, erasedFlagIds, counter) {
+  if (Array.isArray(value)) return value.map((entry) => redactFlagDetailRefs(entry, erasedFlagIds, counter));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value)) {
+      out[key] = redactFlagDetailRefs(value[key], erasedFlagIds, counter);
+    }
+    if (
+      typeof value.flag_id === "string" &&
+      erasedFlagIds.has(value.flag_id) &&
+      Object.hasOwn(value, "detail") &&
+      value.detail !== null
+    ) {
+      out.detail = null;
+      counter.count += 1;
+    }
+    return out;
+  }
+  return value;
+}
+
 export function createDefaultCampusGraphPlaces() {
   // Bootstrap compatibility snapshot. The coordinates are coarse building-level
   // anchors derived from the already shipped HAUT campus seed data; rows stay
@@ -425,18 +446,27 @@ export class PlaceStatusService {
     throw new ContractError("SCHOOL_SCOPE_MISMATCH", "Requested place status resource belongs to a different school_id isolation scope");
   }
 
-  _isModerator(auth) {
+  _moderationRoles(auth) {
+    return new Set([...(auth.roles || []), ...(this.store.getUserRoles?.(auth.cloudUserId) || [])]);
+  }
+
+  _canWritePlaceModeration(auth) {
     const user = this.store.users.get(auth.cloudUserId);
-    const roles = new Set([...(auth.roles || []), ...(this.store.getUserRoles?.(auth.cloudUserId) || [])]);
+    const roles = this._moderationRoles(auth);
     return Boolean(
       user?.role === "admin" ||
-      ["ADMIN", "OPERATOR", "PLATFORM_OWNER", "OPERATIONS_ADMIN", "SCHOOL_OPERATOR", "SECURITY_AUDITOR"].some((role) => roles.has(role))
+      ["ADMIN", "OPERATOR", "PLATFORM_OWNER", "OPERATIONS_ADMIN", "SCHOOL_OPERATOR"].some((role) => roles.has(role))
     );
   }
 
-  _requireModerator(auth, schoolId) {
+  _canReadPlaceModeration(auth) {
+    return this._canWritePlaceModeration(auth) || this._moderationRoles(auth).has("SECURITY_AUDITOR");
+  }
+
+  _requireModerator(auth, schoolId, { write = false } = {}) {
     this._requireSchoolBinding(auth, schoolId);
-    if (!this._isModerator(auth)) {
+    const allowed = write ? this._canWritePlaceModeration(auth) : this._canReadPlaceModeration(auth);
+    if (!allowed) {
       throw new ContractError("PLACE_STATUS_PERMISSION_DENIED", "School-scoped place status moderation permission is required");
     }
   }
@@ -589,11 +619,16 @@ export class PlaceStatusService {
       if (!subscription.metrics.includes(payload.metric)) continue;
       const target = subscription.target || {};
       let matches = false;
-      if (target.type === "PLACE") matches = target.place_ref === payload.place_ref;
-      else if (target.type === "AREA") {
+      if (target.type === "PLACE") {
+        matches = target.place_ref === payload.place_ref &&
+          (!Array.isArray(target.place_types) || target.place_types.includes(payload.place_type));
+      } else if (target.type === "AREA") {
         matches = bboxContains(target.bbox, place) && (!Array.isArray(target.place_types) || target.place_types.includes(payload.place_type));
       }
       if (!matches || notified.has(subscription.cloud_user_id)) continue;
+      const hasActiveBinding = this._activeSchoolBindings(subscription.cloud_user_id)
+        .some((binding) => (binding.school_id || "haut") === subscription.school_id);
+      if (!hasActiveBinding) continue;
       notified.add(subscription.cloud_user_id);
       this._appendNotificationCommitted({
         cloudUserId: subscription.cloud_user_id,
@@ -642,13 +677,13 @@ export class PlaceStatusService {
     return payload;
   }
 
-  _recomputeAfterInputChange({ place, metric, triggerType, triggerReportId, moderationAction = null, nowMs }, undo) {
+  _recomputeAfterInputChange({ place, metric, triggerType, triggerReportId, moderationAction = null, nowMs, evaluationMs = nowMs }, undo) {
     const key = this._aggregateKey(place.school_id, place.place_ref, metric);
     const prior = this.store.placeStatusAggregates.get(key) || null;
     const previousRevision = Number(prior?.aggregation_revision || 0);
     const previousEffective = prior?.last_effective_state || "UNKNOWN";
     const nextRevision = previousRevision + 1;
-    const view = this._computeStatusView(place, metric, nowMs, nextRevision);
+    const view = this._computeStatusView(place, metric, evaluationMs, nextRevision);
     const nextAggregate = {
       key,
       school_id: place.school_id,
@@ -694,20 +729,34 @@ export class PlaceStatusService {
         (!placeRefs || placeRefs.has(report.place_ref))
       )
       .sort((a, b) => Date.parse(a.expires_at) - Date.parse(b.expires_at) || a.id.localeCompare(b.id));
+    const dueByExpiry = new Map();
     for (const report of due) {
-      const contributing = report.aggregation_eligible !== false && this._isLatestIgnoringExpiry(report);
-      mutateObject(report, { ttl_expiry_accounted_at: iso(nowMs) }, undo);
-      if (contributing) {
+      const expiryMs = Date.parse(report.expires_at);
+      if (!dueByExpiry.has(expiryMs)) dueByExpiry.set(expiryMs, []);
+      dueByExpiry.get(expiryMs).push(report);
+    }
+    for (const [expiryMs, expiringReports] of dueByExpiry.entries()) {
+      const affectedAggregates = new Map();
+      for (const report of expiringReports) {
+        const contributing = report.aggregation_eligible !== false && this._isLatestIgnoringExpiry(report);
+        mutateObject(report, { ttl_expiry_accounted_at: iso(nowMs) }, undo);
+        if (!contributing) continue;
         const place = this.store.campusGraphPlaces.get(report.place_ref);
-        if (place) {
-          this._recomputeAfterInputChange({
-            place,
-            metric: report.metric,
-            triggerType: "TTL_EXPIRED",
-            triggerReportId: report.id,
-            nowMs
-          }, undo);
+        if (!place) continue;
+        const key = this._aggregateKey(place.school_id, place.place_ref, report.metric);
+        if (!affectedAggregates.has(key)) {
+          affectedAggregates.set(key, { place, metric: report.metric, triggerReportId: report.id });
         }
+      }
+      for (const affected of affectedAggregates.values()) {
+        this._recomputeAfterInputChange({
+          place: affected.place,
+          metric: affected.metric,
+          triggerType: "TTL_EXPIRED",
+          triggerReportId: affected.triggerReportId,
+          nowMs,
+          evaluationMs: expiryMs
+        }, undo);
       }
     }
   }
@@ -1089,7 +1138,11 @@ export class PlaceStatusService {
     );
     const identical = existingOpen.find((flag) => flag.reason === reason && (flag.detail ?? null) === detail);
     if (identical) {
-      return { status: 200, code: "REQUEST_DUPLICATE", data: this._flagView(identical) };
+      return this._commitWithReceipt(() => ({
+        status: 200,
+        code: "REQUEST_DUPLICATE",
+        data: this._flagView(identical)
+      }), idem.receipt, nowMs);
     }
     if (existingOpen.length > 0) throw flagInvalid("an active flag by the same caller already exists for this report");
     this._checkFlagRateLimit(auth, nowMs);
@@ -1147,7 +1200,7 @@ export class PlaceStatusService {
     if (idem.replay) return idem.replay;
     const flag = this.store.placeReportFlags.get(flagId);
     if (!flag) throw new ContractError("PLACE_REPORT_FLAG_NOT_FOUND", "Place report flag does not exist or is not visible in this reviewer school scope");
-    this._requireModerator(auth, flag.school_id);
+    this._requireModerator(auth, flag.school_id, { write: true });
     if (flag.status !== "OPEN") throw new ContractError("PLACE_REPORT_REVIEW_INVALID", "Place report flag is already terminal");
     requireNoUnknownFields(body, ["action", "review_note"], "ReviewPlaceReportFlagRequest");
     const action = requireString(body.action, "action");
@@ -1160,6 +1213,7 @@ export class PlaceStatusService {
     if (!place) throw new ContractError("PLACE_NOT_FOUND", "Referenced Campus Graph place is missing");
 
     return this._commitWithReceipt((undo) => {
+      this._expireDueReportsCommitted(nowMs, undo, { placeRefs: new Set([report.place_ref]) });
       const ts = iso(nowMs);
       const status = action === "KEEP_VISIBLE"
         ? "RESOLVED_KEEP_VISIBLE"
@@ -1219,7 +1273,11 @@ export class PlaceStatusService {
   exportUserData(cloudUserId) {
     return {
       place_status_reports: clone(Array.from(this.store.placeReports.values()).filter((row) => row.cloud_user_id === cloudUserId)),
-      place_status_report_flags: clone(Array.from(this.store.placeReportFlags.values()).filter((row) => row.flagger_cloud_user_id === cloudUserId || row.reviewer_cloud_user_id === cloudUserId)),
+      place_status_report_flags: clone(
+        Array.from(this.store.placeReportFlags.values())
+          .filter((row) => row.flagger_cloud_user_id === cloudUserId || row.reviewer_cloud_user_id === cloudUserId)
+          .map((row) => this._flagView(row))
+      ),
       place_status_subscriptions: clone(Array.from(this.store.placeStatusSubscriptions.values()).filter((row) => row.cloud_user_id === cloudUserId))
     };
   }
@@ -1231,6 +1289,8 @@ export class PlaceStatusService {
     let flagsDetached = 0;
     let reviewsDetached = 0;
     let subscriptionsDeleted = 0;
+    let reviewNotesRedacted = 0;
+    const erasedFlagIds = new Set();
     for (const report of this.store.placeReports.values()) {
       if (report.cloud_user_id !== cloudUserId) continue;
       report.cloud_user_id = DELETED_USER_TOMBSTONE;
@@ -1243,12 +1303,17 @@ export class PlaceStatusService {
     }
     for (const flag of this.store.placeReportFlags.values()) {
       if (flag.flagger_cloud_user_id === cloudUserId) {
+        erasedFlagIds.add(flag.id);
         flag.flagger_cloud_user_id = DELETED_USER_TOMBSTONE;
         if (flag.detail != null) flag.detail = null;
         flagsDetached += 1;
       }
       if (flag.reviewer_cloud_user_id === cloudUserId) {
         flag.reviewer_cloud_user_id = DELETED_USER_TOMBSTONE;
+        if (flag.review_note != null) {
+          flag.review_note = null;
+          reviewNotesRedacted += 1;
+        }
         reviewsDetached += 1;
       }
     }
@@ -1259,6 +1324,7 @@ export class PlaceStatusService {
     }
     let receiptsDeleted = 0;
     let receiptsPseudonymized = 0;
+    let receiptFlagDetailsRedacted = 0;
     if (this.store.idempotencyRecords instanceof Map) {
       const ownPrefixes = PLACE_STATUS_IDEMPOTENCY_OPS.map((op) => op + "|" + cloudUserId + "|");
       for (const [key, record] of Array.from(this.store.idempotencyRecords.entries())) {
@@ -1269,7 +1335,12 @@ export class PlaceStatusService {
         }
         if (!record || typeof record !== "object") continue;
         const counter = { count: 0 };
-        if (record.data !== undefined) record.data = pseudonymizeUserIdRefs(record.data, cloudUserId, DELETED_USER_TOMBSTONE, counter);
+        if (record.data !== undefined) {
+          const detailCounter = { count: 0 };
+          record.data = redactFlagDetailRefs(record.data, erasedFlagIds, detailCounter);
+          receiptFlagDetailsRedacted += detailCounter.count;
+          record.data = pseudonymizeUserIdRefs(record.data, cloudUserId, DELETED_USER_TOMBSTONE, counter);
+        }
         if (record.headers !== undefined) record.headers = pseudonymizeUserIdRefs(record.headers, cloudUserId, DELETED_USER_TOMBSTONE, counter);
         if (counter.count > 0) receiptsPseudonymized += 1;
       }
@@ -1285,9 +1356,11 @@ export class PlaceStatusService {
       notes_redacted: notesRedacted,
       flags_detached: flagsDetached,
       reviews_detached: reviewsDetached,
+      review_notes_redacted: reviewNotesRedacted,
       subscriptions_deleted: subscriptionsDeleted,
       idempotency_receipts_deleted: receiptsDeleted,
-      idempotency_receipts_pseudonymized: receiptsPseudonymized
+      idempotency_receipts_pseudonymized: receiptsPseudonymized,
+      idempotency_receipt_flag_details_redacted: receiptFlagDetailsRedacted
     };
   }
 }

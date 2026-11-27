@@ -430,10 +430,11 @@ test("W4-04 flags and moderation: queue is school-scoped, exclusion recomputes w
   });
   assert.equal(replay.status, 200);
   assert.equal(replay.body.data.flag_id, flagged.body.data.flag_id);
+  const foldedKey = nextKey("flag-folded");
   const folded = await app.inject({
     method: "POST",
     url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
-    headers: writeHeaders(flagger),
+    headers: writeHeaders(flagger, foldedKey),
     body: flagBody
   });
   assert.equal(folded.status, 200);
@@ -497,6 +498,21 @@ test("W4-04 flags and moderation: queue is school-scoped, exclusion recomputes w
   });
   assert.equal(secondReview.status, 409);
   assert.equal(secondReview.body.error.code, "PLACE_REPORT_REVIEW_INVALID");
+
+  const foldedAfterReview = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger, foldedKey),
+    body: flagBody
+  });
+  assert.equal(foldedAfterReview.status, 200);
+  assert.equal(foldedAfterReview.body.code, "REQUEST_DUPLICATE");
+  assert.equal(foldedAfterReview.body.data.flag_id, flagged.body.data.flag_id);
+  assert.equal(
+    Array.from(app.store.placeReportFlags.values()).filter((row) => row.report_id === report.body.data.report_id).length,
+    1,
+    "a folded fresh key must remain protected by its receipt after review closes the original flag"
+  );
 });
 
 test("W4-04 durability: reports, aggregate revisions, subscriptions, and idempotent receipts survive snapshot restart", async () => {
@@ -605,6 +621,15 @@ test("W4-04 privacy: export/delete covers reports, flags, subscriptions, notes, 
   assert.equal(exportBefore.status, 200);
   assert.equal(exportBefore.body.data.place_status_reports.length, 1);
   assert.equal(exportBefore.body.data.place_status_subscriptions.length, 1);
+  for (const actor of [flagger, moderator]) {
+    const actorExport = app.placeStatus.exportUserData(actor.user.id);
+    assert.equal(actorExport.place_status_report_flags.length, 1);
+    const exportedFlag = actorExport.place_status_report_flags[0];
+    assert.equal(Object.hasOwn(exportedFlag, "flagger_cloud_user_id"), false);
+    assert.equal(Object.hasOwn(exportedFlag, "reviewer_cloud_user_id"), false);
+    assert.ok(!JSON.stringify(exportedFlag).includes(flagger.user.id), "flag export must not expose the other flagger account id");
+    assert.ok(!JSON.stringify(exportedFlag).includes(moderator.user.id), "flag export must not expose the other reviewer account id");
+  }
 
   const deleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: author.auth });
   assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
@@ -633,4 +658,218 @@ test("W4-04 privacy: export/delete covers reports, flags, subscriptions, notes, 
   assert.equal(queue.status, 200);
   assert.equal(queue.body.data.length, 1);
   assert.equal(Object.hasOwn(queue.body.data[0], "flagger_cloud_user_id"), false);
+});
+
+test("W4-04 TTL expiry: staggered deadlines publish ordered state transitions instead of skipping intermediate truth", async () => {
+  const app = createTestApp();
+  const alice = setupUser(app, "alice_staggered_ttl");
+  const bob = setupUser(app, "bob_staggered_ttl");
+
+  const quiet = await createReport(app, alice, {
+    state: "QUIET",
+    observed_at: new Date(BASE_NOW - 10 * 60_000).toISOString()
+  });
+  assert.equal(quiet.status, 201, JSON.stringify(quiet.body));
+  const crowded = await createReport(app, bob, {
+    state: "CROWDED",
+    observed_at: new Date(BASE_NOW - 5 * 60_000).toISOString()
+  });
+  assert.equal(crowded.status, 201, JSON.stringify(crowded.body));
+  const initial = await queryOne(app, alice, "OCCUPANCY", BASE_NOW);
+  assert.equal(initial.effective_state, "CONTESTED");
+
+  const finalView = await queryOne(app, alice, "OCCUPANCY", BASE_NOW + 26 * 60_000);
+  assert.equal(finalView.effective_state, "UNKNOWN");
+  assert.equal(finalView.unknown_reason, "ALL_EXPIRED");
+  const ttlEvents = app.store.outboxEvents
+    .filter((event) => event.event_type === "place.status.changed" && event.payload_json.trigger_type === "TTL_EXPIRED")
+    .map((event) => event.payload_json);
+  assert.equal(ttlEvents.length, 2, JSON.stringify(ttlEvents, null, 2));
+  assert.deepEqual(
+    ttlEvents.map((payload) => [payload.previous_effective_state, payload.effective_state]),
+    [["CONTESTED", "CROWDED"], ["CROWDED", "UNKNOWN"]]
+  );
+  assert.deepEqual(
+    ttlEvents.map((payload) => payload.trigger_report_id),
+    [quiet.body.data.report_id, crowded.body.data.report_id]
+  );
+  assert.equal(ttlEvents[0].expires_at, new Date(BASE_NOW + 25 * 60_000).toISOString());
+  assert.equal(ttlEvents[1].expires_at, null);
+  for (const payload of ttlEvents) {
+    assert.equal(payload.occurred_at, new Date(BASE_NOW + 26 * 60_000).toISOString(), "lazy expiry publication time is the sweep time");
+    assert.equal(payload.official_realtime_status, false);
+  }
+});
+
+test("W4-04 subscription fan-out: exact-place type filters and revoked bindings suppress new alerts", async () => {
+  const app = createTestApp();
+  const filteredSubscriber = setupUser(app, "subscriber_type_filtered");
+  const activeSubscriber = setupUser(app, "subscriber_binding_revoked");
+  const author = setupUser(app, "author_subscription_scope");
+
+  for (const [subscriber, target] of [
+    [filteredSubscriber, { type: "PLACE", place_ref: PLACE, place_types: ["facility"] }],
+    [activeSubscriber, { type: "PLACE", place_ref: PLACE }]
+  ]) {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/places/status/subscriptions",
+      headers: writeHeaders(subscriber),
+      body: { school_id: "haut", target, metrics: ["OCCUPANCY", "ACCESS"] }
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+  }
+
+  const occupancy = await createReport(app, author, {
+    metric: "OCCUPANCY",
+    state: "CROWDED",
+    observed_at: new Date(BASE_NOW - 60_000).toISOString()
+  });
+  assert.equal(occupancy.status, 201, JSON.stringify(occupancy.body));
+  const notificationsFor = (user) => Array.from(app.store.notifications.values())
+    .filter((row) => row.cloud_user_id === user.user.id && row.category === "place_status");
+  assert.equal(notificationsFor(filteredSubscriber).length, 0, "room event must not match a facility-only exact-place filter");
+  assert.equal(notificationsFor(activeSubscriber).length, 1);
+
+  const binding = Array.from(app.store.schoolBindings.values())
+    .find((row) => row.cloud_user_id === activeSubscriber.user.id && row.school_id === "haut");
+  assert.ok(binding);
+  binding.revoked_at = new Date(BASE_NOW + 60_000).toISOString();
+
+  const access = await createReport(app, author, {
+    metric: "ACCESS",
+    state: "OPEN",
+    observed_at: new Date(BASE_NOW - 60_000).toISOString()
+  });
+  assert.equal(access.status, 201, JSON.stringify(access.body));
+  assert.ok(app.store.outboxEvents.some((event) =>
+    event.event_type === "place.status.changed" && event.payload_json.metric === "ACCESS"
+  ), "test must prove an ACCESS event was emitted before asserting fan-out suppression");
+  assert.equal(notificationsFor(activeSubscriber).length, 1, "revoked school binding must stop new subscription alerts");
+  assert.equal(notificationsFor(filteredSubscriber).length, 0);
+});
+
+test("W4-04 moderation authorization: read-only security auditor may inspect but cannot exclude reports", async () => {
+  const app = createTestApp();
+  const author = setupUser(app, "author_auditor_scope");
+  const flagger = setupUser(app, "flagger_auditor_scope");
+  const auditor = setupUser(app, "security_auditor_scope");
+  app.store.setUserRoles(auditor.user.id, ["SECURITY_AUDITOR"]);
+
+  const report = await createReport(app, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  const flag = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: { reason: "INCORRECT", detail: "现场情况需要复核" }
+  });
+  assert.equal(flag.status, 201, JSON.stringify(flag.body));
+
+  const queue = await app.inject({
+    method: "GET",
+    url: "/api/v1/admin/place-report-flags?school_id=haut&status=OPEN",
+    headers: auditor.auth
+  });
+  assert.equal(queue.status, 200, JSON.stringify(queue.body));
+  assert.equal(queue.body.data.length, 1);
+
+  const review = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(auditor),
+    body: { action: "EXCLUDE_INCORRECT", review_note: "只读审计员不应能执行排除" }
+  });
+  assert.equal(review.status, 403);
+  assert.equal(review.body.error.code, "PLACE_STATUS_PERMISSION_DENIED");
+  assert.equal(app.store.placeReports.get(report.body.data.report_id).aggregation_eligible, true);
+});
+
+test("W4-04 moderation expiry attribution: overdue TTL is swept before exclusion so review does not absorb expiry", async () => {
+  const app = createTestApp();
+  const author = setupUser(app, "author_moderation_expiry");
+  const flagger = setupUser(app, "flagger_moderation_expiry");
+  const moderator = setupUser(app, "moderator_moderation_expiry", { admin: true });
+
+  const report = await createReport(app, author, {
+    state: "CROWDED",
+    observed_at: new Date(BASE_NOW - 25 * 60_000).toISOString()
+  });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  const flag = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: { reason: "INCORRECT", detail: "过期边界需要复核" }
+  });
+  assert.equal(flag.status, 201, JSON.stringify(flag.body));
+
+  const review = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(moderator),
+    body: { action: "EXCLUDE_INCORRECT", review_note: "复核时上报已经超过 TTL" },
+    nowMs: BASE_NOW + 6 * 60_000
+  });
+  assert.equal(review.status, 200, JSON.stringify(review.body));
+  assert.equal(review.body.data.status_view.effective_state, "UNKNOWN");
+
+  const changed = app.store.outboxEvents
+    .filter((event) => event.event_type === "place.status.changed")
+    .map((event) => event.payload_json);
+  const ttlEvents = changed.filter((payload) => payload.trigger_type === "TTL_EXPIRED");
+  const moderationEvents = changed.filter((payload) => payload.trigger_type === "MODERATION_REVIEW");
+  assert.equal(ttlEvents.length, 1);
+  assert.equal(ttlEvents[0].previous_effective_state, "CROWDED");
+  assert.equal(ttlEvents[0].effective_state, "UNKNOWN");
+  assert.equal(ttlEvents[0].trigger_report_id, report.body.data.report_id);
+  assert.equal(moderationEvents.length, 0, "exclusion after natural expiry must not be misattributed as the status-changing cause");
+});
+
+test("W4-04 erasure: flag detail is removed from foreign review receipt replay after flagger deletion", async () => {
+  const app = createTestApp();
+  const author = setupUser(app, "author_receipt_erasure");
+  const flagger = setupUser(app, "flagger_receipt_erasure");
+  const moderator = setupUser(app, "moderator_receipt_erasure", { admin: true });
+  const detail = "需要复核的旗标细节-7421";
+
+  const report = await createReport(app, author, { state: "CROWDED", observed_at: new Date(BASE_NOW - 60_000).toISOString() });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  const flag = await app.inject({
+    method: "POST",
+    url: "/api/v1/place-reports/" + report.body.data.report_id + "/flag",
+    headers: writeHeaders(flagger),
+    body: { reason: "OTHER", detail }
+  });
+  assert.equal(flag.status, 201, JSON.stringify(flag.body));
+  const reviewKey = nextKey("review-receipt-erasure");
+  const reviewBody = { action: "KEEP_VISIBLE", review_note: "证据不足，保留可见" };
+  const reviewed = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(moderator, reviewKey),
+    body: reviewBody
+  });
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+  assert.equal(reviewed.body.data.flag.detail, detail);
+
+  const deleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: flagger.auth });
+  assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
+  assert.equal(deleted.body.data.place_status_purged.flags_detached, 1);
+  assert.ok(
+    deleted.body.data.place_status_purged.idempotency_receipt_flag_details_redacted >= 1,
+    JSON.stringify(deleted.body.data.place_status_purged)
+  );
+
+  const replay = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/place-report-flags/" + flag.body.data.flag_id + "/review",
+    headers: writeHeaders(moderator, reviewKey),
+    body: reviewBody
+  });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.code, "REQUEST_DUPLICATE");
+  assert.equal(replay.body.data.flag.detail, null, "review receipt replay must not resurrect erased flag detail");
+  assert.equal(app.store.placeReportFlags.get(flag.body.data.flag_id).detail, null);
+  assert.ok(!JSON.stringify(Array.from(app.store.idempotencyRecords.values())).includes(detail), "no retained receipt may contain erased flag detail");
 });
