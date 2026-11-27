@@ -76,6 +76,18 @@ const EXPECTED_CT01_PLANNED_ROUTES = Object.freeze([
   { method: "DELETE", path: "/api/v1/groups/{groupId}/members/{memberId}", operationId: "removeGroupMember", auth: "bearer" }
 ]);
 
+const EXPECTED_CT02_PLANNED_ROUTES = Object.freeze([
+  { method: "PUT", path: "/api/v1/groups/{groupId}/availability/me", operationId: "replaceMyGroupAvailability", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/groups/{groupId}/availability/me", operationId: "deleteMyGroupAvailability", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/availability/query", operationId: "queryGroupAvailability", auth: "bearer" },
+  { method: "POST", path: "/api/v1/groups/{groupId}/polls", operationId: "createGroupPoll", auth: "bearer" },
+  { method: "GET", path: "/api/v1/polls/{pollId}", operationId: "getGroupPoll", auth: "bearer" },
+  { method: "POST", path: "/api/v1/polls/{pollId}/votes", operationId: "upsertGroupPollVote", auth: "bearer" },
+  { method: "POST", path: "/api/v1/polls/{pollId}/confirm", operationId: "confirmGroupPoll", auth: "bearer" }
+]);
+
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT01_PLANNED_ROUTES.length + EXPECTED_CT02_PLANNED_ROUTES.length;
+
 test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI operationIds are 100% bidirectional", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
@@ -881,7 +893,7 @@ test("Production Booking Safety & Moments Multi-Turn Chat Regression: no mock-fa
   assert.equal(m4.body.data.initiator_contact, "微信: owner_wx_99");
 });
 
-test("Contract Parity: CT-01 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
+test("Contract Parity: CT-01/CT-02 planned group contracts are explicit, countable, unique, and runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -893,8 +905,8 @@ test("Contract Parity: CT-01 planned group contracts are explicit, countable, un
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT01_PLANNED_ROUTES.length, "endpoint-inventory.yaml must declare exactly the 11 CT-01 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT01_PLANNED_ROUTES.length, "OpenAPI must declare exactly the 11 CT-01 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 18 CT-01+CT-02 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 18 CT-01+CT-02 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -909,6 +921,14 @@ test("Contract Parity: CT-01 planned group contracts are explicit, countable, un
     ct01Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
     EXPECTED_CT01_PLANNED_ROUTES,
     "CT-01 planned inventory must exactly match the approved group/invite/member route slice"
+  );
+
+  const ct02Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-02");
+  assert.equal(ct02Inventory.length, EXPECTED_CT02_PLANNED_ROUTES.length, "CT-02 inventory entries must be explicitly countable");
+  assert.deepEqual(
+    ct02Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT02_PLANNED_ROUTES,
+    "CT-02 planned inventory must exactly match the approved availability/poll route slice"
   );
 
   const coreByKey = byRouteKey(coreRegistered);
