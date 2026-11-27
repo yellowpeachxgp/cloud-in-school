@@ -6,7 +6,8 @@ import {
 export function createPluginsRoutes(ctx) {
   const {
     parcelHub,
-    pluginBroker
+    pluginBroker,
+    referencePluginLoadStatus = []
   } = ctx;
 
   return [
@@ -78,15 +79,26 @@ export function createPluginsRoutes(ctx) {
     }
   ),
 
-  route("GET", "/api/v1/features", "listHostFeatures", "public", async () => ({
-    status: 200,
-    code: "FEATURES_OK",
-    data: {
-      host_api_version: 2,
-      supported_plugin_schemas: ["dis-extension/v2", "dis-plugin/v2", "dis-campus-plugin/v1"],
-      dual_engine_booking: ["LOCAL_DEVICE", "CLOUD_HOSTED", "MANUAL_REMINDER"],
-      parcel_providers: parcelHub.listProviders()
-    }
-  }))
+  route("GET", "/api/v1/features", "listHostFeatures", "public", async () => {
+    const loadedCount = referencePluginLoadStatus.filter((plugin) => plugin.status === "LOADED").length;
+    const failedCount = referencePluginLoadStatus.filter((plugin) => plugin.status === "FAILED").length;
+    return {
+      status: 200,
+      code: "FEATURES_OK",
+      data: {
+        host_api_version: 2,
+        supported_plugin_schemas: ["dis-extension/v2", "dis-plugin/v2", "dis-campus-plugin/v1"],
+        dual_engine_booking: ["LOCAL_DEVICE", "CLOUD_HOSTED", "MANUAL_REMINDER"],
+        parcel_providers: parcelHub.listProviders(),
+        reference_plugins: {
+          status: failedCount === 0 ? "OK" : "DEGRADED",
+          expected_count: referencePluginLoadStatus.length,
+          loaded_count: loadedCount,
+          failed_count: failedCount,
+          plugins: referencePluginLoadStatus
+        }
+      }
+    };
+  })
   ];
 }
