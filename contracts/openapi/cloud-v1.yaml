@@ -2760,7 +2760,7 @@ paths:
       summary: Report one observed status for a Campus Graph place entity
       description: |
         Creates one immutable user-reported observation for one metric of a Campus Graph entity. The place reference is the W1-07 stable identity <schoolId>/<campusId>/<type>/<slug> and must be percent-encoded as one path segment. Supported entity types are campus/building/floor/room/facility/entrance/indoor_node; a classroom is represented as room.
-        Corrections are append-only: CORRECTION requires corrects_report_id and never rewrites the target. Aggregation uses the latest eligible report per reporter for the same place+metric. If effective_state changes, place.status.changed is emitted; idempotent replay never emits a duplicate. Reports remain USER_REPORTED evidence and never claim an official realtime feed. The server must apply the same PII-sensitive UGC precheck direction as other community surfaces before accepting free-text notes. Reports, flags, and subscriptions are included in the caller data export/delete coverage; public responses expose only per-school pseudonymous aliases, never cloud user UUIDs or campus login identifiers.
+        Corrections are append-only: CORRECTION requires corrects_report_id and never rewrites the target. The target must be a visible report for the same place+metric in the same school scope. A correction by the original reporter supersedes that reporter's earlier latest report; a correction by another reporter is treated as that reporter's own latest observation linked as explicit disagreement, never as an authority override. Aggregation uses the latest eligible report per reporter for the same place+metric. If effective_state changes, place.status.changed is emitted; idempotent replay never emits a duplicate. Reports remain USER_REPORTED evidence and never claim an official realtime feed. The server must apply the same PII-sensitive UGC precheck direction as other community surfaces before accepting free-text notes. Reports, flags, and subscriptions are included in the caller data export/delete coverage; public responses expose only per-school pseudonymous aliases, never cloud user UUIDs or campus login identifiers.
       parameters:
         - $ref: '#/components/parameters/PlaceRefParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -2854,7 +2854,7 @@ paths:
       summary: Query TTL-aware aggregated place status
       description: |
         Exactly one of place_refs or bbox is required. place_refs is a comma-separated list of W1-07 stable graph ids. bbox is minLat,minLng,maxLat,maxLng in WGS-84 decimal degrees and is only a coarse query filter; it must not become a stored movement trace.
-        Results are grouped by place+metric. An explicitly requested place_ref that is unknown in the school Campus Graph snapshot fails the whole request with PLACE_NOT_FOUND; bbox queries simply return an empty page when no known entity intersects the area. Expired data is UNKNOWN. Contradictory unexpired reports are never collapsed into false consensus: effective_state becomes CONTESTED and divergent_states contains every simultaneous state with counts.
+        Results are grouped by place+metric. An explicitly requested place_ref that is unknown in the school Campus Graph snapshot fails the whole request with PLACE_NOT_FOUND; bbox queries simply return an empty page when no known entity intersects the area. Current truth is evaluated from observed_at + fixed metric TTL, never from report ingestion time. Expired data is UNKNOWN. When TTL expiry recomputation changes effective_state, place.status.changed is emitted with trigger_type=TTL_EXPIRED. Contradictory unexpired reports are never collapsed into false consensus: effective_state becomes CONTESTED and divergent_states contains every simultaneous state with counts.
       parameters:
         - name: school_id
           in: query
@@ -2891,6 +2891,7 @@ paths:
             type: array
             minItems: 1
             uniqueItems: true
+            description: Optional entity type filter; omission means every supported Campus Graph entity type.
             items:
               $ref: '#/components/schemas/PlaceEntityType'
         - name: metrics
@@ -2902,6 +2903,7 @@ paths:
             type: array
             minItems: 1
             uniqueItems: true
+            description: Optional metric filter; omission means every v1 place status metric.
             items:
               $ref: '#/components/schemas/PlaceStatusMetric'
         - name: include_expired
@@ -2910,6 +2912,7 @@ paths:
           schema:
             type: boolean
             default: false
+            description: For bbox queries, include places that have only expired eligible reports as UNKNOWN rows. Explicit place_refs always return their UNKNOWN rows. Expired reports never count as current truth.
         - $ref: '#/components/parameters/CursorParam'
         - $ref: '#/components/parameters/LimitParam'
       responses:
@@ -7009,13 +7012,13 @@ components:
         observed_at:
           type: string
           format: date-time
-          description: Observation time. The server rejects future timestamps beyond a five-minute clock tolerance and implausibly old observations.
+          description: Observation time. The server rejects timestamps more than five minutes in the future or already older than the metric TTL at receipt; expires_at is observed_at + ttl_seconds, never reported_at + ttl_seconds.
         report_kind:
           $ref: '#/components/schemas/PlaceStatusReportKind'
         corrects_report_id:
           type: string
           format: uuid
-          description: Required for CORRECTION and forbidden for OBSERVATION; the target report is never rewritten.
+          description: Required for CORRECTION and forbidden for OBSERVATION. The target must be visible, in the same school scope, and for the same place+metric; it is never rewritten or treated as an authority override.
         note:
           type: string
           maxLength: 280
@@ -7110,7 +7113,7 @@ components:
         expires_at:
           type: string
           format: date-time
-          description: Server-computed expiry. Data after this instant is history, never current truth.
+          description: Server-computed exactly as observed_at + ttl_seconds. Data after this instant is history, never current truth.
         ttl_seconds:
           type: integer
           enum: [1800, 3600, 7200, 86400]
@@ -7241,12 +7244,14 @@ components:
         expires_at:
           type: [string, 'null']
           format: date-time
+          description: Latest expires_at across unexpired eligible reports in this aggregate; null when no unexpired eligible report exists. Individual state support can change earlier as each report reaches its own expiry.
         ttl_seconds:
           type: integer
           enum: [1800, 3600, 7200, 86400]
         aggregation_revision:
           type: integer
           minimum: 0
+          description: Monotonically increasing revision per school_id+place_ref+metric, starting at 0 for no data and incremented whenever an accepted report/correction, moderation eligibility decision, or TTL expiry recomputation changes the aggregation input or effective view.
         aggregation_algorithm:
           type: string
           const: LATEST_PER_REPORTER_ANY_DIVERGENCE_CONTESTED_V1

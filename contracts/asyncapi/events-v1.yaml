@@ -145,7 +145,7 @@ channels:
       message:
         $ref: '#/components/messages/RepairReviewedEvent'
   place.status.changed:
-    description: TTL-aware aggregate status for one Campus Graph place+metric changed after an accepted report/correction or moderation exclusion; payload intentionally omits free-text notes and never claims an official realtime feed.
+    description: TTL-aware aggregate status for one Campus Graph place+metric changed after an accepted report/correction, moderation exclusion, or TTL expiry recomputation; payload intentionally omits free-text notes and never claims an official realtime feed.
     publish:
       operationId: publishPlaceStatusChangedEvent
       message:
@@ -687,7 +687,7 @@ components:
       name: PlaceStatusChangedEvent
       payload:
         type: object
-        required: [event_id, event_key, event_type, occurred_at, school_id, campus_id, place_ref, place_type, metric, previous_effective_state, effective_state, aggregation_revision, active_report_count, reporter_count, expires_at, trigger_report_id, moderation_action, official_realtime_status]
+        required: [event_id, event_key, event_type, occurred_at, school_id, campus_id, place_ref, place_type, metric, previous_effective_state, effective_state, trigger_type, aggregation_revision, active_report_count, reporter_count, expires_at, trigger_report_id, moderation_action, official_realtime_status]
         properties:
           event_id:
             type: string
@@ -720,6 +720,10 @@ components:
           effective_state:
             type: string
             enum: [OPEN, CLOSED, RESTRICTED, WORKING, DEGRADED, OUT_OF_SERVICE, QUIET, MODERATE, CROWDED, FULL, SAFE, HAZARD, CONTESTED, UNKNOWN]
+          trigger_type:
+            type: string
+            enum: [REPORT_ACCEPTED, CORRECTION_ACCEPTED, MODERATION_REVIEW, TTL_EXPIRED]
+            description: Machine-readable cause of the aggregate recomputation that changed effective_state.
           aggregation_revision:
             type: integer
             minimum: 1
@@ -732,13 +736,15 @@ components:
           expires_at:
             type: [string, 'null']
             format: date-time
+            description: Latest expires_at across unexpired eligible reports after recomputation; null when no unexpired eligible report remains.
           trigger_report_id:
             type: string
             format: uuid
-            description: Report or correction whose acceptance/exclusion triggered recompute; event_key uses this stable id plus the aggregation revision.
+            description: Report or correction accepted/excluded, or a contributing report whose TTL expiry triggered recompute; event_key uses this stable id plus the aggregation revision.
           moderation_action:
             type: [string, 'null']
             enum: [KEEP_VISIBLE, EXCLUDE_INCORRECT, EXCLUDE_ABUSE, REJECT_FLAG, null]
+            description: Populated only when trigger_type=MODERATION_REVIEW; otherwise null.
           official_realtime_status:
             type: boolean
             const: false
