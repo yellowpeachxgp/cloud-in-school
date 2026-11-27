@@ -1027,7 +1027,7 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
     const externalReferenceWrite = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       userRef.auth_version = 99;
-    });
+    })();
     store._persistFaultInject = "tmp_write";
     assert.throws(
       () => store.runAtomicCommitUnit(() => {
