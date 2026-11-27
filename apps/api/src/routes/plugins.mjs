@@ -18,17 +18,25 @@ export function createPluginsRoutes(ctx) {
   })),
 
   route("POST", "/api/v1/plugins/install", "installSignedPlugin", "bearer", async ({ auth, body }) => {
+    if (Object.prototype.hasOwnProperty.call(body || {}, "public_key_base64")) {
+      // Trust is host configuration, never client input. Even an administrator
+      // cannot smuggle a replacement publisher key through the install route.
+      throw new ContractError(
+        "BAD_REQUEST",
+        "public_key_base64 is not accepted on plugin install; configure the publisher trust root on the host"
+      );
+    }
     if (body?.manifest) {
       const canOverridePublicKey =
         Array.isArray(auth?.roles) &&
         (auth.roles.includes("PLATFORM_OWNER") || auth.roles.includes("ADMIN"));
-      // W6-01a trust-root rule: production accepts only configured publisher
-      // trust roots. Admin roles never bypass that root; the broker performs
-      // the authoritative fail-closed check for every caller.
+      // W6-01a trust-root rule: production accepts only the explicit
+      // publisher-id → public-key trust root configured on the host. Admin
+      // roles never bypass that root; the broker performs the authoritative
+      // fail-closed check for every caller.
       pluginBroker.registerPluginPackage({
         manifest: body.manifest,
         artifactMap: body.artifact_map || body.artifact_payloads || {},
-        publicKeyBase64: body.public_key_base64 || pluginBroker.publicKeyBase64,
         actorUserId: auth.cloudUserId,
         isAdmin: canOverridePublicKey
       });

@@ -1,5 +1,4 @@
 import path from "node:path";
-import fs from "node:fs";
 import {
   REPO_ROOT,
   ContractError,
@@ -61,6 +60,26 @@ const DEFAULT_REFERENCE_PLUGIN_SOURCES = Object.freeze([
   }
 ]);
 
+// Host-configured trust for the bundled signed examples. The public key is
+// pinned to the publisher id here in host configuration; it is never read
+// from the plugin package or accepted from an install request.
+const DEFAULT_REFERENCE_PLUGIN_TRUST_ROOT = Object.freeze({
+  "dis-official-examples-2026": "MCowBQYDK2VwAyEArHKa2jgA8ALyo4xS8gB7jJs8HNS9LJy670FXblTj8XA="
+});
+
+function trustRootWithReferenceEntries(optionValue) {
+  const defaults = Object.entries(DEFAULT_REFERENCE_PLUGIN_TRUST_ROOT);
+  if (optionValue === null || optionValue === undefined || optionValue === "") return defaults;
+  if (optionValue instanceof Map) return [...defaults, ...optionValue.entries()];
+  if (Array.isArray(optionValue)) return [...defaults, ...optionValue];
+  if (typeof optionValue === "string") return [...defaults, optionValue];
+  if (typeof optionValue === "object") return [...defaults, ...Object.entries(optionValue)];
+  throw new ContractError(
+    "BAD_REQUEST",
+    "pluginTrustedPublisherKeys must be a publisher-to-public-key mapping"
+  );
+}
+
 function sanitizeReferencePluginError(error) {
   if (error?.code === "ENOENT") {
     return "required reference plugin file is missing";
@@ -77,10 +96,16 @@ function loadSignedReferencePlugins({ pluginBroker, sources, logger = console })
       if (!source?.dir) {
         throw new Error("reference plugin source directory is missing");
       }
-      const publicKeyBase64 = fs
-        .readFileSync(path.join(source.dir, "plugin-signing-public.key"), "utf8")
-        .trim();
       const loaded = loadPluginDirectory(source.dir);
+      const publisherId = loaded.manifest?.signature?.key_id;
+      const publicKeyBase64 = pluginBroker.trustedPublicKeyForPublisher(publisherId);
+      if (!publicKeyBase64) {
+        const error = new Error(
+          "reference plugin publisher '" + String(publisherId || "unknown") + "' is missing from the configured trust root"
+        );
+        error.code = "PLUGIN_REFERENCE_UNTRUSTED";
+        throw error;
+      }
       const verified = pluginBroker.registerPluginPackage({
         manifest: loaded.manifest,
         artifactMap: loaded.artifactMap,
@@ -181,7 +206,7 @@ export function createCampusCloudApp(options = {}) {
   const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker({
     store,
     environment: options.environment || process.env.NODE_ENV || "development",
-    trustedPublisherKeys: options.pluginTrustedPublisherKeys,
+    trustedPublisherKeys: trustRootWithReferenceEntries(options.pluginTrustedPublisherKeys),
     allowUnlistedPublishers: options.pluginAllowUnlistedPublishers,
     failureThreshold: options.pluginFailureThreshold
   });

@@ -285,7 +285,10 @@ test("W6-01b AC-42 cloud: pack zip installs through the running host with zero h
   JSON.parse(runCliOutofProcess(["pack", dir, "--out", zipOut], home));
 
   const unpacked = unpackPluginPackage(fs.readFileSync(zipOut));
-  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const app = createCampusCloudApp({
+    requireAdminAccess: false,
+    pluginTrustedPublisherKeys: { "dis-plugin-root-2026": unpacked.publicKeyBase64 }
+  });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "w601b_pack_installer",
@@ -304,8 +307,7 @@ test("W6-01b AC-42 cloud: pack zip installs through the running host with zero h
     headers,
     body: {
       manifest: unpacked.manifest,
-      artifact_map: artifactMap,
-      public_key_base64: unpacked.publicKeyBase64
+      artifact_map: artifactMap
     }
   });
   assert.equal(installRes.status, 201, JSON.stringify(installRes.body));

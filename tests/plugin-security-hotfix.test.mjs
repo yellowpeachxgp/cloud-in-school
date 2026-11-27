@@ -17,6 +17,16 @@ function createUserSession(app, subject) {
   };
 }
 
+function trustedPluginAppOptions(keyPair, extra = {}) {
+  return {
+    requireAdminAccess: false,
+    ...extra,
+    pluginTrustedPublisherKeys: {
+      "dis-plugin-root-2026": keyPair.publicKeyBase64
+    }
+  };
+}
+
 function signedTestPlugin({ keyPair, version, permissions }) {
   const artifact = `export async function execute(ctx) {\n  return { version: \"${version}\", payload: ctx.payload };\n}\n`;
   const artifactMap = { "dist/index.mjs": artifact };
@@ -65,8 +75,7 @@ async function installSignedFixture(app, headers, fixture, publicKeyBase64) {
     headers,
     body: {
       manifest: fixture.manifest,
-      artifact_map: { "dist/index.mjs": fixture.artifact },
-      public_key_base64: publicKeyBase64
+      artifact_map: { "dist/index.mjs": fixture.artifact }
     }
   });
 }
@@ -90,9 +99,9 @@ async function invokePing(app, headers) {
 }
 
 test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, and rollback shrinks grants", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers, user } = createUserSession(app, "plugin_permission_hotfix_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers, user } = createUserSession(app, "plugin_permission_hotfix_user");
   const v1Permissions = ["ui.slot.render"];
   const v2Permissions = [
     "ui.slot.render",
@@ -170,9 +179,9 @@ test("AC-11/AC-12: upgrade permission deltas require review, stay fail-closed, a
 });
 
 test("S1 edge: disable/enable pauses and resumes review without activating the upgrade", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "plugin_permission_pause_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "plugin_permission_pause_user");
   const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions: ["ui.slot.render"] });
   const v2 = signedTestPlugin({
     keyPair,
@@ -215,9 +224,9 @@ test("S1 edge: disable/enable pauses and resumes review without activating the u
 });
 
 test("W6-HOTFIX regression: pre-disabled upgrade cannot invoke until the two-step enable confirmation", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "plugin_permission_pre_disabled_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "plugin_permission_pre_disabled_user");
   const v1Permissions = ["ui.slot.render"];
   const v2Permissions = ["ui.slot.render", "network.request"];
   const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions: v1Permissions });
@@ -285,9 +294,9 @@ test("W6-HOTFIX regression: pre-disabled upgrade cannot invoke until the two-ste
 });
 
 test("W6-HOTFIX regression: pre-disabled reinstall or same-permission upgrade stays disabled", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "plugin_permission_disabled_reinstall_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "plugin_permission_disabled_reinstall_user");
   const permissions = ["ui.slot.render"];
   const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions });
   const v101 = signedTestPlugin({ keyPair, version: "1.0.1", permissions });
@@ -339,9 +348,9 @@ test("W6-HOTFIX regression: pre-disabled reinstall or same-permission upgrade st
 });
 
 test("W6-HOTFIX regression: pre-disabled rollback stays disabled until explicit enable", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "plugin_permission_disabled_rollback_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "plugin_permission_disabled_rollback_user");
   const permissions = ["ui.slot.render"];
   const v1 = signedTestPlugin({ keyPair, version: "1.0.0", permissions });
   const v2 = signedTestPlugin({ keyPair, version: "1.1.0", permissions });

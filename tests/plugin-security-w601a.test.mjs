@@ -31,7 +31,8 @@ function signedPlugin({
   pluginId = "org.example.w601a-security",
   version = "1.0.0",
   permissions = ["ui.slot.render", "network.request", "storage.scoped"],
-  command = null
+  command = null,
+  keyId = "dis-plugin-root-2026"
 }) {
   const artifact = "signed declarative data for " + version + "\n";
   const artifactMap = { "dist/data.txt": artifact };
@@ -69,8 +70,19 @@ function signedPlugin({
     manifest: buildSignedPluginManifest({
       manifestDraft: draft,
       artifactMap,
-      privateKeyBase64: keyPair.privateKeyBase64
+      privateKeyBase64: keyPair.privateKeyBase64,
+      keyId
     })
+  };
+}
+
+function trustedPluginAppOptions(keyPair, extra = {}) {
+  return {
+    requireAdminAccess: false,
+    ...extra,
+    pluginTrustedPublisherKeys: {
+      "dis-plugin-root-2026": keyPair.publicKeyBase64
+    }
   };
 }
 
@@ -82,7 +94,6 @@ async function installFixture(app, headers, fixture, publicKeyBase64, schoolId =
     body: {
       manifest: fixture.manifest,
       artifact_map: { "dist/data.txt": fixture.artifact },
-      public_key_base64: publicKeyBase64,
       ...(schoolId ? { school_id: schoolId } : {})
     }
   });
@@ -98,9 +109,9 @@ async function invokeFixture(app, headers, pluginId, body = {}) {
 }
 
 test("AC-13: revoking one permission takes effect immediately for network-bound commands", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "w601a_revoke_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "w601a_revoke_user");
   const fixture = signedPlugin({ keyPair });
   const install = await installFixture(app, headers, fixture, keyPair.publicKeyBase64);
   assert.equal(install.status, 201);
@@ -128,10 +139,10 @@ test("AC-13: revoking one permission takes effect immediately for network-bound 
 });
 
 test("AC-14: installations are isolated by cloud user and school scope", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
   const userA = createUserSession(app, "w601a_scope_user_a");
   const userB = createUserSession(app, "w601a_scope_user_b");
-  const keyPair = generateEd25519KeyPair();
   const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-scope" });
   const install = await installFixture(app, userA.headers, fixture, keyPair.publicKeyBase64, "schoolx");
   assert.equal(install.status, 201);
@@ -158,19 +169,17 @@ test("AC-15: package versions, installations, grants, and key pins survive an ap
     const snapshotPath = path.join(tmpDir, "snapshot.json");
     const keyPair = generateEd25519KeyPair();
     const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-restart" });
-    const app1 = createCampusCloudApp({
-      requireAdminAccess: false,
+    const app1 = createCampusCloudApp(trustedPluginAppOptions(keyPair, {
       storeOptions: { snapshotPath, requireDurableSnapshot: true }
-    });
+    }));
     const { user, headers } = createUserSession(app1, "w601a_restart_user");
     const install = await installFixture(app1, headers, fixture, keyPair.publicKeyBase64);
     assert.equal(install.status, 201);
     app1.store.flushSnapshotStrictSync();
 
-    const app2 = createCampusCloudApp({
-      requireAdminAccess: false,
+    const app2 = createCampusCloudApp(trustedPluginAppOptions(keyPair, {
       storeOptions: { snapshotPath, requireDurableSnapshot: true }
-    });
+    }));
     const found = app2.pluginBroker._findInstallation(user.id, "org.example.w601a-restart", "haut");
     assert.ok(found, "installation must be restored from the durable snapshot");
     assert.equal(found.installation.active_version, "1.0.0");
@@ -204,7 +213,7 @@ test("AC-16: broker carries no private key and production rejects unlisted publi
   const untrusted = generateEd25519KeyPair();
   const productionBroker = new PluginRegistryAndBroker({
     environment: "production",
-    trustedPublisherKeys: [keyPair.publicKeyBase64]
+    trustedPublisherKeys: { "dis-plugin-root-2026": keyPair.publicKeyBase64 }
   });
   assert.equal(Object.keys(productionBroker).some((key) => /private.*key/i.test(key)), false);
   assert.equal("privateKeyBase64" in productionBroker, false);
@@ -236,10 +245,96 @@ test("AC-16: broker carries no private key and production rejects unlisted publi
   assert.equal(accepted.plugin_id, "org.example.w601a-untrusted");
 });
 
-test("AC-17: third-party commands are declarative, never echo payloads, and reject unsupported or out-of-origin targets", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { headers } = createUserSession(app, "w601a_command_user");
+test("W6-01a trust root: install route rejects client-supplied public keys", async () => {
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "w601a_route_key_user", ["ADMIN"]);
+  const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-route-key" });
+  const rejected = await app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/install",
+    headers,
+    body: {
+      manifest: fixture.manifest,
+      artifact_map: { "dist/data.txt": fixture.artifact },
+      public_key_base64: keyPair.publicKeyBase64
+    }
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.error.code, "BAD_REQUEST");
+  assert.equal(
+    app.pluginBroker.listAvailablePlugins().some((plugin) => plugin.plugin_id === "org.example.w601a-route-key"),
+    false,
+    "a rejected client-supplied key must not register the package"
+  );
+});
+
+test("W6-01a trust root: explicit publisher mapping rejects host-reference and key-confusion bypasses", () => {
+  const keyA = generateEd25519KeyPair();
+  const keyB = generateEd25519KeyPair();
+  const outsider = generateEd25519KeyPair();
+  const broker = new PluginRegistryAndBroker({
+    environment: "production",
+    trustedPublisherKeys: {
+      "publisher-a": keyA.publicKeyBase64,
+      "publisher-b": keyB.publicKeyBase64
+    }
+  });
+  assert.equal(broker.trustedPublicKeyForPublisher("publisher-a"), keyA.publicKeyBase64);
+  assert.equal(broker.trustedPublicKeyForPublisher("missing"), null);
+
+  const configuredFromText = new PluginRegistryAndBroker({
+    environment: "production",
+    trustedPublisherKeys: JSON.stringify({ "publisher-a": keyA.publicKeyBase64 })
+  });
+  assert.equal(configuredFromText.trustedPublicKeyForPublisher("publisher-a"), keyA.publicKeyBase64);
+
+  const valid = signedPlugin({
+    keyPair: keyA,
+    pluginId: "org.example.w601a-trusted-a",
+    keyId: "publisher-a"
+  });
+  const accepted = broker.registerPluginPackage({
+    manifest: valid.manifest,
+    artifactMap: valid.artifactMap,
+    actorUserId: "publisher-user-a"
+  });
+  assert.equal(accepted.plugin_id, "org.example.w601a-trusted-a");
+
+  const confused = JSON.parse(JSON.stringify(valid.manifest));
+  confused.signature.key_id = "publisher-b";
+  assert.throws(
+    () => broker.registerPluginPackage({
+      manifest: confused,
+      artifactMap: valid.artifactMap,
+      actorUserId: "attacker"
+    }),
+    (error) => error?.code === "PLUGIN_SIGNATURE_INVALID",
+    "a package signed by publisher-a must not verify under publisher-b's trust-root entry"
+  );
+
+  const hostReferenceForgery = signedPlugin({
+    keyPair: outsider,
+    pluginId: "org.example.w601a-host-reference-forgery",
+    keyId: "publisher-outside"
+  });
+  assert.throws(
+    () => broker.registerPluginPackage({
+      manifest: hostReferenceForgery.manifest,
+      artifactMap: hostReferenceForgery.artifactMap,
+      publicKeyBase64: outsider.publicKeyBase64,
+      actorUserId: "attacker",
+      isHostReference: true
+    }),
+    (error) => error?.code === "PLUGIN_SIGNATURE_INVALID",
+    "isHostReference must not bypass the configured publisher trust root"
+  );
+});
+
+test("AC-17: third-party commands are declarative, never echo payloads, and reject unsupported or out-of-origin targets", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { headers } = createUserSession(app, "w601a_command_user");
 
   const unsupported = signedPlugin({
     keyPair,
@@ -352,9 +447,9 @@ test("AC-18: consecutive failures auto-disable only the failing plugin and admin
 });
 
 test("AC-19: uninstall removes grants, scoped storage, and cache before any reinstall", async () => {
-  const app = createCampusCloudApp({ requireAdminAccess: false });
-  const { user, headers } = createUserSession(app, "w601a_uninstall_user");
   const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const { user, headers } = createUserSession(app, "w601a_uninstall_user");
   const fixture = signedPlugin({ keyPair, pluginId: "org.example.w601a-uninstall" });
   assert.equal((await installFixture(app, headers, fixture, keyPair.publicKeyBase64)).status, 201);
   const installation = app.pluginBroker._findInstallation(user.id, "org.example.w601a-uninstall")?.installation;

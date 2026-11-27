@@ -359,12 +359,91 @@ function createMemoryPluginStore() {
   return store;
 }
 
-function parseTrustedPublisherKeys(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
-  if (typeof value === "string" && value.trim()) {
-    return value.split(/[,\n\r\t ]+/).map((item) => item.trim()).filter(Boolean);
+function assertTrustedPublisherKeyMaterial(publisherId, publicKeyBase64) {
+  if (typeof publisherId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(publisherId)) {
+    throw new ContractError(
+      "BAD_REQUEST",
+      "Plugin trust root publisher ids must be explicit stable key_id strings"
+    );
   }
-  return [];
+  try {
+    const key = crypto.createPublicKey({
+      key: Buffer.from(String(publicKeyBase64 || ""), "base64"),
+      format: "der",
+      type: "spki"
+    });
+    if (key.asymmetricKeyType !== "ed25519") throw new Error("not-ed25519");
+  } catch {
+    throw new ContractError(
+      "BAD_REQUEST",
+      "Plugin trust root for publisher '" + publisherId + "' is not an Ed25519 SPKI public key"
+    );
+  }
+}
+
+function parseTrustedPublisherEntry(entry) {
+  if (Array.isArray(entry) && entry.length === 2) {
+    return [String(entry[0] || "").trim(), String(entry[1] || "").trim()];
+  }
+  if (entry && typeof entry === "object") {
+    return [
+      String(entry.publisher_id || entry.publisherId || entry.key_id || "").trim(),
+      String(entry.public_key_base64 || entry.publicKeyBase64 || "").trim()
+    ];
+  }
+  const text = String(entry || "").trim();
+  const separator = text.indexOf("=");
+  if (separator <= 0) {
+    throw new ContractError(
+      "BAD_REQUEST",
+      "Plugin trust root entries must use explicit publisher=public-key mappings"
+    );
+  }
+  return [text.slice(0, separator).trim(), text.slice(separator + 1).trim()];
+}
+
+function trustedPublisherEntriesFromString(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("{")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (error) {
+      throw new ContractError(
+        "BAD_REQUEST",
+        "Plugin trust root JSON mapping is invalid: " + (error?.message || String(error))
+      );
+    }
+    return Object.entries(parsed || {});
+  }
+  return trimmed.split(/[,\n\r\t ]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseTrustedPublisherKeyMap(value) {
+  let entries = [];
+  if (value instanceof Map) {
+    entries = [...value.entries()];
+  } else if (Array.isArray(value)) {
+    entries = value.flatMap((item) => typeof item === "string" ? trustedPublisherEntriesFromString(item) : [item]);
+  } else if (typeof value === "string") {
+    entries = trustedPublisherEntriesFromString(value);
+  } else if (value && typeof value === "object") {
+    entries = Object.entries(value);
+  }
+  const result = new Map();
+  for (const entry of entries) {
+    const [publisherId, publicKeyBase64] = parseTrustedPublisherEntry(entry);
+    assertTrustedPublisherKeyMaterial(publisherId, publicKeyBase64);
+    if (result.has(publisherId) && result.get(publisherId) !== publicKeyBase64) {
+      throw new ContractError(
+        "BAD_REQUEST",
+        "Plugin trust root contains conflicting keys for publisher '" + publisherId + "'"
+      );
+    }
+    result.set(publisherId, publicKeyBase64);
+  }
+  return result;
 }
 
 function ownerIdOfInstallation(installation) {
@@ -485,13 +564,16 @@ export class PluginRegistryAndBroker {
     } = options;
     this.hostApiVersion = hostApiVersion;
     this.environment = environment;
-    this.trustedPublisherKeys = new Set(
-      parseTrustedPublisherKeys(
-        trustedPublisherKeys ?? process.env.PLUGIN_TRUSTED_PUBLISHER_KEYS ?? ""
-      )
+    this.trustedPublisherKeyById = parseTrustedPublisherKeyMap(
+      trustedPublisherKeys ?? process.env.PLUGIN_TRUSTED_PUBLISHER_KEYS ?? ""
     );
-    if (publicKeyBase64) this.trustedPublisherKeys.add(publicKeyBase64);
-    this.publicKeyBase64 = publicKeyBase64 || Array.from(this.trustedPublisherKeys)[0] || null;
+    // Kept only as a read-only compatibility view of trusted key material. Trust
+    // decisions are always keyed by publisher id, never by an unscoped key set.
+    this.trustedPublisherKeys = new Set(this.trustedPublisherKeyById.values());
+    // A constructor public key is only a non-production direct-registration
+    // fallback. It is never a trust-root entry and never becomes an HTTP input.
+    this.publisherKeyFallbackBase64 = publicKeyBase64;
+    this.publicKeyBase64 = null;
     this.allowUnlistedPublishers = allowUnlistedPublishers !== null
       ? Boolean(allowUnlistedPublishers)
       : this.environment !== "production";
@@ -561,6 +643,26 @@ export class PluginRegistryAndBroker {
       const pluginId = pkg?.plugin_id || pkg?.manifest?.plugin_id;
       const version = pkg?.version || pkg?.manifest?.version;
       if (!pluginId || !version) continue;
+      const publisherId = publisherIdForManifest(pkg?.manifest || {});
+      try {
+        // Snapshot contents are durable data, not proof of trust. Re-resolve the
+        // publisher through the current configured root and re-verify the stored
+        // signed payload before making a restored version installable.
+        const verificationKey = this._publisherKeyForRegistration(
+          publisherId,
+          pkg.public_key_base64 || null
+        );
+        verifySignedPluginPackage({
+          manifest: pkg.manifest,
+          artifactMap: artifactMapForVerification(pkg.artifactMap || {}),
+          publicKeyBase64: verificationKey,
+          hostApiVersion: this.hostApiVersion
+        });
+      } catch {
+        // Revoked, re-keyed, or tampered packages fail closed: they remain in the
+        // durable snapshot for audit/forensics but receive no runtime index.
+        continue;
+      }
       const list = this.versionsByPlugin.get(pluginId) || [];
       if (!list.includes(version)) list.push(version);
       this.versionsByPlugin.set(pluginId, list);
@@ -572,6 +674,51 @@ export class PluginRegistryAndBroker {
         this.ownerUserByPlugin.set(pluginId, pkg.registered_by_cloud_user_id);
       }
     }
+  }
+
+  trustedPublicKeyForPublisher(publisherId) {
+    return this.trustedPublisherKeyById.get(String(publisherId || "")) || null;
+  }
+
+  _publisherKeyForRegistration(publisherId, suppliedPublicKeyBase64 = null) {
+    const normalizedPublisherId = String(publisherId || "").trim();
+    const trustedKey = this.trustedPublicKeyForPublisher(normalizedPublisherId);
+    const pinnedKey = this.pluginPublishers.get(normalizedPublisherId)?.public_key_base64 || null;
+    if (trustedKey) {
+      if (pinnedKey && pinnedKey !== trustedKey) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "Configured publisher trust root conflicts with the pinned publisher key"
+        );
+      }
+      if (suppliedPublicKeyBase64 && suppliedPublicKeyBase64 !== trustedKey) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "Supplied publisher key does not match the configured trust root"
+        );
+      }
+      return trustedKey;
+    }
+    if (!this.allowUnlistedPublishers) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Plugin publisher '" + normalizedPublisherId + "' is not in the configured trust root"
+      );
+    }
+    if (pinnedKey) {
+      if (suppliedPublicKeyBase64 && suppliedPublicKeyBase64 !== pinnedKey) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "Plugin publisher key_id is pinned to a different public key"
+        );
+      }
+      return pinnedKey;
+    }
+    if (suppliedPublicKeyBase64) return suppliedPublicKeyBase64;
+    throw new ContractError(
+      "PLUGIN_SIGNATURE_INVALID",
+      "No trusted public key is configured for publisher '" + normalizedPublisherId + "'"
+    );
   }
 
   _runtimeState(pluginId) {
@@ -687,32 +834,29 @@ export class PluginRegistryAndBroker {
     return null;
   }
 
-  _assertPublisherAllowed(publicKeyBase64, isHostReference) {
-    if (isHostReference) return;
-    if (this.trustedPublisherKeys.has(publicKeyBase64)) return;
-    if (this.allowUnlistedPublishers) return;
-    throw new ContractError(
-      "PLUGIN_SIGNATURE_INVALID",
-      "Plugin publisher public key is not in the configured trust root"
-    );
-  }
-
   registerPluginPackage({
     manifest,
     artifactMap = {},
     commandHandlers = {},
-    publicKeyBase64 = this.publicKeyBase64,
+    publicKeyBase64 = null,
     actorUserId = null,
     isAdmin = false,
     isHostReference = false
   }) {
-    if (!publicKeyBase64) {
-      throw new ContractError("PLUGIN_SIGNATURE_INVALID", "No plugin publisher public key configured");
-    }
-    this._assertPublisherAllowed(publicKeyBase64, isHostReference);
+    const schemaValidatedManifest = validatePluginManifest(manifest, {
+      hostApiVersion: this.hostApiVersion
+    });
+    const publisherId = publisherIdForManifest(schemaValidatedManifest);
+    // isHostReference intentionally has no trust bypass: host examples and
+    // third-party packages use the same publisher-id keyed trust decision.
+    void isHostReference;
+    publicKeyBase64 = this._publisherKeyForRegistration(
+      publisherId,
+      publicKeyBase64 || this.publisherKeyFallbackBase64 || null
+    );
     const persistedArtifacts = normalizeArtifactMapForPersistence(artifactMap);
     const verified = verifySignedPluginPackage({
-      manifest,
+      manifest: schemaValidatedManifest,
       artifactMap: artifactMapForVerification(persistedArtifacts),
       publicKeyBase64,
       hostApiVersion: this.hostApiVersion
@@ -720,7 +864,6 @@ export class PluginRegistryAndBroker {
     const pluginId = verified.plugin_id;
     const version = verified.version;
     const key = pluginPackageKey(pluginId, version);
-    const publisherId = publisherIdForManifest(verified);
 
     const existingPublisher = this.pluginPublishers.get(publisherId);
     if (existingPublisher && existingPublisher.public_key_base64 !== publicKeyBase64) {
