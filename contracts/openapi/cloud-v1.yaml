@@ -8132,8 +8132,10 @@ components:
           enum: [ENABLE, DISABLE, REVOKE_PERMISSION, ROLLBACK, UNINSTALL]
         target_version:
           $ref: '#/components/schemas/PluginVersion'
+          description: Optional explicit rollback target for action=ROLLBACK; when omitted, the installation previous_version is used. Other actions do not consume this field.
         permission:
           $ref: '#/components/schemas/PluginPermissionId'
+          description: Permission grant to revoke for action=REVOKE_PERMISSION; it must be declared by the active plugin version.
         scope:
           type: string
           enum: [installation, global]
@@ -8148,6 +8150,32 @@ components:
         reason:
           type: string
           description: Optional audit reason for revocation, uninstall, or administrative kill-switch isolation.
+      allOf:
+        - if:
+            properties:
+              action:
+                const: REVOKE_PERMISSION
+            required: [action]
+          then:
+            required: [permission]
+        - if:
+            properties:
+              scope:
+                const: global
+            required: [scope]
+          then:
+            properties:
+              action:
+                const: DISABLE
+        - if:
+            properties:
+              admin_kill_switch:
+                const: true
+            required: [admin_kill_switch]
+          then:
+            properties:
+              action:
+                const: DISABLE
     PluginInstallation:
       type: object
       additionalProperties: false
