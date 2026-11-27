@@ -214,8 +214,9 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       const indent = (raw.match(/^ */) || [""])[0].length;
       if (indent <= parentIndent) break;
       const text = raw.slice(indent).trimEnd();
+      const startsQuoted = text.startsWith("'") || text.startsWith("\"");
       const content = stripPlainScalarComment(text);
-      if (/:(?:\s|$)/.test(content)) {
+      if ((startsQuoted && parseMappingKey(text)) || /:(?:\s|$)/.test(content)) {
         errors.push(label + ":" + (index + 1) + ": mapping syntax cannot appear inside a plain-scalar continuation");
       }
       index += 1;
@@ -462,6 +463,14 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   assert(
     malformedContinuationControl.errors.length > 0,
     "duplicate-key scanner must reject mapping syntax inside plain-scalar continuations"
+  );
+  const malformedQuotedContinuationControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: first line\n    \"Retry #1\": manual\n  sibling: true\n",
+    "malformed-quoted-continuation-control.yaml"
+  );
+  assert(
+    malformedQuotedContinuationControl.errors.length > 0,
+    "duplicate-key scanner must reject quoted mapping syntax inside plain-scalar continuations"
   );
   const mergeKeyControl = analyzeYamlDuplicateKeys(
     "root:\n  <<: *base\n",
