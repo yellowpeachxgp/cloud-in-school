@@ -3270,7 +3270,6 @@ paths:
       responses:
         '501':
           $ref: '#/components/responses/NotImplemented'
-  /api/v1/posts/{postId}:
     delete:
       operationId: deletePost
       x-dis-status: reserved

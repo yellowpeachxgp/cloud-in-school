@@ -36,8 +36,313 @@ assert(fs.existsSync(inventoryPath), "contracts/endpoints/endpoint-inventory.yam
 const openApiText = fs.readFileSync(openApiPath, "utf8");
 assert(openApiText.startsWith("openapi: 3.1.2"), "OpenAPI version must be >= 3.1.2");
 
+assertYamlDuplicateKeyScannerSelfTest();
+const contractYamlFiles = collectYamlFiles(path.join(rootDir, "contracts"));
+assert(contractYamlFiles.length >= 5, "Expected at least 5 YAML files under contracts/");
+for (const yamlFile of contractYamlFiles) {
+  const displayPath = path.relative(rootDir, yamlFile).split(path.sep).join("/");
+  assertNoDuplicateYamlMappingKeys(fs.readFileSync(yamlFile, "utf8"), displayPath);
+}
+
 function yamlScalar(value) {
   return String(value || "").trim().replace(/^['"]/, "").replace(/['"]$/, "");
+}
+
+// YAML duplicate keys are fail-closed contract defects: strict YAML parsers may silently
+// keep only the later mapping entry in looser consumers. The contract repositories use a
+// stable block-style YAML subset, so this dependency-free structural scanner validates
+// sibling keys while respecting sequence-item boundaries and block scalar content.
+function analyzeYamlDuplicateKeys(yamlText, label) {
+  const lines = yamlText.split(/\r?\n/);
+  const duplicates = [];
+  const errors = [];
+
+  function lineInfo(index) {
+    const raw = lines[index];
+    if (!raw || /^\s*$/.test(raw)) return null;
+    if (raw.includes("\t")) {
+      errors.push(label + ":" + (index + 1) + ": tab indentation is unsupported in contract YAML");
+    }
+    const indent = (raw.match(/^ */) || [""])[0].length;
+    const text = raw.slice(indent).trimEnd();
+    if (!text || text.startsWith("#")) return null;
+    return { index, indent, text, line: index + 1 };
+  }
+
+  function nextInfo(index) {
+    for (let cursor = index; cursor < lines.length; cursor += 1) {
+      const info = lineInfo(cursor);
+      if (info) return info;
+    }
+    return null;
+  }
+
+  function stripYamlComment(text) {
+    let quote = null;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (char === quote) {
+          if (quote === "'" && text[index + 1] === "'") index += 1;
+          else quote = null;
+        } else if (char === "\\" && quote === "\"") {
+          index += 1;
+        }
+        continue;
+      }
+      if (char === "'" || char === "\"") {
+        quote = char;
+        continue;
+      }
+      if (char === "#" && (index === 0 || /\s/.test(text[index - 1]))) {
+        return text.slice(0, index).trimEnd();
+      }
+    }
+    return text.trim();
+  }
+
+  function parseSequenceItem(info) {
+    if (info.text === "-") return { body: "", separatorLength: 0 };
+    const match = info.text.match(/^-( +)(.*)$/);
+    if (!match) return null;
+    return { body: match[2], separatorLength: match[1].length };
+  }
+
+  function parseMappingKey(text) {
+    let quote = null;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (char === quote) {
+          if (quote === "'" && text[index + 1] === "'") index += 1;
+          else quote = null;
+        } else if (char === "\\" && quote === "\"") {
+          index += 1;
+        }
+        continue;
+      }
+      if ((char === "'" || char === "\"") && index === 0) {
+        quote = char;
+        continue;
+      }
+      if (char !== ":") continue;
+      if (index + 1 < text.length && !/\s/.test(text[index + 1])) continue;
+      const rawKey = text.slice(0, index).trim();
+      if (!rawKey) return null;
+      let key = rawKey;
+      if ((rawKey.startsWith("'") && rawKey.endsWith("'")) || (rawKey.startsWith("\"") && rawKey.endsWith("\""))) {
+        key = rawKey.slice(1, -1);
+        if (rawKey.startsWith("'")) key = key.replace(/''/g, "'");
+      }
+      return { key, value: stripYamlComment(text.slice(index + 1)) };
+    }
+    return null;
+  }
+
+  function isBlockScalarValue(value) {
+    return /^[|>][+-]?(?:\d+)?(?:\s*(?:#.*)?)?$/.test(value);
+  }
+
+  function containsFlowMappingStart(value) {
+    let quote = null;
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+      if (quote) {
+        if (char === quote) {
+          if (quote === "'" && value[index + 1] === "'") index += 1;
+          else quote = null;
+        } else if (char === "\\" && quote === "\"") {
+          index += 1;
+        }
+        continue;
+      }
+      if (char === "'" || char === "\"") {
+        quote = char;
+        continue;
+      }
+      if (char !== "{") continue;
+      let previous = index - 1;
+      while (previous >= 0 && /\s/.test(value[previous])) previous -= 1;
+      if (previous < 0 || value[previous] === "[" || value[previous] === "," || value[previous] === ":") return true;
+    }
+    return false;
+  }
+
+  function skipBlockScalar(startIndex, parentIndent) {
+    let index = startIndex + 1;
+    while (index < lines.length) {
+      const raw = lines[index];
+      if (!raw || /^\s*$/.test(raw)) {
+        index += 1;
+        continue;
+      }
+      const indent = (raw.match(/^ */) || [""])[0].length;
+      if (indent <= parentIndent) break;
+      index += 1;
+    }
+    return index;
+  }
+
+  function registerKey(keys, key, line) {
+    if (keys.has(key)) {
+      duplicates.push(label + ":" + line + ": duplicate mapping key " + JSON.stringify(key) + " (first at line " + keys.get(key) + ")");
+    } else {
+      keys.set(key, line);
+    }
+  }
+
+  function consumeValue(lineIndex, keyIndent, value) {
+    if (containsFlowMappingStart(value)) {
+      errors.push(label + ":" + (lineIndex + 1) + ": unsupported flow mapping in contract block YAML; duplicate keys cannot be proven absent");
+    }
+    if (isBlockScalarValue(value)) return skipBlockScalar(lineIndex, keyIndent);
+    if (value === "") {
+      const next = nextInfo(lineIndex + 1);
+      if (next && next.indent > keyIndent) return parseBlock(next.index, next.indent);
+    }
+    return lineIndex + 1;
+  }
+
+  function parseMapping(startIndex, indent, initialKeys = new Map()) {
+    const keys = initialKeys;
+    let index = startIndex;
+    while (index < lines.length) {
+      const info = nextInfo(index);
+      if (!info) return lines.length;
+      index = info.index;
+      if (info.indent < indent) return index;
+      if (info.indent > indent) {
+        errors.push(label + ":" + info.line + ": unsupported indentation " + info.indent + "; expected mapping key at indent " + indent);
+        index += 1;
+        continue;
+      }
+      if (parseSequenceItem(info)) return index;
+      const parsed = parseMappingKey(info.text);
+      if (!parsed) {
+        errors.push(label + ":" + info.line + ": unsupported non-mapping YAML line in mapping context");
+        index += 1;
+        continue;
+      }
+      registerKey(keys, parsed.key, info.line);
+      index = consumeValue(index, indent, parsed.value);
+    }
+    return index;
+  }
+
+  function parseSequence(startIndex, indent) {
+    let index = startIndex;
+    while (index < lines.length) {
+      const info = nextInfo(index);
+      if (!info) return lines.length;
+      index = info.index;
+      if (info.indent < indent) return index;
+      if (info.indent > indent) {
+        errors.push(label + ":" + info.line + ": unsupported indentation " + info.indent + "; expected sequence item at indent " + indent);
+        index += 1;
+        continue;
+      }
+      const item = parseSequenceItem(info);
+      if (!item) return index;
+      if (item.body === "") {
+        const next = nextInfo(index + 1);
+        if (next && next.indent > indent) index = parseBlock(next.index, next.indent);
+        else index += 1;
+        continue;
+      }
+      if (isBlockScalarValue(item.body)) {
+        index = skipBlockScalar(index, indent);
+        continue;
+      }
+      const parsedInlineKey = parseMappingKey(item.body);
+      if (parsedInlineKey) {
+        const mapIndent = indent + 1 + item.separatorLength;
+        const keys = new Map();
+        registerKey(keys, parsedInlineKey.key, info.line);
+        const afterInlineValue = consumeValue(index, mapIndent, parsedInlineKey.value);
+        index = parseMapping(afterInlineValue, mapIndent, keys);
+        continue;
+      }
+      index += 1;
+    }
+    return index;
+  }
+
+  function parseBlock(startIndex, indent) {
+    const info = nextInfo(startIndex);
+    if (!info) return lines.length;
+    if (info.indent !== indent) {
+      errors.push(label + ":" + info.line + ": inconsistent block indentation " + info.indent + "; expected " + indent);
+      return info.index + 1;
+    }
+    return parseSequenceItem(info) ? parseSequence(info.index, indent) : parseMapping(info.index, indent);
+  }
+
+  let cursor = 0;
+  while (cursor < lines.length) {
+    const info = nextInfo(cursor);
+    if (!info) break;
+    const nextCursor = parseBlock(info.index, info.indent);
+    if (nextCursor <= cursor) {
+      errors.push(label + ":" + info.line + ": duplicate-key scanner made no progress");
+      break;
+    }
+    cursor = nextCursor;
+  }
+  return { duplicates, errors };
+}
+
+function assertYamlDuplicateKeyScannerSelfTest() {
+  const negative = analyzeYamlDuplicateKeys(
+    "paths:\n  /a:\n    get: first\n  /a:\n    delete: second\n",
+    "negative-duplicate-path.yaml"
+  );
+  assert(
+    negative.errors.length === 0 && negative.duplicates.length === 1 && negative.duplicates[0].includes("duplicate mapping key"),
+    "duplicate-key scanner negative self-test must catch exactly one repeated YAML path key"
+  );
+  const sequenceControl = analyzeYamlDuplicateKeys(
+    "items:\n  - method: GET\n    path: /a\n  - method: POST\n    path: /a\n",
+    "sequence-control.yaml"
+  );
+  assert(
+    sequenceControl.errors.length === 0 && sequenceControl.duplicates.length === 0,
+    "duplicate-key scanner must allow repeated keys in separate sequence items"
+  );
+  const blockScalarControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: |\n    key: text, not YAML structure\n    key: still text\n  sibling: true\n",
+    "block-scalar-control.yaml"
+  );
+  assert(
+    blockScalarControl.errors.length === 0 && blockScalarControl.duplicates.length === 0,
+    "duplicate-key scanner must ignore block scalar content"
+  );
+  const flowMappingControl = analyzeYamlDuplicateKeys(
+    "root: {key: first, key: duplicate}\n",
+    "flow-mapping-control.yaml"
+  );
+  assert(
+    flowMappingControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on unsupported flow mappings"
+  );
+}
+
+function assertNoDuplicateYamlMappingKeys(yamlText, label) {
+  const result = analyzeYamlDuplicateKeys(yamlText, label);
+  const problems = [...result.errors, ...result.duplicates];
+  assert(
+    problems.length === 0,
+    "Duplicate-key/strict YAML scan failed for " + label + ": " + problems.slice(0, 5).join(" | ")
+  );
+}
+
+function collectYamlFiles(directory) {
+  const out = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) out.push(...collectYamlFiles(fullPath));
+    else if (entry.isFile() && /\.ya?ml$/.test(entry.name)) out.push(fullPath);
+  }
+  return out.sort();
 }
 
 function parseComponentParameters(lines) {
@@ -387,5 +692,5 @@ for (const file of schemaFiles) {
 }
 
 console.log(
-  `[CONTRACT-CI PASS] Verified SYSTEM_CONTRACT.md, ${openApiPartitions.active.length} active + ${openApiPartitions.planned.length} planned + ${openApiPartitions.reserved.length} reserved OpenAPI 3.1.2 operations (100% lifecycle inventory parity), and ${schemaFiles.length} JSON Schema 2020-12 files.`
+  `[CONTRACT-CI PASS] Verified SYSTEM_CONTRACT.md, strict duplicate-key scan across ${contractYamlFiles.length} YAML files, ${openApiPartitions.active.length} active + ${openApiPartitions.planned.length} planned + ${openApiPartitions.reserved.length} reserved OpenAPI 3.1.2 operations (100% lifecycle inventory parity), and ${schemaFiles.length} JSON Schema 2020-12 files.`
 );
