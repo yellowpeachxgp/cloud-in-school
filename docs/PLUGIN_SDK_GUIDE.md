@@ -1,7 +1,7 @@
 # Day in School Plugin SDK Guide (`dis-extension/v2`)
 
-> 状态：W6-00 运行时规范事实源。本文只描述**当前两端实际实现**的 snake_case
-> `dis-extension/v2`，不把尚未完成的契约面或插件能力写成已实现。
+> 状态：W6-00 运行时规范事实源 + W6-01b 开发者工具事实源。本文只描述**当前两端实际实现**的 snake_case
+> `dis-extension/v2` 与 `dis-plugin` CLI 的真实行为，不把尚未完成的契约面或插件能力写成已实现。
 >
 > **契约边界（必须读懂）**：CT-01 当前独占两仓 `contracts/**`。因此
 > `contracts/schemas/plugin-extension-v2.schema.json`、
@@ -23,6 +23,7 @@
    示例命令的可调用行为由宿主内置 reference handler 提供，不是从插件产物动态调用。
 4. 当前第三方 declarative command 的云端 broker 仍有遗留回显语义；它是兼容行为，不代表插件代码已被执行。
    `open_host_route / open_url / show_data` 的严格声明式命令类型属于 W6-01a，不在本切片宣称完成。
+   `simulate` 复用同一个真实 broker，因此本地看到的命令输出就是这个回显语义的真实样子。
 5. 不支持远程 Dex、任意脚本热加载、反射宿主私有实现、共享校园登录凭据或财务密钥。
 
 ## 2. 清单字段表（运行时 snake_case）
@@ -150,64 +151,151 @@ CT-02/CT-03 上述端点在契约中均为 `planned`；登记授权语义不表�
 
 ## 6. CLI（`dis-plugin`）
 
-```bash
-# 1. 生成一个已签名的示例插件目录
-npx dis-plugin init ./my-campus-plugin --id org.example.my-campus-plugin
-
-# 2. 校验运行时 Schema、权限、6 个槽位和产物路径
-npx dis-plugin validate ./my-campus-plugin
-
-# 3. 重新计算 entry_artifacts 的 SHA-256 并签名
-npx dis-plugin sign ./my-campus-plugin
-
-# 4. 验证 Ed25519 签名和产物摘要
-npx dis-plugin verify ./my-campus-plugin
-```
+CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm install` 任何第三方包。所有命令的成功输出是 stdout 的一行 JSON（`--pretty` 可缩进）；失败输出是 stderr 的一行 JSON，含 `code`，以及适用时的 `runtime_validation_code`（见 §9），退出码非 0。
 
 命令矩阵：
 
 | 命令 | 行为 |
 |---|---|
-| `init` | 生成 `dist/index.mjs`、公钥/私钥和已签名 `manifest.json` |
-| `validate` | 只做清单结构与语义校验，不验证签名 |
-| `sign` | 重新计算摘要并写入签名 |
-| `package` | 当前是 `sign` 的别名；ZIP 打包属于 W6-01b |
-| `verify` | 验证签名、摘要和安全路径 |
-| `test` | 当前是 `verify` 的别名；离线 simulate 属于 W6-01b |
+| `keygen` | 在密钥环（`$DIS_PLUGIN_HOME/keys`，缺省 `~/.dis-plugin/keys`）生成 Ed25519 发布者密钥对；私钥权限 0600；拒绝静默覆盖，`--force` 才会换钥 |
+| `init` | 按模板生成插件工程：`--template card\|service\|datapack\|legacy`（缺省 `legacy`）；`--keyring` 时使用/创建密钥环密钥，私钥不进入工程目录 |
+| `validate` | 清单结构与语义校验（目录或 pack zip），不验证签名 |
+| `sign` | 重新计算 `entry_artifacts` 摘要并签名；读取产物前先做安全路径检查 |
+| `pack` | 先完整验签验摘要，再产出确定性 ZIP（见 §7）；`package` 是它的别名 |
+| `verify` | 验证 Ed25519 签名、产物摘要与 ZIP 结构（目录或 pack zip）；`test` 是它的别名 |
+| `simulate` | 离线模拟宿主：输出 6 个槽位的描述符、声明式命令执行结果和 Mock 学校上下文（见 §8） |
+| `doctor` | 发布前复合诊断：Schema、语义、host 兼容、产物、签名、密钥卫生、pack 就绪（见 §8） |
 
-**密钥卫生警告**：当前 `init` 会把 `plugin-signing-private.key` 写在插件目录中。绝对不要提交、上传或分享该文件；如果只需要公开发布插件，提交的是 `manifest.json`、产物和 `plugin-signing-public.key`。CLI 把私钥迁出插件目录并生成 `.gitignore` 是 W6-01a/AC-24 的明确待办，本指南不把现状描述为安全终态。
+密钥解析顺序（`sign/pack/verify/simulate/doctor` 共用）：
 
-## 7. 内置示例与加载可观测性
+1. 显式 `--key` / `--pub` 路径；
+2. 密钥环 `<keys>/<plugin-id>.private.key` / `.public.key`；
+3. 从已解析到的私钥数学推导公钥；
+4. 工程内 legacy `plugin-signing-private.key` / `plugin-signing-public.key`（兼容行为）；
+5. pack zip 内嵌的 `plugin-signing-public.key`（仅 zip 输入；自声明性质，信任决定仍属宿主钉扎/信任根）。
+
+**密钥卫生警告**：不带 `--keyring` 的 `init` 保持 W6-00 兼容行为，会把 `plugin-signing-private.key` 写在插件目录中。绝对不要提交、上传或分享该文件；`init` 现在会同时生成覆盖该文件的 `.gitignore`。正式发布请使用 `keygen` + `init --keyring` 流程。CLI 把私钥默认迁出插件目录是 W6-01a/AC-24 的明确待办，本指南不把现状描述为安全终态。
+
+### 6.1 三种 init 模板
+
+| 模板 | 槽位 | 命令 | 产物 | 用途 |
+|---|---|---|---|---|
+| `card` | `home.cards` | `showCardData` | `dist/index.mjs` + `assets/card-data.json` | 首页声明式卡片，内容以签名数据随包发布 |
+| `service` | `campus.services` | `openService` | `dist/index.mjs` | 校园服务入口，声明一个 HTTPS `allowed_origins` 占位 |
+| `datapack` | `campus.services` | `queryDataset` | `dist/index.mjs` + `assets/dataset.json` | 签名数据包：数据集作为产物被签名与核验 |
+| `legacy` | `campus.services` | `ping` | `dist/index.mjs` | W6-00 兼容脚手架（缺省模板），权限含保留项 `storage.scoped` |
+
+三种模板各自的最小脚手架命令：
+
+```bash
+dis-plugin init ./my-card --id org.example.my-card --template card --keyring
+dis-plugin init ./my-service --id org.example.my-service --template service --keyring
+dis-plugin init ./my-datapack --id org.example.my-datapack --template datapack --keyring
+```
+
+模板数据全部标注 `SIMULATED_TEMPLATE_DATA`；真实数据包必须按 SYSTEM_CONTRACT 为每条数据给出 `sources` 与核验状态，不得把示例数据当真实学校数据发布。
+
+## 7. pack ZIP 格式（传输格式事实源）
+
+`dis-plugin pack` 产出的 ZIP 是插件的**传输格式**，不是信任决定：宿主是否接受仍取决于签名钉扎与发布者信任根。
+
+1. 条目封闭集：`manifest.json`（磁盘上的原始字节）+ 可选 `plugin-signing-public.key` + 清单声明的全部产物；出现任何其他条目即拒绝。
+2. 确定性：条目按路径排序、deflate（不可压缩时回退 store）、DOS 时间戳固定 1980-01-01，同内容两次打包字节完全相同。
+3. 解包安全（云端 `readPluginPackageZip` 与 Android 包管线对齐）：拒绝 zip-slip / 绝对路径 / 反斜杠 / NUL / 重复条目（含大小写不敏感）/ 加密条目 / ZIP64 / 多盘；只支持 store 与 deflate；以中央目录为准并校验本地头文件名一致；逐条校验 CRC-32 与解压后长度；上限为 512 条目、单文件 4 MiB、解压总量 16 MiB。**zip bomb 防护是限量解压**：声明值在解压前先做上限预检，解压本身也带着「声明解压长度」的硬输出上限进行，输出字节数边解压边计数、超限立即中止拒绝——即使中央目录谎报小尺寸，攻击者控制的 deflate 流也不会先被完整解压进内存（回归证据：128 MiB 炸弹的解压中止时 RSS 增量只有几 MiB）。store 条目的压缩/解压两个长度字段必须相等，否则在复制前拒绝。
+4. `unpackPluginPackage` 额外强制：清单严格解析 + 运行时校验 + 逐产物 SHA-256 比对，任一失败即拒绝整个包。
+
+## 8. simulate 与 doctor
+
+`simulate` 是离线模拟宿主，**不做任何网络访问**：它把通过验签的包注册进内存中的真实运行时 broker，为模拟用户安装，然后输出：
+
+- `slots`：6 个运行时槽位每个槽位解析出的描述符数组（没有贡献就是空数组）；
+- `commands`：每条声明式命令的执行记录（`executed / output` 或 `error / error_code`）；
+- `installation`：模拟安装状态与授权集合；
+- `mock_school_context`：标注 `SIMULATED_HOST_MOCK` 的示例学校上下文，**不是真实学校数据**，默认作为命令 payload 传入（`--payload '<json>'` 可覆盖，`--origin` 可模拟出站 origin 探测）。
+
+清单、签名或摘要任何一项无效都会以非 0 退出并打印错误码；这就是「故意引入错误时退出码非 0」的验收行为。
+
+`doctor` 输出稳定 check id 的逐项诊断：`manifest.parse`、`manifest.schema`、`manifest.semantics`、`host_api.compatibility`、`artifacts.present`、`artifacts.digest`、`signature.structure`、`signature.verify`、`hygiene.private_key`、`hygiene.gitignore`、`pack.readiness`。任一 FAIL 退出码非 0；WARN（例如 legacy 私钥在工程目录内）不影响退出码。
+
+## 9. 错误码速查
+
+云端 `ContractError.detail.runtime_validation_code` 与 Android `PackageException.runtimeValidationCode` 使用同一组运行时分类，便于两端夹具测试比较结论；它们不是 contracts error-catalog 的新契约错误码。
+
+| 分类 | 含义 | 常见触发 |
+|---|---|---|
+| `runtime_schema_invalid` | 缺必填字段、类型错误、未知字段或一般取值非法 | 手改清单后少写字段、数字写成 `1.0` |
+| `runtime_format_unsupported` | `schema_version` 不是 `dis-extension/v2` 或兼容别名 | 照抄了契约面 camelCase 草稿 |
+| `runtime_host_api_range_invalid` | `min_host_api > max_host_api` | 手误 |
+| `runtime_host_api_out_of_range` | 当前 host API 不在声明区间内 | 区间忘记包含 2 |
+| `runtime_permission_unknown` | 权限不在权限目录 | 声明了 `group.*` 用户态权限或拼写错误 |
+| `runtime_origin_invalid` | origin 不是无路径 HTTPS origin | `http:` 或带了路径 |
+| `runtime_slot_unknown` | 槽位不在六个运行时槽位内 | 用了契约面草稿里的 14 槽位 |
+| `runtime_path_unsafe` | Zip-Slip、绝对路径、盘符、NUL 或过严 `..` 规则命中 | 产物路径含 `../` |
+| `runtime_digest_invalid` | SHA-256 不是 64 位小写 hex | 手填摘要 |
+| `runtime_signature_invalid` | 签名对象结构非法 | 拷贝时破坏了 base64 |
+
+CLI/宿主层错误码：
+
+| 错误码 | 含义 |
+|---|---|
+| `PLUGIN_SIGNATURE_INVALID` | 验签失败、摘要不匹配、ZIP 结构/CRC/封闭集违规 |
+| `PLUGIN_PERMISSION_DENIED` | 命令所需权限未授予、未声明 origin 出站 |
+| `BAD_REQUEST` | 命令未声明、回滚无目标、keygen 覆盖未加 `--force` 等 |
+| `CLI_ERROR` / `CLI_USAGE` | 参数错误或文件缺失等 CLI 层失败 |
+
+## 10. 从零到上架（zero-to-publish 教程）
+
+> 前置：Node ≥ 22；克隆本仓库即可，CLI 零第三方依赖，不需要 `npm install`。
+> 下文 `dis-plugin` 指 `node packages/plugin-sdk/bin/dis-plugin.mjs`（或 `npm exec dis-plugin`）。
+> 本教程的每一步都在验收测试 `tests/plugin-developer-tools.test.mjs` 的 AC-43 用例中原样执行。
+
+```bash
+# 1. 生成发布者密钥对（私钥留在密钥环，0600，永不进入工程）
+dis-plugin keygen --id org.example.tutorial-card
+
+# 2. 用 card 模板脚手架一个插件工程；--keyring 复用第 1 步的密钥
+dis-plugin init ./my-campus-card --id org.example.tutorial-card --template card --keyring
+
+# 3. 编辑 manifest.json：改 name/title，按需调整 permissions 与 allowed_origins
+#    编辑 assets/card-data.json：换成你的真实声明式数据（标注来源）
+
+# 4. 校验清单结构与语义
+dis-plugin validate ./my-campus-card
+
+# 5. 离线模拟宿主：看 6 个槽位描述符和命令执行结果
+dis-plugin simulate ./my-campus-card --pretty
+
+# 6. 发布前复合诊断（应全部 PASS；hygiene 警告要读懂）
+dis-plugin doctor ./my-campus-card
+
+# 7. 改过后重新计算摘要并签名（密钥环自动解析，无需 --key）
+dis-plugin sign ./my-campus-card
+
+# 8. 打包为确定性 ZIP（pack 前会自动再验一遍签名与摘要）
+dis-plugin pack ./my-campus-card
+
+# 9. 验证 ZIP（结构、签名、摘要、封闭集）
+dis-plugin verify ./my-campus-card/org.example.tutorial-card-1.0.0.zip
+```
+
+第 10 步「上架」：把 zip 中的 `manifest.json`、产物与公钥通过宿主公开的安装入口提交（云端 `POST /api/v1/plugins/install`，或 Android 的插件导入入口——后者属于 W6-01a/W6-02 落地范围）。**永远不要通过修改宿主源码来"注册"插件**；非官方示例插件零改宿主完成全流程是 SYSTEM_CONTRACT I.4 的强制验收。
+
+常见排错：任何一步失败都会打印一行 JSON 错误，先查 `runtime_validation_code`（§9）；`doctor` 的 `pack.readiness` 失败时按它列出的前置检查逐项修复。
+
+## 11. 内置示例与加载可观测性
 
 - `examples/hello-campus-plugin`：`campus.services` 卡片 + `greetCampus` 示例命令。
 - `examples/parcel-station-plugin`：`parcel.cards` 卡片 + `queryStationHours` 示例命令。
 - 两个示例都只提交公钥 `plugin-signing-public.key`；`dist/index.mjs` 文件头明确说明宿主只验证完整性、不执行产物代码。
 - `createCampusCloudApp()` 启动时逐个加载示例；失败会写警告日志，并由 `GET /api/v1/features` 的 `reference_plugins` 字段报告 `LOADED/FAILED`、数量、错误码和去标识化错误消息。删除公钥时应看到 `DEGRADED`，不再静默为空。
 
-## 8. 运行时验证错误分类
+## 12. 开发者最小流程（速记）
 
-云端 `ContractError.detail.runtime_validation_code` 与 Android `PackageException.runtimeValidationCode` 使用同一组运行时分类，便于两端夹具测试比较结论；它们不是 contracts error-catalog 的新契约错误码。
-
-| 分类 | 含义 |
-|---|---|
-| `runtime_schema_invalid` | 缺必填字段、类型错误、未知字段或一般取值非法 |
-| `runtime_format_unsupported` | `schema_version` 不是 `dis-extension/v2` 或兼容别名 |
-| `runtime_host_api_range_invalid` | `min_host_api > max_host_api` |
-| `runtime_host_api_out_of_range` | 当前 host API 不在声明区间内 |
-| `runtime_permission_unknown` | 权限不在权限目录 |
-| `runtime_origin_invalid` | origin 不是无路径 HTTPS origin |
-| `runtime_slot_unknown` | 槽位不在六个运行时槽位内 |
-| `runtime_path_unsafe` | Zip-Slip、绝对路径、盘符、NUL 或过严 `..` 规则命中 |
-| `runtime_digest_invalid` | SHA-256 不是 64 位小写 hex |
-| `runtime_signature_invalid` | 签名对象结构非法； cryptographic verification 另有签名验证错误 |
-
-## 9. 开发者最小流程
-
-1. `npx dis-plugin init ./my-campus-plugin --id org.example.my-campus-plugin`
-2. 修改 `manifest.json` 中的名称、槽位、命令和 `allowed_origins`。
-3. 把私钥移到安全位置或至少确认它不会进入 Git；不要复制示例公钥冒充自己的发布者身份。
-4. `npx dis-plugin sign ./my-campus-plugin --key <私钥路径>`
-5. `npx dis-plugin verify ./my-campus-plugin --pub <公钥路径>`
+1. `dis-plugin keygen --id org.example.my-campus-plugin`
+2. `dis-plugin init ./my-campus-plugin --id org.example.my-campus-plugin --template card --keyring`
+3. 修改 `manifest.json` 中的名称、槽位、命令和 `allowed_origins`。
+4. `dis-plugin sign ./my-campus-plugin`（密钥环自动解析；不要复制示例公钥冒充自己的发布者身份）
+5. `dis-plugin verify ./my-campus-plugin`
 6. 通过公开安装 API 或宿主导入入口提交签名清单与产物；不要修改宿主源码来“注册”插件。
 
 如果目标是贡献正式插件，请先阅读 `SYSTEM_CONTRACT.md`：插件不能绕过签名、权限 Broker、Account/School Scope 或学校授权；声明式卡片 + 声明式命令 + 签名数据包是首期唯一扩展形式。
