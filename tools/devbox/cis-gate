@@ -13,8 +13,8 @@ Usage: cis-gate <repository> <branch> <gate> [arguments]
 
 Repositories: day-in-school, cloud-in-school (aliases: android/day, cloud)
 Gates:
-  quick <module> [...]   run module testDebugUnitTest task(s)
-  android                run JVM/unit tests, debug lint, debug assemble
+  quick <module> [...]   run module test (pure JVM) or testDebugUnitTest (Android)
+  android                run Android unit tests, pure JVM tests, debug lint, debug assemble
   android-full           run android plus release lint/assemble
   cloud                  run npm ci, npm test, npm run contract:check
   contracts              run local contract validation and compare contracts/ with other repository main
@@ -103,6 +103,105 @@ prepare_worktree() {
   fi
 }
 
+normalize_gradle_module() {
+  local module=$1
+  case "$module" in
+    :*) ;;
+    *) module=":$module" ;;
+  esac
+  if [[ ! "$module" =~ ^:[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)*$ ]]; then
+    printf 'cis: ERROR: invalid Gradle module name: %s\n' "$module" >&2
+    return 64
+  fi
+  printf '%s\n' "$module"
+}
+
+gradle_module_dir() {
+  local module=$1 relative
+  relative=${module#:}
+  printf '%s' "$relative" | tr ':' '/'
+}
+
+discover_gradle_modules() {
+  local settings="$build_dir/settings.gradle.kts"
+  if [ ! -f "$settings" ]; then
+    printf '%s\n' 'cis: ERROR: settings.gradle.kts is missing in Android build checkout' >&2
+    return 2
+  fi
+  # Module declarations in this repository are string literals passed to include().
+  # Deduplicate while preserving settings order so coverage evidence is stable.
+  grep -oE '":([A-Za-z0-9._-]+:)*[A-Za-z0-9._-]+"' "$settings" \
+    | sed 's/^"//; s/"$//' \
+    | awk '!seen[$0]++'
+}
+
+is_pure_jvm_gradle_module() {
+  local module=$1 dir build_file
+  dir=$(gradle_module_dir "$module")
+  build_file="$build_dir/$dir/build.gradle.kts"
+  [ -f "$build_file" ] || return 1
+  if grep -Eq 'libs\.plugins\.android\.(application|library)|com\.android\.(application|library)' "$build_file"; then
+    return 1
+  fi
+  grep -Eq 'libs\.plugins\.kotlin\.jvm|org\.jetbrains\.kotlin\.jvm|kotlin\([[:space:]]*"jvm"' "$build_file"
+}
+
+is_android_gradle_module() {
+  local module=$1 dir build_file
+  dir=$(gradle_module_dir "$module")
+  build_file="$build_dir/$dir/build.gradle.kts"
+  [ -f "$build_file" ] || return 1
+  grep -Eq 'libs\.plugins\.android\.(application|library)|com\.android\.(application|library)' "$build_file"
+}
+
+classify_android_test_modules() {
+  CIS_PURE_JVM_MODULES=()
+  CIS_ANDROID_MODULES=()
+  CIS_UNCLASSIFIED_MODULES=()
+
+  local modules=()
+  local module
+  while IFS= read -r module; do
+    modules+=("$module")
+  done < <(discover_gradle_modules)
+
+  if [ "${#modules[@]}" -eq 0 ]; then
+    printf '%s\n' 'cis: ERROR: no Gradle modules discovered from settings.gradle.kts' >&2
+    return 2
+  fi
+
+  for module in "${modules[@]}"; do
+    if is_pure_jvm_gradle_module "$module"; then
+      CIS_PURE_JVM_MODULES+=("$module")
+    elif is_android_gradle_module "$module"; then
+      CIS_ANDROID_MODULES+=("$module")
+    else
+      CIS_UNCLASSIFIED_MODULES+=("$module")
+    fi
+  done
+
+  for module in "${CIS_PURE_JVM_MODULES[@]}"; do
+    printf 'CIS_ANDROID_PURE_JVM_MODULE=%s test_task=%s:test\n' "$module" "$module"
+  done
+  for module in "${CIS_ANDROID_MODULES[@]}"; do
+    printf 'CIS_ANDROID_MODULE=%s test_task=%s:testDebugUnitTest\n' "$module" "$module"
+  done
+  printf 'CIS_ANDROID_PURE_JVM_MODULE_COUNT=%s\n' "${#CIS_PURE_JVM_MODULES[@]}"
+  printf 'CIS_ANDROID_MODULE_COUNT=%s\n' "${#CIS_ANDROID_MODULES[@]}"
+
+  if [ "${#CIS_UNCLASSIFIED_MODULES[@]}" -ne 0 ]; then
+    for module in "${CIS_UNCLASSIFIED_MODULES[@]}"; do
+      printf 'cis: ERROR: unable to classify Gradle module test type: %s\n' "$module" >&2
+    done
+    printf '%s\n' 'cis: ERROR: extend the detector or module build metadata rather than silently omitting tests' >&2
+    return 2
+  fi
+  if [ "${#CIS_PURE_JVM_MODULES[@]}" -eq 0 ]; then
+    printf '%s\n' 'cis: ERROR: no pure JVM modules discovered; refusing to report Android coverage as complete' >&2
+    return 2
+  fi
+}
+
 run_optional_android_quality_gates() {
   # W0-07 owns the implementation of these checks. They are deliberately
   # discovered rather than hard-coded so the current baseline remains truthful
@@ -126,32 +225,85 @@ run_quick() {
     return 64
   fi
   local tasks=()
-  local module
-  for module in "$@"; do
-    case "$module" in
-      :*) tasks+=("$module:testDebugUnitTest") ;;
-      *) tasks+=(":$module:testDebugUnitTest") ;;
-    esac
+  local normalized_modules=()
+  local raw_module module existing task kind duplicate
+  for raw_module in "$@"; do
+    if ! module=$(normalize_gradle_module "$raw_module"); then
+      return 64
+    fi
+    duplicate=false
+    for existing in "${normalized_modules[@]}"; do
+      if [ "$existing" = "$module" ]; then
+        duplicate=true
+        break
+      fi
+    done
+    if [ "$duplicate" = true ]; then
+      printf 'CIS_QUICK_DUPLICATE_SKIPPED=%s\n' "$module"
+      continue
+    fi
+
+    if is_pure_jvm_gradle_module "$module"; then
+      kind=pure-jvm
+      task="$module:test"
+    elif is_android_gradle_module "$module"; then
+      kind=android
+      task="$module:testDebugUnitTest"
+    else
+      printf 'cis: ERROR: quick module is missing or uses an unsupported project type: %s\n' "$module" >&2
+      printf '%s\n' 'cis: ERROR: quick only supports registered Android or pure Kotlin JVM modules' >&2
+      return 2
+    fi
+
+    normalized_modules+=("$module")
+    tasks+=("$task")
+    printf 'CIS_QUICK_MODULE=%s kind=%s test_task=%s\n' "$module" "$kind" "$task"
   done
+  printf 'CIS_QUICK_MODULE_COUNT=%s\n' "${#normalized_modules[@]}"
   cd "$build_dir"
   "$SCRIPT_DIR/cis-gradle" "${tasks[@]}"
-}
-
-android_tasks() {
-  local tasks=(testDebugUnitTest :app:lintDebug :app:assembleDebug)
-  if grep -RIl --include='build.gradle.kts' -e roborazzi . >/dev/null 2>&1; then
-    tasks+=(verifyRoborazziDebug)
-  fi
-  if [ "$gate" = android-full ]; then
-    tasks+=(:app:lintRelease :app:assembleRelease)
-  fi
-  printf '%s\n' "${tasks[@]}"
 }
 
 run_android() {
   cd "$build_dir"
-  mapfile -t tasks < <(android_tasks)
-  "$SCRIPT_DIR/cis-gradle" "${tasks[@]}"
+  classify_android_test_modules || return
+
+  local android_test_tasks=()
+  local jvm_compile_tasks=()
+  local jvm_test_tasks=()
+  local module
+  for module in "${CIS_ANDROID_MODULES[@]}"; do
+    android_test_tasks+=("$module:testDebugUnitTest")
+  done
+  for module in "${CIS_PURE_JVM_MODULES[@]}"; do
+    jvm_compile_tasks+=("$module:testClasses")
+    jvm_test_tasks+=("$module:test")
+  done
+
+  # The first pass keeps the normal build cache for compilation, Android unit
+  # tests, lint, and assembly. testClasses materializes pure-JVM test compile
+  # outputs without executing the tests themselves.
+  local main_tasks=(
+    "${android_test_tasks[@]}"
+    "${jvm_compile_tasks[@]}"
+    :app:lintDebug
+    :app:assembleDebug
+  )
+  if grep -RIl --include='build.gradle.kts' -e roborazzi . >/dev/null 2>&1; then
+    main_tasks+=(verifyRoborazziDebug)
+  fi
+  if [ "$gate" = android-full ]; then
+    main_tasks+=(:app:lintRelease :app:assembleRelease)
+  fi
+  printf 'CIS_ANDROID_PRIMARY_TASK_COUNT=%s\n' "${#main_tasks[@]}"
+  "$SCRIPT_DIR/cis-gradle" "${main_tasks[@]}"
+
+  # Every gate starts from a fresh checkout and the first pass never executes
+  # pure-JVM test tasks, so their result XML/output state cannot be up-to-date.
+  # Disabling only this second pass's build cache therefore makes the visible
+  # test execution evidence real while still reusing compiled inputs.
+  printf '%s\n' 'CIS_ANDROID_PURE_JVM_EXECUTION=second-pass-no-build-cache-after-testClasses'
+  "$SCRIPT_DIR/cis-gradle" --no-build-cache "${jvm_test_tasks[@]}"
   run_optional_android_quality_gates
 }
 

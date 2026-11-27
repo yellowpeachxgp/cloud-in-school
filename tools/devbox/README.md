@@ -57,9 +57,11 @@ cis-clean --days 7
 
 | 门禁 | 当前行为 |
 |---|---|
-| `quick <模块> [...]` | 指定模块 `testDebugUnitTest` |
-| `android` | `testDebugUnitTest :app:lintDebug :app:assembleDebug`；发现 Roborazzi 后追加 `verifyRoborazziDebug`，并动态执行 W0-07 提供的检查入口 |
+| `quick <模块> [...]` | 自动识别模块类型：纯 Kotlin JVM 模块执行 `<模块>:test`，Android 模块执行 `<模块>:testDebugUnitTest`；重复传入同一模块只保留一次 |
+| `android` | 显式枚举所有已注册模块：Android 模块 `<模块>:testDebugUnitTest`，纯 JVM 模块 `<模块>:test`；另执行 `:app:lintDebug :app:assembleDebug`，发现 Roborazzi 后追加 `verifyRoborazziDebug`，并动态执行 W0-07 提供的检查入口 |
 | `android-full` | `android` 内容加 release lint/assemble；Room 迁移测试由全量单元测试覆盖 |
 | `cloud` | 有 `package-lock.json`/`npm-shrinkwrap.json` 时必须 `npm ci`；无 lockfile 且 `package.json` 所有依赖字段均为空时明确记录并跳过安装；有任何依赖却无 lockfile 时失败并要求补 lockfile。随后 `npm test && npm run contract:check`（AUTO-006 候选） |
 | `contracts` | 本仓 contract-ci + 与另一仓 `main` 的 `contracts/` 逐文件比对 |
 | `secrets` | 调用 INF-01 的 `tools/secret-scan`；未合入时明确返回缺失，不伪造通过 |
+
+Android 模块类型由 `settings.gradle.kts` 的已注册模块和各模块 `build.gradle.kts` 的插件声明静态识别；无法分类时门禁失败而不是静默漏测。`android`/`android-full` 先用常规构建缓存完成编译、`testClasses`、Android 单测、Lint 和组装，再以 `--no-build-cache` 第二段执行纯 JVM `<模块>:test`，因此日志中的 JVM 测试不是远端缓存回放。该识别不需要业务模块提供 `testDebugUnitTest` 兼容别名；新注册且使用标准 Kotlin JVM 插件声明的模块（包括后续时间线等纯 JVM 内核）会自动纳入。
