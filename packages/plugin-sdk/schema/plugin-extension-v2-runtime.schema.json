@@ -160,6 +160,23 @@
               "ui.slot.render",
               "parcel.write.import"
             ]
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "route": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "artifact_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
           }
         }
       }

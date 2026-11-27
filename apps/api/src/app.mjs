@@ -30,17 +30,17 @@ import { createCoreRoutes, createExtensionRoutes } from "./routes/index.mjs";
 
 // Host-owned reference command implementations. They preserve the documented
 // built-in example behavior without evaluating the plugin artifacts themselves.
-async function referenceGreetCampusHandler({ userId, payload }) {
+async function referenceGreetCampusHandler({ userId }) {
   return {
     greeting: `欢迎使用河南工业大学扩展卡片 (${userId})`,
-    campus: payload?.campus || "莲花街校区",
+    campus: "莲花街校区",
     timestamp: new Date().toISOString()
   };
 }
 
-async function referenceQueryStationHoursHandler({ payload }) {
+async function referenceQueryStationHoursHandler() {
   return {
-    station_name: payload?.station_name || "莲花街北苑菜鸟驿站",
+    station_name: "莲花街北苑菜鸟驿站",
     open_hours: "08:30 - 21:00",
     crowd_level: "LOW",
     supports_self_pickup: true
@@ -84,7 +84,8 @@ function loadSignedReferencePlugins({ pluginBroker, sources, logger = console })
         manifest: loaded.manifest,
         artifactMap: loaded.artifactMap,
         publicKeyBase64,
-        commandHandlers: source.commandHandlers || {}
+        commandHandlers: source.commandHandlers || {},
+        isHostReference: true
       });
       statuses.push({
         plugin_id: verified.plugin_id,
@@ -175,7 +176,13 @@ export function createCampusCloudApp(options = {}) {
       );
     }
   }
-  const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker();
+  const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker({
+    store,
+    environment: options.environment || process.env.NODE_ENV || "development",
+    trustedPublisherKeys: options.pluginTrustedPublisherKeys,
+    allowUnlistedPublishers: options.pluginAllowUnlistedPublishers,
+    failureThreshold: options.pluginFailureThreshold
+  });
   const redisBuffer =
     options.redisBuffer ||
     new RedisGatewayBuffer({

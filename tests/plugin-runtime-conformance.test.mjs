@@ -137,9 +137,15 @@ test("W6-00 CLI init: generated manifest passes the transitional runtime schema 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w600-cli-init-"));
   try {
     const cliPath = path.join(REPO_ROOT, "packages/plugin-sdk/bin/dis-plugin.mjs");
-    execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.w600-runtime"], {
-      stdio: "pipe"
-    });
+    const keyHome = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w600-keys-"));
+    try {
+      execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.w600-runtime"], {
+        stdio: "pipe",
+        env: { ...process.env, DIS_PLUGIN_KEY_HOME: keyHome }
+      });
+    } finally {
+      fs.rmSync(keyHome, { recursive: true, force: true });
+    }
     const loaded = loadPluginDirectory(tmpDir);
     assert.deepEqual(validatePluginRuntimeSchema(loaded.manifest), []);
     const normalized = validatePluginManifest(loaded.manifest);

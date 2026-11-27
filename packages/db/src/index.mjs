@@ -645,8 +645,14 @@ export class CloudDatabaseStore {
     this.parcelSourceConnections = new Map(); // connectionId -> connection
     this.parcelSyncJobs = new Map(); // jobId -> sync job
 
-    // Plugins
-    this.pluginInstallations = new Map(); // `${userId}:${pluginId}` -> installation
+    // Plugins (W6-01a SQL 0011 durable model mirrored by the snapshot store)
+    this.pluginPublishers = new Map(); // publisherId -> trusted publisher/public key metadata
+    this.pluginVersions = new Map(); // `${pluginId}@${version}` -> signed immutable version record
+    this.pluginInstallations = new Map(); // `${userId}:${schoolId}:${pluginId}` -> installation
+    this.pluginPermissionGrants = new Map(); // `${installationId}:${permission}` -> grant/revocation row
+    this.pluginStorageEntries = new Map(); // `${installationId}:${namespace}:${key}` -> scoped storage row
+    this.pluginCacheEntries = new Map(); // `${installationId}:${namespace}:${key}` -> disposable cache row
+    this.pluginRuntimeStates = new Map(); // pluginId -> failure/kill-switch runtime state
 
     // Cloud-Controlled Campus Channels, Clubs & Dynamic Content
     this.campusContent = new Map();
@@ -902,7 +908,13 @@ export class CloudDatabaseStore {
       loadMap(this.parcelEvents, raw.parcelEvents);
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
       loadMap(this.parcelSyncJobs, raw.parcelSyncJobs);
+      loadMap(this.pluginPublishers, raw.pluginPublishers);
+      loadMap(this.pluginVersions, raw.pluginVersions);
       loadMap(this.pluginInstallations, raw.pluginInstallations);
+      loadMap(this.pluginPermissionGrants, raw.pluginPermissionGrants);
+      loadMap(this.pluginStorageEntries, raw.pluginStorageEntries);
+      loadMap(this.pluginCacheEntries, raw.pluginCacheEntries);
+      loadMap(this.pluginRuntimeStates, raw.pluginRuntimeStates);
       loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
       if (!this.campusContent.has("haut")) {
@@ -1144,7 +1156,13 @@ export class CloudDatabaseStore {
         parcelEvents: Array.from(this.parcelEvents.entries()),
         parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
         parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
+        pluginPublishers: Array.from(this.pluginPublishers.entries()),
+        pluginVersions: Array.from(this.pluginVersions.entries()),
         pluginInstallations: Array.from(this.pluginInstallations.entries()),
+        pluginPermissionGrants: Array.from(this.pluginPermissionGrants.entries()),
+        pluginStorageEntries: Array.from(this.pluginStorageEntries.entries()),
+        pluginCacheEntries: Array.from(this.pluginCacheEntries.entries()),
+        pluginRuntimeStates: Array.from(this.pluginRuntimeStates.entries()),
         schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
         campusContent: Array.from(this.campusContent.entries()),
         momentsState: this.momentsState,
@@ -2513,6 +2531,58 @@ export class CloudDatabaseStore {
     this.flushSnapshotStrictSync();
 
     return { cancelledJobIds };
+  }
+
+  purgeUserPluginData(cloudUserId) {
+    if (!cloudUserId) {
+      return { removed_installations: 0, removed_permission_grants: 0, removed_storage_entries: 0, removed_cache_entries: 0 };
+    }
+    const installationIds = new Set();
+    let removedInstallations = 0;
+    for (const [key, installation] of Array.from(this.pluginInstallations.entries())) {
+      const owner = installation?.cloud_user_id || installation?.user_id;
+      if (owner !== cloudUserId) continue;
+      if (installation?.installation_id) installationIds.add(installation.installation_id);
+      this.pluginInstallations.delete(key);
+      removedInstallations += 1;
+    }
+    let removedGrantRows = 0;
+    for (const [key, row] of Array.from(this.pluginPermissionGrants.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginPermissionGrants.delete(key);
+      removedGrantRows += 1;
+    }
+    let removedStorageEntries = 0;
+    for (const [key, row] of Array.from(this.pluginStorageEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginStorageEntries.delete(key);
+      removedStorageEntries += 1;
+    }
+    let removedCacheEntries = 0;
+    for (const [key, row] of Array.from(this.pluginCacheEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginCacheEntries.delete(key);
+      removedCacheEntries += 1;
+    }
+    const result = {
+      removed_installations: removedInstallations,
+      removed_permission_grants: removedGrantRows,
+      removed_storage_entries: removedStorageEntries,
+      removed_cache_entries: removedCacheEntries
+    };
+    if (removedInstallations || removedStorageEntries || removedCacheEntries) {
+      this.recordAudit({
+        actor_kind: "USER",
+        actor_ref: cloudUserId,
+        action: "PURGE_USER_PLUGIN_DATA",
+        resource_kind: "user",
+        resource_ref: cloudUserId,
+        outcome: "SUCCESS",
+        detail: result
+      });
+      this.saveSnapshot();
+    }
+    return result;
   }
 
   purgeUserMomentsData(cloudUserId, nowMs = Date.now()) {

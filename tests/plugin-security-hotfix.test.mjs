@@ -42,7 +42,9 @@ function signedTestPlugin({ keyPair, version, permissions }) {
       {
         name: "ping",
         description: "Declarative ping fixture",
-        required_permission: "ui.slot.render"
+        required_permission: "ui.slot.render",
+        type: "open_url",
+        url: "https://plugin.example.com/ping"
       }
     ]
   };

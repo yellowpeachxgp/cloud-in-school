@@ -237,6 +237,7 @@ export function createMeRoutes(ctx) {
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
     const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+    const pluginPurged = store.purgeUserPluginData?.(auth.cloudUserId) || null;
     // Plans/bindings were already halted above with the USER_DATA_DELETE audit
     // reason; only revoke sessions here (unlinkXpeach stays false).
     identity.revokeAllUserSessions(auth.cloudUserId, {
@@ -254,7 +255,8 @@ export function createMeRoutes(ctx) {
         cloud_user_id: auth.cloudUserId,
         status: "DELETED",
         cancelled_job_ids: cascade.cancelledJobIds,
-        moments_purged: momentsPurged
+        moments_purged: momentsPurged,
+        plugin_purged: pluginPurged
       }
     };
   })

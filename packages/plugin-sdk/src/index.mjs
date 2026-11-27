@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ContractError, loadPermissionCatalog, parseJsonWithNumberLiterals } from "../../contracts/src/index.mjs";
+import { ContractError, DEFAULT_SCHOOL_ID, loadPermissionCatalog, parseJsonWithNumberLiterals } from "../../contracts/src/index.mjs";
 import {
-  generateEd25519KeyPair,
+  canonicalizeJson,
   signPluginManifest,
   verifyPluginManifestSignature,
   sha256Hex
@@ -286,23 +286,413 @@ function isOperationallyEnabled(installation) {
   return installation?.status === "ENABLED" || installation?.status === "PENDING_PERMISSION_REVIEW";
 }
 
-export class PluginRegistryAndBroker {
-  constructor({ publicKeyBase64 = null, privateKeyBase64 = null, hostApiVersion = 2 } = {}) {
-    if (!publicKeyBase64 || !privateKeyBase64) {
-      const pair = generateEd25519KeyPair();
-      this.publicKeyBase64 = publicKeyBase64 || pair.publicKeyBase64;
-      this.privateKeyBase64 = privateKeyBase64 || pair.privateKeyBase64;
-    } else {
-      this.publicKeyBase64 = publicKeyBase64;
-      this.privateKeyBase64 = privateKeyBase64;
+function normalizeSchoolId(schoolId = DEFAULT_SCHOOL_ID) {
+  const normalized = String(schoolId || DEFAULT_SCHOOL_ID).trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(normalized)) {
+    throw new ContractError("BAD_REQUEST", "Invalid plugin school scope: " + normalized);
+  }
+  return normalized;
+}
+
+function pluginPackageKey(pluginId, version) {
+  return String(pluginId) + "@" + String(version);
+}
+
+function pluginInstallationKey(userId, schoolId, pluginId) {
+  return String(userId) + ":" + normalizeSchoolId(schoolId) + ":" + String(pluginId);
+}
+
+function permissionGrantKey(installationId, permission) {
+  return String(installationId) + ":" + String(permission);
+}
+
+function scopedEntryKey(installationId, namespace, key) {
+  return String(installationId) + ":" + String(namespace || "default") + ":" + String(key);
+}
+
+function normalizeArtifactMapForPersistence(artifactMap = {}) {
+  const normalized = {};
+  for (const [artifactPath, content] of Object.entries(artifactMap || {})) {
+    const safePath = assertSafeRelativeArtifactPath(artifactPath);
+    const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content ?? ""), "utf8");
+    normalized[safePath] = buffer.toString("base64");
+  }
+  return normalized;
+}
+
+function artifactMapForVerification(storedArtifactMap = {}) {
+  const result = {};
+  for (const [artifactPath, encoded] of Object.entries(storedArtifactMap || {})) {
+    result[artifactPath] = Buffer.from(String(encoded || ""), "base64");
+  }
+  return result;
+}
+
+function createMemoryPluginStore() {
+  const store = {
+    pluginPublishers: new Map(),
+    pluginVersions: new Map(),
+    pluginInstallations: new Map(),
+    pluginPermissionGrants: new Map(),
+    pluginStorageEntries: new Map(),
+    pluginCacheEntries: new Map(),
+    pluginRuntimeStates: new Map(),
+    auditEvents: [],
+    saveSnapshot() {},
+    recordAudit(entry) {
+      const audit = {
+        id: crypto.randomUUID(),
+        actor_kind: entry.actor_kind || "SYSTEM",
+        actor_ref: entry.actor_ref || "plugin-broker",
+        action: entry.action,
+        resource_kind: entry.resource_kind,
+        resource_ref: entry.resource_ref,
+        outcome: entry.outcome || "SUCCESS",
+        detail: entry.detail || null,
+        created_at: new Date().toISOString()
+      };
+      store.auditEvents.push(audit);
+      return audit;
     }
+  };
+  return store;
+}
+
+function parseTrustedPublisherKeys(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) {
+    return value.split(/[,\n\r\t ]+/).map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function ownerIdOfInstallation(installation) {
+  return installation?.cloud_user_id || installation?.user_id || null;
+}
+
+function installationResponseShape(installation) {
+  if (!installation) return installation;
+  return {
+    ...installation,
+    cloud_user_id: installation.cloud_user_id || installation.user_id,
+    user_id: installation.user_id || installation.cloud_user_id,
+    school_id: normalizeSchoolId(installation.school_id || DEFAULT_SCHOOL_ID)
+  };
+}
+
+function canonicalManifestText(manifest) {
+  try {
+    return canonicalizeJson(manifest);
+  } catch {
+    return JSON.stringify(manifest);
+  }
+}
+
+function publisherIdForManifest(manifest) {
+  return manifest?.signature?.key_id || "unknown-publisher";
+}
+
+function decodeStoredArtifactText(pkg, artifactPath) {
+  const encoded = pkg?.artifactMap?.[artifactPath];
+  if (encoded === undefined) return null;
+  return Buffer.from(String(encoded), "base64").toString("utf8");
+}
+
+const DECLARATIVE_COMMAND_TYPES = new Set(["open_host_route", "open_url", "show_data"]);
+const HOST_ROUTE_ALLOWLIST = new Set([
+  "home",
+  "campus",
+  "campus.services",
+  "library",
+  "parcel",
+  "settings",
+  "settings.plugins"
+]);
+
+function assertValidDeclarativeTarget(commandSpec, pkg) {
+  if (commandSpec.type === "open_host_route") {
+    const routeName = String(commandSpec.route || "").trim();
+    if (!HOST_ROUTE_ALLOWLIST.has(routeName)) {
+      throw new ContractError(
+        "PLUGIN_COMMAND_UNSUPPORTED",
+        "Declarative open_host_route target is not in the host route allowlist"
+      );
+    }
+    return { type: "open_host_route", route: routeName };
+  }
+  if (commandSpec.type === "open_url") {
+    const targetUrl = String(commandSpec.url || "").trim();
+    let parsed;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      throw new ContractError("PLUGIN_COMMAND_UNSUPPORTED", "Declarative open_url target is not a valid URL");
+    }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      throw new ContractError("PLUGIN_PERMISSION_DENIED", "Declarative open_url target must be a credential-free HTTPS URL");
+    }
+    const origin = parsed.origin;
+    if (!(pkg?.manifest?.allowed_origins || []).includes(origin)) {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "Origin '" + origin + "' is not in plugin's allowed_origins"
+      );
+    }
+    return { type: "open_url", url: parsed.toString(), origin };
+  }
+  if (commandSpec.type === "show_data") {
+    const artifactPath = String(commandSpec.artifact_path || "").trim();
+    if (!artifactPath) {
+      throw new ContractError("PLUGIN_COMMAND_UNSUPPORTED", "Declarative show_data command lacks artifact_path");
+    }
+    const safePath = assertSafeRelativeArtifactPath(artifactPath);
+    const declared = (pkg?.manifest?.entry_artifacts || []).some((artifact) => artifact.path === safePath);
+    if (!declared) {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "show_data artifact is not part of the signed plugin package"
+      );
+    }
+    const dataText = decodeStoredArtifactText(pkg, safePath);
+    if (dataText === null) {
+      throw new ContractError("NOT_FOUND", "Signed plugin data artifact is unavailable");
+    }
+    return { type: "show_data", artifact_path: safePath, data_text: dataText };
+  }
+  throw new ContractError(
+    "PLUGIN_COMMAND_UNSUPPORTED",
+    "Unsupported plugin command type: " + String(commandSpec.type || "missing")
+  );
+}
+
+export class PluginRegistryAndBroker {
+  constructor(options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options, "privateKeyBase64")) {
+      throw new ContractError(
+        "BAD_REQUEST",
+        "Plugin broker must not be configured with publisher private keys"
+      );
+    }
+    const {
+      publicKeyBase64 = null,
+      hostApiVersion = 2,
+      store = null,
+      environment = process.env.NODE_ENV || "development",
+      trustedPublisherKeys = null,
+      allowUnlistedPublishers = null,
+      failureThreshold = 3
+    } = options;
     this.hostApiVersion = hostApiVersion;
-    this.packages = new Map(); // `${pluginId}@${version}` -> { manifest, artifactMap, commandHandlers }
+    this.environment = environment;
+    this.trustedPublisherKeys = new Set(
+      parseTrustedPublisherKeys(
+        trustedPublisherKeys ?? process.env.PLUGIN_TRUSTED_PUBLISHER_KEYS ?? ""
+      )
+    );
+    if (publicKeyBase64) this.trustedPublisherKeys.add(publicKeyBase64);
+    this.publicKeyBase64 = publicKeyBase64 || Array.from(this.trustedPublisherKeys)[0] || null;
+    this.allowUnlistedPublishers = allowUnlistedPublishers !== null
+      ? Boolean(allowUnlistedPublishers)
+      : this.environment !== "production";
+    this.failureThreshold = Math.max(1, Number(failureThreshold || 3));
+
+    this.store = store || createMemoryPluginStore();
+    this.pluginPublishers = this.store.pluginPublishers;
+    this.packages = this.store.pluginVersions;
+    this.userInstallations = this.store.pluginInstallations;
+    this.pluginPermissionGrants = this.store.pluginPermissionGrants;
+    this.pluginStorageEntries = this.store.pluginStorageEntries;
+    this.pluginCacheEntries = this.store.pluginCacheEntries;
+    this.pluginRuntimeStates = this.store.pluginRuntimeStates;
+
+    // Volatile host-owned reference handlers only. They are intentionally not
+    // persisted and are never deserialized from plugin artifacts.
+    this.commandHandlersByPackage = new Map();
     this.latestVersionByPlugin = new Map();
     this.versionsByPlugin = new Map();
-    this.ownerKeyByPlugin = new Map(); // pluginId -> publicKeyBase64
-    this.ownerUserByPlugin = new Map(); // pluginId -> userId
-    this.userInstallations = new Map(); // `${userId}:${pluginId}` -> installation
+    this.ownerKeyByPlugin = new Map();
+    this.ownerUserByPlugin = new Map();
+
+    this._migrateLegacyInstallations();
+    this._rebuildRegistryIndexes();
+  }
+
+  _persist() {
+    this.store.saveSnapshot?.();
+  }
+
+  _audit(entry) {
+    return this.store.recordAudit?.({
+      actor_kind: "SYSTEM",
+      actor_ref: "plugin-broker",
+      outcome: "SUCCESS",
+      ...entry
+    });
+  }
+
+  _migrateLegacyInstallations() {
+    let mutated = false;
+    for (const [key, installation] of Array.from(this.userInstallations.entries())) {
+      const parts = String(key).split(":");
+      if (parts.length === 2) {
+        const userId = parts[0];
+        const pluginId = parts[1];
+        const schoolId = normalizeSchoolId(installation?.school_id || DEFAULT_SCHOOL_ID);
+        this.userInstallations.delete(key);
+        const migrated = installationResponseShape({ ...installation, school_id: schoolId });
+        this.userInstallations.set(pluginInstallationKey(userId, schoolId, pluginId), migrated);
+        mutated = true;
+      } else if (installation && !installation.school_id) {
+        installation.school_id = DEFAULT_SCHOOL_ID;
+        mutated = true;
+      }
+    }
+    if (mutated) this._persist();
+  }
+
+  _rebuildRegistryIndexes() {
+    this.latestVersionByPlugin.clear();
+    this.versionsByPlugin.clear();
+    this.ownerKeyByPlugin.clear();
+    this.ownerUserByPlugin.clear();
+    for (const [key, pkg] of this.packages.entries()) {
+      const pluginId = pkg?.plugin_id || pkg?.manifest?.plugin_id;
+      const version = pkg?.version || pkg?.manifest?.version;
+      if (!pluginId || !version) continue;
+      const list = this.versionsByPlugin.get(pluginId) || [];
+      if (!list.includes(version)) list.push(version);
+      this.versionsByPlugin.set(pluginId, list);
+      this.latestVersionByPlugin.set(pluginId, version);
+      if (pkg.public_key_base64 && !this.ownerKeyByPlugin.has(pluginId)) {
+        this.ownerKeyByPlugin.set(pluginId, pkg.public_key_base64);
+      }
+      if (pkg.registered_by_cloud_user_id && !this.ownerUserByPlugin.has(pluginId)) {
+        this.ownerUserByPlugin.set(pluginId, pkg.registered_by_cloud_user_id);
+      }
+    }
+  }
+
+  _runtimeState(pluginId) {
+    const existing = this.pluginRuntimeStates.get(pluginId);
+    if (existing) return existing;
+    return {
+      plugin_id: pluginId,
+      failure_count: 0,
+      consecutive_failure_count: 0,
+      auto_disabled: false,
+      disabled_reason: null,
+      kill_switch: false,
+      kill_switch_reason: null,
+      updated_at: new Date().toISOString()
+    };
+  }
+
+  _saveRuntimeState(state) {
+    state.updated_at = new Date().toISOString();
+    this.pluginRuntimeStates.set(state.plugin_id, state);
+    this._persist();
+    return state;
+  }
+
+  _syncPermissionGrantRows(installation) {
+    const installationId = installation.installation_id;
+    const nowIso = new Date().toISOString();
+    const active = new Set(uniquePermissionList(installation.granted_permissions));
+    for (const [key, row] of Array.from(this.pluginPermissionGrants.entries())) {
+      if (row?.installation_id !== installationId) continue;
+      if (!active.has(row.permission) && !row.revoked_at) {
+        row.revoked_at = nowIso;
+        this.pluginPermissionGrants.set(key, row);
+      }
+    }
+    for (const permission of active) {
+      const key = permissionGrantKey(installationId, permission);
+      const existing = this.pluginPermissionGrants.get(key);
+      if (!existing) {
+        this.pluginPermissionGrants.set(key, {
+          installation_id: installationId,
+          permission,
+          granted_at: nowIso,
+          revoked_at: null
+        });
+      } else if (existing.revoked_at) {
+        existing.revoked_at = null;
+        existing.granted_at = nowIso;
+        this.pluginPermissionGrants.set(key, existing);
+      }
+    }
+  }
+
+  _saveInstallation(key, installation) {
+    const shaped = installationResponseShape(installation);
+    this.userInstallations.set(key, shaped);
+    this._syncPermissionGrantRows(shaped);
+    this._persist();
+    return shaped;
+  }
+
+  _deleteInstallationData(installation) {
+    const installationId = installation.installation_id;
+    const counts = {
+      permission_grants: 0,
+      storage_entries: 0,
+      cache_entries: 0
+    };
+    for (const [key, row] of Array.from(this.pluginPermissionGrants.entries())) {
+      if (row?.installation_id === installationId) {
+        this.pluginPermissionGrants.delete(key);
+        counts.permission_grants += 1;
+      }
+    }
+    for (const [key, row] of Array.from(this.pluginStorageEntries.entries())) {
+      if (row?.installation_id === installationId) {
+        this.pluginStorageEntries.delete(key);
+        counts.storage_entries += 1;
+      }
+    }
+    for (const [key, row] of Array.from(this.pluginCacheEntries.entries())) {
+      if (row?.installation_id === installationId) {
+        this.pluginCacheEntries.delete(key);
+        counts.cache_entries += 1;
+      }
+    }
+    return counts;
+  }
+
+  _findInstallation(userId, pluginId, schoolId = null) {
+    if (schoolId) {
+      const key = pluginInstallationKey(userId, schoolId, pluginId);
+      const installation = this.userInstallations.get(key);
+      return installation ? { key, installation } : null;
+    }
+    const defaultKey = pluginInstallationKey(userId, DEFAULT_SCHOOL_ID, pluginId);
+    if (this.userInstallations.has(defaultKey)) {
+      return { key: defaultKey, installation: this.userInstallations.get(defaultKey) };
+    }
+    const matches = [];
+    for (const [key, installation] of this.userInstallations.entries()) {
+      if (ownerIdOfInstallation(installation) === userId && installation?.plugin_id === pluginId) {
+        matches.push({ key, installation });
+      }
+    }
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new ContractError(
+        "BAD_REQUEST",
+        "Plugin installation is ambiguous across school scopes; pass school_id"
+      );
+    }
+    return null;
+  }
+
+  _assertPublisherAllowed(publicKeyBase64, isHostReference) {
+    if (isHostReference) return;
+    if (this.trustedPublisherKeys.has(publicKeyBase64)) return;
+    if (this.allowUnlistedPublishers) return;
+    throw new ContractError(
+      "PLUGIN_SIGNATURE_INVALID",
+      "Plugin publisher public key is not in the configured trust root"
+    );
   }
 
   registerPluginPackage({
@@ -311,57 +701,114 @@ export class PluginRegistryAndBroker {
     commandHandlers = {},
     publicKeyBase64 = this.publicKeyBase64,
     actorUserId = null,
-    isAdmin = false
+    isAdmin = false,
+    isHostReference = false
   }) {
+    if (!publicKeyBase64) {
+      throw new ContractError("PLUGIN_SIGNATURE_INVALID", "No plugin publisher public key configured");
+    }
+    this._assertPublisherAllowed(publicKeyBase64, isHostReference);
+    const persistedArtifacts = normalizeArtifactMapForPersistence(artifactMap);
     const verified = verifySignedPluginPackage({
       manifest,
-      artifactMap,
+      artifactMap: artifactMapForVerification(persistedArtifacts),
       publicKeyBase64,
       hostApiVersion: this.hostApiVersion
     });
+    const pluginId = verified.plugin_id;
+    const version = verified.version;
+    const key = pluginPackageKey(pluginId, version);
+    const publisherId = publisherIdForManifest(verified);
 
-    const existingKey = this.ownerKeyByPlugin.get(verified.plugin_id);
+    const existingPublisher = this.pluginPublishers.get(publisherId);
+    if (existingPublisher && existingPublisher.public_key_base64 !== publicKeyBase64) {
+      throw new ContractError(
+        "PLUGIN_SIGNATURE_INVALID",
+        "Plugin publisher key_id is pinned to a different public key"
+      );
+    }
+
+    const existingKey = this.ownerKeyByPlugin.get(pluginId);
     if (existingKey && existingKey !== publicKeyBase64 && !isAdmin) {
       throw new ContractError(
         "PLUGIN_SIGNATURE_INVALID",
-        `Plugin '${verified.plugin_id}' is pinned to a different signing public key`
+        "Plugin '" + pluginId + "' is pinned to a different signing public key"
       );
     }
-    const existingOwner = this.ownerUserByPlugin.get(verified.plugin_id);
+    const existingOwner = this.ownerUserByPlugin.get(pluginId);
     if (existingOwner && actorUserId && existingOwner !== actorUserId && !isAdmin) {
       throw new ContractError(
         "FORBIDDEN",
-        `Plugin '${verified.plugin_id}' is owned by another publisher`
+        "Plugin '" + pluginId + "' is owned by another publisher"
       );
     }
-    if (!existingKey) {
-      this.ownerKeyByPlugin.set(verified.plugin_id, publicKeyBase64);
-    }
-    if (!existingOwner && actorUserId) {
-      this.ownerUserByPlugin.set(verified.plugin_id, actorUserId);
+
+    const existingPackage = this.packages.get(key);
+    if (existingPackage) {
+      if (
+        existingPackage.public_key_base64 !== publicKeyBase64 ||
+        canonicalManifestText(existingPackage.manifest) !== canonicalManifestText(verified)
+      ) {
+        throw new ContractError(
+          "CONFLICT",
+          "Signed plugin version is immutable and conflicts with the persisted version"
+        );
+      }
+      if (Object.keys(commandHandlers || {}).length > 0) {
+        this.commandHandlersByPackage.set(key, { ...commandHandlers });
+      }
+      return existingPackage.manifest;
     }
 
-    const key = `${verified.plugin_id}@${verified.version}`;
-    this.packages.set(key, {
+    if (!existingPublisher) {
+      this.pluginPublishers.set(publisherId, {
+        publisher_id: publisherId,
+        public_key_base64: publicKeyBase64,
+        owner_cloud_user_id: actorUserId || null,
+        status: "ACTIVE",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    }
+    if (!existingKey) this.ownerKeyByPlugin.set(pluginId, publicKeyBase64);
+    if (!existingOwner && actorUserId) this.ownerUserByPlugin.set(pluginId, actorUserId);
+
+    const record = {
+      plugin_id: pluginId,
+      version,
+      publisher_id: publisherId,
       manifest: verified,
-      artifactMap,
-      commandHandlers,
+      artifactMap: persistedArtifacts,
+      signature_base64: verified.signature?.value_base64 || "",
+      public_key_base64: publicKeyBase64,
+      registered_by_cloud_user_id: actorUserId || null,
       registered_at: new Date().toISOString()
-    });
-
-    const list = this.versionsByPlugin.get(verified.plugin_id) || [];
-    if (!list.includes(verified.version)) {
-      list.push(verified.version);
-      this.versionsByPlugin.set(verified.plugin_id, list);
+    };
+    this.packages.set(key, record);
+    if (Object.keys(commandHandlers || {}).length > 0) {
+      this.commandHandlersByPackage.set(key, { ...commandHandlers });
     }
-    this.latestVersionByPlugin.set(verified.plugin_id, verified.version);
+
+    const list = this.versionsByPlugin.get(pluginId) || [];
+    if (!list.includes(version)) list.push(version);
+    this.versionsByPlugin.set(pluginId, list);
+    this.latestVersionByPlugin.set(pluginId, version);
+    this._persist();
+    this._audit({
+      actor_kind: actorUserId ? "USER" : "SYSTEM",
+      actor_ref: actorUserId || "plugin-broker",
+      action: "REGISTER_PLUGIN_VERSION",
+      resource_kind: "plugin_version",
+      resource_ref: key,
+      detail: { plugin_id: pluginId, version, publisher_id: publisherId }
+    });
     return verified;
   }
 
   listAvailablePlugins() {
     const result = [];
     for (const [pluginId, latestVer] of this.latestVersionByPlugin.entries()) {
-      const pkg = this.packages.get(`${pluginId}@${latestVer}`);
+      const pkg = this.packages.get(pluginPackageKey(pluginId, latestVer));
       if (pkg) {
         result.push({
           plugin_id: pluginId,
@@ -377,17 +824,18 @@ export class PluginRegistryAndBroker {
     return result;
   }
 
-  installPluginForUser(userId, pluginId, { version = null } = {}) {
+  installPluginForUser(userId, pluginId, { version = null, schoolId = DEFAULT_SCHOOL_ID } = {}) {
+    const scopedSchoolId = normalizeSchoolId(schoolId);
     const targetVersion = version || this.latestVersionByPlugin.get(pluginId);
     if (!targetVersion) {
-      throw new ContractError("NOT_FOUND", `Plugin '${pluginId}' not found`);
+      throw new ContractError("NOT_FOUND", "Plugin '" + pluginId + "' not found");
     }
-    const pkg = this.packages.get(`${pluginId}@${targetVersion}`);
+    const pkg = this.packages.get(pluginPackageKey(pluginId, targetVersion));
     if (!pkg) {
-      throw new ContractError("NOT_FOUND", `Plugin '${pluginId}@${targetVersion}' not found`);
+      throw new ContractError("NOT_FOUND", "Plugin '" + pluginId + "@" + targetVersion + "' not found");
     }
 
-    const installKey = `${userId}:${pluginId}`;
+    const installKey = pluginInstallationKey(userId, scopedSchoolId, pluginId);
     const existing = this.userInstallations.get(installKey);
     const nowIso = new Date().toISOString();
     const targetPermissions = uniquePermissionList(pkg.manifest.permissions);
@@ -396,9 +844,11 @@ export class PluginRegistryAndBroker {
       // Initial installation is the user's explicit consent point. Upgrades are
       // treated differently below: newly declared permissions are never granted
       // silently while an older version continues to run.
-      const record = {
+      const record = installationResponseShape({
         installation_id: crypto.randomUUID(),
+        cloud_user_id: userId,
         user_id: userId,
+        school_id: scopedSchoolId,
         plugin_id: pluginId,
         active_version: targetVersion,
         previous_version: null,
@@ -408,8 +858,16 @@ export class PluginRegistryAndBroker {
         granted_permissions: targetPermissions,
         installed_at: nowIso,
         updated_at: nowIso
-      };
-      this.userInstallations.set(installKey, record);
+      });
+      this._saveInstallation(installKey, record);
+      this._audit({
+        actor_kind: "USER",
+        actor_ref: userId,
+        action: "INSTALL_PLUGIN",
+        resource_kind: "plugin_installation",
+        resource_ref: record.installation_id,
+        detail: { plugin_id: pluginId, school_id: scopedSchoolId, version: targetVersion }
+      });
       return record;
     }
 
@@ -433,8 +891,7 @@ export class PluginRegistryAndBroker {
         granted_permissions: currentGranted,
         updated_at: nowIso
       };
-      this.userInstallations.set(installKey, record);
-      return record;
+      return this._saveInstallation(installKey, record);
     }
 
     const record = {
@@ -455,24 +912,23 @@ export class PluginRegistryAndBroker {
       granted_permissions: intersectPermissionLists(currentGranted, targetPermissions),
       updated_at: nowIso
     };
-    this.userInstallations.set(installKey, record);
-    return record;
+    return this._saveInstallation(installKey, record);
   }
 
-  confirmPendingPluginPermissions(userId, pluginId) {
-    const installKey = `${userId}:${pluginId}`;
-    const inst = this.userInstallations.get(installKey);
-    if (!inst) {
-      throw new ContractError("NOT_FOUND", `Plugin '${pluginId}' is not installed for user`);
+  confirmPendingPluginPermissions(userId, pluginId, { schoolId = null } = {}) {
+    const found = this._findInstallation(userId, pluginId, schoolId);
+    if (!found) {
+      throw new ContractError("NOT_FOUND", "Plugin '" + pluginId + "' is not installed for user");
     }
+    const { key: installKey, installation: inst } = found;
     if (inst.status !== "PENDING_PERMISSION_REVIEW" || !inst.pending_version) {
-      throw new ContractError("BAD_REQUEST", `Plugin '${pluginId}' has no pending permission review`);
+      throw new ContractError("BAD_REQUEST", "Plugin '" + pluginId + "' has no pending permission review");
     }
-    const pendingPkg = this.packages.get(`${pluginId}@${inst.pending_version}`);
+    const pendingPkg = this.packages.get(pluginPackageKey(pluginId, inst.pending_version));
     if (!pendingPkg) {
       throw new ContractError(
         "BAD_REQUEST",
-        `Pending plugin version '${pluginId}@${inst.pending_version}' is no longer available`
+        "Pending plugin version '" + pluginId + "@" + inst.pending_version + "' is no longer available"
       );
     }
     const nowIso = new Date().toISOString();
@@ -490,23 +946,29 @@ export class PluginRegistryAndBroker {
       granted_permissions: targetPermissions,
       updated_at: nowIso
     };
-    this.userInstallations.set(installKey, confirmed);
-    return confirmed;
+    return this._saveInstallation(installKey, confirmed);
   }
 
-  transitionUserPlugin(userId, pluginId, { action, targetVersion = null }) {
-    const installKey = `${userId}:${pluginId}`;
-    const inst = this.userInstallations.get(installKey);
-    if (!inst) {
-      throw new ContractError("NOT_FOUND", `Plugin '${pluginId}' is not installed for user`);
+  transitionUserPlugin(userId, pluginId, {
+    action,
+    targetVersion = null,
+    permission = null,
+    schoolId = null,
+    actorIsAdmin = false,
+    reason = null
+  }) {
+    const found = this._findInstallation(userId, pluginId, schoolId);
+    if (!found) {
+      throw new ContractError("NOT_FOUND", "Plugin '" + pluginId + "' is not installed for user");
     }
-
+    const { key: installKey, installation: inst } = found;
     const nowIso = new Date().toISOString();
+
     if (action === "ENABLE") {
       // PENDING_PERMISSION_REVIEW is a distinct approval gate. In that state
       // the lifecycle ENABLE action is the explicit user confirmation.
       if (inst.status === "PENDING_PERMISSION_REVIEW") {
-        return this.confirmPendingPluginPermissions(userId, pluginId);
+        return this.confirmPendingPluginPermissions(userId, pluginId, { schoolId });
       }
       // Disabling pauses a pending review. The first ENABLE from DISABLED only
       // resumes the review state with the old version and old grant set; a
@@ -515,20 +977,44 @@ export class PluginRegistryAndBroker {
       // or discard the pending permission delta.
       inst.status = inst.pending_version ? "PENDING_PERMISSION_REVIEW" : "ENABLED";
       inst.updated_at = nowIso;
-      return inst;
+      return this._saveInstallation(installKey, inst);
     }
     if (action === "DISABLE") {
       inst.status = "DISABLED";
       inst.updated_at = nowIso;
-      return inst;
+      return this._saveInstallation(installKey, inst);
+    }
+    if (action === "REVOKE_PERMISSION") {
+      if (!permission || typeof permission !== "string") {
+        throw new ContractError("BAD_REQUEST", "REVOKE_PERMISSION requires a permission field");
+      }
+      const activePkg = this.packages.get(pluginPackageKey(pluginId, inst.active_version));
+      if (!(activePkg?.manifest?.permissions || []).includes(permission)) {
+        throw new ContractError(
+          "BAD_REQUEST",
+          "Permission '" + permission + "' is not declared by the active plugin version"
+        );
+      }
+      inst.granted_permissions = uniquePermissionList(inst.granted_permissions).filter((item) => item !== permission);
+      inst.updated_at = nowIso;
+      const saved = this._saveInstallation(installKey, inst);
+      this._audit({
+        actor_kind: actorIsAdmin ? "ADMIN" : "USER",
+        actor_ref: userId,
+        action: "REVOKE_PLUGIN_PERMISSION",
+        resource_kind: "plugin_installation",
+        resource_ref: inst.installation_id,
+        detail: { plugin_id: pluginId, permission, reason: reason || null }
+      });
+      return saved;
     }
     if (action === "ROLLBACK") {
       const rollbackVer = targetVersion || inst.previous_version;
-      const rollbackPkg = rollbackVer ? this.packages.get(`${pluginId}@${rollbackVer}`) : null;
+      const rollbackPkg = rollbackVer ? this.packages.get(pluginPackageKey(pluginId, rollbackVer)) : null;
       if (!rollbackVer || !rollbackPkg) {
         throw new ContractError(
           "BAD_REQUEST",
-          `No valid rollback version available for plugin '${pluginId}'`
+          "No valid rollback version available for plugin '" + pluginId + "'"
         );
       }
       const rollbackPermissions = uniquePermissionList(rollbackPkg.manifest.permissions);
@@ -544,25 +1030,71 @@ export class PluginRegistryAndBroker {
       // A disabled installation remains disabled until an explicit ENABLE.
       inst.status = inst.status === "DISABLED" ? "DISABLED" : "ENABLED";
       inst.updated_at = nowIso;
-      return inst;
+      return this._saveInstallation(installKey, inst);
     }
     if (action === "UNINSTALL") {
+      const cleanup = this._deleteInstallationData(inst);
       this.userInstallations.delete(installKey);
+      this._persist();
+      this._audit({
+        actor_kind: actorIsAdmin ? "ADMIN" : "USER",
+        actor_ref: userId,
+        action: "UNINSTALL_PLUGIN",
+        resource_kind: "plugin_installation",
+        resource_ref: inst.installation_id,
+        detail: {
+          plugin_id: pluginId,
+          school_id: inst.school_id,
+          cleanup,
+          reason: reason || null
+        }
+      });
       return {
         plugin_id: pluginId,
+        school_id: inst.school_id,
         status: "UNINSTALLED",
+        cleanup,
         uninstalled_at: nowIso
       };
     }
 
-    throw new ContractError("BAD_REQUEST", `Unsupported lifecycle action: ${action}`);
+    throw new ContractError("BAD_REQUEST", "Unsupported lifecycle action: " + action);
   }
 
-  getResolvedUiSlotDescriptors(userId, slotId = null) {
+  adminDisablePlugin(pluginId, { actorUserId = "admin", reason = null } = {}) {
+    const state = this._runtimeState(pluginId);
+    state.kill_switch = true;
+    state.kill_switch_reason = reason || "ADMIN_KILL_SWITCH";
+    let disabledCount = 0;
+    for (const [key, installation] of this.userInstallations.entries()) {
+      if (installation?.plugin_id !== pluginId) continue;
+      if (installation.status !== "DISABLED") {
+        installation.status = "DISABLED";
+        installation.disabled_reason = state.kill_switch_reason;
+        installation.updated_at = new Date().toISOString();
+        this.userInstallations.set(key, installation);
+        disabledCount += 1;
+      }
+    }
+    this._saveRuntimeState(state);
+    this._audit({
+      actor_kind: "ADMIN",
+      actor_ref: actorUserId,
+      action: "PLUGIN_KILL_SWITCH_DISABLE",
+      resource_kind: "plugin",
+      resource_ref: pluginId,
+      detail: { reason: state.kill_switch_reason, disabled_installations: disabledCount }
+    });
+    return { ...state, disabled_installations: disabledCount };
+  }
+
+  getResolvedUiSlotDescriptors(userId, slotId = null, { schoolId = null } = {}) {
     const descriptors = [];
     for (const inst of this.userInstallations.values()) {
-      if (inst.user_id !== userId || !isOperationallyEnabled(inst)) continue;
-      const pkg = this.packages.get(`${inst.plugin_id}@${inst.active_version}`);
+      if (ownerIdOfInstallation(inst) !== userId || !isOperationallyEnabled(inst)) continue;
+      if (schoolId && normalizeSchoolId(inst.school_id) !== normalizeSchoolId(schoolId)) continue;
+      if (this._runtimeState(inst.plugin_id).kill_switch || this._runtimeState(inst.plugin_id).auto_disabled) continue;
+      const pkg = this.packages.get(pluginPackageKey(inst.plugin_id, inst.active_version));
       if (!pkg) continue;
       if (!(inst.granted_permissions || []).includes("ui.slot.render")) continue;
 
@@ -571,6 +1103,7 @@ export class PluginRegistryAndBroker {
         descriptors.push({
           plugin_id: inst.plugin_id,
           plugin_version: inst.active_version,
+          school_id: inst.school_id,
           slot_id: slot.slot_id,
           card_id: slot.card_id,
           title: slot.title,
@@ -582,23 +1115,113 @@ export class PluginRegistryAndBroker {
     return descriptors;
   }
 
+  putPluginStorage(userId, pluginId, key, value, { schoolId = null, namespace = "default", cache = false } = {}) {
+    const found = this._findInstallation(userId, pluginId, schoolId);
+    if (!found) throw new ContractError("NOT_FOUND", "Plugin is not installed in this scope");
+    const installation = found.installation;
+    if (!cache && !(installation.granted_permissions || []).includes("storage.scoped")) {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "Plugin lacks storage.scoped permission"
+      );
+    }
+    const target = cache ? this.pluginCacheEntries : this.pluginStorageEntries;
+    const rowKey = scopedEntryKey(installation.installation_id, namespace, key);
+    const nowIso = new Date().toISOString();
+    target.set(rowKey, {
+      id: crypto.randomUUID(),
+      installation_id: installation.installation_id,
+      namespace,
+      key: String(key),
+      value,
+      created_at: target.get(rowKey)?.created_at || nowIso,
+      updated_at: nowIso
+    });
+    this._persist();
+    return target.get(rowKey);
+  }
+
+  getPluginStorage(userId, pluginId, key, { schoolId = null, namespace = "default", cache = false } = {}) {
+    const found = this._findInstallation(userId, pluginId, schoolId);
+    if (!found) return null;
+    const target = cache ? this.pluginCacheEntries : this.pluginStorageEntries;
+    return target.get(scopedEntryKey(found.installation.installation_id, namespace, key)) || null;
+  }
+
+  pluginDataCounts(installationId) {
+    const count = (map) => Array.from(map.values()).filter((row) => row?.installation_id === installationId).length;
+    return {
+      permission_grants: count(this.pluginPermissionGrants),
+      storage_entries: count(this.pluginStorageEntries),
+      cache_entries: count(this.pluginCacheEntries)
+    };
+  }
+
+  _recordCommandFailure(pluginId, error) {
+    const state = this._runtimeState(pluginId);
+    state.failure_count = Number(state.failure_count || 0) + 1;
+    state.consecutive_failure_count = Number(state.consecutive_failure_count || 0) + 1;
+    let autoDisabledNow = false;
+    if (state.consecutive_failure_count >= this.failureThreshold && !state.auto_disabled) {
+      state.auto_disabled = true;
+      state.disabled_reason = "CONSECUTIVE_COMMAND_FAILURES:" + (error?.code || error?.name || "UNKNOWN");
+      autoDisabledNow = true;
+      for (const [key, installation] of this.userInstallations.entries()) {
+        if (installation?.plugin_id !== pluginId) continue;
+        installation.status = "DISABLED";
+        installation.disabled_reason = state.disabled_reason;
+        installation.updated_at = new Date().toISOString();
+        this.userInstallations.set(key, installation);
+      }
+    }
+    this._saveRuntimeState(state);
+    if (autoDisabledNow) {
+      this._audit({
+        action: "PLUGIN_AUTO_DISABLED",
+        resource_kind: "plugin",
+        resource_ref: pluginId,
+        outcome: "FAIL_CLOSED",
+        detail: {
+          consecutive_failure_count: state.consecutive_failure_count,
+          reason: state.disabled_reason
+        }
+      });
+    }
+    return state;
+  }
+
+  _recordCommandSuccess(pluginId) {
+    const state = this._runtimeState(pluginId);
+    if (state.consecutive_failure_count === 0) return;
+    state.consecutive_failure_count = 0;
+    this._saveRuntimeState(state);
+  }
+
   async invokePluginCommand({
     userId,
     pluginId,
     commandName,
     payload = {},
-    requestedOrigin = null
+    requestedOrigin = null,
+    schoolId = null
   }) {
-    const installKey = `${userId}:${pluginId}`;
-    const inst = this.userInstallations.get(installKey);
+    const found = this._findInstallation(userId, pluginId, schoolId);
+    const inst = found?.installation;
     if (!inst || !isOperationallyEnabled(inst)) {
       throw new ContractError(
         "PLUGIN_PERMISSION_DENIED",
-        `Plugin '${pluginId}' is not installed and enabled for user`
+        "Plugin '" + pluginId + "' is not installed and enabled for user"
+      );
+    }
+    const runtimeState = this._runtimeState(pluginId);
+    if (runtimeState.kill_switch || runtimeState.auto_disabled) {
+      throw new ContractError(
+        "PLUGIN_PERMISSION_DENIED",
+        "Plugin '" + pluginId + "' is disabled by runtime isolation"
       );
     }
 
-    const pkg = this.packages.get(`${pluginId}@${inst.active_version}`);
+    const pkg = this.packages.get(pluginPackageKey(pluginId, inst.active_version));
     if (!pkg) {
       throw new ContractError("NOT_FOUND", "Active plugin package missing");
     }
@@ -607,7 +1230,7 @@ export class PluginRegistryAndBroker {
     if (!cmdSpec) {
       throw new ContractError(
         "BAD_REQUEST",
-        `Command '${commandName}' is not declared in plugin manifest`
+        "Command '" + commandName + "' is not declared in plugin manifest"
       );
     }
 
@@ -617,7 +1240,22 @@ export class PluginRegistryAndBroker {
     ) {
       throw new ContractError(
         "PLUGIN_PERMISSION_DENIED",
-        `Plugin '${pluginId}' lacks permission '${cmdSpec.required_permission}'`
+        "Plugin '" + pluginId + "' lacks permission '" + cmdSpec.required_permission + "'"
+      );
+    }
+
+    const commandHandlers = this.commandHandlersByPackage.get(pluginPackageKey(pluginId, inst.active_version)) || {};
+    const handler = commandHandlers[commandName];
+    if (cmdSpec.type && !DECLARATIVE_COMMAND_TYPES.has(cmdSpec.type)) {
+      throw new ContractError(
+        "PLUGIN_COMMAND_UNSUPPORTED",
+        "Unsupported plugin command type: " + String(cmdSpec.type)
+      );
+    }
+    if (!cmdSpec.type && typeof handler !== "function") {
+      throw new ContractError(
+        "PLUGIN_COMMAND_UNSUPPORTED",
+        "Third-party declarative command type is missing or unsupported"
       );
     }
 
@@ -628,44 +1266,49 @@ export class PluginRegistryAndBroker {
       if (!hasNetPerm) {
         throw new ContractError(
           "PLUGIN_PERMISSION_DENIED",
-          `Plugin '${pluginId}' attempted outbound network access without 'network.request'`
+          "Plugin '" + pluginId + "' attempted outbound network access without 'network.request'"
         );
       }
       const allowedOrigins = pkg.manifest.allowed_origins || [];
       if (!allowedOrigins.includes(requestedOrigin)) {
         throw new ContractError(
           "PLUGIN_PERMISSION_DENIED",
-          `Origin '${requestedOrigin}' is not in plugin's allowed_origins`
+          "Origin '" + requestedOrigin + "' is not in plugin's allowed_origins"
         );
       }
     }
 
-    const handler = pkg.commandHandlers?.[commandName];
-    if (typeof handler === "function") {
-      const result = await handler({
-        userId,
-        pluginId,
-        version: inst.active_version,
-        payload
-      });
-      return {
-        plugin_id: pluginId,
-        version: inst.active_version,
-        command: commandName,
-        executed: true,
-        output: result
-      };
+    if (typeof handler === "function" && !cmdSpec.type) {
+      try {
+        // Host-owned reference handlers are part of the host binary. They are
+        // never loaded from plugin artifacts and must not echo request payloads.
+        const result = await handler({
+          userId,
+          pluginId,
+          version: inst.active_version
+        });
+        this._recordCommandSuccess(pluginId);
+        return {
+          plugin_id: pluginId,
+          version: inst.active_version,
+          command: commandName,
+          executed: true,
+          output: result
+        };
+      } catch (error) {
+        this._recordCommandFailure(pluginId, error);
+        throw error;
+      }
     }
 
+    const output = assertValidDeclarativeTarget(cmdSpec, pkg);
+    this._recordCommandSuccess(pluginId);
     return {
       plugin_id: pluginId,
       version: inst.active_version,
       command: commandName,
       executed: true,
-      output: {
-        message: `Executed declarative command '${commandName}' on ${pluginId}@${inst.active_version}`,
-        echo: payload
-      }
+      output
     };
   }
 }

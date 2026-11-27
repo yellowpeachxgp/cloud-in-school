@@ -22,20 +22,12 @@ export function createPluginsRoutes(ctx) {
       const canOverridePublicKey =
         Array.isArray(auth?.roles) &&
         (auth.roles.includes("PLATFORM_OWNER") || auth.roles.includes("ADMIN"));
-      if (
-        body.public_key_base64 &&
-        body.public_key_base64 !== pluginBroker.publicKeyBase64 &&
-        process.env.NODE_ENV === "production" &&
-        !canOverridePublicKey
-      ) {
-        throw new ContractError(
-          "FORBIDDEN",
-          "Custom plugin public_key_base64 registration in production requires PLATFORM_OWNER or ADMIN role"
-        );
-      }
+      // W6-01a trust-root rule: production accepts only configured publisher
+      // trust roots. Admin roles never bypass that root; the broker performs
+      // the authoritative fail-closed check for every caller.
       pluginBroker.registerPluginPackage({
         manifest: body.manifest,
-        artifactMap: body.artifact_map || {},
+        artifactMap: body.artifact_map || body.artifact_payloads || {},
         publicKeyBase64: body.public_key_base64 || pluginBroker.publicKeyBase64,
         actorUserId: auth.cloudUserId,
         isAdmin: canOverridePublicKey
@@ -43,7 +35,8 @@ export function createPluginsRoutes(ctx) {
     }
     const pluginId = body?.plugin_id || body?.manifest?.plugin_id;
     const inst = pluginBroker.installPluginForUser(auth.cloudUserId, pluginId, {
-      version: body?.version || body?.manifest?.version
+      version: body?.version || body?.manifest?.version,
+      schoolId: body?.school_id || undefined
     });
     return { status: 201, code: "PLUGIN_INSTALLED", data: inst };
   }),
@@ -54,9 +47,26 @@ export function createPluginsRoutes(ctx) {
     "transitionPluginLifecycle",
     "bearer",
     async ({ auth, params, body }) => {
+      const wantsGlobalKillSwitch =
+        body?.action === "DISABLE" &&
+        (body?.scope === "global" || body?.admin_kill_switch === true);
+      if (wantsGlobalKillSwitch) {
+        if (!ctx.isAdminOrOperatorAuth?.(auth)) {
+          throw new ContractError("FORBIDDEN", "Plugin global kill switch requires admin or operator role");
+        }
+        const killed = pluginBroker.adminDisablePlugin(params.pluginId, {
+          actorUserId: auth.cloudUserId,
+          reason: body?.reason || null
+        });
+        return { status: 200, code: "PLUGIN_LIFECYCLE_OK", data: killed };
+      }
       const res = pluginBroker.transitionUserPlugin(auth.cloudUserId, params.pluginId, {
         action: body?.action,
-        targetVersion: body?.target_version
+        targetVersion: body?.target_version,
+        permission: body?.permission,
+        schoolId: body?.school_id,
+        actorIsAdmin: Boolean(ctx.isAdminOrOperatorAuth?.(auth)),
+        reason: body?.reason
       });
       return { status: 200, code: "PLUGIN_LIFECYCLE_OK", data: res };
     }
@@ -72,8 +82,9 @@ export function createPluginsRoutes(ctx) {
         userId: auth.cloudUserId,
         pluginId: params.pluginId,
         commandName: params.commandId,
-        payload: body?.payload || {},
-        requestedOrigin: body?.requested_origin || null
+        payload: body?.payload || body?.input || {},
+        requestedOrigin: body?.requested_origin || null,
+        schoolId: body?.school_id || null
       });
       return { status: 200, code: "PLUGIN_COMMAND_EXECUTED", data: res };
     }
