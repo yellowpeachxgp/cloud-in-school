@@ -966,13 +966,14 @@ export class CommunityService {
     }
 
     for (const group of Array.from(this.store.groups.values())) {
+      if (group.created_by !== cloudUserId) continue;
       const activeCount = this._activeMembersForGroup(group.id).length;
       if (activeCount === 0) {
         for (const invite of Array.from(this.store.groupInvites.values())) {
           if (invite.group_id === group.id) this.store.groupInvites.delete(invite.id);
         }
         if (this.store.groups.delete(group.id)) groupsDeleted += 1;
-      } else if (group.created_by === cloudUserId) {
+      } else {
         group.created_by = DELETED_USER_TOMBSTONE;
         group.updated_at = ts;
       }

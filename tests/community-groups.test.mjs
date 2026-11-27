@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { COMMUNITY_DELETED_USER_TOMBSTONE } from "../packages/community/src/index.mjs";
 
 const BASE_NOW = Date.parse("2026-11-27T10:00:00.000Z");
 let keySeq = 0;
+let userSeq = 0;
 
 function nextKey(prefix) {
   keySeq += 1;
@@ -29,7 +33,7 @@ function setupUser(app, label, { schoolId = "haut", bind = true, nowMs = BASE_NO
       id: crypto.randomUUID(),
       cloud_user_id: user.id,
       school_id: schoolId,
-      student_no: "2024" + String(Math.floor(Math.random() * 900000) + 100000),
+      student_no: "2024" + String(100000 + (++userSeq)),
       status: "DELEGATED_ACTIVE",
       credential_ref: null,
       consent_id: null,
@@ -429,5 +433,162 @@ test("W4-01 privacy: community data is exported and data-delete detaches members
   for (const event of app.store.outboxEvents.filter((row) => row.aggregate_type === "group_member")) {
     assert.notEqual(event.payload_json.cloud_user_id, owner.user.id);
     assert.notEqual(event.payload_json.actor_cloud_user_id, owner.user.id);
+  }
+});
+
+test("W4-01 member governance: cross-school accept is isolated, last owner cannot demote self, and admin removal emits ADMIN_REMOVED with sharing withdrawn", async () => {
+  const app = createTestApp();
+  const owner = setupUser(app, "owner_governance");
+  const adminCandidate = setupUser(app, "admin_candidate");
+  const memberC = setupUser(app, "member_removee");
+  const crossSchool = setupUser(app, "cross_acceptor", { schoolId: "other-university" });
+  const group = await createStudyGroup(app, owner);
+  const invite = await createInvite(app, owner, group.group_id, { maxUses: 4 });
+
+  const crossAccept = await acceptInvite(app, crossSchool, invite.code);
+  assert.equal(crossAccept.status, 403);
+  assert.equal(crossAccept.body.error.code, "SCHOOL_SCOPE_MISMATCH");
+
+  const acceptedAdmin = await acceptInvite(app, adminCandidate, invite.code);
+  assert.equal(acceptedAdmin.status, 201);
+  const acceptedC = await acceptInvite(app, memberC, invite.code);
+  assert.equal(acceptedC.status, 201);
+
+  const ownerRow = Array.from(app.store.groupMembers.values()).find(
+    (row) => row.group_id === group.group_id && row.cloud_user_id === owner.user.id && row.status === "ACTIVE"
+  );
+  const selfDemote = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + ownerRow.id,
+    headers: { ...owner.auth, "idempotency-key": nextKey("owner-self-demote") },
+    body: { role: "MEMBER" }
+  });
+  assert.equal(selfDemote.status, 409);
+  assert.equal(selfDemote.body.error.code, "GROUP_LAST_OWNER_REQUIRED");
+
+  const promote = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + acceptedAdmin.body.data.member_id,
+    headers: { ...owner.auth, "idempotency-key": nextKey("promote-admin") },
+    body: { role: "ADMIN" }
+  });
+  assert.equal(promote.status, 200);
+  assert.equal(promote.body.data.role, "ADMIN");
+
+  const share = await app.inject({
+    method: "PATCH",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + acceptedC.body.data.member_id,
+    headers: { ...memberC.auth, "idempotency-key": nextKey("removee-share") },
+    body: { sharing_level: "BUSY_BLOCKS_30MIN" }
+  });
+  assert.equal(share.status, 200);
+
+  const removed = await app.inject({
+    method: "DELETE",
+    url: "/api/v1/groups/" + group.group_id + "/members/" + acceptedC.body.data.member_id,
+    headers: { ...adminCandidate.auth, "idempotency-key": nextKey("admin-remove") }
+  });
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.data.reason, "ADMIN_REMOVED");
+  const removedRow = app.store.groupMembers.get(acceptedC.body.data.member_id);
+  assert.equal(removedRow.status, "REMOVED");
+  assert.equal(removedRow.sharing_level, "NONE");
+  const removalEvents = app.store.outboxEvents.filter(
+    (event) => event.event_type === "group.member.left" && event.payload_json.reason === "ADMIN_REMOVED"
+  );
+  assert.equal(removalEvents.length, 1);
+  assert.equal(removalEvents[0].payload_json.sharing_level, "NONE");
+  assert.equal(removalEvents[0].payload_json.actor_cloud_user_id, adminCandidate.user.id);
+});
+
+test("W4-01 durability: group, invite, member and idempotency receipts survive snapshot restart without duplicate replay", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-w401-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app1 = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app1, "owner_durable");
+    const member = setupUser(app1, "member_durable");
+    const createKey = "durability-create-123";
+    const createBody = { school_id: "haut", type: "project", name: "耐久项目组" };
+    const created = await app1.inject({
+      method: "POST",
+      url: "/api/v1/groups",
+      headers: { ...owner.auth, "idempotency-key": createKey },
+      body: createBody
+    });
+    assert.equal(created.status, 201);
+    const groupId = created.body.data.group_id;
+
+    const app2 = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const replayCreate = await app2.inject({
+      method: "POST",
+      url: "/api/v1/groups",
+      headers: { ...owner.auth, "idempotency-key": createKey },
+      body: createBody
+    });
+    assert.equal(replayCreate.status, 200);
+    assert.equal(replayCreate.body.code, "REQUEST_DUPLICATE");
+    assert.equal(app2.store.groups.size, 1);
+
+    const inviteKey = "durability-invite-123";
+    const inviteBody = { expires_at: "2026-11-28T10:00:00.000Z", max_uses: 2 };
+    const invite = await app2.inject({
+      method: "POST",
+      url: "/api/v1/groups/" + groupId + "/invites",
+      headers: { ...owner.auth, "idempotency-key": inviteKey },
+      body: inviteBody
+    });
+    assert.equal(invite.status, 201);
+    const inviteCode = invite.body.data.code;
+
+    const app3 = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const replayInvite = await app3.inject({
+      method: "POST",
+      url: "/api/v1/groups/" + groupId + "/invites",
+      headers: { ...owner.auth, "idempotency-key": inviteKey },
+      body: inviteBody
+    });
+    assert.equal(replayInvite.status, 200);
+    assert.equal(replayInvite.body.code, "REQUEST_DUPLICATE");
+    assert.equal(app3.store.groupInvites.size, 1);
+
+    const acceptKey = "durability-accept-123";
+    const accepted = await app3.inject({
+      method: "POST",
+      url: "/api/v1/group-invites/" + inviteCode + "/accept",
+      headers: { ...member.auth, "idempotency-key": acceptKey }
+    });
+    assert.equal(accepted.status, 201);
+
+    const app4 = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const replayAccept = await app4.inject({
+      method: "POST",
+      url: "/api/v1/group-invites/" + inviteCode + "/accept",
+      headers: { ...member.auth, "idempotency-key": acceptKey }
+    });
+    assert.equal(replayAccept.status, 200);
+    assert.equal(replayAccept.body.code, "REQUEST_DUPLICATE");
+    assert.equal(replayAccept.body.data.member_id, accepted.body.data.member_id);
+    assert.equal(
+      Array.from(app4.store.groupMembers.values()).filter(
+        (row) => row.group_id === groupId && row.status === "ACTIVE"
+      ).length,
+      2
+    );
+    assert.equal(app4.store.groupInvites.get(invite.body.data.invite_id).used_count, 1);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
