@@ -159,6 +159,18 @@ CT-04 contract-first planned 权限（地点状态用户态/审核态授权语�
 
 CT-02/CT-03/CT-04 上述端点在契约中均为 `planned`；登记授权语义不表示忙闲、投票、账本、值日、报修或地点状态运行时实现已经 active。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
 
+CT-05 contract-first reserved 权限（论坛与私信用户态/运营审核态授权语义；同样**不是插件可声明权限**。这些端点在契约中是 `reserved` 而非 `planned`：语义上只是将来才可能开启的保留位，当前没有任何运行时实现、不建表、不写业务逻辑，全部统一返回 `501 FEATURE_NOT_ENABLED`）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
+| `ugc.read` | CT-05 reserved 语义：若将来开启，读取同 school 作用域论坛板块、帖子、楼层回复与帖子搜索结果；当前端点统一返回 501 |
+| `ugc.write` | CT-05 reserved 语义：若将来开启，创建帖子、删除调用者本人帖子、追加楼层回复；当前端点统一返回 501 |
+| `ugc.report` | CT-05 reserved 语义：若将来开启，对帖子、回复或媒体对象提交用户举报；当前端点统一返回 501 |
+| `ugc.media.write` | CT-05 reserved 语义：若将来开启，创建并完成媒体上传槽位（服务端剥离 EXIF、转 WebP、随机 ID、私有桶）；当前端点统一返回 501 |
+| `ugc.moderate` | CT-05 reserved 语义：若将来开启，审核运营队列并应用带审计证据的保留/隐藏/删除/驳回处置；不得改写用户内容；当前端点统一返回 501 |
+
+CT-05 上述端点在契约中均为 `reserved`；登记授权语义只为冻结将来开启时的授权模型占位，不表示论坛、私信、审核或媒体上传会以任何时间表落地——按 D2 它们是「将来才可能开启的保留位」，开启前还必须完成 G6 合规核查。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
+
 ## 6. CLI（`dis-plugin`）
 
 CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm install` 任何第三方包。所有命令的成功输出是 stdout 的一行 JSON（`--pretty` 可缩进）；失败输出是 stderr 的一行 JSON，含 `code`，以及适用时的 `runtime_validation_code`（见 §9），退出码非 0。
