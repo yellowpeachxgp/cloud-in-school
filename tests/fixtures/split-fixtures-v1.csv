@@ -1,0 +1,12 @@
+# version=split-fixtures-v1
+# columns: case_id|mode|total_fen|members(csv)|rule_spec|expected_shares(csv participant=fen)
+# fixture ids intentionally use simple lowercase ASCII so every implementation orders them identically.
+equal-tie|EQUAL|10|c,a,b|-|a=4,b=3,c=3
+one-fen-tie|EQUAL|1|c,b,a|-|a=1,b=0,c=0
+ratio-largest-remainder|RATIO|10|a,b,c|a:1,b:2,c:3|a=2,b=3,c=5
+selected-tie|SELECTED|9|a,b,c|b,c|b=5,c=4
+stay-zero-excluded|STAY_DAYS|30|a,b,c|a:1,b:2,c:0|a=10,b=20
+zero-selected|SELECTED|0|a,b,c|b,c|b=0,c=0
+negative-equal|EQUAL|-10|a,b,c|-|a=-4,b=-3,c=-3
+minimum-long-equal|EQUAL|-9223372036854775808|a,b|-|a=-4611686018427387904,b=-4611686018427387904
+huge-weight-ratio|RATIO|9223372036854775807|a,b|a:9223372036854775807,b:9223372036854775807|a=4611686018427387904,b=4611686018427387903

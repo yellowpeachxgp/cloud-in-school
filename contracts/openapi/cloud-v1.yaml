@@ -1624,9 +1624,9 @@ paths:
   /api/v1/groups/{groupId}/ledger/entries:
     post:
       operationId: createLedgerEntry
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, EMPTY_PARTICIPANTS, DUPLICATE_PARTICIPANT, UNKNOWN_PARTICIPANT, INVALID_RATIO_WEIGHT, INVALID_STAY_DAYS, NO_EFFECTIVE_PARTICIPANTS, ARITHMETIC_OVERFLOW, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -1673,9 +1673,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listLedgerEntries
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [ledger]
@@ -1712,9 +1712,9 @@ paths:
   /api/v1/groups/{groupId}/ledger/entries/{entryId}/amend:
     post:
       operationId: amendLedgerEntry
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, LEDGER_ENTRY_NOT_FOUND, EMPTY_PARTICIPANTS, DUPLICATE_PARTICIPANT, UNKNOWN_PARTICIPANT, INVALID_RATIO_WEIGHT, INVALID_STAY_DAYS, NO_EFFECTIVE_PARTICIPANTS, ARITHMETIC_OVERFLOW, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -1763,9 +1763,9 @@ paths:
   /api/v1/groups/{groupId}/ledger/balances:
     get:
       operationId: getLedgerBalances
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [ledger]
@@ -1794,9 +1794,9 @@ paths:
   /api/v1/groups/{groupId}/settlements:
     post:
       operationId: createSettlement
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.settlement.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, SAME_SETTLEMENT_PARTIES, NON_POSITIVE_SETTLEMENT_AMOUNT, SETTLEMENT_AMOUNT_INVALID, SETTLEMENT_BALANCE_STALE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -1842,9 +1842,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listSettlements
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [ledger]
@@ -1878,9 +1878,9 @@ paths:
   /api/v1/settlements/{settlementId}:
     get:
       operationId: getSettlement
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.ledger.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED]
       tags: [ledger]
@@ -1907,9 +1907,9 @@ paths:
   /api/v1/settlements/{settlementId}/confirm:
     post:
       operationId: confirmSettlement
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.settlement.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED, SETTLEMENT_PARTY_MISMATCH, SETTLEMENT_INVALID_STATE, SETTLEMENT_BALANCE_STALE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -1951,9 +1951,9 @@ paths:
   /api/v1/settlements/{settlementId}/cancel:
     post:
       operationId: cancelSettlement
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 ledger implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 ledger implementation PR.
       x-dis-permissions: [group.settlement.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, SETTLEMENT_NOT_FOUND, SETTLEMENT_PERMISSION_DENIED, SETTLEMENT_PARTY_MISMATCH, SETTLEMENT_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -1994,9 +1994,9 @@ paths:
   /api/v1/groups/{groupId}/rotas:
     post:
       operationId: createDutyRota
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.manage]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2042,9 +2042,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listDutyRotas
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [duty]
@@ -2078,9 +2078,9 @@ paths:
   /api/v1/rotas/{rotaId}:
     get:
       operationId: getDutyRota
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED]
       tags: [duty]
@@ -2106,9 +2106,9 @@ paths:
           $ref: '#/components/responses/Conflict'
     patch:
       operationId: updateDutyRota
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.manage]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2149,9 +2149,9 @@ paths:
   /api/v1/groups/{groupId}/duty-tasks:
     get:
       operationId: listDutyTasks
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [duty]
@@ -2203,9 +2203,9 @@ paths:
   /api/v1/duty-tasks/{taskId}/complete:
     post:
       operationId: completeDutyTask
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2247,9 +2247,9 @@ paths:
   /api/v1/duty-tasks/{taskId}/confirm:
     post:
       operationId: confirmDutyTaskCompletion
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.confirm]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_CONFIRMATION_NOT_ALLOWED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2291,9 +2291,9 @@ paths:
   /api/v1/duty-tasks/{taskId}/skip:
     post:
       operationId: skipDutyTask
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.manage]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_TASK_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2335,9 +2335,9 @@ paths:
   /api/v1/rotas/{rotaId}/swaps:
     post:
       operationId: requestDutySwap
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_TASK_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SCHEDULE_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2384,9 +2384,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listDutySwaps
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_ROTA_NOT_FOUND, DUTY_PERMISSION_DENIED]
       tags: [duty]
@@ -2428,9 +2428,9 @@ paths:
   /api/v1/duty-swaps/{swapId}:
     get:
       operationId: getDutySwap
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_SWAP_NOT_FOUND, DUTY_PERMISSION_DENIED]
       tags: [duty]
@@ -2459,9 +2459,9 @@ paths:
   /api/v1/duty-swaps/{swapId}/resolve:
     post:
       operationId: resolveDutySwap
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.duty.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, DUTY_SWAP_NOT_FOUND, DUTY_PERMISSION_DENIED, DUTY_SWAP_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2503,9 +2503,9 @@ paths:
   /api/v1/groups/{groupId}/repairs:
     post:
       operationId: createRepairTicket
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2552,9 +2552,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listRepairTickets
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, GROUP_NOT_FOUND, GROUP_PERMISSION_DENIED]
       tags: [repairs]
@@ -2588,9 +2588,9 @@ paths:
   /api/v1/repairs/{repairId}:
     get:
       operationId: getRepairTicket
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED]
       tags: [repairs]
@@ -2616,9 +2616,9 @@ paths:
           $ref: '#/components/responses/Conflict'
     patch:
       operationId: updateRepairTicket
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_INVALID_STATE, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2659,9 +2659,9 @@ paths:
   /api/v1/repairs/{repairId}/status:
     post:
       operationId: transitionRepairStatus
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.manage]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_STATUS_TRANSITION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2703,9 +2703,9 @@ paths:
   /api/v1/repairs/{repairId}/review:
     post:
       operationId: submitRepairReview
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 dorm collaboration implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-03 dorm collaboration implementation PR.
       x-dis-permissions: [group.repair.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, REPAIR_NOT_FOUND, REPAIR_PERMISSION_DENIED, REPAIR_REVIEW_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required

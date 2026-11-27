@@ -598,9 +598,10 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "pluginInstallations", "pluginPermissionGrants", "pluginStorageEntries",
   "pluginCacheEntries", "pluginRuntimeStates", "campusContent", "groups", "groupMembers",
   "groupInvites", "availabilityShares", "busyBlocks", "meetingPolls", "pollOptions",
-  "pollVotes", "confirmedGroupEvents", "notifications", "priceQuotes", "idempotencyRecords",
-  "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
-  "placeStatusAggregates"
+  "pollVotes", "confirmedGroupEvents", "ledgerEntries", "ledgerBalanceRevisions", "settlements",
+  "dutyRotas", "dutyTasks", "dutySwaps", "repairTickets", "repairTicketRevisions", "repairReviews",
+  "notifications", "priceQuotes", "idempotencyRecords", "campusGraphPlaces", "placeReports",
+  "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -933,6 +934,19 @@ export class CloudDatabaseStore {
     this.pollOptions = new Map(); // optionId -> quantized poll time window
     this.pollVotes = new Map(); // voteId -> one vote per (poll, membership period)
     this.confirmedGroupEvents = new Map(); // confirmedEventId -> terminal group event
+
+    // Ledger & dorm collaboration (W4-03): append-only integer-fen postings,
+    // settlement acknowledgements, deterministic duty projections, swaps, and repairs.
+    this.ledgerEntries = new Map(); // entryId -> immutable posting + deterministic shares
+    this.ledgerBalanceRevisions = new Map(); // groupId -> monotonic balance revision row
+    this.settlements = new Map(); // settlementId -> two-party out-of-band confirmation record
+    this.dutyRotas = new Map(); // rotaId -> rotation schedule and generation cursor
+    this.dutyTasks = new Map(); // taskId -> projected duty occurrence
+    this.dutySwaps = new Map(); // swapId -> immutable swap/cover audit record
+    this.repairTickets = new Map(); // repairId -> informal group repair coordination record
+    this.repairTicketRevisions = new Map(); // revisionId -> immutable repair metadata edit audit row
+    this.repairReviews = new Map(); // reviewId -> one-time reporter review
+
     // Place Status (W4-04): bootstrap Campus Graph snapshot, immutable user
     // observations, flags, subscriptions, and aggregate revision state.
     this.campusGraphPlaces = new Map(); // placeRef -> coarse graph entity
@@ -1211,6 +1225,15 @@ export class CloudDatabaseStore {
       loadMap(this.pollOptions, raw.pollOptions);
       loadMap(this.pollVotes, raw.pollVotes);
       loadMap(this.confirmedGroupEvents, raw.confirmedGroupEvents);
+      loadMap(this.ledgerEntries, raw.ledgerEntries);
+      loadMap(this.ledgerBalanceRevisions, raw.ledgerBalanceRevisions);
+      loadMap(this.settlements, raw.settlements);
+      loadMap(this.dutyRotas, raw.dutyRotas);
+      loadMap(this.dutyTasks, raw.dutyTasks);
+      loadMap(this.dutySwaps, raw.dutySwaps);
+      loadMap(this.repairTickets, raw.repairTickets);
+      loadMap(this.repairTicketRevisions, raw.repairTicketRevisions);
+      loadMap(this.repairReviews, raw.repairReviews);
       loadMap(this.campusGraphPlaces, raw.campusGraphPlaces);
       loadMap(this.placeReports, raw.placeReports);
       loadMap(this.placeReportFlags, raw.placeReportFlags);
@@ -1604,6 +1627,160 @@ export class CloudDatabaseStore {
         throw new Error("确认事件快照与投票终态指针不一致");
       }
     }
+    // W4-03 ledger/dorm collaboration snapshot invariants. Amounts are signed
+    // integer fen encoded as exact safe integers or decimal strings for int64
+    // edge values; BigInt is used here only for validation and is never persisted.
+    const fenSnapshotValue = (value, label) => {
+      if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
+      if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+      throw new Error(label + " 不是精确整数分");
+    };
+    const ledgerRows = new Map(raw.ledgerEntries || []);
+    const settlementRows = new Map(raw.settlements || []);
+    const revisionRows = new Map(raw.ledgerBalanceRevisions || []);
+    const rotaRows = new Map(raw.dutyRotas || []);
+    const taskRows = new Map(raw.dutyTasks || []);
+    const swapRows = new Map(raw.dutySwaps || []);
+    const repairRows = new Map(raw.repairTickets || []);
+    const repairRevisionRows = new Map(raw.repairTicketRevisions || []);
+    const repairReviewRows = new Map(raw.repairReviews || []);
+    for (const [, revision] of revisionRows) {
+      const group = groups.get(revision?.group_id);
+      if (!group || group.school_id !== revision.school_id) {
+        throw new Error("账本余额 revision 快照与学校作用域不一致");
+      }
+      if (!Number.isSafeInteger(revision.balance_revision) || revision.balance_revision < 0) {
+        throw new Error("账本余额 revision 不是非负安全整数");
+      }
+    }
+    for (const [, entry] of ledgerRows) {
+      const group = groups.get(entry?.group_id);
+      if (!group || group.school_id !== entry.school_id) {
+        throw new Error("账本条目快照与学校作用域不一致");
+      }
+      if (!["EXPENSE", "REFUND", "CORRECTION"].includes(entry.entry_kind)) {
+        throw new Error("账本条目快照类型无效");
+      }
+      const amount = fenSnapshotValue(entry.amount_fen, "账本条目金额");
+      if (amount === 0n) throw new Error("账本条目快照金额为零");
+      const correctionShape =
+        (entry.entry_kind === "CORRECTION" && typeof entry.corrects_entry_id === "string" && typeof entry.correction_reason === "string" && entry.correction_reason.length > 0) ||
+        (entry.entry_kind !== "CORRECTION" && entry.corrects_entry_id == null && entry.correction_reason == null);
+      if (!correctionShape) throw new Error("账本更正链快照形状不一致");
+      if (entry.entry_kind === "CORRECTION") {
+        const target = ledgerRows.get(entry.corrects_entry_id);
+        if (!target || target.group_id !== entry.group_id || target.school_id !== entry.school_id) {
+          throw new Error("账本更正链快照目标缺失或跨作用域");
+        }
+      }
+      if (!Array.isArray(entry.shares) || entry.shares.length === 0) {
+        throw new Error("账本条目快照缺少确定分摊");
+      }
+      const shareParticipants = new Set();
+      let shareSum = 0n;
+      for (const share of entry.shares) {
+        if (shareParticipants.has(share?.participant_member_id)) {
+          throw new Error("账本分摊快照存在重复参与人");
+        }
+        shareParticipants.add(share?.participant_member_id);
+        shareSum += fenSnapshotValue(share?.amount_fen, "账本分摊金额");
+      }
+      if (shareSum !== amount) throw new Error("账本分摊快照不守恒");
+    }
+    for (const [, settlement] of settlementRows) {
+      const group = groups.get(settlement?.group_id);
+      if (!group || group.school_id !== settlement.school_id) {
+        throw new Error("结算快照与学校作用域不一致");
+      }
+      if (settlement.debtor_member_id === settlement.creditor_member_id) {
+        throw new Error("结算快照双方相同");
+      }
+      if (fenSnapshotValue(settlement.amount_fen, "结算金额") <= 0n) {
+        throw new Error("结算快照金额不是正整数分");
+      }
+      const statusShape =
+        (settlement.status === "PENDING_BOTH_CONFIRMATIONS" && settlement.debtor_confirmed_at == null && settlement.creditor_confirmed_at == null && settlement.confirmed_at == null && settlement.cancelled_at == null) ||
+        (settlement.status === "PENDING_DEBTOR_CONFIRMATION" && settlement.debtor_confirmed_at == null && settlement.creditor_confirmed_at != null && settlement.confirmed_at == null && settlement.cancelled_at == null) ||
+        (settlement.status === "PENDING_CREDITOR_CONFIRMATION" && settlement.debtor_confirmed_at != null && settlement.creditor_confirmed_at == null && settlement.confirmed_at == null && settlement.cancelled_at == null) ||
+        (settlement.status === "CONFIRMED" && settlement.debtor_confirmed_at != null && settlement.creditor_confirmed_at != null && settlement.confirmed_at != null && settlement.cancelled_at == null) ||
+        (settlement.status === "CANCELLED" && settlement.confirmed_at == null && settlement.cancelled_at != null && settlement.cancelled_by_member_id != null);
+      if (!statusShape) throw new Error("结算快照双方确认状态形状不一致");
+    }
+    for (const [, rota] of rotaRows) {
+      const group = groups.get(rota?.group_id);
+      if (!group || group.school_id !== rota.school_id) {
+        throw new Error("值日轮班快照与学校作用域不一致");
+      }
+      if (!Array.isArray(rota.rotation_member_ids) || rota.rotation_member_ids.length < 2 || new Set(rota.rotation_member_ids).size !== rota.rotation_member_ids.length) {
+        throw new Error("值日轮班快照成员序列无效");
+      }
+      if (!["DAILY", "WEEKLY"].includes(rota.frequency) || !["ACTIVE", "PAUSED", "ARCHIVED"].includes(rota.status)) {
+        throw new Error("值日轮班快照频率或状态无效");
+      }
+      if (rota.frequency === "WEEKLY" && (!Array.isArray(rota.days_of_week) || rota.days_of_week.length === 0)) {
+        throw new Error("WEEKLY 值日轮班快照缺少星期集合");
+      }
+    }
+    for (const [, task] of taskRows) {
+      const rota = rotaRows.get(task?.rota_id);
+      const group = groups.get(task?.group_id);
+      if (!group || group.school_id !== task.school_id || !rota || rota.group_id !== task.group_id || rota.school_id !== task.school_id) {
+        throw new Error("值日任务快照与轮班或学校作用域不一致");
+      }
+      const taskShape =
+        (task.status === "PENDING" && task.completed_at == null && task.confirmed_at == null && task.skipped_at == null) ||
+        (task.status === "COMPLETED" && task.completed_at != null && task.completed_by_member_id != null && task.confirmed_at == null && task.skipped_at == null) ||
+        (task.status === "CONFIRMED" && task.completed_at != null && task.confirmed_at != null && task.confirmed_by_member_id != null && task.skipped_at == null) ||
+        (task.status === "SKIPPED" && task.completed_at == null && task.confirmed_at == null && task.skip_reason != null && task.skipped_at != null && task.skipped_by_member_id != null);
+      if (!taskShape) throw new Error("值日任务快照状态形状不一致");
+    }
+    for (const [, swap] of swapRows) {
+      const rota = rotaRows.get(swap?.rota_id);
+      const task = taskRows.get(swap?.duty_task_id);
+      if (!rota || !task || task.rota_id !== swap.rota_id || rota.group_id !== swap.group_id || rota.school_id !== swap.school_id) {
+        throw new Error("值日交换快照与轮班任务作用域不一致");
+      }
+      const swapShape =
+        (swap.status === "PENDING" && swap.resolved_at == null && swap.resolved_by_member_id == null) ||
+        (["ACCEPTED", "REJECTED", "CANCELLED"].includes(swap.status) && swap.resolved_at != null && swap.resolved_by_member_id != null);
+      if (!swapShape) throw new Error("值日交换快照状态形状不一致");
+    }
+    for (const [, repair] of repairRows) {
+      const group = groups.get(repair?.group_id);
+      if (!group || group.school_id !== repair.school_id) {
+        throw new Error("报修快照与学校作用域不一致");
+      }
+      if (!["OPEN", "TRIAGED", "IN_PROGRESS", "RESOLVED", "REJECTED", "CLOSED"].includes(repair.status)) {
+        throw new Error("报修快照状态无效");
+      }
+      if (repair.official_work_order !== false) {
+        throw new Error("报修快照错误声明为官方工单");
+      }
+      if ((repair.status === "CLOSED") !== (repair.closed_at != null) || (repair.status === "REJECTED") !== (repair.rejected_at != null)) {
+        throw new Error("报修快照终态时间戳形状不一致");
+      }
+    }
+    for (const [, revision] of repairRevisionRows) {
+      const repair = repairRows.get(revision?.repair_id);
+      if (!repair || repair.group_id !== revision.group_id || repair.school_id !== revision.school_id) {
+        throw new Error("报修编辑审计快照与报修作用域不一致");
+      }
+    }
+    const reviewedRepairs = new Set();
+    for (const [, review] of repairReviewRows) {
+      const repair = repairRows.get(review?.repair_id);
+      if (!repair || repair.group_id !== review.group_id || repair.school_id !== review.school_id) {
+        throw new Error("报修评价快照与报修作用域不一致");
+      }
+      if (reviewedRepairs.has(review.repair_id) || repair.review_id !== review.id) {
+        throw new Error("报修评价快照违反一次性评价约束");
+      }
+      reviewedRepairs.add(review.repair_id);
+      if (!Number.isInteger(review.rating) || review.rating < 1 || review.rating > 5) {
+        throw new Error("报修评价快照评分越界");
+      }
+    }
+
     const graphPlaces = new Map(raw.campusGraphPlaces || []);
     const placeReports = new Map(raw.placeReports || []);
     for (const [, report] of placeReports) {
@@ -1756,6 +1933,15 @@ export class CloudDatabaseStore {
         pollOptions: Array.from(source.pollOptions.entries()),
         pollVotes: Array.from(source.pollVotes.entries()),
         confirmedGroupEvents: Array.from(source.confirmedGroupEvents.entries()),
+        ledgerEntries: Array.from(source.ledgerEntries.entries()),
+        ledgerBalanceRevisions: Array.from(source.ledgerBalanceRevisions.entries()),
+        settlements: Array.from(source.settlements.entries()),
+        dutyRotas: Array.from(source.dutyRotas.entries()),
+        dutyTasks: Array.from(source.dutyTasks.entries()),
+        dutySwaps: Array.from(source.dutySwaps.entries()),
+        repairTickets: Array.from(source.repairTickets.entries()),
+        repairTicketRevisions: Array.from(source.repairTicketRevisions.entries()),
+        repairReviews: Array.from(source.repairReviews.entries()),
         campusGraphPlaces: Array.from(source.campusGraphPlaces.entries()),
         placeReports: Array.from(source.placeReports.entries()),
         placeReportFlags: Array.from(source.placeReportFlags.entries()),

@@ -23,6 +23,7 @@ import { ParcelHubService } from "../../../packages/parcel-hub/src/index.mjs";
 import { CommunityService } from "../../../packages/community/src/index.mjs";
 import { AvailabilityService } from "../../../packages/availability/src/index.mjs";
 import { PlaceStatusService } from "../../../packages/place-status/src/index.mjs";
+import { LedgerService } from "../../../packages/ledger/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -191,6 +192,7 @@ export function createCampusCloudApp(options = {}) {
   const community = options.community || new CommunityService(store);
   const availability = options.availability || new AvailabilityService(store);
   const placeStatus = options.placeStatus || new PlaceStatusService(store);
+  const ledger = options.ledger || new LedgerService(store);
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -502,6 +504,7 @@ export function createCampusCloudApp(options = {}) {
     community,
     availability,
     placeStatus,
+    ledger,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -533,6 +536,7 @@ export function createCampusCloudApp(options = {}) {
     community,
     availability,
     placeStatus,
+    ledger,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
