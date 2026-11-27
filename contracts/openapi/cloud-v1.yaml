@@ -8111,7 +8111,7 @@ components:
           type: object
           additionalProperties:
             type: string
-          description: Canonical artifact payload map keyed by the exact safe relative paths declared in manifest.entry_artifacts. JSON string values are the artifact bytes represented as UTF-8 text; the host persists them as bytes and verifies every declared SHA-256 digest.
+          description: Canonical artifact payload map keyed by the exact safe relative paths declared in manifest.entry_artifacts. JSON string values are interpreted as UTF-8 artifact content before SHA-256 verification; the host persists the verified bytes in its own Base64 storage form.
         public_key_base64:
           type: string
           minLength: 44

@@ -1,5 +1,5 @@
 {
-  "version": "w6-contract-lifecycle-2026-11-28-r1",
+  "version": "w6-contract-lifecycle-2026-11-28-r2",
   "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface. Records are retained for audit even after the contract line closes them.",
   "debts": [
     {
@@ -36,18 +36,41 @@
       "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
       "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
       "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginInstallRequest",
+      "unregistered_runtime_fields": [
+        "artifact_map",
+        "version",
+        "school_id"
+      ],
+      "contradictory_contract_fields": [
+        "signature_base64: the published contract requires a detached signature field, while the runtime verifies manifest.signature.value_base64 inside the signed manifest",
+        "public_key_base64: the published contract requires client submission, while the runtime treats it only as an optional consistency proof that must equal the host-configured publisher trust root or non-production pinned key and never becomes trust input",
+        "artifact_payloads: the published contract uses this name, while the runtime canonical field is artifact_map and artifact_payloads remains only a transitional alias"
+      ],
       "resolved_contract_fields": [
         "artifact_map",
         "school_id",
         "public_key_base64"
       ],
-      "resolution_evidence": "PluginInstallRequest now requires only the signed manifest, registers canonical artifact_map and school_id, removes detached signature evidence, and documents public_key_base64 strictly as an optional consistency proof rather than trust input."
+      "resolution_evidence": "PluginInstallRequest now requires only the signed manifest, registers canonical artifact_map and school_id, removes detached signature evidence, and documents public_key_base64 strictly as an optional consistency proof rather than trust input. Transitional plugin_id/version selectors and the artifact_payloads alias remain runtime compatibility details but are excluded from the published shape because the signed manifest is the sole package identity and version evidence."
     },
     {
       "id": "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
       "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
       "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
       "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginLifecycleRequest",
+      "unregistered_runtime_fields": [
+        "REVOKE_PERMISSION",
+        "target_version",
+        "permission",
+        "scope",
+        "admin_kill_switch",
+        "school_id",
+        "kill_switch_reason",
+        "QUARANTINED",
+        "pre_quarantine_status",
+        "quarantine_reason",
+        "quarantined_at"
+      ],
       "resolved_contract_fields": [
         "REVOKE_PERMISSION",
         "target_version",
@@ -68,6 +91,15 @@
       "status": "CLOSED_BY_W6_CONTRACT_LIFECYCLE",
       "runtime_fact_source": "apps/api/src/routes/plugins.mjs",
       "contract_target": "contracts/openapi/cloud-v1.yaml#/components/schemas/PluginCommandInvokeRequest",
+      "unregistered_runtime_fields": [
+        "payload",
+        "requested_origin",
+        "school_id"
+      ],
+      "contradictory_contract_fields": [
+        "campus_profile_id: the published contract requires this field, while the runtime derives the account/school installation scope from the bearer cloud user plus school_id",
+        "input: the published contract uses this object name, while the runtime canonical object is payload and input remains only a transitional alias"
+      ],
       "resolved_contract_fields": [
         "payload",
         "requested_origin",
