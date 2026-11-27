@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
 import { AVAILABILITY_DELETED_USER_TOMBSTONE } from "../packages/availability/src/index.mjs";
 
@@ -654,5 +657,73 @@ test("W4-02 erasure: export contains availability domain and data-delete removes
   }
   for (const event of app.store.outboxEvents.filter((row) => ["group_availability", "group_event", "group_event_conflict"].includes(row.aggregate_type))) {
     assert.equal(JSON.stringify(event.payload_json).includes(member.user.id), false, "availability event payload must pseudonymize erased cloud user id");
+  }
+});
+
+test("W4-02 durability: pre-publish failure rolls back availability commit and restart restores snapshot state", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-w402-availability-atomic-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app, "w402_owner_atomic");
+    const group = await createStudyGroup(app, owner);
+    const ownerMember = memberRow(app, group.group_id, owner.user.id);
+    const key = nextKey("w402-atomic-put");
+    const blocks = [{ start_at: iso(BASE_NOW + HOUR), end_at: iso(BASE_NOW + 2 * HOUR) }];
+
+    app.store._persistFaultInject = "tmp_write";
+    const failed = await putAvailability(app, owner, group.group_id, blocks, { key });
+    assert.equal(failed.status, 503, JSON.stringify(failed.body));
+    assert.equal(failed.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(app.store.availabilityShares.has(ownerMember.id), false, "pre-publish failure must roll back share metadata");
+    assert.equal(app.store.busyBlocks.size, 0, "pre-publish failure must roll back raw blocks");
+    assert.equal(app.store.groupMembers.get(ownerMember.id).sharing_level, "NONE", "pre-publish failure must roll back sharing_level");
+    assert.equal(
+      app.store.outboxEvents.some((event) => event.event_type === "group.availability.updated"),
+      false,
+      "pre-publish failure must roll back the availability outbox event"
+    );
+    assert.equal(
+      Array.from(app.store.idempotencyRecords.keys()).some((row) => row.startsWith("replaceMyGroupAvailability|" + owner.user.id + "|" + key)),
+      false,
+      "pre-publish failure must not retain an idempotency receipt"
+    );
+
+    app.store._persistFaultInject = null;
+    const accepted = await putAvailability(app, owner, group.group_id, blocks, { key });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    assert.equal(accepted.body.code, "GROUP_AVAILABILITY_REPLACED", "same key retries as the first durable attempt after pre-publish rollback");
+    assert.equal(app.store.busyBlocks.size, 1);
+
+    const restarted = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    assert.equal(restarted.store.availabilityShares.get(ownerMember.id).status, "ACTIVE", "share metadata survives restart");
+    assert.equal(restarted.store.busyBlocks.size, 1, "quantized busy block survives restart");
+    assert.equal(restarted.store.groupMembers.get(ownerMember.id).sharing_level, "BUSY_BLOCKS_30MIN");
+    assert.equal(
+      Array.from(restarted.store.busyBlocks.values())[0].start_at,
+      iso(BASE_NOW + HOUR)
+    );
+    clearTimeout(restarted.store._snapshotFlushTimer);
+
+    app.store._persistFaultInject = "dir_fsync";
+    const unknown = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/groups/" + group.group_id + "/availability/me",
+      headers: { ...owner.auth, "idempotency-key": nextKey("w402-atomic-delete") },
+      nowMs: BASE_NOW + 1000
+    });
+    assert.equal(unknown.status, 503, JSON.stringify(unknown.body));
+    assert.equal(unknown.body.error.code, "STORAGE_COMMIT_UNKNOWN");
+    assert.equal(app.store.availabilityShares.get(ownerMember.id).status, "WITHDRAWN", "post-publish unknown must not roll memory back");
+    assert.equal(app.store.busyBlocks.size, 0, "post-publish unknown keeps the candidate erased state");
+    clearTimeout(app.store._snapshotFlushTimer);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
