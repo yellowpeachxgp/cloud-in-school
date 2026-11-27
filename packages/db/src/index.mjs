@@ -1525,19 +1525,17 @@ export class CloudDatabaseStore {
       throw err;
     }
     if (result && typeof result.then === "function") {
-      // Async mutation functions are supported for callers that await the
-      // returned promise. The store remains inside the copy-on-write unit for
-      // the whole async body, so object references captured across await stay
-      // connected to the transactional overlay until commit/abort.
-      return Promise.resolve(result).then(
-        () => this._finishAtomicCommitUnit(transaction, result),
-        (err) => {
-          transaction.abort();
-          throw err;
-        }
-      ).finally(() => {
-        this._commitUnitDepth = 0;
-      });
+      // Atomicity relies on the mutation body being synchronous: while it runs
+      // the Node event loop cannot interleave unrelated writes with the overlay.
+      // Reject thenables explicitly instead of publishing too early or letting
+      // an unrelated request accidentally write into this unit's overlay.
+      transaction.abort();
+      this._commitUnitDepth = 0;
+      result.then(() => {}, () => {});
+      throw new ContractError(
+        "INVALID_ARGUMENT",
+        "runAtomicCommitUnit requires a synchronous mutation function; async mutation bodies are rejected"
+      );
     }
     try {
       return this._finishAtomicCommitUnit(transaction, result);
