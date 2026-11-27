@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { route } from "./route-table.mjs";
 import { revokeAllUserSessionsInStore } from "../../../../packages/identity/src/index.mjs";
 import { CommunityService } from "../../../../packages/community/src/index.mjs";
+import { AvailabilityService } from "../../../../packages/availability/src/index.mjs";
+import { PlaceStatusService } from "../../../../packages/place-status/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -15,6 +17,8 @@ export function createMeRoutes(ctx) {
     financeService,
     parcelHub,
     community,
+    availability,
+    placeStatus,
     syncUserToSso
   } = ctx;
 
@@ -227,6 +231,19 @@ export function createMeRoutes(ctx) {
       community_group_members: [],
       community_group_invites: []
     };
+    const availabilityExport = availability?.exportUserData?.(auth.cloudUserId) || {
+      availability_shares: [],
+      availability_busy_blocks: [],
+      availability_polls: [],
+      availability_poll_options: [],
+      availability_poll_votes: [],
+      availability_confirmed_group_events: []
+    };
+    const placeStatusExport = placeStatus?.exportUserData?.(auth.cloudUserId) || {
+      place_status_reports: [],
+      place_status_report_flags: [],
+      place_status_subscriptions: []
+    };
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
@@ -238,7 +255,9 @@ export function createMeRoutes(ctx) {
         moments_posts: momentsPosts,
         moments_books: momentsBooks,
         moments_anti_lost_tags: momentsTags,
-        ...communityExport
+        ...communityExport,
+        ...availabilityExport,
+        ...placeStatusExport
       })
     };
   }),
@@ -249,9 +268,16 @@ export function createMeRoutes(ctx) {
     // 已退役的通用 copy-on-write overlay，也不给突变体异步逃逸的机会。
     const outcome = store.runDataDeleteAtomicCommitUnit((staging) => {
       const stagingCommunity = new CommunityService(staging);
+      const stagingAvailability = new AvailabilityService(staging);
+      const stagingPlaceStatus = new PlaceStatusService(staging);
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+      // Availability erasure must run before membership rows are removed: its
+      // busy blocks and votes are keyed by membership-period IDs.
+      const availabilityPurged = stagingAvailability.purgeUserAvailabilityData?.(auth.cloudUserId, nowMs) || null;
       const communityPurged = stagingCommunity.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+      const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
+      const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
       revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
@@ -261,7 +287,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, communityPurged };
+      return { cascade, momentsPurged, availabilityPurged, communityPurged, pluginPurged, placeStatusPurged };
     });
     return {
       status: 202,
@@ -271,7 +297,10 @@ export function createMeRoutes(ctx) {
         status: "DELETED",
         cancelled_job_ids: outcome.cascade.cancelledJobIds,
         moments_purged: outcome.momentsPurged,
-        community_purged: outcome.communityPurged
+        availability_purged: outcome.availabilityPurged,
+        community_purged: outcome.communityPurged,
+        plugin_purged: outcome.pluginPurged,
+        place_status_purged: outcome.placeStatusPurged
       }
     };
   })

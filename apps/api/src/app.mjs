@@ -21,6 +21,8 @@ import {
 } from "../../../packages/finance/src/index.mjs";
 import { ParcelHubService } from "../../../packages/parcel-hub/src/index.mjs";
 import { CommunityService } from "../../../packages/community/src/index.mjs";
+import { AvailabilityService } from "../../../packages/availability/src/index.mjs";
+import { PlaceStatusService } from "../../../packages/place-status/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -31,17 +33,17 @@ import { createCoreRoutes, createExtensionRoutes } from "./routes/index.mjs";
 
 // Host-owned reference command implementations. They preserve the documented
 // built-in example behavior without evaluating the plugin artifacts themselves.
-async function referenceGreetCampusHandler({ userId, payload }) {
+async function referenceGreetCampusHandler({ userId }) {
   return {
     greeting: `欢迎使用河南工业大学扩展卡片 (${userId})`,
-    campus: payload?.campus || "莲花街校区",
+    campus: "莲花街校区",
     timestamp: new Date().toISOString()
   };
 }
 
-async function referenceQueryStationHoursHandler({ payload }) {
+async function referenceQueryStationHoursHandler() {
   return {
-    station_name: payload?.station_name || "莲花街北苑菜鸟驿站",
+    station_name: "莲花街北苑菜鸟驿站",
     open_hours: "08:30 - 21:00",
     crowd_level: "LOW",
     supports_self_pickup: true
@@ -61,6 +63,26 @@ const DEFAULT_REFERENCE_PLUGIN_SOURCES = Object.freeze([
   }
 ]);
 
+// Host-configured trust for the bundled signed examples. The public key is
+// pinned to the publisher id here in host configuration; it is never read
+// from the plugin package or accepted from an install request.
+const DEFAULT_REFERENCE_PLUGIN_TRUST_ROOT = Object.freeze({
+  "dis-official-examples-2026": "MCowBQYDK2VwAyEArHKa2jgA8ALyo4xS8gB7jJs8HNS9LJy670FXblTj8XA="
+});
+
+function trustRootWithReferenceEntries(optionValue) {
+  const defaults = Object.entries(DEFAULT_REFERENCE_PLUGIN_TRUST_ROOT);
+  if (optionValue === null || optionValue === undefined || optionValue === "") return defaults;
+  if (optionValue instanceof Map) return [...defaults, ...optionValue.entries()];
+  if (Array.isArray(optionValue)) return [...defaults, ...optionValue];
+  if (typeof optionValue === "string") return [...defaults, optionValue];
+  if (typeof optionValue === "object") return [...defaults, ...Object.entries(optionValue)];
+  throw new ContractError(
+    "BAD_REQUEST",
+    "pluginTrustedPublisherKeys must be a publisher-to-public-key mapping"
+  );
+}
+
 function sanitizeReferencePluginError(error) {
   if (error?.code === "ENOENT") {
     return "required reference plugin file is missing";
@@ -77,15 +99,32 @@ function loadSignedReferencePlugins({ pluginBroker, sources, logger = console })
       if (!source?.dir) {
         throw new Error("reference plugin source directory is missing");
       }
-      const publicKeyBase64 = fs
-        .readFileSync(path.join(source.dir, "plugin-signing-public.key"), "utf8")
-        .trim();
       const loaded = loadPluginDirectory(source.dir);
+      const publisherId = loaded.manifest?.signature?.key_id;
+      const publicKeyBase64 = pluginBroker.trustedPublicKeyForPublisher(publisherId);
+      if (!publicKeyBase64) {
+        const error = new Error(
+          "reference plugin publisher '" + String(publisherId || "unknown") + "' is missing from the configured trust root"
+        );
+        error.code = "PLUGIN_REFERENCE_UNTRUSTED";
+        throw error;
+      }
+      // The packaged public key remains required as a consistency attestation,
+      // but it is never trusted by itself. A missing file preserves the AC-04/S5
+      // degraded-load signal; a mismatch means the package and host root diverged.
+      const packagedPublicKey = fs.readFileSync(path.join(source.dir, "plugin-signing-public.key"), "utf8").trim();
+      if (packagedPublicKey !== publicKeyBase64) {
+        throw new ContractError(
+          "PLUGIN_SIGNATURE_INVALID",
+          "reference plugin packaged public key does not match the configured publisher trust root"
+        );
+      }
       const verified = pluginBroker.registerPluginPackage({
         manifest: loaded.manifest,
         artifactMap: loaded.artifactMap,
         publicKeyBase64,
-        commandHandlers: source.commandHandlers || {}
+        commandHandlers: source.commandHandlers || {},
+        isHostReference: true
       });
       statuses.push({
         plugin_id: verified.plugin_id,
@@ -150,6 +189,8 @@ export function createCampusCloudApp(options = {}) {
       environment: options.environment || process.env.NODE_ENV || "production"
     });
   const community = options.community || new CommunityService(store);
+  const availability = options.availability || new AvailabilityService(store);
+  const placeStatus = options.placeStatus || new PlaceStatusService(store);
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -177,7 +218,13 @@ export function createCampusCloudApp(options = {}) {
       );
     }
   }
-  const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker();
+  const pluginBroker = options.pluginBroker || new PluginRegistryAndBroker({
+    store,
+    environment: options.environment || process.env.NODE_ENV || "development",
+    trustedPublisherKeys: trustRootWithReferenceEntries(options.pluginTrustedPublisherKeys),
+    allowUnlistedPublishers: options.pluginAllowUnlistedPublishers,
+    failureThreshold: options.pluginFailureThreshold
+  });
   const redisBuffer =
     options.redisBuffer ||
     new RedisGatewayBuffer({
@@ -453,6 +500,8 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     community,
+    availability,
+    placeStatus,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -482,6 +531,8 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     community,
+    availability,
+    placeStatus,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,

@@ -4,12 +4,23 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createCampusCloudApp } from "../apps/api/src/app.mjs";
+import { createCampusCloudApp as createCampusCloudAppBase } from "../apps/api/src/app.mjs";
 import { COMMUNITY_DELETED_USER_TOMBSTONE } from "../packages/community/src/index.mjs";
 import { CloudDatabaseStore } from "../packages/db/src/index.mjs";
 
 const BASE_NOW = Date.parse("2026-11-27T10:00:00.000Z");
 let keySeq = 0;
+
+// 全文件时钟冻结：会话令牌固定签发在 BASE_NOW（access token 4 小时有效）。
+// 若 inject 缺省 nowMs，请求处理会落到真实时钟——真实时间越过 BASE_NOW+4h 后
+// 令牌被正确判过期，全部鉴权请求 401。因此本文件所有 app 的 inject 一律默认
+// 在 BASE_NOW 求值；单个调用显式传 nowMs 时仍以调用方为准。
+function createCampusCloudApp(options) {
+  const app = createCampusCloudAppBase(options);
+  const rawInject = app.inject.bind(app);
+  app.inject = (request) => rawInject({ nowMs: BASE_NOW, ...request });
+  return app;
+}
 let userSeq = 0;
 
 function nextKey(prefix) {

@@ -110,6 +110,11 @@ errors:
     retryable: false
     user_action: REVIEW_PLUGIN_PERMISSIONS
     description: Plugin attempted an undeclared or forbidden capability via PluginBroker.
+  - code: PLUGIN_COMMAND_UNSUPPORTED
+    http_status: 400
+    retryable: false
+    user_action: USE_DECLARED_PLUGIN_COMMAND_TYPE
+    description: Plugin command type is missing or outside the declarative open_host_route, open_url, and show_data contract surface; hosts must not fabricate executed command echoes.
   - code: STORAGE_PERSISTENCE_FAILED
     http_status: 503
     retryable: true
@@ -125,6 +130,11 @@ errors:
     retryable: false
     user_action: FIX_REQUEST_FIELDS
     description: Request parameters or JSON body failed schema validation.
+  - code: CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: RESOLVE_CONFLICT
+    description: Business state conflicts with the current immutable or terminal resource state; resolve the conflict before retrying.
   - code: GROUP_NOT_FOUND
     http_status: 404
     retryable: false
@@ -365,3 +375,63 @@ errors:
     retryable: false
     user_action: CHECK_REPAIR_REVIEW_STATE
     description: Repair review is allowed only once by the reporter after RESOLVED; existing reviews cannot be rewritten.
+  - code: PLACE_REF_INVALID
+    http_status: 400
+    retryable: false
+    user_action: CHECK_PLACE_REFERENCE
+    description: Place reference is not a valid W1-07 Campus Graph stable id or uses an unsupported entity type.
+  - code: PLACE_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_CAMPUS_GRAPH_ENTITY
+    description: Campus Graph place entity does not exist or is not visible in the caller school scope.
+  - code: PLACE_STATUS_REPORT_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_STATUS_OBSERVATION
+    description: Place status metric/state combination, observation time, correction link, or note failed validation.
+  - code: PLACE_STATUS_REPORT_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_PLACE_REPORT_ID
+    description: Place status report does not exist or is not visible in the caller school scope.
+  - code: PLACE_STATUS_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_PLACE_STATUS_AUTHORIZATION
+    description: Caller lacks the required school-scoped place status read, report, subscription, flag, or moderation authorization.
+  - code: PLACE_STATUS_RATE_LIMITED
+    http_status: 429
+    retryable: true
+    user_action: WAIT_FOR_RATE_LIMIT_WINDOW
+    description: Place status report or flag rate limit reached; automated spam and retry amplification are forbidden.
+  - code: PLACE_STATUS_SUBSCRIPTION_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_PLACE_STATUS_SUBSCRIPTION
+    description: Place status subscription target, metric set, bounding box, or school scope failed validation.
+  - code: PLACE_STATUS_SUBSCRIPTION_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_PLACE_STATUS_SUBSCRIPTION
+    description: Place status subscription does not exist or does not belong to the authenticated caller.
+  - code: PLACE_REPORT_FLAG_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_PLACE_REPORT_FLAG
+    description: Place report flag reason or detail failed validation, including duplicate active flags by the same caller.
+  - code: PLACE_REPORT_FLAG_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_PLACE_REPORT_FLAG
+    description: Place report flag does not exist or is not visible in the reviewer school scope.
+  - code: PLACE_REPORT_REVIEW_INVALID
+    http_status: 409
+    retryable: false
+    user_action: REFRESH_PLACE_REPORT_FLAG
+    description: Place report flag is already terminal or the requested review action is invalid for its current state.
+  - code: FEATURE_NOT_ENABLED
+    http_status: 501
+    retryable: false
+    user_action: NONE
+    description: Reserved feature endpoint (decision D2); the feature is contract-only with no implementation, clients must keep the entry hidden or disabled and must not retry or probe for availability.

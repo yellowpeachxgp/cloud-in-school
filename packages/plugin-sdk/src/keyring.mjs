@@ -38,6 +38,13 @@ export function keyringDir(env = process.env) {
   if (override && override.trim()) {
     return path.join(override, "keys");
   }
+  // W6-01a tests and early adopters used DIS_PLUGIN_KEY_HOME as the direct
+  // keyring root. Keep it as a compatibility alias; new automation should use
+  // DIS_PLUGIN_HOME (whose keys/ child is the keyring).
+  const legacyOverride = env?.DIS_PLUGIN_KEY_HOME;
+  if (legacyOverride && legacyOverride.trim()) {
+    return legacyOverride;
+  }
   return path.join(os.homedir(), ".dis-plugin", "keys");
 }
 

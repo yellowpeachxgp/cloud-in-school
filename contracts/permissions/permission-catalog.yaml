@@ -132,6 +132,46 @@ permissions:
     scope: user_school_scope
     description: Triage, assign, progress, resolve, reject, or close repair records; requires GROUP_OWNER or GROUP_ADMIN authorization inside the group.
     default_granted: false
+  - id: place.status.read
+    scope: user_school_scope
+    description: Read user-reported place status aggregates, divergence, provenance, and visible correction history inside the caller school scope.
+    default_granted: true
+  - id: place.status.report
+    scope: user_school_scope
+    description: Submit direct observations and append-only corrections for Campus Graph places; never permits claiming official realtime status.
+    default_granted: true
+  - id: place.status.subscribe
+    scope: user_school_scope
+    description: Create, list, and cancel caller-owned in-app notification subscriptions for place.status.changed within the caller school scope.
+    default_granted: true
+  - id: place.status.flag
+    scope: user_school_scope
+    description: Flag incorrect, stale, abusive, spam, or PII-containing place status reports for explicit review.
+    default_granted: true
+  - id: place.status.moderate
+    scope: operations_school_scope
+    description: Review place report flags and keep or exclude individual reports from aggregation with audit evidence; never permits rewriting user observations or fabricating corrected status.
+    default_granted: false
+  - id: ugc.read
+    scope: user_school_scope
+    description: CT-05 reserved semantics only; would read school-scoped forum boards, posts, floor replies, and post search results if the feature is ever enabled. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
+    default_granted: true
+  - id: ugc.write
+    scope: user_school_scope
+    description: CT-05 reserved semantics only; would create posts, delete the caller's own posts, and append floor replies inside the caller school scope if ever enabled. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
+    default_granted: true
+  - id: ugc.report
+    scope: user_school_scope
+    description: CT-05 reserved semantics only; would file user reports against posts, replies, or media objects for operations review if ever enabled. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
+    default_granted: true
+  - id: ugc.media.write
+    scope: user_school_scope
+    description: CT-05 reserved semantics only; would mint and complete media upload slots whose payloads are EXIF-stripped, WebP-converted, randomly named, and privately bucketed if ever enabled. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
+    default_granted: true
+  - id: ugc.moderate
+    scope: operations_school_scope
+    description: CT-05 reserved semantics only; would review the moderation queue and apply audited keep/hide/delete/reject dispositions with security audit evidence if ever enabled; never permits rewriting user content. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

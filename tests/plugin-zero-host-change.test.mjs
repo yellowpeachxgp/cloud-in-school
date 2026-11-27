@@ -20,10 +20,14 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
   const hostAppPath = path.join(REPO_ROOT, "apps/api/src/app.mjs");
   const hostBeforeSha = fs.readFileSync(hostAppPath, "utf8");
 
-  // 1. dis-plugin init
-  execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.zero-host-demo"], {
-    stdio: "pipe"
-  });
+  // 1. dis-plugin init（私钥必须落在插件目录外；测试用临时 key home 隔离）
+  const keyHome = fs.mkdtempSync(path.join(os.tmpdir(), "dis-zero-host-keys-"));
+  const initOut = JSON.parse(execFileSync("node", [cliPath, "init", tmpDir, "--id", "org.example.zero-host-demo"], {
+    encoding: "utf8",
+    env: { ...process.env, DIS_PLUGIN_KEY_HOME: keyHome }
+  }));
+  assert.equal(fs.existsSync(path.join(tmpDir, "plugin-signing-private.key")), false);
+  assert.equal(fs.existsSync(path.join(tmpDir, ".gitignore")), true);
 
   // 2. dis-plugin validate & verify
   const valOut = JSON.parse(
@@ -37,8 +41,16 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
   );
   assert.equal(verOut.ok, true);
 
-  // 3. Install v1.0.0 into running CampusCloudApp without modifying any host files
-  const app = createCampusCloudApp({ requireAdminAccess: false });
+  // 3. Install v1.0.0 into running CampusCloudApp without modifying any host files.
+  // The host trust decision comes from an explicit publisher-id mapping, never
+  // from a public_key_base64 field in the install request.
+  const pubKey = fs.readFileSync(path.join(tmpDir, "plugin-signing-public.key"), "utf8").trim();
+  const privKey = fs.readFileSync(initOut.private_key_path, "utf8").trim();
+  const loadedV1 = loadPluginDirectory(tmpDir);
+  const app = createCampusCloudApp({
+    requireAdminAccess: false,
+    pluginTrustedPublisherKeys: { "dis-plugin-root-2026": pubKey }
+  });
   const user = app.store.findOrCreateCloudUser({
     issuer: "https://sso.xpeach.codes/t/acme",
     subject: "plugin_tester",
@@ -46,10 +58,6 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
   });
   const session = app.identity.issueDeviceSession(user, "Android");
   const authHeaders = { authorization: `Bearer ${session.access_token}` };
-
-  const pubKey = fs.readFileSync(path.join(tmpDir, "plugin-signing-public.key"), "utf8").trim();
-  const privKey = fs.readFileSync(path.join(tmpDir, "plugin-signing-private.key"), "utf8").trim();
-  const loadedV1 = loadPluginDirectory(tmpDir);
 
   const installV1Res = await app.inject({
     method: "POST",
@@ -59,8 +67,7 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
       manifest: loadedV1.manifest,
       artifact_map: {
         "dist/index.mjs": loadedV1.artifactMap["dist/index.mjs"].toString("utf8")
-      },
-      public_key_base64: pubKey
+      }
     }
   });
   assert.equal(installV1Res.status, 201);
@@ -98,8 +105,7 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
       manifest: signedV2,
       artifact_map: {
         "dist/index.mjs": loadedV1.artifactMap["dist/index.mjs"].toString("utf8")
-      },
-      public_key_base64: pubKey
+      }
     }
   });
   assert.equal(installV2Res.status, 201);
@@ -145,6 +151,7 @@ test("Plugin Ecosystem: External plugin CLI init -> validate -> sign -> verify -
   const hostAfterSha = fs.readFileSync(hostAppPath, "utf8");
   assert.equal(hostBeforeSha, hostAfterSha);
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(keyHome, { recursive: true, force: true });
 });
 
 test("Plugin Ecosystem: LegacySchoolPackageAdapter migrates dis-campus-plugin/v1 seamlessly to dis-extension/v2", () => {

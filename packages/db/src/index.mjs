@@ -591,11 +591,16 @@ export function simulateMigration0004OnCatalog(
 const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
   "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
-  "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
+  "consents", "operationsSchoolGrants", "reservationPlans", "reservationJobs", "scheduleEvents",
   "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
   "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
-  "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
-  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+  "parcelSyncJobs", "installedPlugins", "pluginPublishers", "pluginVersions",
+  "pluginInstallations", "pluginPermissionGrants", "pluginStorageEntries",
+  "pluginCacheEntries", "pluginRuntimeStates", "campusContent", "groups", "groupMembers",
+  "groupInvites", "availabilityShares", "busyBlocks", "meetingPolls", "pollOptions",
+  "pollVotes", "confirmedGroupEvents", "notifications", "priceQuotes", "idempotencyRecords",
+  "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
+  "placeStatusAggregates"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -879,6 +884,7 @@ export class CloudDatabaseStore {
     // School & Credentials & Consents
     this.schoolIntegrations = new Map(); // school_id -> integration config
     this.schoolBindings = new Map(); // bindingId -> binding
+    this.operationsSchoolGrants = new Map(); // grantId -> explicit per-school operations authorization
     this.encryptedCredentials = new Map(); // credId -> encrypted record
     this.consents = new Map(); // consentId -> consent
 
@@ -901,8 +907,15 @@ export class CloudDatabaseStore {
     this.parcelSourceConnections = new Map(); // connectionId -> connection
     this.parcelSyncJobs = new Map(); // jobId -> sync job
 
-    // Plugins
-    this.pluginInstallations = new Map(); // `${userId}:${pluginId}` -> installation
+    // Plugins (W6-01a SQL 0011 durable model mirrored by the snapshot store)
+    this.installedPlugins = new Map(); // plugin_id -> legacy 0002 signed registry root row
+    this.pluginPublishers = new Map(); // publisherId -> trusted publisher/public key metadata
+    this.pluginVersions = new Map(); // `${pluginId}@${version}` -> signed immutable version record
+    this.pluginInstallations = new Map(); // `${userId}:${schoolId}:${pluginId}` -> installation
+    this.pluginPermissionGrants = new Map(); // `${installationId}:${permission}` -> grant/revocation row
+    this.pluginStorageEntries = new Map(); // `${installationId}:${namespace}:${key}` -> scoped storage row
+    this.pluginCacheEntries = new Map(); // `${installationId}:${namespace}:${key}` -> disposable cache row
+    this.pluginRuntimeStates = new Map(); // pluginId -> failure/kill-switch runtime state
 
     // Cloud-Controlled Campus Channels, Clubs & Dynamic Content
     this.campusContent = new Map();
@@ -912,6 +925,21 @@ export class CloudDatabaseStore {
     this.groups = new Map(); // groupId -> group
     this.groupMembers = new Map(); // memberId -> membership-period record
     this.groupInvites = new Map(); // inviteId -> invite
+
+    // Availability & time polls (W4-02): privacy-minimized blocks and collaboration state
+    this.availabilityShares = new Map(); // memberId -> TTL-bounded share metadata/tombstone
+    this.busyBlocks = new Map(); // busyBlockId -> quantized time block only (never title/reason)
+    this.meetingPolls = new Map(); // pollId -> deadline-bound group time poll
+    this.pollOptions = new Map(); // optionId -> quantized poll time window
+    this.pollVotes = new Map(); // voteId -> one vote per (poll, membership period)
+    this.confirmedGroupEvents = new Map(); // confirmedEventId -> terminal group event
+    // Place Status (W4-04): bootstrap Campus Graph snapshot, immutable user
+    // observations, flags, subscriptions, and aggregate revision state.
+    this.campusGraphPlaces = new Map(); // placeRef -> coarse graph entity
+    this.placeReports = new Map(); // reportId -> immutable observation + moderation eligibility
+    this.placeReportFlags = new Map(); // flagId -> review request
+    this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
+    this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
 
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
@@ -952,7 +980,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -1149,6 +1177,7 @@ export class CloudDatabaseStore {
       loadMap(this.exchangeTickets, raw.exchangeTickets);
       loadMap(this.deviceSessions, raw.deviceSessions);
       loadMap(this.schoolBindings, raw.schoolBindings);
+      loadMap(this.operationsSchoolGrants, raw.operationsSchoolGrants);
       loadMap(this.encryptedCredentials, raw.encryptedCredentials);
       loadMap(this.consents, raw.consents);
       loadMap(this.reservationPlans, raw.reservationPlans);
@@ -1163,12 +1192,30 @@ export class CloudDatabaseStore {
       loadMap(this.parcelEvents, raw.parcelEvents);
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
       loadMap(this.parcelSyncJobs, raw.parcelSyncJobs);
+      loadMap(this.installedPlugins, raw.installedPlugins);
+      loadMap(this.pluginPublishers, raw.pluginPublishers);
+      loadMap(this.pluginVersions, raw.pluginVersions);
       loadMap(this.pluginInstallations, raw.pluginInstallations);
+      loadMap(this.pluginPermissionGrants, raw.pluginPermissionGrants);
+      loadMap(this.pluginStorageEntries, raw.pluginStorageEntries);
+      loadMap(this.pluginCacheEntries, raw.pluginCacheEntries);
+      loadMap(this.pluginRuntimeStates, raw.pluginRuntimeStates);
       loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
       loadMap(this.groups, raw.groups);
       loadMap(this.groupMembers, raw.groupMembers);
       loadMap(this.groupInvites, raw.groupInvites);
+      loadMap(this.availabilityShares, raw.availabilityShares);
+      loadMap(this.busyBlocks, raw.busyBlocks);
+      loadMap(this.meetingPolls, raw.meetingPolls);
+      loadMap(this.pollOptions, raw.pollOptions);
+      loadMap(this.pollVotes, raw.pollVotes);
+      loadMap(this.confirmedGroupEvents, raw.confirmedGroupEvents);
+      loadMap(this.campusGraphPlaces, raw.campusGraphPlaces);
+      loadMap(this.placeReports, raw.placeReports);
+      loadMap(this.placeReportFlags, raw.placeReportFlags);
+      loadMap(this.placeStatusSubscriptions, raw.placeStatusSubscriptions);
+      loadMap(this.placeStatusAggregates, raw.placeStatusAggregates);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1403,6 +1450,179 @@ export class CloudDatabaseStore {
         throw new Error("群组邀请快照与学校作用域不一致");
       }
     }
+
+    const members = new Map(raw.groupMembers || []);
+    const shares = new Map(raw.availabilityShares || []);
+    const polls = new Map(raw.meetingPolls || []);
+    const options = new Map(raw.pollOptions || []);
+    const quantized = (row) => {
+      const start = Date.parse(row?.start_at);
+      const end = Date.parse(row?.end_at);
+      return Number.isFinite(start) && Number.isFinite(end) &&
+        end > start && end - start >= 1_800_000 &&
+        start % 1_800_000 === 0 && end % 1_800_000 === 0;
+    };
+    const finiteTime = (value) => Number.isFinite(Date.parse(value));
+    for (const [, share] of shares) {
+      const member = members.get(share?.member_id);
+      const group = groups.get(share?.group_id);
+      if (!member || member.group_id !== share.group_id || member.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与成员作用域不一致");
+      }
+      if (!group || group.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与学校作用域不一致");
+      }
+      if (!Number.isInteger(share?.revision) || share.revision < 1) {
+        throw new Error("忙闲共享快照 revision 不是正整数");
+      }
+      if (!Number.isInteger(share?.ttl_seconds) || share.ttl_seconds < 1800 || share.ttl_seconds > 7776000) {
+        throw new Error("忙闲共享快照 TTL 超出 30 分钟到 90 天边界");
+      }
+      if (!finiteTime(share?.expires_at)) {
+        throw new Error("忙闲共享快照 expires_at 无效");
+      }
+      const shareShapeValid =
+        (share?.status === "ACTIVE" && share.withdrawn_at == null && share.expired_at == null) ||
+        (share?.status === "WITHDRAWN" && finiteTime(share.withdrawn_at) && share.expired_at == null) ||
+        (share?.status === "EXPIRED" && finiteTime(share.expired_at) && share.withdrawn_at == null);
+      if (!shareShapeValid) {
+        throw new Error("忙闲共享快照状态时间戳形状不一致");
+      }
+    }
+    const blocksByMember = new Map();
+    for (const [, block] of raw.busyBlocks || []) {
+      const share = shares.get(block?.member_id);
+      if (!share || share.group_id !== block.group_id || share.school_id !== block.school_id) {
+        throw new Error("忙闲块快照与共享作用域不一致");
+      }
+      if (!quantized(block)) {
+        throw new Error("忙闲块快照违反 30 分钟量化约束");
+      }
+      if (share.status !== "ACTIVE") {
+        throw new Error("撤回或过期忙闲共享仍保留原始时间块");
+      }
+      if (!blocksByMember.has(block.member_id)) blocksByMember.set(block.member_id, []);
+      blocksByMember.get(block.member_id).push(block);
+    }
+    for (const memberBlocks of blocksByMember.values()) {
+      memberBlocks.sort((a, b) => Date.parse(a.start_at) - Date.parse(b.start_at) || Date.parse(a.end_at) - Date.parse(b.end_at));
+      for (let index = 1; index < memberBlocks.length; index += 1) {
+        if (Date.parse(memberBlocks[index].start_at) < Date.parse(memberBlocks[index - 1].end_at)) {
+          throw new Error("忙闲块快照存在重叠时间窗");
+        }
+      }
+    }
+    for (const [, poll] of polls) {
+      const group = groups.get(poll?.group_id);
+      if (!group || group.school_id !== poll.school_id) {
+        throw new Error("投票快照与学校作用域不一致");
+      }
+      if (typeof poll?.title !== "string" || poll.title.trim().length < 1 || poll.title.trim().length > 120) {
+        throw new Error("投票快照标题无效");
+      }
+      if (!finiteTime(poll?.voting_deadline_at)) {
+        throw new Error("投票快照截止时间无效");
+      }
+      const pollShapeValid =
+        (poll?.status === "OPEN" && poll.closed_at == null && poll.confirmed_at == null && poll.confirmed_option_id == null && poll.confirmed_event_id == null) ||
+        (poll?.status === "CLOSED" && finiteTime(poll.closed_at) && poll.confirmed_at == null && poll.confirmed_option_id == null && poll.confirmed_event_id == null) ||
+        (poll?.status === "CONFIRMED" && finiteTime(poll.closed_at) && finiteTime(poll.confirmed_at) && typeof poll.confirmed_option_id === "string" && typeof poll.confirmed_event_id === "string");
+      if (!pollShapeValid) {
+        throw new Error("投票快照状态终态形状不一致");
+      }
+    }
+    const optionWindows = new Set();
+    const optionCountByPoll = new Map();
+    for (const [, option] of options) {
+      const poll = polls.get(option?.poll_id);
+      if (!poll || !quantized(option)) {
+        throw new Error("投票选项快照与投票或量化约束不一致");
+      }
+      if (!Number.isInteger(option?.position) || option.position < 0) {
+        throw new Error("投票选项快照 position 无效");
+      }
+      const windowKey = option.poll_id + "|" + option.start_at + "|" + option.end_at;
+      if (optionWindows.has(windowKey)) {
+        throw new Error("投票选项快照存在重复时间窗");
+      }
+      optionWindows.add(windowKey);
+      optionCountByPoll.set(option.poll_id, (optionCountByPoll.get(option.poll_id) || 0) + 1);
+    }
+    for (const [pollId] of polls) {
+      const count = optionCountByPoll.get(pollId) || 0;
+      if (count < 2 || count > 10) {
+        throw new Error("投票快照选项数量不在 2..10 边界内");
+      }
+    }
+    const voteMembers = new Set();
+    for (const [, vote] of raw.pollVotes || []) {
+      const poll = polls.get(vote?.poll_id);
+      const option = options.get(vote?.option_id);
+      const member = members.get(vote?.member_id);
+      if (!poll || poll.group_id !== vote.group_id || poll.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== vote.poll_id) {
+        throw new Error("投票表决快照与选项不一致");
+      }
+      if (!member || member.group_id !== vote.group_id || member.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与成员作用域不一致");
+      }
+      const voteKey = vote.poll_id + "|" + vote.member_id;
+      if (voteMembers.has(voteKey)) {
+        throw new Error("投票表决快照违反单成员一票约束");
+      }
+      voteMembers.add(voteKey);
+      if (finiteTime(vote?.created_at) && finiteTime(vote?.updated_at) && Date.parse(vote.updated_at) < Date.parse(vote.created_at)) {
+        throw new Error("投票表决快照 updated_at 早于 created_at");
+      }
+    }
+    const confirmedPolls = new Set();
+    for (const [, confirmed] of raw.confirmedGroupEvents || []) {
+      const poll = polls.get(confirmed?.poll_id);
+      const option = options.get(confirmed?.option_id);
+      if (!poll || poll.group_id !== confirmed.group_id || poll.school_id !== confirmed.school_id) {
+        throw new Error("确认事件快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== confirmed.poll_id || !quantized(confirmed)) {
+        throw new Error("确认事件快照与选项或量化约束不一致");
+      }
+      if (confirmed?.status !== "CONFIRMED" || !finiteTime(confirmed.confirmed_at)) {
+        throw new Error("确认事件快照不是有效终态");
+      }
+      if (confirmedPolls.has(confirmed.poll_id)) {
+        throw new Error("确认事件快照违反单投票唯一终态约束");
+      }
+      confirmedPolls.add(confirmed.poll_id);
+      if (
+        poll.status !== "CONFIRMED" ||
+        poll.confirmed_option_id !== confirmed.option_id ||
+        poll.confirmed_event_id !== confirmed.id ||
+        option.start_at !== confirmed.start_at ||
+        option.end_at !== confirmed.end_at
+      ) {
+        throw new Error("确认事件快照与投票终态指针不一致");
+      }
+    }
+    const graphPlaces = new Map(raw.campusGraphPlaces || []);
+    const placeReports = new Map(raw.placeReports || []);
+    for (const [, report] of placeReports) {
+      const place = graphPlaces.get(report?.place_ref);
+      if (!place || place.school_id !== report.school_id || place.campus_id !== report.campus_id || place.place_type !== report.place_type) {
+        throw new Error("地点状态报告快照与 Campus Graph 学校作用域不一致");
+      }
+    }
+    for (const [, flag] of raw.placeReportFlags || []) {
+      const report = placeReports.get(flag?.report_id);
+      if (!report || report.school_id !== flag.school_id || report.place_ref !== flag.place_ref) {
+        throw new Error("地点状态举报快照与报告作用域不一致");
+      }
+    }
+    for (const [, subscription] of raw.placeStatusSubscriptions || []) {
+      if (subscription?.target?.type === "PLACE" && !graphPlaces.has(subscription.target.place_ref)) {
+        throw new Error("地点状态订阅快照引用了缺失的 Campus Graph 实体");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1502,6 +1722,7 @@ export class CloudDatabaseStore {
         exchangeTickets: Array.from(source.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(source.deviceSessions.entries()),
         schoolBindings: Array.from(source.schoolBindings.entries()),
+        operationsSchoolGrants: Array.from(source.operationsSchoolGrants.entries()),
         encryptedCredentials: Array.from(source.encryptedCredentials.entries()),
         consents: Array.from(source.consents.entries()),
         reservationPlans: Array.from(source.reservationPlans.entries()).map(serializeRecord),
@@ -1516,12 +1737,30 @@ export class CloudDatabaseStore {
         parcelEvents: Array.from(source.parcelEvents.entries()),
         parcelSourceConnections: Array.from(source.parcelSourceConnections.entries()),
         parcelSyncJobs: Array.from(source.parcelSyncJobs.entries()),
+        installedPlugins: Array.from(source.installedPlugins.entries()),
+        pluginPublishers: Array.from(source.pluginPublishers.entries()),
+        pluginVersions: Array.from(source.pluginVersions.entries()),
         pluginInstallations: Array.from(source.pluginInstallations.entries()),
+        pluginPermissionGrants: Array.from(source.pluginPermissionGrants.entries()),
+        pluginStorageEntries: Array.from(source.pluginStorageEntries.entries()),
+        pluginCacheEntries: Array.from(source.pluginCacheEntries.entries()),
+        pluginRuntimeStates: Array.from(source.pluginRuntimeStates.entries()),
         schoolIntegrations: Array.from(source.schoolIntegrations.entries()),
         campusContent: Array.from(source.campusContent.entries()),
         groups: Array.from(source.groups.entries()),
         groupMembers: Array.from(source.groupMembers.entries()),
         groupInvites: Array.from(source.groupInvites.entries()),
+        availabilityShares: Array.from(source.availabilityShares.entries()),
+        busyBlocks: Array.from(source.busyBlocks.entries()),
+        meetingPolls: Array.from(source.meetingPolls.entries()),
+        pollOptions: Array.from(source.pollOptions.entries()),
+        pollVotes: Array.from(source.pollVotes.entries()),
+        confirmedGroupEvents: Array.from(source.confirmedGroupEvents.entries()),
+        campusGraphPlaces: Array.from(source.campusGraphPlaces.entries()),
+        placeReports: Array.from(source.placeReports.entries()),
+        placeReportFlags: Array.from(source.placeReportFlags.entries()),
+        placeStatusSubscriptions: Array.from(source.placeStatusSubscriptions.entries()),
+        placeStatusAggregates: Array.from(source.placeStatusAggregates.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
@@ -2127,6 +2366,91 @@ export class CloudDatabaseStore {
   setUserRoles(cloudUserId, roles) {
     this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])]));
     this.saveSnapshot();
+  }
+
+  _requireOperationsGrantPart(value, field) {
+    const clean = String(value || "").trim();
+    if (!clean) throw new ContractError("BAD_REQUEST", field + " must not be empty");
+    if (clean.length > 128) throw new ContractError("BAD_REQUEST", field + " exceeds maximum length 128");
+    return clean;
+  }
+
+  grantOperationsSchoolScope(cloudUserId, schoolId, permission, { grantedByRef = "system", nowMs = Date.now() } = {}) {
+    const userId = this._requireOperationsGrantPart(cloudUserId, "cloud_user_id");
+    const scopedSchoolId = this._requireOperationsGrantPart(schoolId, "school_id");
+    const scopedPermission = this._requireOperationsGrantPart(permission, "permission");
+    const existing = Array.from(this.operationsSchoolGrants.values()).find((grant) =>
+      grant.cloud_user_id === userId &&
+      grant.school_id === scopedSchoolId &&
+      grant.permission === scopedPermission &&
+      grant.status === "ACTIVE" &&
+      !grant.revoked_at
+    );
+    if (existing) return existing;
+    const ts = new Date(nowMs).toISOString();
+    const grant = {
+      id: crypto.randomUUID(),
+      cloud_user_id: userId,
+      school_id: scopedSchoolId,
+      permission: scopedPermission,
+      status: "ACTIVE",
+      granted_by_ref: this._requireOperationsGrantPart(grantedByRef, "granted_by_ref"),
+      created_at: ts,
+      updated_at: ts,
+      revoked_at: null
+    };
+    this.operationsSchoolGrants.set(grant.id, grant);
+    this.saveSnapshot();
+    return grant;
+  }
+
+  revokeOperationsSchoolScope(cloudUserId, schoolId, permission, nowMs = Date.now()) {
+    const userId = this._requireOperationsGrantPart(cloudUserId, "cloud_user_id");
+    const scopedSchoolId = this._requireOperationsGrantPart(schoolId, "school_id");
+    const scopedPermission = this._requireOperationsGrantPart(permission, "permission");
+    const ts = new Date(nowMs).toISOString();
+    let revoked = 0;
+    for (const grant of this.operationsSchoolGrants.values()) {
+      if (
+        grant.cloud_user_id === userId &&
+        grant.school_id === scopedSchoolId &&
+        grant.permission === scopedPermission &&
+        grant.status === "ACTIVE" &&
+        !grant.revoked_at
+      ) {
+        grant.status = "REVOKED";
+        grant.updated_at = ts;
+        grant.revoked_at = ts;
+        revoked += 1;
+      }
+    }
+    if (revoked) this.saveSnapshot();
+    return revoked;
+  }
+
+  revokeOperationsSchoolGrant(grantId, nowMs = Date.now()) {
+    const grant = this.operationsSchoolGrants.get(grantId);
+    if (!grant || grant.status !== "ACTIVE" || grant.revoked_at) return false;
+    const ts = new Date(nowMs).toISOString();
+    grant.status = "REVOKED";
+    grant.updated_at = ts;
+    grant.revoked_at = ts;
+    this.saveSnapshot();
+    return true;
+  }
+
+  hasOperationsSchoolScope(cloudUserId, schoolId, permission) {
+    const userId = String(cloudUserId || "").trim();
+    const scopedSchoolId = String(schoolId || "").trim();
+    const scopedPermission = String(permission || "").trim();
+    if (!userId || !scopedSchoolId || !scopedPermission) return false;
+    return Array.from(this.operationsSchoolGrants.values()).some((grant) =>
+      grant.cloud_user_id === userId &&
+      grant.school_id === scopedSchoolId &&
+      grant.permission === scopedPermission &&
+      grant.status === "ACTIVE" &&
+      !grant.revoked_at
+    );
   }
 
   requireRole(authContext, requiredRoles) {
@@ -2888,6 +3212,58 @@ export class CloudDatabaseStore {
     this.flushSnapshotStrictSync();
 
     return { cancelledJobIds };
+  }
+
+  purgeUserPluginData(cloudUserId) {
+    if (!cloudUserId) {
+      return { removed_installations: 0, removed_permission_grants: 0, removed_storage_entries: 0, removed_cache_entries: 0 };
+    }
+    const installationIds = new Set();
+    let removedInstallations = 0;
+    for (const [key, installation] of Array.from(this.pluginInstallations.entries())) {
+      const owner = installation?.cloud_user_id || installation?.user_id;
+      if (owner !== cloudUserId) continue;
+      if (installation?.installation_id) installationIds.add(installation.installation_id);
+      this.pluginInstallations.delete(key);
+      removedInstallations += 1;
+    }
+    let removedGrantRows = 0;
+    for (const [key, row] of Array.from(this.pluginPermissionGrants.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginPermissionGrants.delete(key);
+      removedGrantRows += 1;
+    }
+    let removedStorageEntries = 0;
+    for (const [key, row] of Array.from(this.pluginStorageEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginStorageEntries.delete(key);
+      removedStorageEntries += 1;
+    }
+    let removedCacheEntries = 0;
+    for (const [key, row] of Array.from(this.pluginCacheEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginCacheEntries.delete(key);
+      removedCacheEntries += 1;
+    }
+    const result = {
+      removed_installations: removedInstallations,
+      removed_permission_grants: removedGrantRows,
+      removed_storage_entries: removedStorageEntries,
+      removed_cache_entries: removedCacheEntries
+    };
+    if (removedInstallations || removedStorageEntries || removedCacheEntries) {
+      this.recordAudit({
+        actor_kind: "USER",
+        actor_ref: cloudUserId,
+        action: "PURGE_USER_PLUGIN_DATA",
+        resource_kind: "user",
+        resource_ref: cloudUserId,
+        outcome: "SUCCESS",
+        detail: result
+      });
+      this.saveSnapshot();
+    }
+    return result;
   }
 
   purgeUserMomentsData(cloudUserId, nowMs = Date.now()) {
