@@ -3719,6 +3719,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/v1/plugins/{pluginId}/lifecycle:
     post:
       operationId: transitionPluginLifecycle

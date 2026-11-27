@@ -130,6 +130,11 @@ errors:
     retryable: false
     user_action: FIX_REQUEST_FIELDS
     description: Request parameters or JSON body failed schema validation.
+  - code: CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: RESOLVE_CONFLICT
+    description: Business state conflicts with the current immutable or terminal resource state; resolve the conflict before retrying.
   - code: GROUP_NOT_FOUND
     http_status: 404
     retryable: false
