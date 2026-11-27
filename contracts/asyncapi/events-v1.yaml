@@ -730,7 +730,7 @@ components:
             type: integer
             minimum: 0
           expires_at:
-            type: string
+            type: [string, 'null']
             format: date-time
           trigger_report_id:
             type: string

@@ -7442,6 +7442,7 @@ components:
     PlaceReportFlagStatus:
       type: string
       enum: [OPEN, RESOLVED_KEEP_VISIBLE, RESOLVED_EXCLUDED, REJECTED]
+      description: OPEN awaits review; RESOLVED_KEEP_VISIBLE means review kept the report aggregation-eligible; RESOLVED_EXCLUDED means EXCLUDE_INCORRECT or EXCLUDE_ABUSE removed only that report from aggregation; REJECTED means the flag itself was rejected without changing aggregation.
     PlaceReportReviewAction:
       type: string
       enum: [KEEP_VISIBLE, EXCLUDE_INCORRECT, EXCLUDE_ABUSE, REJECT_FLAG]
