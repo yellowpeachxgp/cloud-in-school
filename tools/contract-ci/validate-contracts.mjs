@@ -108,7 +108,78 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
     return { body: match[2], separatorLength: match[1].length };
   }
 
-  function parseMappingKey(text) {
+  function decodeDoubleQuotedKey(rawKey) {
+    if (rawKey.length < 2 || !rawKey.endsWith("\"")) {
+      return { key: rawKey, error: "unterminated double-quoted key" };
+    }
+    const inner = rawKey.slice(1, -1);
+    const simpleEscapes = {
+      "0": "\0",
+      "a": "\x07",
+      "b": "\b",
+      "t": "\t",
+      "n": "\n",
+      "v": "\v",
+      "f": "\f",
+      "r": "\r",
+      "e": "\x1b",
+      " ": " ",
+      "\"": "\"",
+      "/": "/",
+      "\\": "\\",
+      "N": "\u0085",
+      "_": "\u00a0",
+      "L": "\u2028",
+      "P": "\u2029"
+    };
+    let key = "";
+    for (let index = 0; index < inner.length; index += 1) {
+      const char = inner[index];
+      if (char !== "\\") {
+        key += char;
+        continue;
+      }
+      index += 1;
+      if (index >= inner.length) return { key: rawKey, error: "truncated escape sequence" };
+      const escape = inner[index];
+      if (Object.prototype.hasOwnProperty.call(simpleEscapes, escape)) {
+        key += simpleEscapes[escape];
+        continue;
+      }
+      const digitCount = escape === "x" ? 2 : escape === "u" ? 4 : escape === "U" ? 8 : 0;
+      if (digitCount === 0) return { key: rawKey, error: "unsupported escape sequence \\" + escape };
+      const hex = inner.slice(index + 1, index + 1 + digitCount);
+      if (hex.length !== digitCount || !/^[0-9a-fA-F]+$/.test(hex)) {
+        return { key: rawKey, error: "truncated or non-hexadecimal \\" + escape + " escape" };
+      }
+      const codePoint = Number.parseInt(hex, 16);
+      if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return { key: rawKey, error: "escape sequence is outside the supported Unicode scalar range" };
+      }
+      key += String.fromCodePoint(codePoint);
+      index += digitCount;
+    }
+    return { key };
+  }
+
+  function canonicalizeYamlKey(rawKey) {
+    if (rawKey.startsWith("'")) {
+      if (rawKey.length < 2 || !rawKey.endsWith("'")) {
+        return { key: rawKey, error: "unterminated single-quoted key" };
+      }
+      return { key: rawKey.slice(1, -1).replace(/''/g, "'") };
+    }
+    if (rawKey.startsWith("\"")) return decodeDoubleQuotedKey(rawKey);
+    return { key: rawKey };
+  }
+
+  function unsupportedYamlKeyProperty(rawKey) {
+    if (rawKey.startsWith("'") || rawKey.startsWith("\"")) return false;
+    if (rawKey === "<<") return true;
+    return /^[!&*]\S*(?:\s+|$)/.test(rawKey);
+  }
+
+  function parseMappingKey(text, line) {
     let quote = null;
     for (let index = 0; index < text.length; index += 1) {
       const char = text[index];
@@ -129,12 +200,17 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       if (index + 1 < text.length && !/\s/.test(text[index + 1])) continue;
       const rawKey = text.slice(0, index).trim();
       if (!rawKey) return null;
-      let key = rawKey;
-      if ((rawKey.startsWith("'") && rawKey.endsWith("'")) || (rawKey.startsWith("\"") && rawKey.endsWith("\""))) {
-        key = rawKey.slice(1, -1);
-        if (rawKey.startsWith("'")) key = key.replace(/''/g, "'");
+      let invalidKey = false;
+      if (unsupportedYamlKeyProperty(rawKey)) {
+        errors.push(label + ":" + line + ": unsupported YAML key node property " + JSON.stringify(rawKey) + "; anchors/tags/aliases/merge keys are outside the supported contract subset");
+        invalidKey = true;
       }
-      return { key, value: stripYamlComment(text.slice(index + 1)) };
+      const canonical = canonicalizeYamlKey(rawKey);
+      if (canonical.error) {
+        errors.push(label + ":" + line + ": invalid YAML quoted key " + JSON.stringify(rawKey) + ": " + canonical.error);
+        invalidKey = true;
+      }
+      return { key: canonical.key, invalidKey, value: stripYamlComment(text.slice(index + 1)) };
     }
     return null;
   }
@@ -224,9 +300,6 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
   }
 
   function registerKey(keys, key, line) {
-    if (key === "<<") {
-      errors.push(label + ":" + line + ": YAML merge keys are unsupported in contract YAML; effective duplicate keys cannot be proven absent");
-    }
     if (keys.has(key)) {
       duplicates.push(label + ":" + line + ": duplicate mapping key " + JSON.stringify(key) + " (first at line " + keys.get(key) + ")");
     } else {
@@ -266,13 +339,13 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
         continue;
       }
       if (parseSequenceItem(info)) return index;
-      const parsed = parseMappingKey(info.text);
+      const parsed = parseMappingKey(info.text, info.line);
       if (!parsed) {
         errors.push(label + ":" + info.line + ": unsupported non-mapping YAML line in mapping context");
         index += 1;
         continue;
       }
-      registerKey(keys, parsed.key, info.line);
+      if (!parsed.invalidKey) registerKey(keys, parsed.key, info.line);
       index = consumeValue(index, indent, parsed.value);
     }
     return index;
@@ -312,11 +385,11 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
         index += 1;
         continue;
       }
-      const parsedInlineKey = parseMappingKey(item.body);
+      const parsedInlineKey = parseMappingKey(item.body, info.line);
       if (parsedInlineKey) {
         const mapIndent = indent + 1 + item.separatorLength;
         const keys = new Map();
-        registerKey(keys, parsedInlineKey.key, info.line);
+        if (!parsedInlineKey.invalidKey) registerKey(keys, parsedInlineKey.key, info.line);
         const afterInlineValue = consumeValue(index, mapIndent, parsedInlineKey.value);
         index = parseMapping(afterInlineValue, mapIndent, keys);
         continue;
@@ -494,6 +567,77 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   assert(
     aliasControl.errors.length > 0,
     "duplicate-key scanner must fail closed on YAML aliases outside the supported subset"
+  );
+  const escapedKeyNegative = analyzeYamlDuplicateKeys(
+    "root:\n  a: first\n  \"\\x61\": second\n",
+    "escaped-key-negative.yaml"
+  );
+  assert(
+    escapedKeyNegative.errors.length === 0 &&
+      escapedKeyNegative.duplicates.length === 1 &&
+      escapedKeyNegative.duplicates[0] === "escaped-key-negative.yaml:3: duplicate mapping key \"a\" (first at line 2)",
+    "duplicate-key scanner must canonicalize double-quoted \\x escapes with exact line/key evidence"
+  );
+  const unicodeEscapeMatrix = analyzeYamlDuplicateKeys(
+    "root:\n  a: first\n  \"\\x61\": second\n  \"\\u0061\": third\n  \"\\U00000061\": fourth\n",
+    "unicode-escape-matrix.yaml"
+  );
+  assert(
+    unicodeEscapeMatrix.errors.length === 0 &&
+      unicodeEscapeMatrix.duplicates.length === 3 &&
+      unicodeEscapeMatrix.duplicates[0].includes("unicode-escape-matrix.yaml:3: duplicate mapping key \"a\"") &&
+      unicodeEscapeMatrix.duplicates[1].includes("unicode-escape-matrix.yaml:4: duplicate mapping key \"a\"") &&
+      unicodeEscapeMatrix.duplicates[2].includes("unicode-escape-matrix.yaml:5: duplicate mapping key \"a\""),
+    "duplicate-key scanner must canonicalize \\x, \\u, and \\U double-quoted key escapes"
+  );
+  const threeFormKeyMatrix = analyzeYamlDuplicateKeys(
+    "root:\n  a: first\n  'a': second\n  \"a\": third\n",
+    "three-form-key-matrix.yaml"
+  );
+  assert(
+    threeFormKeyMatrix.errors.length === 0 &&
+      threeFormKeyMatrix.duplicates.length === 2 &&
+      threeFormKeyMatrix.duplicates[0].includes("three-form-key-matrix.yaml:3: duplicate mapping key \"a\"") &&
+      threeFormKeyMatrix.duplicates[1].includes("three-form-key-matrix.yaml:4: duplicate mapping key \"a\""),
+    "duplicate-key scanner must treat plain, single-quoted, and double-quoted forms of the same key as duplicates"
+  );
+  const taggedKeyNegative = analyzeYamlDuplicateKeys(
+    "root:\n  a: first\n  !!str a: second\n",
+    "tagged-key-negative.yaml"
+  );
+  assert(
+    taggedKeyNegative.errors.length === 1 &&
+      taggedKeyNegative.errors[0] === "tagged-key-negative.yaml:3: unsupported YAML key node property \"!!str a\"; anchors/tags/aliases/merge keys are outside the supported contract subset" &&
+      taggedKeyNegative.duplicates.length === 0,
+    "duplicate-key scanner must reject tagged keys with exact line/key evidence"
+  );
+  const keyPropertyMatrix = analyzeYamlDuplicateKeys(
+    "root:\n  &anchor a: first\n  *aliasKey: second\n  !!str a: third\n  <<: merged\n",
+    "key-property-matrix.yaml"
+  );
+  assert(
+    keyPropertyMatrix.errors.length === 4 &&
+      keyPropertyMatrix.errors[0].includes("key-property-matrix.yaml:2: unsupported YAML key node property \"&anchor a\"") &&
+      keyPropertyMatrix.errors[1].includes("key-property-matrix.yaml:3: unsupported YAML key node property \"*aliasKey\"") &&
+      keyPropertyMatrix.errors[2].includes("key-property-matrix.yaml:4: unsupported YAML key node property \"!!str a\"") &&
+      keyPropertyMatrix.errors[3].includes("key-property-matrix.yaml:5: unsupported YAML key node property \"<<\""),
+    "duplicate-key scanner must reject anchor, alias, tag, and merge node properties in key position"
+  );
+  const quotedMergeLiteralControl = analyzeYamlDuplicateKeys(
+    "root:\n  \"<<\": literal string key\n",
+    "quoted-merge-literal-control.yaml"
+  );
+  assert(
+    quotedMergeLiteralControl.errors.length === 0 && quotedMergeLiteralControl.duplicates.length === 0,
+    "duplicate-key scanner must allow a quoted literal << key"
+  );
+  const invalidEscapeControl = analyzeYamlDuplicateKeys(
+    "root:\n  \"\\x6g\": invalid\n",
+    "invalid-escape-control.yaml"
+  );
+  assert(
+    invalidEscapeControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on malformed double-quoted key escapes"
   );
 }
 
