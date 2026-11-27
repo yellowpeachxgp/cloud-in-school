@@ -913,8 +913,8 @@ test("W4-01 atomicity: data-delete is a single commit unit — pre-publish flush
     assert.ok(ownerMembership, "membership row must roll back");
     assert.equal(ownerMembership.status, "ACTIVE");
     assert.equal(ownerMembership.role, "OWNER", "ownership transfer must roll back");
-    // Re-read through the store: rollback is overlay discard, so live row
-    // object identity is preserved rather than replaced by cloned records.
+    // Re-read through the store: pre-publish rollback is candidate discard,
+    // so live row object identity is preserved rather than replaced by cloned records.
     const rolledBinding = Array.from(app.store.schoolBindings.values()).find(
       (row) => row.cloud_user_id === owner.user.id
     );
