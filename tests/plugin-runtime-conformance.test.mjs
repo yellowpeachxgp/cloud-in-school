@@ -33,6 +33,10 @@ function fixtureFiles() {
     .sort();
 }
 
+function readFixtureText(fileName) {
+  return fs.readFileSync(path.join(FIXTURE_DIR, fileName), "utf8");
+}
+
 test("W6-00 runtime fixtures: SDK conclusions and canonical validation codes are stable", () => {
   const files = fixtureFiles();
   assert.ok(files.length >= 30, `expected at least 30 runtime fixtures, found ${files.length}`);
@@ -41,16 +45,16 @@ test("W6-00 runtime fixtures: SDK conclusions and canonical validation codes are
 
   for (const fileName of files) {
     const expected = fixtureExpectation(fileName);
-    const manifest = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, fileName), "utf8"));
+    const manifestText = readFixtureText(fileName);
     if (expected.valid) {
-      const normalized = validatePluginManifest(manifest);
-      assert.equal(normalized.plugin_id, manifest.plugin_id, fileName);
+      const normalized = validatePluginManifest(manifestText);
+      assert.equal(normalized.plugin_id, "org.example.runtime-fixture", fileName);
       continue;
     }
 
     let thrown = null;
     try {
-      validatePluginManifest(manifest);
+      validatePluginManifest(manifestText);
     } catch (error) {
       thrown = error;
     }
@@ -59,6 +63,28 @@ test("W6-00 runtime fixtures: SDK conclusions and canonical validation codes are
       thrown.detail?.runtime_validation_code,
       expected.code,
       `${fileName}: expected ${expected.code}, got ${thrown.detail?.runtime_validation_code} (${thrown.message})`
+    );
+  }
+});
+
+test("W6-00 parity gaps: legacy enum, nonblank display strings, and integer literals", () => {
+  const legacy = validatePluginManifest(readFixtureText("valid-legacy-schema-version.json"));
+  assert.equal(legacy.legacy_schema_version, "dis-campus-plugin/v1");
+
+  const padded = validatePluginManifest(readFixtureText("valid-display-strings-padded-nonblank.json"));
+  assert.equal(padded.name, "  Runtime Fixture Plugin  ");
+  assert.equal(padded.ui_slots[0].title, "  Runtime Fixture Card  ");
+
+  for (const fileName of [
+    "invalid-runtime_schema_invalid-invalid-legacy-schema-version.json",
+    "invalid-runtime_schema_invalid-blank-name.json",
+    "invalid-runtime_schema_invalid-blank-ui-slot-title.json",
+    "invalid-runtime_schema_invalid-decimal-integer-min-host-api.json"
+  ]) {
+    assert.throws(
+      () => validatePluginManifest(readFixtureText(fileName)),
+      (error) => error?.detail?.runtime_validation_code === "runtime_schema_invalid",
+      fileName + " must fail with runtime_schema_invalid"
     );
   }
 });

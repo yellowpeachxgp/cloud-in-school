@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ContractError, loadPermissionCatalog } from "../../contracts/src/index.mjs";
+import { ContractError, loadPermissionCatalog, parseJsonWithNumberLiterals } from "../../contracts/src/index.mjs";
 import {
   generateEd25519KeyPair,
   signPluginManifest,
@@ -86,7 +86,8 @@ export function assertSafeRelativeArtifactPath(relPath) {
 }
 
 export function validatePluginManifest(rawManifest, { hostApiVersion = 2 } = {}) {
-  const manifest = adaptLegacyCampusManifest(rawManifest);
+  const parsedInput = typeof rawManifest === "string" ? parseJsonWithNumberLiterals(rawManifest) : rawManifest;
+  const manifest = adaptLegacyCampusManifest(parsedInput);
 
   // W6-00: validate the exact snake_case runtime shape before semantic checks.
   // The transitional schema is packages/plugin-sdk/schema/, not contracts/**;
@@ -648,7 +649,7 @@ export class PluginRegistryAndBroker {
 
 export function loadPluginDirectory(pluginDir) {
   const manifestPath = path.join(pluginDir, "manifest.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const manifest = parseJsonWithNumberLiterals(fs.readFileSync(manifestPath, "utf8"));
   const artifactMap = {};
   for (const art of manifest.entry_artifacts || []) {
     const safePath = assertSafeRelativeArtifactPath(art.path);

@@ -33,12 +33,12 @@
 |---|---|---|
 | `schema_version` | string | `dis-extension/v2`；兼容别名 `dis-plugin/v2` |
 | `plugin_id` | string | 5–120 字符，`a-z0-9` 段以点连接，例如 `org.example.hello-campus` |
-| `name` | string | 1–80 字符 |
+| `name` | string | 1–80 字符，且必须包含至少一个非空白字符（纯空白被拒绝；非空白内容前后的空格按原样保留） |
 | `version` | string | `MAJOR.MINOR.PATCH[-prerelease]`；数字段不允许前导零 |
-| `min_host_api` / `max_host_api` | integer | 正整数且 `min <= max`；当前 host API 为 2，区间必须包含 2 |
+| `min_host_api` / `max_host_api` | integer literal | 正整数且 `min <= max`；当前 host API 为 2，区间必须包含 2。JSON 源文本必须是整数字面量（如 `2`）；`1.0`、`2e0` 这类小数/指数形式即使数值为整数也被拒绝 |
 | `permissions` | string array | 只能包含 §5 权限目录中的 ID |
 | `allowed_origins` | string array | 只能是无路径 HTTPS origin，例如 `https://plugin.example.com`；不允许 `http:` 或路径 |
-| `ui_slots` | object array | 每项必须有 `slot_id / card_id / title / action_command`，可选 `subtitle` |
+| `ui_slots` | object array | 每项必须有 `slot_id / card_id / title / action_command`，可选 `subtitle`；`title` 为 1–60 字符且不能是纯空白 |
 | `commands` | object array | 每项必须有 `name`，可选 `description / required_permission` |
 | `entry_artifacts` | object array | 每项必须有 `path / sha256 / size_bytes` |
 
@@ -46,7 +46,7 @@
 
 | 字段 | 类型 | 运行时规则 |
 |---|---|---|
-| `legacy_schema_version` | string | v1 适配结果可标记 `dis-campus-plugin/v1` |
+| `legacy_schema_version` | string | 若存在，只能是 `dis-campus-plugin/v1`；其他值、空值或非字符串都会被拒绝。Android 解析后保留该标记 |
 | `signature` | object | `algorithm=Ed25519`、`key_id`、`value_base64`。结构校验时可选；签名包安装/验证时必需 |
 
 未知顶层字段、未知嵌套字段会被拒绝。`path` 采用安全方向的过严规则：绝对路径、Windows 盘符、NUL、以及**任何包含 `..` 子串的文件名**都会被拒绝；这意味着 `a..b.js` 目前也会被拒绝。

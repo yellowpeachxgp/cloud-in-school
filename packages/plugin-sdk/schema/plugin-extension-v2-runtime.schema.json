@@ -41,7 +41,8 @@
     "name": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 80
+      "maxLength": 80,
+      "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
     },
     "version": {
       "type": "string",
@@ -111,7 +112,8 @@
           "title": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 60
+            "maxLength": 60,
+            "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
           },
           "subtitle": {
             "type": "string",

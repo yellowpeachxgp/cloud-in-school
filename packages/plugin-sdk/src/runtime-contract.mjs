@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ContractError } from "../../contracts/src/index.mjs";
+import { ContractError, jsonNumberLiteralAt } from "../../contracts/src/index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_PLUGIN_SCHEMA_PATH = path.resolve(
@@ -153,9 +153,39 @@ function validateJsonSchemaValue(value, schema, currentPath = "$", issues = []) 
   return issues;
 }
 
+function integerLiteralFormSchemaIssues(manifest) {
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) return [];
+  const checks = [
+    ["$.min_host_api", manifest.min_host_api],
+    ["$.max_host_api", manifest.max_host_api]
+  ];
+  if (Array.isArray(manifest.entry_artifacts)) {
+    manifest.entry_artifacts.forEach((artifact, artifactIndex) => {
+      checks.push(["$.entry_artifacts[" + artifactIndex + "].size_bytes", artifact?.size_bytes]);
+    });
+  }
+
+  const issues = [];
+  for (const [path, value] of checks) {
+    if (typeof value !== "number") continue;
+    const literal = jsonNumberLiteralAt(manifest, path);
+    if (literal !== null && !/^-?[0-9]+$/.test(literal)) {
+      issues.push(
+        issue(
+          path,
+          "integerLiteral",
+          path + " must use integer literal form, got source literal " + literal
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 export function validatePluginRuntimeSchema(manifest) {
   const schema = loadRuntimePluginManifestSchema();
-  return validateJsonSchemaValue(manifest, schema);
+  const issues = validateJsonSchemaValue(manifest, schema);
+  return [...issues, ...integerLiteralFormSchemaIssues(manifest)];
 }
 
 export function runtimeValidationCodeForSchemaIssue(item) {

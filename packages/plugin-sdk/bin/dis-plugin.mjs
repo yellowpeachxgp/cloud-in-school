@@ -8,6 +8,7 @@ import {
   loadPluginDirectory
 } from "../src/index.mjs";
 import { generateEd25519KeyPair } from "../../crypto/src/index.mjs";
+import { parseJsonWithNumberLiterals } from "../../contracts/src/index.mjs";
 
 const [, , subcommand, targetArg, ...flags] = process.argv;
 
@@ -81,7 +82,7 @@ try {
   } else if (subcommand === "sign" || subcommand === "package") {
     const dir = path.resolve(targetArg || ".");
     const manifestPath = path.join(dir, "manifest.json");
-    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const raw = parseJsonWithNumberLiterals(fs.readFileSync(manifestPath, "utf8"));
     const privPath = parseFlag("--key", path.join(dir, "plugin-signing-private.key"));
     const privateKeyBase64 = fs.readFileSync(privPath, "utf8").trim();
 
