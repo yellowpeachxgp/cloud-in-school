@@ -590,3 +590,105 @@ Idempotency-Key: place_report_review_demo_0001
   "action": "EXCLUDE_INCORRECT",
   "review_note": "两名用户现场纠错且原报告已过观察时效，排除后重新聚合"
 }
+
+### 64. CT-05 List Forum Boards (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+GET http://127.0.0.1:4100/api/v1/boards
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 65. CT-05 List Board Posts (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+GET http://127.0.0.1:4100/api/v1/boards/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/posts?cursor=&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 66. CT-05 Create Forum Post (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/posts
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+Content-Type: application/json
+
+{
+  "board_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "title": "示例标题（保留端点不会真的创建）",
+  "body": "示例正文"
+}
+
+### 67. CT-05 Get Post Detail (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+GET http://127.0.0.1:4100/api/v1/posts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 68. CT-05 Delete Own Post (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+DELETE http://127.0.0.1:4100/api/v1/posts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 69. CT-05 Reply To Post (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/posts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/replies
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+Content-Type: application/json
+
+{
+  "body": "示例楼层回复（保留端点不会真的创建）"
+}
+
+### 70. CT-05 Search Posts (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+GET http://127.0.0.1:4100/api/v1/search/posts?q=%E8%87%AA%E4%B9%A0%E5%AE%A4&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 71. CT-05 File User Report (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/reports
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+Content-Type: application/json
+
+{
+  "target_type": "POST",
+  "target_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "reason": "SPAM"
+}
+
+### 72. CT-05 List Moderation Queue (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+GET http://127.0.0.1:4100/api/v1/admin/moderation/queue?school_id=haut&status=OPEN&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 73. CT-05 Apply Moderation Action (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/admin/moderation/cccccccc-cccc-4ccc-8ccc-cccccccccccc/actions
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+Content-Type: application/json
+
+{
+  "action": "KEEP_VISIBLE"
+}
+
+### 74. CT-05 Mint Media Upload Slot (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/media/uploads
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+Content-Type: application/json
+
+{
+  "content_type": "image/webp",
+  "byte_size": 204800
+}
+
+### 75. CT-05 Complete Media Upload Slot (reserved, uniform 501)
+# Runtime truth: reserved endpoint (decision D2); every request receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum, regardless of authentication state, query parameters, headers, or request body.
+POST http://127.0.0.1:4100/api/v1/media/uploads/dddddddd-dddd-4ddd-8ddd-dddddddddddd/complete
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
