@@ -697,6 +697,8 @@ test("W4-02 durability: pre-publish failure rolls back availability commit and r
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.code, "GROUP_AVAILABILITY_REPLACED", "same key retries as the first durable attempt after pre-publish rollback");
     assert.equal(app.store.busyBlocks.size, 1);
+    const poll = await createPoll(app, owner, group.group_id, pollBodies(BASE_NOW + 2 * HOUR), { nowMs: BASE_NOW + 500 });
+    assert.equal(poll.status, 201, JSON.stringify(poll.body));
 
     const restarted = createCampusCloudApp({
       requireAdminAccess: false,
@@ -709,6 +711,64 @@ test("W4-02 durability: pre-publish failure rolls back availability commit and r
       Array.from(restarted.store.busyBlocks.values())[0].start_at,
       iso(BASE_NOW + HOUR)
     );
+
+    const commitProbe = {
+      reservationPlans: [],
+      reservationJobs: [],
+      scheduleEvents: [],
+      priceQuotes: [],
+      idempotencyRecords: [],
+      groups: Array.from(restarted.store.groups.entries()),
+      groupMembers: Array.from(restarted.store.groupMembers.entries()),
+      groupInvites: Array.from(restarted.store.groupInvites.entries()),
+      availabilityShares: Array.from(restarted.store.availabilityShares.entries()),
+      busyBlocks: Array.from(restarted.store.busyBlocks.entries()),
+      meetingPolls: Array.from(restarted.store.meetingPolls.entries()),
+      pollOptions: Array.from(restarted.store.pollOptions.entries()),
+      pollVotes: Array.from(restarted.store.pollVotes.entries()),
+      confirmedGroupEvents: Array.from(restarted.store.confirmedGroupEvents.entries()),
+      campusGraphPlaces: [],
+      placeReports: [],
+      placeReportFlags: [],
+      placeStatusSubscriptions: []
+    };
+    assert.doesNotThrow(() => restarted.store._validateCommitUnit(commitProbe), "valid availability/poll snapshot must pass invariant validation");
+
+    const invalidTtl = structuredClone(commitProbe);
+    invalidTtl.availabilityShares[0][1].ttl_seconds = 1799;
+    assert.throws(() => restarted.store._validateCommitUnit(invalidTtl), /TTL/);
+
+    const overlapping = structuredClone(commitProbe);
+    const firstBlock = overlapping.busyBlocks[0][1];
+    overlapping.busyBlocks.push([
+      "corrupt-overlap",
+      { ...firstBlock, id: "corrupt-overlap", start_at: iso(BASE_NOW + 90 * 60_000), end_at: iso(BASE_NOW + 150 * 60_000) }
+    ]);
+    assert.throws(() => restarted.store._validateCommitUnit(overlapping), /重叠/);
+
+    const duplicateOption = structuredClone(commitProbe);
+    const firstOption = duplicateOption.pollOptions[0][1];
+    duplicateOption.pollOptions.push(["corrupt-option", { ...firstOption, id: "corrupt-option" }]);
+    assert.throws(() => restarted.store._validateCommitUnit(duplicateOption), /重复时间窗/);
+
+    const badTerminal = structuredClone(commitProbe);
+    const terminalOption = badTerminal.pollOptions[0][1];
+    badTerminal.confirmedGroupEvents.push([
+      "corrupt-confirmed",
+      {
+        id: "corrupt-confirmed",
+        poll_id: terminalOption.poll_id,
+        option_id: terminalOption.id,
+        group_id: group.group_id,
+        school_id: "haut",
+        start_at: terminalOption.start_at,
+        end_at: terminalOption.end_at,
+        status: "CONFIRMED",
+        confirmed_by_member_id: ownerMember.id,
+        confirmed_at: iso(BASE_NOW + 600)
+      }
+    ]);
+    assert.throws(() => restarted.store._validateCommitUnit(badTerminal), /终态/);
     clearTimeout(restarted.store._snapshotFlushTimer);
 
     app.store._persistFaultInject = "dir_fsync";
