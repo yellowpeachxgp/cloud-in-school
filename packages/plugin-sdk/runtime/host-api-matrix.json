@@ -1,0 +1,24 @@
+{
+  "version": "runtime-fact-2026-11-27",
+  "notice": "Runtime-only plugin host API fact source for W6-00. This is not contracts/compatibility/host-api-matrix.yaml and must not be presented as the CT/INF contract shared fixture source. The contract-surface convergence slice is pending CT-01.",
+  "host_api_versions": [
+    {
+      "host_api": 2,
+      "format": "dis-extension/v2",
+      "aliases": [
+        "dis-plugin/v2"
+      ],
+      "status": "CURRENT_RUNTIME_STABLE",
+      "supported_ui_slots": [
+        "home.cards",
+        "campus.services",
+        "library.actions",
+        "parcel.cards",
+        "parcel.providers",
+        "settings.entries"
+      ],
+      "signature_algorithm": "Ed25519",
+      "dynamic_code_loading_allowed": false
+    }
+  ]
+}
