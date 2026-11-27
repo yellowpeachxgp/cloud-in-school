@@ -2832,6 +2832,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaceStatusReportListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3144,6 +3146,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaceReportFlagListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
