@@ -595,7 +595,8 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
   "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
   "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
-  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+  "groupInvites", "availabilityShares", "busyBlocks", "meetingPolls", "pollOptions",
+  "pollVotes", "confirmedGroupEvents", "notifications", "priceQuotes", "idempotencyRecords"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -913,6 +914,14 @@ export class CloudDatabaseStore {
     this.groupMembers = new Map(); // memberId -> membership-period record
     this.groupInvites = new Map(); // inviteId -> invite
 
+    // Availability & time polls (W4-02): privacy-minimized blocks and collaboration state
+    this.availabilityShares = new Map(); // memberId -> TTL-bounded share metadata/tombstone
+    this.busyBlocks = new Map(); // busyBlockId -> quantized time block only (never title/reason)
+    this.meetingPolls = new Map(); // pollId -> deadline-bound group time poll
+    this.pollOptions = new Map(); // optionId -> quantized poll time window
+    this.pollVotes = new Map(); // voteId -> one vote per (poll, membership period)
+    this.confirmedGroupEvents = new Map(); // confirmedEventId -> terminal group event
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -1169,6 +1178,12 @@ export class CloudDatabaseStore {
       loadMap(this.groups, raw.groups);
       loadMap(this.groupMembers, raw.groupMembers);
       loadMap(this.groupInvites, raw.groupInvites);
+      loadMap(this.availabilityShares, raw.availabilityShares);
+      loadMap(this.busyBlocks, raw.busyBlocks);
+      loadMap(this.meetingPolls, raw.meetingPolls);
+      loadMap(this.pollOptions, raw.pollOptions);
+      loadMap(this.pollVotes, raw.pollVotes);
+      loadMap(this.confirmedGroupEvents, raw.confirmedGroupEvents);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1403,6 +1418,79 @@ export class CloudDatabaseStore {
         throw new Error("群组邀请快照与学校作用域不一致");
       }
     }
+
+    const members = new Map(raw.groupMembers || []);
+    const shares = new Map(raw.availabilityShares || []);
+    const polls = new Map(raw.meetingPolls || []);
+    const options = new Map(raw.pollOptions || []);
+    const quantized = (row) => {
+      const start = Date.parse(row?.start_at);
+      const end = Date.parse(row?.end_at);
+      return Number.isFinite(start) && Number.isFinite(end) &&
+        end > start && end - start >= 1_800_000 &&
+        start % 1_800_000 === 0 && end % 1_800_000 === 0;
+    };
+    for (const [, share] of shares) {
+      const member = members.get(share?.member_id);
+      const group = groups.get(share?.group_id);
+      if (!member || member.group_id !== share.group_id || member.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与成员作用域不一致");
+      }
+      if (!group || group.school_id !== share.school_id) {
+        throw new Error("忙闲共享快照与学校作用域不一致");
+      }
+    }
+    let activeShareBlockCount = 0;
+    for (const [, block] of raw.busyBlocks || []) {
+      const share = shares.get(block?.member_id);
+      if (!share || share.group_id !== block.group_id || share.school_id !== block.school_id) {
+        throw new Error("忙闲块快照与共享作用域不一致");
+      }
+      if (!quantized(block)) {
+        throw new Error("忙闲块快照违反 30 分钟量化约束");
+      }
+      if (share.status !== "ACTIVE") {
+        throw new Error("撤回或过期忙闲共享仍保留原始时间块");
+      }
+      activeShareBlockCount += 1;
+    }
+    for (const [, poll] of polls) {
+      const group = groups.get(poll?.group_id);
+      if (!group || group.school_id !== poll.school_id) {
+        throw new Error("投票快照与学校作用域不一致");
+      }
+    }
+    for (const [, option] of options) {
+      const poll = polls.get(option?.poll_id);
+      if (!poll || !quantized(option)) {
+        throw new Error("投票选项快照与投票或量化约束不一致");
+      }
+    }
+    for (const [, vote] of raw.pollVotes || []) {
+      const poll = polls.get(vote?.poll_id);
+      const option = options.get(vote?.option_id);
+      const member = members.get(vote?.member_id);
+      if (!poll || poll.group_id !== vote.group_id || poll.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== vote.poll_id) {
+        throw new Error("投票表决快照与选项不一致");
+      }
+      if (!member || member.group_id !== vote.group_id || member.school_id !== vote.school_id) {
+        throw new Error("投票表决快照与成员作用域不一致");
+      }
+    }
+    for (const [, confirmed] of raw.confirmedGroupEvents || []) {
+      const poll = polls.get(confirmed?.poll_id);
+      const option = options.get(confirmed?.option_id);
+      if (!poll || poll.group_id !== confirmed.group_id || poll.school_id !== confirmed.school_id) {
+        throw new Error("确认事件快照与投票作用域不一致");
+      }
+      if (!option || option.poll_id !== confirmed.poll_id || !quantized(confirmed)) {
+        throw new Error("确认事件快照与选项或量化约束不一致");
+      }
+    }
+    void activeShareBlockCount;
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1522,6 +1610,12 @@ export class CloudDatabaseStore {
         groups: Array.from(source.groups.entries()),
         groupMembers: Array.from(source.groupMembers.entries()),
         groupInvites: Array.from(source.groupInvites.entries()),
+        availabilityShares: Array.from(source.availabilityShares.entries()),
+        busyBlocks: Array.from(source.busyBlocks.entries()),
+        meetingPolls: Array.from(source.meetingPolls.entries()),
+        pollOptions: Array.from(source.pollOptions.entries()),
+        pollVotes: Array.from(source.pollVotes.entries()),
+        confirmedGroupEvents: Array.from(source.confirmedGroupEvents.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its

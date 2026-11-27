@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
+import { withdrawAvailabilityForMembershipTransition } from "../../availability/src/index.mjs";
 
 const GROUP_TYPES = new Set(["study", "dorm", "club", "project"]);
 const GROUP_ROLES = new Set(["OWNER", "ADMIN", "MEMBER"]);
@@ -608,6 +609,16 @@ export class CommunityService {
           { status: "LEFT", sharing_level: "NONE", left_at: ts },
           undo
         );
+        // W4-02 privacy invariant: group archival withdraws busy-block sharing
+        // immediately and deletes the raw time blocks in the same commit unit.
+        withdrawAvailabilityForMembershipTransition(
+          this.store,
+          group,
+          member,
+          auth.cloudUserId,
+          ts,
+          undo
+        );
         this._appendMemberEvent(
           {
             group,
@@ -910,6 +921,16 @@ export class CommunityService {
           sharing_level: "NONE",
           left_at: ts
         },
+        undo
+      );
+      // W4-02 privacy invariant: self-leave and admin removal both withdraw
+      // busy-block sharing immediately; raw blocks never wait for TTL expiry.
+      withdrawAvailabilityForMembershipTransition(
+        this.store,
+        group,
+        target,
+        auth.cloudUserId,
+        ts,
         undo
       );
       this._appendMemberEvent(

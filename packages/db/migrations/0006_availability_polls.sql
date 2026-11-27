@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS meeting_polls (
   title TEXT NOT NULL CHECK (char_length(btrim(title)) BETWEEN 1 AND 120),
   status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED', 'CONFIRMED')),
   voting_deadline_at TIMESTAMPTZ NOT NULL,
+  -- Logical membership-period reference. Intentionally not a hard FK: account erasure
+  -- may detach it to the documented tombstone while preserving group-owned poll state.
   created_by_member_id UUID NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at TIMESTAMPTZ,
@@ -90,10 +92,6 @@ CREATE TABLE IF NOT EXISTS meeting_polls (
   CONSTRAINT meeting_polls_group_scope_fk
     FOREIGN KEY (group_id, school_id)
     REFERENCES "groups" (group_id, school_id)
-    ON DELETE CASCADE,
-  CONSTRAINT meeting_polls_creator_scope_fk
-    FOREIGN KEY (created_by_member_id, group_id, school_id)
-    REFERENCES group_members (member_id, group_id, school_id)
     ON DELETE CASCADE,
   CONSTRAINT meeting_polls_status_shape_check
     CHECK (
@@ -111,6 +109,7 @@ CREATE INDEX IF NOT EXISTS meeting_polls_group_status_idx
 CREATE TABLE IF NOT EXISTS poll_options (
   option_id UUID PRIMARY KEY,
   poll_id UUID NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
   start_at TIMESTAMPTZ NOT NULL,
   end_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -175,6 +174,8 @@ CREATE TABLE IF NOT EXISTS confirmed_group_events (
   start_at TIMESTAMPTZ NOT NULL,
   end_at TIMESTAMPTZ NOT NULL,
   status TEXT NOT NULL CHECK (status = 'CONFIRMED'),
+  -- Logical membership-period reference. Intentionally not a hard FK: account erasure
+  -- may detach it to the documented tombstone while preserving the group-owned event.
   confirmed_by_member_id UUID NOT NULL,
   confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT confirmed_group_events_poll_scope_fk
@@ -184,10 +185,6 @@ CREATE TABLE IF NOT EXISTS confirmed_group_events (
   CONSTRAINT confirmed_group_events_option_poll_fk
     FOREIGN KEY (option_id, poll_id)
     REFERENCES poll_options (option_id, poll_id)
-    ON DELETE CASCADE,
-  CONSTRAINT confirmed_group_events_member_scope_fk
-    FOREIGN KEY (confirmed_by_member_id, group_id, school_id)
-    REFERENCES group_members (member_id, group_id, school_id)
     ON DELETE CASCADE,
   CONSTRAINT confirmed_group_events_time_shape_check
     CHECK (

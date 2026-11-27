@@ -21,6 +21,7 @@ import {
 } from "../../../packages/finance/src/index.mjs";
 import { ParcelHubService } from "../../../packages/parcel-hub/src/index.mjs";
 import { CommunityService } from "../../../packages/community/src/index.mjs";
+import { AvailabilityService } from "../../../packages/availability/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -150,6 +151,7 @@ export function createCampusCloudApp(options = {}) {
       environment: options.environment || process.env.NODE_ENV || "production"
     });
   const community = options.community || new CommunityService(store);
+  const availability = options.availability || new AvailabilityService(store);
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -453,6 +455,7 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     community,
+    availability,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -482,6 +485,7 @@ export function createCampusCloudApp(options = {}) {
     reservationEngine,
     parcelHub,
     community,
+    availability,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,

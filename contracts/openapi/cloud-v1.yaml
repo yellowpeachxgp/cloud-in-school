@@ -1321,7 +1321,7 @@ paths:
   /api/v1/groups/{groupId}/availability/me:
     put:
       operationId: replaceMyGroupAvailability
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.availability.write]
@@ -1364,7 +1364,7 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     delete:
       operationId: deleteMyGroupAvailability
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.availability.write]
@@ -1402,7 +1402,7 @@ paths:
   /api/v1/groups/{groupId}/availability/query:
     post:
       operationId: queryGroupAvailability
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.availability.read]
@@ -1445,7 +1445,7 @@ paths:
   /api/v1/groups/{groupId}/polls:
     post:
       operationId: createGroupPoll
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.poll.create]
@@ -1494,7 +1494,7 @@ paths:
   /api/v1/polls/{pollId}:
     get:
       operationId: getGroupPoll
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.poll.read]
@@ -1523,7 +1523,7 @@ paths:
   /api/v1/polls/{pollId}/votes:
     post:
       operationId: upsertGroupPollVote
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.poll.vote]
@@ -1566,7 +1566,7 @@ paths:
   /api/v1/polls/{pollId}/confirm:
     post:
       operationId: confirmGroupPoll
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 availability implementation PR.
       x-dis-permissions: [group.poll.confirm]
