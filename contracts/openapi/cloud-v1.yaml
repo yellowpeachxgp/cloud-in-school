@@ -1422,12 +1422,12 @@ paths:
             schema:
               $ref: '#/components/schemas/AdminRefundRequest'
       responses:
-        '200':
-          description: Order refunded
+        '202':
+          description: Dual-approval refund request created; no refund has executed yet
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OrderEnvelope'
+                $ref: '#/components/schemas/RefundRequestEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
@@ -1514,9 +1514,26 @@ paths:
       security:
         - bearerAuth: []
       summary: Create a dual-approval refund request (legacy 1-click refunds no longer execute unilaterally)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminQuickRefundRequest'
       responses:
         '202':
-          description: Refund request created pending second-admin approval
+          description: Dual-approval refund request created pending second-admin approval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundRequestEnvelope'
   /api/v1/reservation-jobs/{jobId}/execute-now:
     post:
       operationId: executeReservationJobNow
@@ -1524,6 +1541,8 @@ paths:
       security:
         - bearerAuth: []
       summary: Trigger immediate PRECHECK -> FINAL_CHECK -> FIRE execution for an armed reservation job
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
       responses:
         '200':
           description: Reservation job executed
@@ -1534,6 +1553,8 @@ paths:
       security:
         - bearerAuth: []
       summary: Release a live confirmed or active library seat reservation
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
       responses:
         '200':
           description: Seat reservation released
@@ -1611,6 +1632,13 @@ paths:
       security:
         - bearerAuth: []
       summary: Delete a campus channel item by ID
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
       responses:
         '200':
           description: Updated channel catalog
@@ -1631,6 +1659,13 @@ paths:
       security:
         - bearerAuth: []
       summary: Delete a student club item by ID
+      parameters:
+        - name: clubId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
       responses:
         '200':
           description: Updated club catalog
@@ -1651,6 +1686,13 @@ paths:
       security:
         - bearerAuth: []
       summary: Delete a university competition item by ID
+      parameters:
+        - name: competitionId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
       responses:
         '200':
           description: Updated competition catalog
@@ -1689,9 +1731,19 @@ paths:
           schema:
             type: string
             format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRefundRequest'
       responses:
         '202':
           description: Refund request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundRequestEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
@@ -1706,6 +1758,10 @@ paths:
       responses:
         '200':
           description: Refund requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundRequestListEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
   /api/v1/admin/refund-requests/{requestId}/approve:
@@ -1725,6 +1781,10 @@ paths:
       responses:
         '200':
           description: Refund request approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundRequestEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
@@ -1745,7 +1805,11 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Refund executed (order REFUNDED)
+          description: Refund executed or idempotently converged (order REFUNDED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundExecutionEnvelope'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
@@ -3009,15 +3073,155 @@ components:
     AdminRefundRequest:
       type: object
       additionalProperties: false
-      required: [amount_micropeach, reason, second_approver_ref]
+      required: [amount_micropeach]
       properties:
         amount_micropeach:
           type: integer
           minimum: 1
         reason:
           type: string
-        second_approver_ref:
+          maxLength: 200
+    AdminQuickRefundRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
           type: string
+          maxLength: 200
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [id, order_id, cloud_user_id, amount_micropeach, reason, request_hash, status, created_by, created_at, expires_at, approved_by, approved_at, executed_at, result_error]
+      properties:
+        id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        cloud_user_id:
+          type: string
+        amount_micropeach:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          maxLength: 200
+        request_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        status:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED, EXECUTING, RESULT_UNKNOWN, REFUNDED, EXPIRED, FAILED]
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        approved_by:
+          type: [string, 'null']
+        approved_at:
+          type: [string, 'null']
+          format: date-time
+        executed_at:
+          type: [string, 'null']
+          format: date-time
+        result_error:
+          type: [string, 'null']
+    RefundRequestEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required: [refund_request]
+          properties:
+            refund_request:
+              $ref: '#/components/schemas/RefundRequest'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    RefundLegacyReconcileQueueItem:
+      type: object
+      additionalProperties: false
+      required: [order_id, event_key, status, attempt_count, last_error_code, created_at, updated_at]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        event_key:
+          type: string
+        status:
+          type: string
+        attempt_count:
+          type: integer
+          minimum: 0
+        last_error_code:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RefundRequestListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required: [refund_requests, legacy_reconcile_queue]
+          properties:
+            refund_requests:
+              type: array
+              items:
+                $ref: '#/components/schemas/RefundRequest'
+            legacy_reconcile_queue:
+              type: array
+              items:
+                $ref: '#/components/schemas/RefundLegacyReconcileQueueItem'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    RefundExecutionEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required: [refund_request, order]
+          properties:
+            refund_request:
+              $ref: '#/components/schemas/RefundRequest'
+            order:
+              type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
     AuditEventListEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]

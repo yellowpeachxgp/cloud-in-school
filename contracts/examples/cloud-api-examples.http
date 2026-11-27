@@ -52,3 +52,23 @@ Content-Type: application/json
     "campus": "lianhuajie"
   }
 }
+
+### 6. Create Dual-Approval Refund Request (legacy admin refund compatibility)
+# Runtime truth: this creates a PENDING_APPROVAL refund_request and returns 202;
+# it does not refund the order synchronously.
+POST http://127.0.0.1:4100/api/v1/admin/orders/33333333-3333-4333-8333-333333333333/refund
+Authorization: Bearer <finance_admin_access_token>
+Content-Type: application/json
+
+{
+  "amount_micropeach": 10000,
+  "reason": "Dual-control refund example"
+}
+
+### 7. Approve Refund Request As DISTINCT Second Finance Admin
+POST http://127.0.0.1:4100/api/v1/admin/refund-requests/44444444-4444-4444-8444-444444444444/approve
+Authorization: Bearer <second_finance_admin_access_token>
+
+### 8. Execute Approved Refund Request (idempotent convergence)
+POST http://127.0.0.1:4100/api/v1/admin/refund-requests/44444444-4444-4444-8444-444444444444/execute
+Authorization: Bearer <finance_admin_access_token>
