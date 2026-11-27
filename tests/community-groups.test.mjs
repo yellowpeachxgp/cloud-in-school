@@ -610,3 +610,57 @@ test("W4-01 durability: group, invite, member and idempotency receipts survive s
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("W4-01 atomicity: pre-commit storage failure rolls back owner transfer and same key may reconcile", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-community-atomic-"));
+  const snapshotPath = path.join(tmpDir, "cloud-state.json");
+  try {
+    const app = createCampusCloudApp({
+      requireAdminAccess: false,
+      storeOptions: { snapshotPath, requireDurableSnapshot: true }
+    });
+    const owner = setupUser(app, "owner_atomic");
+    const member = setupUser(app, "member_atomic");
+    const group = await createStudyGroup(app, owner);
+    const invite = await createInvite(app, owner, group.group_id, { maxUses: 2 });
+    const accepted = await acceptInvite(app, member, invite.code);
+    assert.equal(accepted.status, 201);
+    const targetId = accepted.body.data.member_id;
+    const ownerRow = Array.from(app.store.groupMembers.values()).find(
+      (row) => row.group_id === group.group_id && row.cloud_user_id === owner.user.id && row.status === "ACTIVE"
+    );
+    const targetRow = app.store.groupMembers.get(targetId);
+    const transferKey = "atomic-owner-transfer-123";
+
+    app.store._persistFaultInject = "tmp_write";
+    const failed = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/groups/" + group.group_id + "/members/" + targetId,
+      headers: { ...owner.auth, "idempotency-key": transferKey },
+      body: { role: "OWNER" }
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+    assert.equal(ownerRow.role, "OWNER", "pre-commit failure must restore the original owner");
+    assert.equal(targetRow.role, "MEMBER", "pre-commit failure must restore the target role");
+    assert.equal(
+      Array.from(app.store.idempotencyRecords.keys()).some((key) => key.endsWith("|" + transferKey)),
+      false,
+      "failed pre-publish transfer must not leave a durable success receipt"
+    );
+
+    app.store._persistFaultInject = null;
+    const retry = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/groups/" + group.group_id + "/members/" + targetId,
+      headers: { ...owner.auth, "idempotency-key": transferKey },
+      body: { role: "OWNER" }
+    });
+    assert.equal(retry.status, 200);
+    assert.equal(retry.body.data.role, "OWNER");
+    assert.equal(ownerRow.role, "MEMBER");
+    assert.equal(targetRow.role, "OWNER");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
