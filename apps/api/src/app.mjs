@@ -28,16 +28,35 @@ import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs
 import { createCampusRouter } from "./router.mjs";
 import { createCoreRoutes, createExtensionRoutes } from "./routes/index.mjs";
 
+// Host-owned reference command implementations. They preserve the documented
+// built-in example behavior without evaluating the plugin artifacts themselves.
+async function referenceGreetCampusHandler({ userId, payload }) {
+  return {
+    greeting: `欢迎使用河南工业大学扩展卡片 (${userId})`,
+    campus: payload?.campus || "莲花街校区",
+    timestamp: new Date().toISOString()
+  };
+}
+
+async function referenceQueryStationHoursHandler({ payload }) {
+  return {
+    station_name: payload?.station_name || "莲花街北苑菜鸟驿站",
+    open_hours: "08:30 - 21:00",
+    crowd_level: "LOW",
+    supports_self_pickup: true
+  };
+}
+
 const DEFAULT_REFERENCE_PLUGIN_SOURCES = Object.freeze([
   {
     pluginId: "org.example.hello-campus",
     dir: path.join(REPO_ROOT, "examples/hello-campus-plugin"),
-    commandHandlers: {}
+    commandHandlers: { greetCampus: referenceGreetCampusHandler }
   },
   {
     pluginId: "org.example.parcel-station",
     dir: path.join(REPO_ROOT, "examples/parcel-station-plugin"),
-    commandHandlers: {}
+    commandHandlers: { queryStationHours: referenceQueryStationHoursHandler }
   }
 ]);
 

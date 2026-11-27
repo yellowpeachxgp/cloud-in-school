@@ -27,6 +27,30 @@ test("AC-04/S5: fresh app loads both signed reference plugins and /api/v1/featur
       ["org.example.parcel-station", "LOADED"]
     ]
   );
+
+  // The documented reference commands remain useful through host-owned
+  // implementations; the signed artifact bytes are verified but never evaluated.
+  const user = app.store.findOrCreateCloudUser({
+    issuer: "https://sso.xpeach.codes/t/acme",
+    subject: "reference_plugin_command_user",
+    displayName: "Reference Plugin Tester"
+  });
+  app.pluginBroker.installPluginForUser(user.id, "org.example.hello-campus");
+  app.pluginBroker.installPluginForUser(user.id, "org.example.parcel-station");
+  const greeting = await app.pluginBroker.invokePluginCommand({
+    userId: user.id,
+    pluginId: "org.example.hello-campus",
+    commandName: "greetCampus",
+    payload: {}
+  });
+  assert.equal(greeting.output.campus, "莲花街校区");
+  const station = await app.pluginBroker.invokePluginCommand({
+    userId: user.id,
+    pluginId: "org.example.parcel-station",
+    commandName: "queryStationHours",
+    payload: {}
+  });
+  assert.equal(station.output.open_hours, "08:30 - 21:00");
 });
 
 test("AC-04/S5: missing reference public key is logged and reported by /api/v1/features", async () => {
