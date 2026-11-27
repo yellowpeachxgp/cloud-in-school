@@ -12,6 +12,7 @@ export function createMeRoutes(ctx) {
     identity,
     financeService,
     parcelHub,
+    community,
     syncUserToSso
   } = ctx;
 
@@ -219,6 +220,11 @@ export function createMeRoutes(ctx) {
     const momentsPosts = (ms.posts || []).filter((p) => p?.owner_cloud_user_id === auth.cloudUserId);
     const momentsBooks = (ms.book_listings || []).filter((b) => b?.owner_cloud_user_id === auth.cloudUserId);
     const momentsTags = (ms.anti_lost_tags || []).filter((t) => t?.owner_cloud_user_id === auth.cloudUserId);
+    const communityExport = community?.exportUserData?.(auth.cloudUserId) || {
+      community_groups: [],
+      community_group_members: [],
+      community_group_invites: []
+    };
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
@@ -229,7 +235,8 @@ export function createMeRoutes(ctx) {
         parcels,
         moments_posts: momentsPosts,
         moments_books: momentsBooks,
-        moments_anti_lost_tags: momentsTags
+        moments_anti_lost_tags: momentsTags,
+        ...communityExport
       })
     };
   }),
@@ -237,6 +244,7 @@ export function createMeRoutes(ctx) {
   route("POST", "/api/v1/me/data-delete", "requestMyDataDelete", "bearer", async ({ auth, nowMs }) => {
     const cascade = store.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
     const momentsPurged = store.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
+    const communityPurged = community?.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
     // Plans/bindings were already halted above with the USER_DATA_DELETE audit
     // reason; only revoke sessions here (unlinkXpeach stays false).
     identity.revokeAllUserSessions(auth.cloudUserId, {
@@ -254,7 +262,8 @@ export function createMeRoutes(ctx) {
         cloud_user_id: auth.cloudUserId,
         status: "DELETED",
         cancelled_job_ids: cascade.cancelledJobIds,
-        moments_purged: momentsPurged
+        moments_purged: momentsPurged,
+        community_purged: communityPurged
       }
     };
   })

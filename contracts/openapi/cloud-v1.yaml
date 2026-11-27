@@ -880,7 +880,7 @@ paths:
   /api/v1/groups:
     get:
       operationId: listGroups
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.read]
@@ -917,7 +917,7 @@ paths:
           $ref: '#/components/responses/Conflict'
     post:
       operationId: createGroup
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.create]
@@ -967,7 +967,7 @@ paths:
   /api/v1/groups/{groupId}:
     get:
       operationId: getGroup
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.read]
@@ -995,7 +995,7 @@ paths:
           $ref: '#/components/responses/Conflict'
     patch:
       operationId: updateGroup
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.manage]
@@ -1035,7 +1035,7 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     delete:
       operationId: deleteGroup
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.manage]
@@ -1071,7 +1071,7 @@ paths:
   /api/v1/groups/{groupId}/invites:
     post:
       operationId: createGroupInvite
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.invite.manage]
@@ -1118,7 +1118,7 @@ paths:
   /api/v1/group-invites/{code}/accept:
     post:
       operationId: acceptGroupInvite
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.join]
@@ -1166,7 +1166,7 @@ paths:
   /api/v1/groups/{groupId}/invites/{inviteId}:
     delete:
       operationId: revokeGroupInvite
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.invite.manage]
@@ -1202,7 +1202,7 @@ paths:
   /api/v1/groups/{groupId}/members:
     get:
       operationId: listGroupMembers
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.read]
@@ -1233,7 +1233,7 @@ paths:
   /api/v1/groups/{groupId}/members/{memberId}:
     patch:
       operationId: updateGroupMember
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.member.manage]
@@ -1274,7 +1274,7 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     delete:
       operationId: removeGroupMember
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
       x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 runtime implementation PR.
       x-dis-permissions: [group.member.manage]

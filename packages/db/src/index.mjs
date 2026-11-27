@@ -652,6 +652,11 @@ export class CloudDatabaseStore {
     this.campusContent = new Map();
     this.momentsState = createDefaultHautMomentsState(); // schoolId -> { school_id, version, updated_at, bulletin, channels, clubs }
 
+    // Community Groups (W4-01): school-scoped groups, membership periods, invites
+    this.groups = new Map(); // groupId -> group
+    this.groupMembers = new Map(); // memberId -> membership-period record
+    this.groupInvites = new Map(); // inviteId -> invite
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -691,7 +696,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -905,6 +910,9 @@ export class CloudDatabaseStore {
       loadMap(this.pluginInstallations, raw.pluginInstallations);
       loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
+      loadMap(this.groups, raw.groups);
+      loadMap(this.groupMembers, raw.groupMembers);
+      loadMap(this.groupInvites, raw.groupInvites);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1032,6 +1040,20 @@ export class CloudDatabaseStore {
         throw new Error("预约幂等回执与计划、任务、事件不一致");
       }
     }
+
+    const groups = new Map(raw.groups || []);
+    for (const [, member] of raw.groupMembers || []) {
+      const group = groups.get(member?.group_id);
+      if (!group || group.school_id !== member.school_id) {
+        throw new Error("群组成员快照与学校作用域不一致");
+      }
+    }
+    for (const [, invite] of raw.groupInvites || []) {
+      const group = groups.get(invite?.group_id);
+      if (!group || group.school_id !== invite.school_id) {
+        throw new Error("群组邀请快照与学校作用域不一致");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1147,6 +1169,9 @@ export class CloudDatabaseStore {
         pluginInstallations: Array.from(this.pluginInstallations.entries()),
         schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
         campusContent: Array.from(this.campusContent.entries()),
+        groups: Array.from(this.groups.entries()),
+        groupMembers: Array.from(this.groupMembers.entries()),
+        groupInvites: Array.from(this.groupInvites.entries()),
         momentsState: this.momentsState,
         notifications: Array.from(this.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
