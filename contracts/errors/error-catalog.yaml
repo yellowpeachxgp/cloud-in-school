@@ -170,3 +170,43 @@ errors:
     retryable: false
     user_action: TRANSFER_OWNER_BEFORE_LEAVING
     description: The last group owner cannot leave, be removed, or be demoted before ownership transfer.
+  - code: AVAILABILITY_BLOCK_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_BUSY_BLOCK_TIME_RANGE
+    description: Busy blocks must be aligned to 30-minute boundaries, last at least 30 minutes, use whole 30-minute multiples, be non-overlapping, and contain no titles or free-form notes.
+  - code: AVAILABILITY_QUERY_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_AVAILABILITY_QUERY_WINDOW
+    description: Availability query window, duration, quorum, member filter, or granularity failed validation; granularity below 30 minutes is forbidden.
+  - code: POLL_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_POLL_ID
+    description: Poll does not exist or is not visible in the caller school scope.
+  - code: POLL_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_GROUP_ROLE
+    description: Caller is not an active member allowed to read or vote, or is not the creator/owner/admin allowed to confirm the poll.
+  - code: POLL_VOTING_CLOSED
+    http_status: 409
+    retryable: false
+    user_action: CREATE_NEW_POLL_IF_NEEDED
+    description: Voting deadline has passed or the poll has otherwise closed; no vote or vote change is accepted.
+  - code: POLL_ALREADY_CONFIRMED
+    http_status: 409
+    retryable: false
+    user_action: OPEN_CONFIRMED_GROUP_EVENT
+    description: Poll already has a terminal confirmed option and cannot be voted on or confirmed again.
+  - code: POLL_OPTION_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_POLL_OPTION_ID
+    description: Poll option does not exist within the referenced poll.
+  - code: POLL_OPTION_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_POLL_OPTIONS_OR_DEADLINE
+    description: Poll options must be non-overlapping quantized time windows and the deadline must be in the future and no later than the earliest option start.
