@@ -1024,6 +1024,10 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
     const outboxRef = store.outboxEvents;
     const firstEventRef = store.outboxEvents[0];
     const auditLength = store.auditEvents.length;
+    const externalReferenceWrite = (async () => {
+      await Promise.resolve();
+      userRef.auth_version = 99;
+    });
     store._persistFaultInject = "tmp_write";
     assert.throws(
       () => store.runAtomicCommitUnit(() => {
@@ -1056,6 +1060,8 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
     assert.equal(store.outboxEvents[0], firstEventRef, "existing event rows keep their object identity");
     assert.equal(store.outboxEvents.some((event) => event.id === "scale-event-overflow"), false);
     assert.equal(store.auditEvents.length, auditLength, "no partial audit append may survive the aborted unit");
+    await externalReferenceWrite;
+    assert.equal(userRef.auth_version, 99, "original reference write across await must remain connected after rollback");
 
     store._persistFaultInject = null;
     await store.runAtomicCommitUnit(async () => {
@@ -1067,8 +1073,8 @@ test("W4-01 atomicity scale: copy-on-write rollback handles 200k events, preserv
     assert.equal(userRef.status, "DISABLED", "write through a reference captured across await must not be lost");
 
     const restarted = new CloudDatabaseStore({ snapshotPath, requireDurableSnapshot: true });
-    assert.equal(restarted.store.users.get(userId).status, "DISABLED", "async cross-await write must be durable after restart");
-    assert.equal(restarted.store.outboxEvents.length, 200000);
+    assert.equal(restarted.users.get(userId).status, "DISABLED", "async cross-await write must be durable after restart");
+    assert.equal(restarted.outboxEvents.length, 200000);
     clearTimeout(restarted._snapshotFlushTimer);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
