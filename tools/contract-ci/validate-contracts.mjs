@@ -143,6 +143,10 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
     return /^[|>][+-]?(?:\d+)?(?:\s*(?:#.*)?)?$/.test(value);
   }
 
+  function hasYamlNodePropertyPrefix(value) {
+    return /^(?:&|!|\*)\S*(?:\s+|$)/.test(value.trimStart());
+  }
+
   function containsFlowMappingStart(value) {
     let first = 0;
     while (first < value.length && /\s/.test(value[first])) first += 1;
@@ -200,12 +204,19 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       }
       const indent = (raw.match(/^ */) || [""])[0].length;
       if (indent <= parentIndent) break;
+      const text = raw.slice(indent).trimEnd();
+      if (!text.startsWith("#") && parseMappingKey(text)) {
+        errors.push(label + ":" + (index + 1) + ": mapping syntax cannot appear inside a plain-scalar continuation");
+      }
       index += 1;
     }
     return index;
   }
 
   function registerKey(keys, key, line) {
+    if (key === "<<") {
+      errors.push(label + ":" + line + ": YAML merge keys are unsupported in contract YAML; effective duplicate keys cannot be proven absent");
+    }
     if (keys.has(key)) {
       duplicates.push(label + ":" + line + ": duplicate mapping key " + JSON.stringify(key) + " (first at line " + keys.get(key) + ")");
     } else {
@@ -214,6 +225,9 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
   }
 
   function consumeValue(lineIndex, keyIndent, value) {
+    if (hasYamlNodePropertyPrefix(value)) {
+      errors.push(label + ":" + (lineIndex + 1) + ": unsupported YAML anchor/tag node property; duplicate keys cannot be proven absent");
+    }
     if (containsFlowMappingStart(value)) {
       errors.push(label + ":" + (lineIndex + 1) + ": unsupported flow mapping in contract block YAML; duplicate keys cannot be proven absent");
     }
@@ -276,6 +290,11 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       }
       if (isBlockScalarValue(item.body)) {
         index = skipBlockScalar(index, indent);
+        continue;
+      }
+      if (hasYamlNodePropertyPrefix(item.body)) {
+        errors.push(label + ":" + info.line + ": unsupported YAML anchor/tag node property in sequence item; duplicate keys cannot be proven absent");
+        index += 1;
         continue;
       }
       if (containsFlowMappingStart(item.body)) {
@@ -401,6 +420,46 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   assert(
     tabCommentControl.errors.length === 0 && tabCommentControl.duplicates.length === 0,
     "duplicate-key scanner must allow tabs inside comments"
+  );
+  const anchoredBlockControl = analyzeYamlDuplicateKeys(
+    "root:\n  payload: &payload\n    type: object\n    type: string\n",
+    "anchored-block-control.yaml"
+  );
+  assert(
+    anchoredBlockControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on anchored block mappings"
+  );
+  const anchoredFlowControl = analyzeYamlDuplicateKeys(
+    "root:\n  examples: &examples [{action: removed, action: restored}]\n",
+    "anchored-flow-control.yaml"
+  );
+  assert(
+    anchoredFlowControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on anchored flow sequences"
+  );
+  const malformedContinuationControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: first line\n    format: uuid\n  sibling: true\n",
+    "malformed-continuation-control.yaml"
+  );
+  assert(
+    malformedContinuationControl.errors.length > 0,
+    "duplicate-key scanner must reject mapping syntax inside plain-scalar continuations"
+  );
+  const mergeKeyControl = analyzeYamlDuplicateKeys(
+    "root:\n  <<: *base\n",
+    "merge-key-control.yaml"
+  );
+  assert(
+    mergeKeyControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on YAML merge keys"
+  );
+  const aliasControl = analyzeYamlDuplicateKeys(
+    "root:\n  payload: *base\n",
+    "alias-control.yaml"
+  );
+  assert(
+    aliasControl.errors.length > 0,
+    "duplicate-key scanner must fail closed on YAML aliases outside the supported subset"
   );
 }
 
