@@ -238,11 +238,16 @@ export class LedgerService extends DormCollaborationBase {
   }
 
   _incrementRevision(group, occurredAt, undo) {
+    const existed = this.store.ledgerBalanceRevisions.has(group.id);
     const row = this._revisionRow(group);
     const before = { balance_revision: row.balance_revision, updated_at: row.updated_at };
     row.balance_revision = Number(row.balance_revision || 0) + 1;
     row.updated_at = occurredAt;
     undo.push(() => {
+      if (!existed) {
+        this.store.ledgerBalanceRevisions.delete(group.id);
+        return;
+      }
       row.balance_revision = before.balance_revision;
       row.updated_at = before.updated_at;
     });
@@ -821,12 +826,12 @@ export class LedgerService extends DormCollaborationBase {
     if (["CONFIRMED", "CANCELLED"].includes(settlement.status)) {
       throw domainError("SETTLEMENT_INVALID_STATE", "settlement is already terminal");
     }
+    if (body.basis_balance_revision !== settlement.basis_balance_revision || this._currentRevision(group) !== settlement.basis_balance_revision) {
+      throw domainError("SETTLEMENT_BALANCE_STALE", "ledger balances changed after this settlement was proposed");
+    }
     const already = party === "DEBTOR" ? Boolean(settlement.debtor_confirmed_at) : Boolean(settlement.creditor_confirmed_at);
     if (already) {
       return { status: 200, code: "SETTLEMENT_CONFIRMATION_REPLAYED", data: this._settlementView(settlement) };
-    }
-    if (body.basis_balance_revision !== settlement.basis_balance_revision || this._currentRevision(group) !== settlement.basis_balance_revision) {
-      throw domainError("SETTLEMENT_BALANCE_STALE", "ledger balances changed after this settlement was proposed");
     }
     return this._commitWithReceipt((undo) => {
       const ts = iso(nowMs);

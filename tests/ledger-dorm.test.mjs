@@ -642,6 +642,7 @@ test("W4-03 erasure and durability: export coverage, post-delete event/receipt s
     assert.equal(failed.status, 503, JSON.stringify(failed.body));
     assert.equal(failed.body.error.code, "STORAGE_PERSISTENCE_FAILED");
     assert.equal(app.store.ledgerEntries.size, 0, "pre-publish failure rolls back the entry");
+    assert.equal(app.store.ledgerBalanceRevisions.size, 0, "pre-publish failure also rolls back a newly-created balance revision row");
     assert.equal(app.store.outboxEvents.some((event) => event.event_type === "ledger.entry.created"), false);
     app.store._persistFaultInject = null;
     const created = await createEntry(app, ctx.owner, ctx.group.group_id, entryBody, entryKey);
