@@ -132,20 +132,36 @@ test("W6-01a contract debt: transitional runtime surfaces are explicitly registe
   assert.match(registry.authority_notice, /not a contract/);
   assert.match(registry.authority_notice, /cloud-in-school\/contracts/);
   const byId = new Map((registry.debts || []).map((debt) => [debt.id, debt]));
-  for (const id of [
-    "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
-    "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
-    "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS",
-    "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
-    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
-    "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT"
-  ]) {
+  const expectedStatuses = new Map([
+    ["PLUGIN_RUNTIME_SCHEMA_TRANSITION", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS", "OPEN_CONTRACT_DEBT"],
+    ["PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"],
+    ["PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"],
+    ["PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT", "CLOSED_BY_W6_CONTRACT_LIFECYCLE"]
+  ]);
+  for (const [id, expectedStatus] of expectedStatuses) {
     assert.ok(byId.has(id), "missing contract debt entry " + id);
-    assert.equal(byId.get(id).status, "OPEN_CONTRACT_DEBT");
+    assert.equal(byId.get(id).status, expectedStatus);
     assert.ok(
       fs.existsSync(path.join(REPO_ROOT, byId.get(id).runtime_fact_source)),
       "runtime fact source must exist for " + id
     );
+  }
+  for (const id of [
+    "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
+    "PLUGIN_RUNTIME_HOST_MATRIX_TRANSITION",
+    "PLUGIN_RUNTIME_FIXTURES_OUTSIDE_CONTRACTS"
+  ]) {
+    assert.match(byId.get(id).resolution || "", /AUTO-022/, id + " must remain explicitly deferred to AUTO-022");
+  }
+  for (const id of [
+    "PLUGIN_INSTALL_REQUEST_CONTRACT_DRIFT",
+    "PLUGIN_LIFECYCLE_SECURITY_RUNTIME_EXTENSION",
+    "PLUGIN_COMMAND_INVOKE_CONTRACT_DRIFT"
+  ]) {
+    assert.ok(Array.isArray(byId.get(id).resolved_contract_fields), id + " must retain closed contract field evidence");
+    assert.match(byId.get(id).resolution_evidence || "", /Plugin/, id + " must retain closure evidence");
   }
   assert.deepEqual(
     byId.get("PLUGIN_RUNTIME_SCHEMA_TRANSITION").unregistered_runtime_fields,

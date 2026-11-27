@@ -1,4 +1,5 @@
 import { createCampusCloudApp } from "./app.mjs";
+import { applyOperationsSchoolGrantBootstrap } from "./operations-grants.mjs";
 import { createShutdownController } from "./shutdown.mjs";
 import { scanDueScheduleEvents } from "../../scheduler/src/main.mjs";
 
@@ -12,6 +13,10 @@ const app = createCampusCloudApp({
     requireDurableSnapshot: process.env.CLOUD_REQUIRE_DURABLE_SNAPSHOT !== "false"
   }
 });
+// Deployment-operator provisioning is intentionally startup-only: the env JSON
+// is reconciled before any socket accepts traffic, and removing an entry plus
+// restarting revokes only bootstrap-managed grants (manual grants are untouched).
+applyOperationsSchoolGrantBootstrap(app.store, process.env.CLOUD_OPERATIONS_SCHOOL_GRANTS);
 const server = app.createHttpServer();
 
 // 250ms high-precision background Triple-Schedule scanner (PRECHECK T-30m / FINAL_CHECK T-5m / FIRE T)

@@ -51,6 +51,12 @@ tags:
     description: Dorm repair records, explicit status transitions, and reporter reviews
   - name: place-status
     description: Campus Graph place status reports, TTL-aware divergence aggregation, subscriptions, flags, and review correction
+  - name: ugc
+    description: Reserved (D2) forum boards, posts, replies, search, and user reports; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
+  - name: moderation
+    description: Reserved (D2) operations review queue and audited dispositions; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
+  - name: media
+    description: Reserved (D2) media upload slots with EXIF stripping and WebP conversion intent; uniform 501 FEATURE_NOT_ENABLED placeholders with no implementation
   - name: parcels
     description: Parcel Hub multi-source aggregation, trace, pickup codes, stations, sync jobs, and opt-in AI assistant
   - name: plugins
@@ -2747,9 +2753,9 @@ paths:
   /api/v1/places/{placeRef}/reports:
     post:
       operationId: createPlaceStatusReport
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.report]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_REPORT_INVALID, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2799,9 +2805,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listPlaceStatusReports
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -2845,9 +2851,9 @@ paths:
   /api/v1/places/status:
     get:
       operationId: queryPlaceStatus
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -2937,9 +2943,9 @@ paths:
   /api/v1/places/status/subscriptions:
     post:
       operationId: createPlaceStatusSubscription
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_STATUS_SUBSCRIPTION_INVALID, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -2984,9 +2990,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: listPlaceStatusSubscriptions
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status]
@@ -3023,9 +3029,9 @@ paths:
   /api/v1/places/status/subscriptions/{subscriptionId}:
     delete:
       operationId: deletePlaceStatusSubscription
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.subscribe]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_SUBSCRIPTION_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3058,9 +3064,9 @@ paths:
   /api/v1/place-reports/{reportId}/flag:
     post:
       operationId: flagPlaceStatusReport
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.flag]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CAMPUS_BINDING_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_STATUS_REPORT_NOT_FOUND, PLACE_STATUS_PERMISSION_DENIED, PLACE_REPORT_FLAG_INVALID, PLACE_STATUS_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3109,9 +3115,9 @@ paths:
   /api/v1/admin/place-report-flags:
     get:
       operationId: listPlaceReportFlags
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.moderate]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REF_INVALID, PLACE_STATUS_PERMISSION_DENIED]
       tags: [place-status, admin]
@@ -3155,9 +3161,9 @@ paths:
   /api/v1/admin/place-report-flags/{flagId}/review:
     post:
       operationId: reviewPlaceReportFlag
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Additive v1 contract; planned status is explicit and flips to active only with the W4 place-status implementation PR.
+      x-dis-compatibility: Additive v1 contract; active runtime status is implemented by the W4-04 place-status PR.
       x-dis-permissions: [place.status.moderate]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, PLACE_REPORT_FLAG_NOT_FOUND, PLACE_REPORT_REVIEW_INVALID, PLACE_STATUS_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3196,6 +3202,209 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/boards:
+    get:
+      operationId: listBoards
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: List school-scoped forum boards (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the school-scoped forum boards visible to the caller. Issue #45 suggests default boards such as course discussion, second-hand trading, lost-and-found, and help Q&A with management-side curation; the lost-and-found private-chat need of issue #9 folds into the same reserved surface per decision D2 rather than a separate messaging API.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/boards/{boardId}/posts:
+    get:
+      operationId: listBoardPosts
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: List posts of one board (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the posts of one board in reverse chronological order with cursor pagination, exposing only per-school pseudonymous aliases and never cloud user identifiers.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/BoardIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts:
+    post:
+      operationId: createPost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Create a forum post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint creates one plain-text post with a title, body, and up to three server-hosted images per issue #45, only after the moderation precheck described by the reserved moderation surface passes. Public display uses per-school pseudonymous aliases over a server-side identity anchor of (cloud_user_id, school_id).
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts/{postId}:
+    get:
+      operationId: getPost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Get one post with floor-structured replies (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint returns one post together with its floor-structured replies, including explicit quote-reply links; content whose author deleted the account displays as a detached anonymized author per the D2 retention direction.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deletePost
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Delete own post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint deletes the caller's own post as an author self-service surface; administrative removal, pinning, and locking would be separate audited moderation dispositions, never this endpoint.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/posts/{postId}/replies:
+    post:
+      operationId: createPostReply
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Append a floor reply to a post (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint appends one floor reply to a post, optionally quoting another reply, after the same moderation precheck; replies are the public conversation structure that the lost-and-found chat need of issue #9 would use instead of private direct messaging.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/search/posts:
+    get:
+      operationId: searchPosts
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.read]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: Full-text search posts (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint full-text searches post titles and bodies inside the caller school scope only, never across school boundaries.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/reports:
+    post:
+      operationId: createReport
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.report]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [ugc]
+      summary: File a user report (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint files one user report against a post, reply, or media object so the operations moderation queue can review it with audit evidence; filing a report never hides or mutates the target content by itself.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/moderation/queue:
+    get:
+      operationId: listModerationQueue
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.moderate]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [moderation, admin]
+      summary: List the moderation review queue (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint lists the operations review queue of pending user reports and precheck-flagged content for one school scope; the queue is the compliance precondition of any public UGC launch, not an optional add-on.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/moderation/{itemId}/actions:
+    post:
+      operationId: createModerationAction
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.moderate]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [moderation, admin]
+      summary: Apply an audited moderation disposition (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint applies one audited moderation disposition (keep visible, hide, delete, or reject the report) to one queue item; every disposition would be written to the security audit events and would emit ugc.post.moderated whenever it affects a post, while never rewriting user content.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/ModerationItemIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/media/uploads:
+    post:
+      operationId: createMediaUpload
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.media.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [media]
+      summary: Mint a media upload slot (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint mints one upload slot for a post image; the server would strip EXIF metadata, convert the payload to WebP, store it under a random object id in a private non-listable bucket, and serve it back only through signed URLs, because external image links are forbidden by the issue #45 baseline.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/media/uploads/{uploadId}/complete:
+    post:
+      operationId: completeMediaUpload
+      x-dis-status: reserved
+      x-dis-api-version: v1
+      x-dis-compatibility: Reserved v1 placeholder surface (D2); no implementation, persistence, or business logic exists for this endpoint. If a future compliant launch is ever approved, the enabling PR flips this operation from reserved to active in the same PR and rewrites this contract with the real behavior contract.
+      x-dis-permissions: [ugc.media.write]
+      x-dis-error-codes: [FEATURE_NOT_ENABLED]
+      tags: [media]
+      summary: Complete a media upload slot (reserved placeholder, uniform 501)
+      description: |
+        If ever enabled, this endpoint marks one upload slot as completed after the binary payload lands, triggering the server-side EXIF stripping and WebP conversion pipeline before the object becomes referenceable by posts.
+        Reserved contract-only surface (decision D2): forum (#45) and private messaging (#9) are interface-only in this stage. Every request to this endpoint receives the identical 501 FEATURE_NOT_ENABLED envelope with error.detail.feature=community.forum regardless of authentication state, query parameters, headers, or request body; no table exists, no input is validated, no state ever changes, and every call is side-effect free and trivially idempotent. This reserved contract intentionally defines no request body schema, no query parameters, and no success response, because the real shapes stay undecided until the G6 compliance review (ICP filing, forum community and comment-management obligations, security assessment) completes. The endpoint never emits events and never reads or writes personal data.
+      parameters:
+        - $ref: '#/components/parameters/MediaUploadIdParam'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
   /api/v1/parcels:
     get:
       operationId: listParcels
@@ -3510,13 +3719,15 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/v1/plugins/{pluginId}/lifecycle:
     post:
       operationId: transitionPluginLifecycle
       tags: [plugins]
       security:
         - bearerAuth: []
-      summary: Enable, disable, rollback, or uninstall an installed plugin
+      summary: Enable, disable, revoke a permission, roll back, uninstall, or admin-disable an installed plugin
       parameters:
         - name: pluginId
           in: path
@@ -3536,6 +3747,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PluginDescriptorEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
   /api/v1/plugins/{pluginId}/commands/{commandId}/invoke:
@@ -3569,6 +3784,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PluginCommandInvokeEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
@@ -4368,6 +4585,34 @@ components:
       schema:
         type: string
         format: uuid
+    BoardIdParam:
+      name: boardId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PostIdParam:
+      name: postId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ModerationItemIdParam:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MediaUploadIdParam:
+      name: uploadId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ParcelIdParam:
       name: parcelId
       in: path
@@ -4423,6 +4668,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
+    NotImplemented:
+      description: Uniform reserved endpoint response (decision D2); the feature is not enabled, nothing is persisted, and every request receives the identical FEATURE_NOT_ENABLED envelope regardless of authentication state, query parameters, headers, or request body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FeatureNotEnabledErrorEnvelope'
   schemas:
     ResponseMeta:
       type: object
@@ -4462,6 +4713,42 @@ components:
           type: string
         error:
           $ref: '#/components/schemas/ErrorDetail'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    FeatureNotEnabledErrorEnvelope:
+      type: object
+      required: [ok, code, request_id, error, meta]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        code:
+          type: string
+          const: FEATURE_NOT_ENABLED
+        request_id:
+          type: string
+        error:
+          type: object
+          required: [code, message, retryable, detail]
+          properties:
+            code:
+              type: string
+              const: FEATURE_NOT_ENABLED
+            message:
+              type: string
+            user_action:
+              type: string
+            retryable:
+              type: boolean
+              const: false
+            detail:
+              type: object
+              required: [feature]
+              properties:
+                feature:
+                  type: string
+                  const: community.forum
+                  description: Stable feature identifier shared with the Android community.forum feature flag and the community.boards reserved plugin slot; the reserved surface covers both forum (#45) and private messaging (#9) per decision D2.
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     HealthResponse:
@@ -7791,21 +8078,50 @@ components:
             type: object
         meta:
           $ref: '#/components/schemas/ResponseMeta'
+    PluginSchoolId:
+      type: string
+      minLength: 2
+      maxLength: 32
+      pattern: '^[a-z0-9][a-z0-9_-]{1,31}$'
+      description: Lowercase school isolation scope. The host trims and lowercases this identifier before resolving the account/school plugin installation.
+    PluginPermissionId:
+      type: string
+      enum:
+        - network.request
+        - account.session
+        - storage.scoped
+        - notification.send
+        - location.coarse
+        - library.booking.read
+        - library.booking.create
+        - parcel.read
+        - parcel.ai.invoke
+        - ui.slot.render
+        - parcel.write.import
+    PluginVersion:
+      type: string
+      pattern: '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$'
     PluginInstallRequest:
       type: object
       additionalProperties: false
-      required: [manifest, signature_base64, public_key_base64]
+      required: [manifest]
       properties:
         manifest:
           type: object
-        signature_base64:
-          type: string
-        public_key_base64:
-          type: string
-        artifact_payloads:
+          description: Signed snake_case dis-extension/v2 runtime manifest. manifest.signature.value_base64 is the authoritative signature evidence; no detached signature field is part of this contract. Full manifest-schema convergence into contracts/schemas/plugin-extension-v2.schema.json remains a separately tracked W6 contract-surface slice.
+        artifact_map:
           type: object
           additionalProperties:
             type: string
+          description: Canonical artifact payload map keyed by the exact safe relative paths declared in manifest.entry_artifacts. JSON string values are interpreted as UTF-8 artifact content before SHA-256 verification; the host persists the verified bytes in its own Base64 storage form.
+        public_key_base64:
+          type: string
+          minLength: 60
+          maxLength: 60
+          pattern: '^[A-Za-z0-9+/]+={0,2}$'
+          description: Optional client consistency proof encoded as the base64 Ed25519 SPKI DER public key for the host-configured publisher trust root. It is never trust input, never overrides the publisher/key_id trust root, and is not required.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
     PluginLifecycleRequest:
       type: object
       additionalProperties: false
@@ -7813,9 +8129,198 @@ components:
       properties:
         action:
           type: string
-          enum: [ENABLE, DISABLE, ROLLBACK, UNINSTALL]
+          enum: [ENABLE, DISABLE, REVOKE_PERMISSION, ROLLBACK, UNINSTALL]
+        target_version:
+          $ref: '#/components/schemas/PluginVersion'
+          description: Optional explicit rollback target for action=ROLLBACK; when omitted, the installation previous_version is used. Other actions do not consume this field.
+        permission:
+          $ref: '#/components/schemas/PluginPermissionId'
+          description: Permission grant to revoke for action=REVOKE_PERMISSION; it must be declared by the active plugin version.
+        scope:
+          type: string
+          enum: [installation, global]
+          default: installation
+          description: installation affects only the caller account/school installation. global is reserved for the admin/operator kill-switch form of DISABLE.
+        admin_kill_switch:
+          type: boolean
+          default: false
+          description: When true with action DISABLE, an admin/operator globally disables the plugin and existing installations. scope=global selects the same form; ordinary users cannot use either form.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
         reason:
           type: string
+          description: Optional audit reason for revocation, uninstall, or administrative kill-switch isolation.
+      allOf:
+        - if:
+            properties:
+              action:
+                const: REVOKE_PERMISSION
+            required: [action]
+          then:
+            required: [permission]
+        - if:
+            properties:
+              scope:
+                const: global
+            required: [scope]
+          then:
+            properties:
+              action:
+                const: DISABLE
+        - if:
+            properties:
+              admin_kill_switch:
+                const: true
+            required: [admin_kill_switch]
+          then:
+            properties:
+              action:
+                const: DISABLE
+    PluginInstallation:
+      type: object
+      additionalProperties: false
+      required:
+        - installation_id
+        - cloud_user_id
+        - user_id
+        - school_id
+        - plugin_id
+        - active_version
+        - previous_version
+        - pending_version
+        - pending_permissions
+        - status
+        - granted_permissions
+        - installed_at
+        - updated_at
+      properties:
+        installation_id:
+          type: string
+          format: uuid
+        cloud_user_id:
+          type: string
+        user_id:
+          type: string
+          description: Compatibility mirror of cloud_user_id retained for the transitional runtime persistence shape.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+        plugin_id:
+          type: string
+          pattern: '^[a-z0-9]+(\.[a-z0-9-]+)+$'
+        active_version:
+          $ref: '#/components/schemas/PluginVersion'
+        previous_version:
+          anyOf:
+            - $ref: '#/components/schemas/PluginVersion'
+            - type: 'null'
+        pending_version:
+          anyOf:
+            - $ref: '#/components/schemas/PluginVersion'
+            - type: 'null'
+        pending_permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginPermissionId'
+        status:
+          type: string
+          enum: [ENABLED, DISABLED, PENDING_PERMISSION_REVIEW, QUARANTINED]
+        granted_permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginPermissionId'
+        disabled_reason:
+          type: string
+        pre_quarantine_status:
+          type: string
+          enum: [ENABLED, DISABLED, PENDING_PERMISSION_REVIEW]
+          description: Lifecycle state captured before restart-time package integrity isolation; present only for QUARANTINED installations.
+        quarantine_reason:
+          type: string
+          enum: [ACTIVE_PACKAGE_COMPROMISED]
+          description: Machine-readable reason a QUARANTINED installation was isolated after persisted package verification failed.
+        quarantined_at:
+          type: string
+          format: date-time
+        installed_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PluginUninstallResult:
+      type: object
+      additionalProperties: false
+      required: [plugin_id, school_id, status, cleanup, uninstalled_at]
+      properties:
+        plugin_id:
+          type: string
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+        status:
+          type: string
+          enum: [UNINSTALLED]
+        cleanup:
+          type: object
+          additionalProperties: false
+          required: [permission_grants, storage_entries, cache_entries]
+          properties:
+            permission_grants:
+              type: integer
+              minimum: 0
+            storage_entries:
+              type: integer
+              minimum: 0
+            cache_entries:
+              type: integer
+              minimum: 0
+        uninstalled_at:
+          type: string
+          format: date-time
+    PluginRuntimeIsolationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - plugin_id
+        - failure_count
+        - consecutive_failure_count
+        - auto_disabled
+        - disabled_reason
+        - kill_switch
+        - kill_switch_reason
+        - updated_at
+        - disabled_installations
+      properties:
+        plugin_id:
+          type: string
+        failure_count:
+          type: integer
+          minimum: 0
+        consecutive_failure_count:
+          type: integer
+          minimum: 0
+        auto_disabled:
+          type: boolean
+        disabled_reason:
+          anyOf:
+            - type: string
+            - type: 'null'
+        kill_switch:
+          type: boolean
+        kill_switch_reason:
+          anyOf:
+            - type: string
+            - type: 'null'
+        updated_at:
+          type: string
+          format: date-time
+        disabled_installations:
+          type: integer
+          minimum: 0
+    PluginLifecycleResponseData:
+      oneOf:
+        - $ref: '#/components/schemas/PluginInstallation'
+        - $ref: '#/components/schemas/PluginUninstallResult'
+        - $ref: '#/components/schemas/PluginRuntimeIsolationResult'
     PluginDescriptorEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
@@ -7827,20 +8332,39 @@ components:
         request_id:
           type: string
         data:
-          type: object
+          $ref: '#/components/schemas/PluginLifecycleResponseData'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     PluginCommandInvokeRequest:
       type: object
       additionalProperties: false
-      required: [campus_profile_id, input]
       properties:
-        campus_profile_id:
-          type: string
-        school_id:
-          type: string
-        input:
+        payload:
           type: object
+          description: Canonical command payload object. The legacy input alias and campus_profile_id selector are not part of the published contract; the bearer cloud user plus school_id select the installation scope.
+        requested_origin:
+          type: string
+          pattern: '^https://[a-zA-Z0-9.-]+(:[0-9]+)?$'
+          description: Optional credential-free HTTPS origin being invoked through the broker. It must be present in the plugin manifest allowed_origins and requires granted network.request permission.
+        school_id:
+          $ref: '#/components/schemas/PluginSchoolId'
+    PluginCommandInvokeResult:
+      type: object
+      additionalProperties: false
+      required: [plugin_id, version, command, executed, output]
+      properties:
+        plugin_id:
+          type: string
+        version:
+          $ref: '#/components/schemas/PluginVersion'
+        command:
+          type: string
+        executed:
+          type: boolean
+          const: true
+        output:
+          type: object
+          description: Declarative open_host_route/open_url/show_data output, or host-owned reference-handler output for built-in examples. Third-party plugin artifacts are never executed and request payloads are never echoed as fake execution evidence.
     PluginCommandInvokeEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
@@ -7852,7 +8376,7 @@ components:
         request_id:
           type: string
         data:
-          type: object
+          $ref: '#/components/schemas/PluginCommandInvokeResult'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
     FeatureCatalogEnvelope:

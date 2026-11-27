@@ -57,6 +57,29 @@ export function createPluginsRoutes(ctx) {
     "transitionPluginLifecycle",
     "bearer",
     async ({ auth, params, body }) => {
+      // Mirror the conditional constraints published in PluginLifecycleRequest:
+      // revocation must name its permission, and the global/admin kill-switch
+      // form exists only for DISABLE. Validate before any installation lookup so
+      // malformed contract shapes fail as BAD_REQUEST instead of being silently
+      // narrowed to an installation-scoped action.
+      if (
+        body?.action === "REVOKE_PERMISSION" &&
+        (typeof body?.permission !== "string" || body.permission.trim().length === 0)
+      ) {
+        throw new ContractError("BAD_REQUEST", "REVOKE_PERMISSION requires a permission field");
+      }
+      if (body?.scope !== undefined && body?.scope !== "installation" && body?.scope !== "global") {
+        throw new ContractError("BAD_REQUEST", "lifecycle scope must be installation or global");
+      }
+      if (body?.admin_kill_switch !== undefined && typeof body?.admin_kill_switch !== "boolean") {
+        throw new ContractError("BAD_REQUEST", "admin_kill_switch must be a boolean when supplied");
+      }
+      if (body?.scope === "global" && body?.action !== "DISABLE") {
+        throw new ContractError("BAD_REQUEST", "scope=global is only valid for lifecycle action DISABLE");
+      }
+      if (body?.admin_kill_switch === true && body?.action !== "DISABLE") {
+        throw new ContractError("BAD_REQUEST", "admin_kill_switch is only valid for lifecycle action DISABLE");
+      }
       const wantsGlobalKillSwitch =
         body?.action === "DISABLE" &&
         (body?.scope === "global" || body?.admin_kill_switch === true);

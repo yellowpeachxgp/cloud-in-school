@@ -155,17 +155,29 @@ CT-03 contract-first planned 权限（同样全部是 `scope: user_school_scope`
 | `group.repair.write` | CT-03 planned 语义：提交报修记录、编辑仍可编辑的报修元数据并提交一次性评价；不联系外部维修系统 |
 | `group.repair.manage` | CT-03 planned 语义：分流、指派、推进、解决、驳回或关闭报修记录；要求组内 GROUP_OWNER/GROUP_ADMIN 授权 |
 
-CT-04 contract-first planned 权限（地点状态用户态/审核态授权语义；同样**不是插件可声明权限**，也不表示 place-status 运行时实现已经 active）：
+CT-04 active 权限（地点状态用户态/审核态授权语义；同样**不是插件可声明权限**；place-status 运行时已随 W4-04 active）：
 
 | 权限 | 当前语义与诚实状态 |
 |---|---|
-| `place.status.read` | CT-04 planned 语义：读取同 school 作用域内用户上报地点状态聚合、分歧、来源与可见纠错历史 |
-| `place.status.report` | CT-04 planned 语义：提交 Campus Graph 地点的直接观察与只追加纠错；不得冒充官方实时状态 |
-| `place.status.subscribe` | CT-04 planned 语义：创建、读取和取消调用者自己的地点状态站内通知订阅 |
-| `place.status.flag` | CT-04 planned 语义：举报错误、过期、滥用、垃圾或含 PII 的地点状态报告，等待显式审核 |
-| `place.status.moderate` | CT-04 planned 语义：审核地点状态举报并保留/排除单个报告；不得改写用户观察或编造 corrected status |
+| `place.status.read` | CT-04 active 语义：读取同 school 作用域内用户上报地点状态聚合、分歧、来源与可见纠错历史 |
+| `place.status.report` | CT-04 active 语义：提交 Campus Graph 地点的直接观察与只追加纠错；不得冒充官方实时状态 |
+| `place.status.subscribe` | CT-04 active 语义：创建、读取和取消调用者自己的地点状态站内通知订阅 |
+| `place.status.flag` | CT-04 active 语义：举报错误、过期、滥用、垃圾或含 PII 的地点状态报告，等待显式审核 |
+| `place.status.moderate` | CT-04 active 语义：持该校显式 `operations_school_scope` 授权的运营主体审核地点状态举报并保留/排除单个报告；全局角色或普通 campus binding 本身不足以读队列或处置，且审核不得改写用户观察或编造 corrected status |
 
-CT-02/CT-03/CT-04 上述端点在契约中均为 `planned`；登记授权语义不表示忙闲、投票、账本、值日、报修或地点状态运行时实现已经 active。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
+CT-02/CT-03 上述端点在契约中仍为 `planned`；CT-04 端点已随 W4-04 翻转为 `active`。登记授权语义不表示忙闲、投票、账本、值日或报修运行时实现已经 active。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
+
+CT-05 contract-first reserved 权限（论坛与私信用户态/运营审核态授权语义；同样**不是插件可声明权限**。这些端点在契约中是 `reserved` 而非 `planned`：语义上只是将来才可能开启的保留位，当前没有任何运行时实现、不建表、不写业务逻辑，全部统一返回 `501 FEATURE_NOT_ENABLED`）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
+| `ugc.read` | CT-05 reserved 语义：若将来开启，读取同 school 作用域论坛板块、帖子、楼层回复与帖子搜索结果；当前端点统一返回 501 |
+| `ugc.write` | CT-05 reserved 语义：若将来开启，创建帖子、删除调用者本人帖子、追加楼层回复；当前端点统一返回 501 |
+| `ugc.report` | CT-05 reserved 语义：若将来开启，对帖子、回复或媒体对象提交用户举报；当前端点统一返回 501 |
+| `ugc.media.write` | CT-05 reserved 语义：若将来开启，创建并完成媒体上传槽位（服务端剥离 EXIF、转 WebP、随机 ID、私有桶）；当前端点统一返回 501 |
+| `ugc.moderate` | CT-05 reserved 语义：若将来开启，审核运营队列并应用带审计证据的保留/隐藏/删除/驳回处置；不得改写用户内容；当前端点统一返回 501 |
+
+CT-05 上述端点在契约中均为 `reserved`；登记授权语义只为冻结将来开启时的授权模型占位，不表示论坛、私信、审核或媒体上传会以任何时间表落地——按 D2 它们是「将来才可能开启的保留位」，开启前还必须完成 G6 合规核查。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
 
 ## 6. CLI（`dis-plugin`）
 

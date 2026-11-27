@@ -139,6 +139,44 @@ test("AC-13: revoking one permission takes effect immediately for network-bound 
   assert.equal(denied.body.error.code, "PLUGIN_PERMISSION_DENIED");
 });
 
+test("W6-01a lifecycle contract conditionals: revoke requires permission and global kill-switch is DISABLE-only", async () => {
+  const keyPair = generateEd25519KeyPair();
+  const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
+  const userSession = createUserSession(app, "w601a_lifecycle_shape_user");
+  const adminSession = createUserSession(app, "w601a_lifecycle_shape_admin", ["PLATFORM_OWNER"]);
+  const pluginId = "org.example.w601a-lifecycle-shape";
+  const fixture = signedPlugin({ keyPair, pluginId });
+  assert.equal((await installFixture(app, userSession.headers, fixture, keyPair.publicKeyBase64)).status, 201);
+  const lifecycle = (headers, body) => app.inject({
+    method: "POST",
+    url: "/api/v1/plugins/" + pluginId + "/lifecycle",
+    headers,
+    body
+  });
+
+  const missingPermission = await lifecycle(userSession.headers, { action: "REVOKE_PERMISSION" });
+  assert.equal(missingPermission.status, 400);
+  assert.equal(missingPermission.body.error.code, "BAD_REQUEST");
+
+  for (const body of [
+    { action: "ENABLE", scope: "global" },
+    { action: "ENABLE", admin_kill_switch: true },
+    { action: "ROLLBACK", admin_kill_switch: true }
+  ]) {
+    const rejected = await lifecycle(adminSession.headers, body);
+    assert.equal(rejected.status, 400, JSON.stringify(body));
+    assert.equal(rejected.body.error.code, "BAD_REQUEST");
+  }
+
+  const validGlobalDisable = await lifecycle(adminSession.headers, {
+    action: "DISABLE",
+    scope: "global",
+    reason: "lifecycle shape drill"
+  });
+  assert.equal(validGlobalDisable.status, 200);
+  assert.equal(validGlobalDisable.body.data.kill_switch, true);
+});
+
 test("AC-14: installations are isolated by cloud user and school scope", async () => {
   const keyPair = generateEd25519KeyPair();
   const app = createCampusCloudApp(trustedPluginAppOptions(keyPair));
