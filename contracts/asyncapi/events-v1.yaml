@@ -60,6 +60,24 @@ channels:
       operationId: publishGroupMemberLeftEvent
       message:
         $ref: '#/components/messages/GroupMemberEvent'
+  group.availability.updated:
+    description: Busy-block share replaced, withdrawn, or expired; consumers must treat event_key as idempotent and must not infer event titles or reasons because only time blocks exist.
+    publish:
+      operationId: publishGroupAvailabilityUpdatedEvent
+      message:
+        $ref: '#/components/messages/GroupAvailabilityUpdatedEvent'
+  group.event.confirmed:
+    description: Poll confirmation created exactly one terminal group event; this event is informational and never writes to any school system.
+    publish:
+      operationId: publishGroupEventConfirmedEvent
+      message:
+        $ref: '#/components/messages/GroupEventConfirmedEvent'
+  group.event.conflict_detected:
+    description: A later shared busy block overlaps a confirmed group event; consumers may only prompt users for review and must never silently reschedule.
+    publish:
+      operationId: publishGroupEventConflictDetectedEvent
+      message:
+        $ref: '#/components/messages/GroupEventConflictDetectedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -105,6 +123,156 @@ components:
           reason:
             type: string
             enum: [GROUP_CREATED, INVITE_ACCEPTED, SELF_LEFT, ADMIN_REMOVED, GROUP_ARCHIVED]
+    GroupAvailabilityUpdatedEvent:
+      name: GroupAvailabilityUpdatedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, member_id, cloud_user_id, actor_cloud_user_id, sharing_level, revision, block_count, expires_at, reason]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:availability:[0-9a-fA-F-]{36}:revision:[0-9]+:v1$'
+          event_type:
+            type: string
+            enum: [updated]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          member_id:
+            type: string
+            format: uuid
+          cloud_user_id:
+            type: string
+            format: uuid
+          actor_cloud_user_id:
+            type: string
+            format: uuid
+          sharing_level:
+            type: string
+            enum: [NONE, BUSY_BLOCKS_30MIN]
+          revision:
+            type: integer
+            minimum: 1
+            description: Monotonic per-member share revision. Idempotent replay does not create a new revision or duplicate event.
+          block_count:
+            type: integer
+            minimum: 0
+            description: Count only; raw blocks are not embedded in the event payload.
+          expires_at:
+            type: [string, 'null']
+            format: date-time
+          reason:
+            type: string
+            enum: [SHARE_REPLACED, SHARE_WITHDRAWN, TTL_EXPIRED]
+    GroupEventConfirmedEvent:
+      name: GroupEventConfirmedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, poll_id, option_id, confirmed_event_id, start_at, end_at, confirmed_by_member_id, confirmed_by_cloud_user_id, vote_count, total_votes]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:event:[0-9a-fA-F-]{36}:confirmed:v1$'
+          event_type:
+            type: string
+            enum: [confirmed]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          poll_id:
+            type: string
+            format: uuid
+          option_id:
+            type: string
+            format: uuid
+          confirmed_event_id:
+            type: string
+            format: uuid
+          start_at:
+            type: string
+            format: date-time
+          end_at:
+            type: string
+            format: date-time
+          confirmed_by_member_id:
+            type: string
+            format: uuid
+          confirmed_by_cloud_user_id:
+            type: string
+            format: uuid
+          vote_count:
+            type: integer
+            minimum: 0
+          total_votes:
+            type: integer
+            minimum: 0
+    GroupEventConflictDetectedEvent:
+      name: GroupEventConflictDetectedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, group_id, school_id, confirmed_event_id, poll_id, option_id, member_id, cloud_user_id, availability_revision, overlap_start_at, overlap_end_at, automatic_rescheduling]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:group:[0-9a-fA-F-]{36}:event:[0-9a-fA-F-]{36}:member:[0-9a-fA-F-]{36}:conflict:[0-9]+:v1$'
+          event_type:
+            type: string
+            enum: [conflict_detected]
+          occurred_at:
+            type: string
+            format: date-time
+          group_id:
+            type: string
+            format: uuid
+          school_id:
+            type: string
+          confirmed_event_id:
+            type: string
+            format: uuid
+          poll_id:
+            type: string
+            format: uuid
+          option_id:
+            type: string
+            format: uuid
+          member_id:
+            type: string
+            format: uuid
+          cloud_user_id:
+            type: string
+            format: uuid
+          availability_revision:
+            type: integer
+            minimum: 1
+          overlap_start_at:
+            type: string
+            format: date-time
+          overlap_end_at:
+            type: string
+            format: date-time
+          automatic_rescheduling:
+            type: boolean
+            const: false
+            description: Contractual sentinel proving the event is advisory only; consumers must prompt users and never silently move the confirmed event.
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:

@@ -68,6 +68,30 @@ permissions:
     scope: user_school_scope
     description: Manage group roles, sharing levels, removal, or self-service leave; school scope isolation is mandatory.
     default_granted: false
+  - id: group.availability.write
+    scope: user_school_scope
+    description: Upload, replace, or withdraw the caller's own quantized busy-block share inside a group; never permits writing another member's availability.
+    default_granted: true
+  - id: group.availability.read
+    scope: user_school_scope
+    description: Run privacy-minimizing intersection queries and read per-member AVAILABLE/BUSY/UNKNOWN states inside an active group; raw busy blocks are not exposed by query results.
+    default_granted: true
+  - id: group.poll.create
+    scope: user_school_scope
+    description: Create deadline-bound time polls as an active group member in the same school scope.
+    default_granted: true
+  - id: group.poll.read
+    scope: user_school_scope
+    description: Read poll options, deadline, per-option results, caller vote, and confirmation state as an active group member.
+    default_granted: true
+  - id: group.poll.vote
+    scope: user_school_scope
+    description: Cast or change the caller's single-choice vote while a group poll is OPEN.
+    default_granted: true
+  - id: group.poll.confirm
+    scope: user_school_scope
+    description: Confirm a poll option as the terminal group event; limited to the poll creator or GROUP_OWNER/GROUP_ADMIN in the same school scope.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

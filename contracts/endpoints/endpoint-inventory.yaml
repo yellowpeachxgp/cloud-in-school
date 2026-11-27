@@ -552,3 +552,52 @@ endpoints:
     auth: bearer
     owner: community
     status: active
+  - method: PUT
+    path: /api/v1/groups/{groupId}/availability/me
+    operationId: replaceMyGroupAvailability
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: DELETE
+    path: /api/v1/groups/{groupId}/availability/me
+    operationId: deleteMyGroupAvailability
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: POST
+    path: /api/v1/groups/{groupId}/availability/query
+    operationId: queryGroupAvailability
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: POST
+    path: /api/v1/groups/{groupId}/polls
+    operationId: createGroupPoll
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: GET
+    path: /api/v1/polls/{pollId}
+    operationId: getGroupPoll
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: POST
+    path: /api/v1/polls/{pollId}/votes
+    operationId: upsertGroupPollVote
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
+  - method: POST
+    path: /api/v1/polls/{pollId}/confirm
+    operationId: confirmGroupPoll
+    auth: bearer
+    owner: availability
+    status: planned
+    contract_card: CT-02
