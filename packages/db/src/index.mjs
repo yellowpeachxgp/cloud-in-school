@@ -588,6 +588,262 @@ export function simulateMigration0004OnCatalog(
   };
 }
 
+const DATA_DELETE_MAP_FIELDS = Object.freeze([
+  "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
+  "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
+  "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
+  "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
+  "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
+  "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
+  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+]);
+const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
+
+function dataDeleteIsObject(value) {
+  return value !== null && (typeof value === "object" || typeof value === "function");
+}
+
+function dataDeleteContainerKind(value) {
+  if (!dataDeleteIsObject(value)) return null;
+  if (Array.isArray(value)) return "array";
+  if (value instanceof Map) return "map";
+  if (value instanceof Set) return "set";
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null ? "object" : null;
+}
+
+function dataDeleteAssertDescriptorValue(value, key, descriptor) {
+  if (!descriptor || !Object.hasOwn(descriptor, "value")) {
+    throw new Error(
+      "data-delete 原子候选包含访问器属性 " + String(key) + "；删号计算只接受纯数据对象图"
+    );
+  }
+  return descriptor;
+}
+
+function cloneDataDeleteValue(value, liveToClone, cloneToLive) {
+  if (!dataDeleteIsObject(value)) return value;
+  const existing = liveToClone.get(value);
+  if (existing) return existing;
+  const kind = dataDeleteContainerKind(value);
+  if (!kind) {
+    throw new Error("data-delete 原子候选包含不可克隆的非纯数据对象；拒绝猜测删后世界");
+  }
+
+  let copy;
+  if (kind === "array") copy = [];
+  else if (kind === "map") copy = new Map();
+  else if (kind === "set") copy = new Set();
+  else copy = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
+  liveToClone.set(value, copy);
+  cloneToLive.set(copy, value);
+
+  if (kind === "array") {
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === "length") continue;
+      const descriptor = dataDeleteAssertDescriptorValue(
+        value,
+        key,
+        Reflect.getOwnPropertyDescriptor(value, key)
+      );
+      Reflect.defineProperty(copy, key, {
+        ...descriptor,
+        value: cloneDataDeleteValue(descriptor.value, liveToClone, cloneToLive)
+      });
+    }
+    copy.length = value.length;
+    return copy;
+  }
+  if (kind === "map") {
+    for (const [key, item] of value.entries()) {
+      copy.set(
+        cloneDataDeleteValue(key, liveToClone, cloneToLive),
+        cloneDataDeleteValue(item, liveToClone, cloneToLive)
+      );
+    }
+    return copy;
+  }
+  if (kind === "set") {
+    for (const item of value.values()) {
+      copy.add(cloneDataDeleteValue(item, liveToClone, cloneToLive));
+    }
+    return copy;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = dataDeleteAssertDescriptorValue(
+      value,
+      key,
+      Reflect.getOwnPropertyDescriptor(value, key)
+    );
+    Reflect.defineProperty(copy, key, {
+      ...descriptor,
+      value: cloneDataDeleteValue(descriptor.value, liveToClone, cloneToLive)
+    });
+  }
+  return copy;
+}
+
+function syncDataDeleteArray(target, source, materialize) {
+  const sourceKeys = new Set(Reflect.ownKeys(source));
+  for (const key of Reflect.ownKeys(target)) {
+    if (key !== "length" && !sourceKeys.has(key)) delete target[key];
+  }
+  for (const key of sourceKeys) {
+    if (key === "length") continue;
+    const descriptor = dataDeleteAssertDescriptorValue(
+      source,
+      key,
+      Reflect.getOwnPropertyDescriptor(source, key)
+    );
+    target[key] = materialize(descriptor.value);
+  }
+  target.length = source.length;
+}
+
+function syncDataDeleteObject(target, source, materialize) {
+  const sourceKeys = new Set(Reflect.ownKeys(source));
+  for (const key of Reflect.ownKeys(target)) {
+    if (!sourceKeys.has(key)) delete target[key];
+  }
+  for (const key of sourceKeys) {
+    const descriptor = dataDeleteAssertDescriptorValue(
+      source,
+      key,
+      Reflect.getOwnPropertyDescriptor(source, key)
+    );
+    target[key] = materialize(descriptor.value);
+  }
+}
+
+function syncDataDeleteMap(target, source, materialize) {
+  const nextEntries = [];
+  for (const [key, item] of source.entries()) {
+    nextEntries.push([materialize(key), materialize(item)]);
+  }
+  const nextKeys = new Set(nextEntries.map(([key]) => key));
+  for (const key of Array.from(target.keys())) {
+    if (!nextKeys.has(key)) target.delete(key);
+  }
+  for (const [key, item] of nextEntries) target.set(key, item);
+}
+
+function syncDataDeleteSet(target, source, materialize) {
+  const nextItems = [];
+  for (const item of source.values()) nextItems.push(materialize(item));
+  const nextSet = new Set(nextItems);
+  for (const item of Array.from(target.values())) {
+    if (!nextSet.has(item)) target.delete(item);
+  }
+  for (const item of nextItems) target.add(item);
+}
+
+function materializeDataDeleteCandidate(value, cloneToLive, memo) {
+  if (!dataDeleteIsObject(value)) return value;
+  const existing = memo.get(value);
+  if (existing) return existing;
+  const kind = dataDeleteContainerKind(value);
+  if (!kind) {
+    throw new Error("data-delete 原子候选包含不可落地的非纯数据对象");
+  }
+  const liveCounterpart = cloneToLive.get(value);
+  let target;
+  if (liveCounterpart && dataDeleteContainerKind(liveCounterpart) === kind) {
+    target = liveCounterpart;
+  } else if (kind === "array") {
+    target = [];
+  } else if (kind === "map") {
+    target = new Map();
+  } else if (kind === "set") {
+    target = new Set();
+  } else {
+    target = Object.create(Object.getPrototypeOf(value) ?? Object.prototype);
+  }
+  memo.set(value, target);
+
+  if (kind === "array") {
+    syncDataDeleteArray(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else if (kind === "map") {
+    syncDataDeleteMap(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else if (kind === "set") {
+    syncDataDeleteSet(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  } else {
+    syncDataDeleteObject(target, value, (item) => materializeDataDeleteCandidate(item, cloneToLive, memo));
+  }
+  return target;
+}
+
+class DataDeleteAtomicTransition {
+  constructor(store) {
+    this.store = store;
+    const replica = store._createDataDeleteReplica();
+    this.staging = replica.staging;
+    this.cloneToLive = replica.cloneToLive;
+    this.closed = false;
+  }
+
+  discard() {
+    this.closed = true;
+  }
+
+  _applyToLive() {
+    const memo = new WeakMap();
+    const materialize = (value) => materializeDataDeleteCandidate(value, this.cloneToLive, memo);
+    for (const field of DATA_DELETE_MAP_FIELDS) {
+      const next = materialize(this.staging[field]);
+      if (this.store[field] !== next) this.store[field] = next;
+    }
+    for (const field of DATA_DELETE_ARRAY_FIELDS) {
+      const next = materialize(this.staging[field]);
+      if (this.store[field] !== next) this.store[field] = next;
+    }
+    this.store.momentsState = materialize(this.staging.momentsState);
+    this.store._rebuildIndexes?.();
+  }
+
+  _applyCommittedMemoryState() {
+    try {
+      this._applyToLive();
+    } catch (cause) {
+      this.store.storageCommitUnknown = true;
+      const err = new ContractError(
+        "STORAGE_COMMIT_UNKNOWN",
+        "删号快照已发布，但内存换态失败；禁止重试覆盖，需隔离核验",
+        { durability: "UNKNOWN", retry_same_key: true }
+      );
+      err.commitPublished = true;
+      err.memory_commit_error = cause?.message || "memory commit failed";
+      throw err;
+    }
+  }
+
+  commit() {
+    if (this.closed) {
+      throw new ContractError("INVALID_ARGUMENT", "data-delete atomic transition is already closed");
+    }
+    this.closed = true;
+    if (this.store._snapshotFlushTimer) {
+      clearTimeout(this.store._snapshotFlushTimer);
+      this.store._snapshotFlushTimer = null;
+    }
+    try {
+      this.store._flushSnapshotSync({ strict: true, stateSource: this.staging });
+    } catch (err) {
+      if (err?.commitPublished === true) {
+        // The candidate may already be durable. Adopt the same candidate in
+        // memory; STORAGE_COMMIT_UNKNOWN remains a durability fence rather
+        // than a rollback signal.
+        try {
+          this._applyToLive();
+        } catch (commitErr) {
+          err.memory_commit_error = commitErr?.message || "memory commit failed";
+        }
+      }
+      throw err;
+    }
+    this._applyCommittedMemoryState();
+  }
+}
+
 export class CloudDatabaseStore {
   constructor({
     snapshotPath = null,
@@ -652,6 +908,11 @@ export class CloudDatabaseStore {
     this.campusContent = new Map();
     this.momentsState = createDefaultHautMomentsState(); // schoolId -> { school_id, version, updated_at, bulletin, channels, clubs }
 
+    // Community Groups (W4-01): school-scoped groups, membership periods, invites
+    this.groups = new Map(); // groupId -> group
+    this.groupMembers = new Map(); // memberId -> membership-period record
+    this.groupInvites = new Map(); // inviteId -> invite
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -691,7 +952,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -905,6 +1166,9 @@ export class CloudDatabaseStore {
       loadMap(this.pluginInstallations, raw.pluginInstallations);
       loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
+      loadMap(this.groups, raw.groups);
+      loadMap(this.groupMembers, raw.groupMembers);
+      loadMap(this.groupInvites, raw.groupInvites);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -934,7 +1198,40 @@ export class CloudDatabaseStore {
     }
   }
 
+  _createDataDeleteReplica() {
+    const liveToClone = new WeakMap();
+    const cloneToLive = new WeakMap();
+    const staging = Object.create(CloudDatabaseStore.prototype);
+    staging.snapshotPath = null;
+    staging.snapshotFs = this.snapshotFs;
+    staging.onPersistStage = null;
+    staging.storageCommitUnknown = false;
+    staging.requireDurableSnapshot = false;
+    staging.pricingMicropeach = this.pricingMicropeach;
+    staging.adminSsoSubjects = new Set(this.adminSsoSubjects || []);
+    staging.appliedMigrations = new Set(this.appliedMigrations || []);
+    staging._snapshotFlushTimer = null;
+    staging._snapshotTmpSeq = 0;
+    staging._persistFaultInject = null;
+    staging.lastPersistenceError = null;
+    // Inner service methods still call saveSnapshot/flushSnapshotStrictSync as
+    // part of their standalone contracts. The data-delete commit unit owns the
+    // single durable flush, so those calls are inert inside the isolated copy.
+    staging._commitUnitDepth = 1;
+    staging._dataDeleteCommitUnitActive = false;
+    for (const field of DATA_DELETE_MAP_FIELDS) {
+      staging[field] = cloneDataDeleteValue(this[field], liveToClone, cloneToLive);
+    }
+    for (const field of DATA_DELETE_ARRAY_FIELDS) {
+      staging[field] = cloneDataDeleteValue(this[field], liveToClone, cloneToLive);
+    }
+    staging.momentsState = cloneDataDeleteValue(this.momentsState, liveToClone, cloneToLive);
+    staging._rebuildIndexes();
+    return { staging, cloneToLive };
+  }
+
   saveSnapshot() {
+    if (this._commitUnitDepth > 0) return;
     this.assertStorageWritable();
     if (!this.snapshotPath) return;
     if (this._snapshotFlushTimer) return;
@@ -948,6 +1245,7 @@ export class CloudDatabaseStore {
   }
 
   flushSnapshotSync() {
+    if (this._commitUnitDepth > 0) return;
     if (this._snapshotFlushTimer) {
       clearTimeout(this._snapshotFlushTimer);
       this._snapshotFlushTimer = null;
@@ -956,11 +1254,70 @@ export class CloudDatabaseStore {
   }
 
   flushSnapshotStrictSync() {
+    if (this._commitUnitDepth > 0) return;
     if (this._snapshotFlushTimer) {
       clearTimeout(this._snapshotFlushTimer);
       this._snapshotFlushTimer = null;
     }
     this._flushSnapshotSync({ strict: true });
+  }
+
+  // Data-delete专用原子提交单元。通用 copy-on-write overlay 已退役：
+  // 先在隔离的纯数据副本中计算完整删后世界，再把该候选序列化为单次耐久
+  // 提交；只有候选成功发布后才换 live 状态。发布前故障不触碰 live，发布后
+  // 故障按 commit-unknown 采用同一候选，绝不制造第三种内存状态。
+  runDataDeleteAtomicCommitUnit(fn) {
+    if (typeof fn !== "function") {
+      throw new ContractError("INVALID_ARGUMENT", "runDataDeleteAtomicCommitUnit requires a mutation function");
+    }
+    if (this._dataDeleteCommitUnitActive) {
+      throw new ContractError(
+        "CONFLICT",
+        "nested data-delete atomic commit units are rejected before any mutation executes"
+      );
+    }
+    this.assertStorageWritable();
+    this._dataDeleteCommitUnitActive = true;
+    let transition;
+    try {
+      transition = new DataDeleteAtomicTransition(this);
+    } catch (err) {
+      this._dataDeleteCommitUnitActive = false;
+      throw err;
+    }
+    let result;
+    try {
+      result = fn(transition.staging);
+    } catch (err) {
+      transition.discard();
+      this._dataDeleteCommitUnitActive = false;
+      throw err;
+    }
+    if (result && typeof result.then === "function") {
+      transition.discard();
+      this._dataDeleteCommitUnitActive = false;
+      try { result.then(() => {}, () => {}); } catch { /* thenable rejection is still isolated */ }
+      throw new ContractError(
+        "INVALID_ARGUMENT",
+        "data-delete atomic mutations must be synchronous; nested or returned thenables are rejected"
+      );
+    }
+    try {
+      transition.commit();
+      return result;
+    } finally {
+      this._dataDeleteCommitUnitActive = false;
+    }
+  }
+
+  // Compatibility fence for the removed generic transaction overlay. It must
+  // never execute caller code: an async continuation captured before removal
+  // cannot be allowed to write into live state half-committed.
+  runAtomicCommitUnit() {
+    throw new ContractError(
+      "INVALID_ARGUMENT",
+      "generic copy-on-write atomic commit units are retired; use the dedicated data-delete atomic path"
+    );
   }
 
   pruneAuthEphemera(nowMs = Date.now()) {
@@ -1032,6 +1389,20 @@ export class CloudDatabaseStore {
         throw new Error("预约幂等回执与计划、任务、事件不一致");
       }
     }
+
+    const groups = new Map(raw.groups || []);
+    for (const [, member] of raw.groupMembers || []) {
+      const group = groups.get(member?.group_id);
+      if (!group || group.school_id !== member.school_id) {
+        throw new Error("群组成员快照与学校作用域不一致");
+      }
+    }
+    for (const [, invite] of raw.groupInvites || []) {
+      const group = groups.get(invite?.group_id);
+      if (!group || group.school_id !== invite.school_id) {
+        throw new Error("群组邀请快照与学校作用域不一致");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1072,8 +1443,9 @@ export class CloudDatabaseStore {
     }
   }
 
-  _flushSnapshotSync({ strict = false } = {}) {
+  _flushSnapshotSync({ strict = false, stateSource = null } = {}) {
     this.assertStorageWritable();
+    const source = stateSource || this;
     if (!this.snapshotPath) {
       if (strict && this.requireDurableSnapshot) {
         throw new ContractError(
@@ -1082,16 +1454,16 @@ export class CloudDatabaseStore {
         );
       }
       if (!this.requireDurableSnapshot) {
-        for (const p of this.reservationPlans.values()) {
+        for (const p of source.reservationPlans.values()) {
           if (p?._stopPersistencePending) delete p._stopPersistencePending;
         }
-        for (const j of this.reservationJobs.values()) {
+        for (const j of source.reservationJobs.values()) {
           if (j?._stopPersistencePending) delete j._stopPersistencePending;
         }
       }
       return;
     }
-    this.pruneAuthEphemera();
+    source.pruneAuthEphemera();
     let tmp = null;
     let published = false;
     let intentWritten = false;
@@ -1123,38 +1495,41 @@ export class CloudDatabaseStore {
       };
       const data = {
         storage_protocol: 2,
-        users: Array.from(this.users.entries()),
-        userRoles: Array.from(this.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
-        userSsoRoles: Array.from(this.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
-        authTransactions: Array.from(this.authTransactions.entries()).slice(-200),
-        exchangeTickets: Array.from(this.exchangeTickets.entries()).slice(-200),
-        deviceSessions: Array.from(this.deviceSessions.entries()),
-        schoolBindings: Array.from(this.schoolBindings.entries()),
-        encryptedCredentials: Array.from(this.encryptedCredentials.entries()),
-        consents: Array.from(this.consents.entries()),
-        reservationPlans: Array.from(this.reservationPlans.entries()).map(serializeRecord),
-        reservationJobs: Array.from(this.reservationJobs.entries()).map(serializeRecord),
-        scheduleEvents: Array.from(this.scheduleEvents.entries()),
-        schoolReservations: Array.from(this.schoolReservations.entries()),
-        reservationAttempts: Array.from(this.reservationAttempts.entries()),
-        reservationOrders: Array.from(this.reservationOrders.entries()),
-        financeOperations: Array.from(this.financeOperations.entries()),
-        refundRequests: Array.from(this.refundRequests.entries()),
-        parcels: Array.from(this.parcels.entries()),
-        parcelEvents: Array.from(this.parcelEvents.entries()),
-        parcelSourceConnections: Array.from(this.parcelSourceConnections.entries()),
-        parcelSyncJobs: Array.from(this.parcelSyncJobs.entries()),
-        pluginInstallations: Array.from(this.pluginInstallations.entries()),
-        schoolIntegrations: Array.from(this.schoolIntegrations.entries()),
-        campusContent: Array.from(this.campusContent.entries()),
-        momentsState: this.momentsState,
-        notifications: Array.from(this.notifications.entries()),
+        users: Array.from(source.users.entries()),
+        userRoles: Array.from(source.userRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        userSsoRoles: Array.from(source.userSsoRoles.entries()).map(([k, set]) => [k, Array.from(set)]),
+        authTransactions: Array.from(source.authTransactions.entries()).slice(-200),
+        exchangeTickets: Array.from(source.exchangeTickets.entries()).slice(-200),
+        deviceSessions: Array.from(source.deviceSessions.entries()),
+        schoolBindings: Array.from(source.schoolBindings.entries()),
+        encryptedCredentials: Array.from(source.encryptedCredentials.entries()),
+        consents: Array.from(source.consents.entries()),
+        reservationPlans: Array.from(source.reservationPlans.entries()).map(serializeRecord),
+        reservationJobs: Array.from(source.reservationJobs.entries()).map(serializeRecord),
+        scheduleEvents: Array.from(source.scheduleEvents.entries()),
+        schoolReservations: Array.from(source.schoolReservations.entries()),
+        reservationAttempts: Array.from(source.reservationAttempts.entries()),
+        reservationOrders: Array.from(source.reservationOrders.entries()),
+        financeOperations: Array.from(source.financeOperations.entries()),
+        refundRequests: Array.from(source.refundRequests.entries()),
+        parcels: Array.from(source.parcels.entries()),
+        parcelEvents: Array.from(source.parcelEvents.entries()),
+        parcelSourceConnections: Array.from(source.parcelSourceConnections.entries()),
+        parcelSyncJobs: Array.from(source.parcelSyncJobs.entries()),
+        pluginInstallations: Array.from(source.pluginInstallations.entries()),
+        schoolIntegrations: Array.from(source.schoolIntegrations.entries()),
+        campusContent: Array.from(source.campusContent.entries()),
+        groups: Array.from(source.groups.entries()),
+        groupMembers: Array.from(source.groupMembers.entries()),
+        groupInvites: Array.from(source.groupInvites.entries()),
+        momentsState: source.momentsState,
+        notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
         // original result after restart — never a duplicate, never lost.
-        idempotencyRecords: Array.from(this.idempotencyRecords.entries()),
-        priceQuotes: Array.from(this.priceQuotes.entries()),
-        outboxEvents: this.outboxEvents,
-        auditEvents: this.auditEvents.slice(-500)
+        idempotencyRecords: Array.from(source.idempotencyRecords.entries()),
+        priceQuotes: Array.from(source.priceQuotes.entries()),
+        outboxEvents: source.outboxEvents,
+        auditEvents: source.auditEvents.slice(-500)
       };
       this._snapshotTmpSeq = (this._snapshotTmpSeq || 0) + 1;
       tmp = `${this.snapshotPath}.tmp.${process.pid}.${this._snapshotTmpSeq}`;
@@ -1196,10 +1571,10 @@ export class CloudDatabaseStore {
         stage = "intent_clear_fsync"; this._syncSnapshotDirectory(stage);
       } catch (err) { err.persistStage = err.persistStage || stage; throw err; }
       this._unknownSnapshotHash = undefined;
-      for (const p of this.reservationPlans.values()) {
+      for (const p of source.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;
       }
-      for (const j of this.reservationJobs.values()) {
+      for (const j of source.reservationJobs.values()) {
         if (j?._stopPersistencePending) delete j._stopPersistencePending;
       }
     } catch (err) {

@@ -10,6 +10,7 @@ import { createAdminRoutes } from "./admin.mjs";
 import { createSyncRoutes } from "./sync.mjs";
 import { createCampusContentRoutes } from "./campus-content.mjs";
 import { createMomentsExtensionRoutes } from "./moments.mjs";
+import { createCommunityRoutes } from "./community.mjs";
 
 export function createCoreRoutes(ctx) {
   return [
@@ -23,7 +24,8 @@ export function createCoreRoutes(ctx) {
     ...createPluginsRoutes(ctx),
     ...createAdminRoutes(ctx),
     ...createSyncRoutes(ctx),
-    ...createCampusContentRoutes(ctx)
+    ...createCampusContentRoutes(ctx),
+    ...createCommunityRoutes(ctx)
   ];
 }
 
