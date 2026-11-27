@@ -3787,9 +3787,9 @@ components:
           description: Replacement set of busy intervals. Overlapping or non-normalized blocks are rejected; titles, reasons, locations, and notes are outside this schema by design.
         ttl_seconds:
           type: integer
-          minimum: 3600
+          minimum: 1800
           maximum: 7776000
-          description: Share lifetime in seconds (1 hour through 90 days). The server computes expires_at and must not retain expired blocks.
+          description: Share lifetime in seconds (30 minutes through 90 days). The server computes expires_at and must not retain expired blocks.
     GroupAvailabilityShare:
       type: object
       additionalProperties: false
@@ -3814,7 +3814,7 @@ components:
           minimum: 0
         ttl_seconds:
           type: integer
-          minimum: 3600
+          minimum: 1800
           maximum: 7776000
         expires_at:
           type: string
@@ -4019,7 +4019,7 @@ components:
           maxItems: 10
           items:
             $ref: '#/components/schemas/GroupPollOptionInput'
-          description: Two or more non-overlapping candidate time windows. Exact duplicates and overlapping options are rejected.
+          description: Two or more distinct candidate time windows. Exact duplicates are rejected; partial overlap is allowed because alternatives may use different start times or durations.
         voting_deadline_at:
           type: string
           format: date-time

@@ -209,4 +209,4 @@ errors:
     http_status: 400
     retryable: false
     user_action: FIX_POLL_OPTIONS_OR_DEADLINE
-    description: Poll options must be non-overlapping quantized time windows and the deadline must be in the future and no later than the earliest option start.
+    description: Poll options must be distinct quantized time windows and the deadline must be in the future and no later than the earliest option start.
