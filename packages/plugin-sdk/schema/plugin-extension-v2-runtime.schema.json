@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://campus.yellowpeachxgp.com/runtime-schemas/plugin-extension-v2-runtime.schema.json",
+  "title": "Day in School dis-extension/v2 Runtime Manifest (transitional runtime fact source)",
+  "description": "Runtime-only validation schema for the snake_case dis-extension/v2 manifest used by cloud plugin-sdk and Android. This file is deliberately outside contracts/** during W6-00 because CT-01 owns contracts; it is not the AC-01/AC-02 contract-schema acceptance artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plugin_id",
+    "name",
+    "version",
+    "min_host_api",
+    "max_host_api",
+    "permissions",
+    "allowed_origins",
+    "ui_slots",
+    "commands",
+    "entry_artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "dis-extension/v2",
+        "dis-plugin/v2"
+      ]
+    },
+    "legacy_schema_version": {
+      "type": "string",
+      "enum": [
+        "dis-campus-plugin/v1"
+      ]
+    },
+    "plugin_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$",
+      "minLength": 5,
+      "maxLength": 120
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$"
+    },
+    "min_host_api": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "max_host_api": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "network.request",
+          "account.session",
+          "storage.scoped",
+          "notification.send",
+          "location.coarse",
+          "library.booking.read",
+          "library.booking.create",
+          "parcel.read",
+          "parcel.ai.invoke",
+          "ui.slot.render",
+          "parcel.write.import"
+        ]
+      }
+    },
+    "allowed_origins": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https://[a-zA-Z0-9.-]+(:[0-9]+)?$"
+      }
+    },
+    "ui_slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot_id",
+          "card_id",
+          "title",
+          "action_command"
+        ],
+        "properties": {
+          "slot_id": {
+            "type": "string",
+            "enum": [
+              "home.cards",
+              "campus.services",
+              "library.actions",
+              "parcel.cards",
+              "parcel.providers",
+              "settings.entries"
+            ]
+          },
+          "card_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
+          },
+          "subtitle": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "action_command": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "required_permission": {
+            "type": "string",
+            "enum": [
+              "network.request",
+              "account.session",
+              "storage.scoped",
+              "notification.send",
+              "location.coarse",
+              "library.booking.read",
+              "library.booking.create",
+              "parcel.read",
+              "parcel.ai.invoke",
+              "ui.slot.render",
+              "parcel.write.import"
+            ]
+          }
+        }
+      }
+    },
+    "entry_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "size_bytes"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "value_base64"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "value_base64": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "minLength": 64,
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

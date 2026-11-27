@@ -8,7 +8,9 @@ import {
   DEFAULT_SCHOOL_ID,
   generateRequestId,
   okEnvelope,
-  errorEnvelope
+  errorEnvelope,
+  parseJsonWithNumberLiterals,
+  copyJsonNumberLiteralMetadata
 } from "../../../packages/contracts/src/index.mjs";
 import {
   renderConsoleHtml,
@@ -763,8 +765,12 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
 
   function sanitizeParsedJson(val) {
     if (!val || typeof val !== "object") return val;
-    if (Array.isArray(val)) return val.map(sanitizeParsedJson);
+    if (Array.isArray(val)) {
+      const arr = val.map(sanitizeParsedJson);
+      return copyJsonNumberLiteralMetadata(val, arr);
+    }
     const out = {};
+    copyJsonNumberLiteralMetadata(val, out);
     for (const [k, v] of Object.entries(val)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
       out[k] = sanitizeParsedJson(v);
@@ -802,7 +808,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         let parsedBody = undefined;
         if (rawBody && rawBody.trim().length > 0) {
           try {
-            parsedBody = sanitizeParsedJson(JSON.parse(rawBody));
+            parsedBody = sanitizeParsedJson(parseJsonWithNumberLiterals(rawBody));
           } catch {
             res.writeHead(400, {
               ...SECURITY_HEADERS,

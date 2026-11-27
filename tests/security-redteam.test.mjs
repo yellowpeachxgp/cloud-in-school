@@ -137,11 +137,14 @@ test("Security Red-Team: Plugin zip-slip path traversal, tampered artifact diges
         min_host_api: 2,
         max_host_api: 2,
         permissions: ["ui.slot.render"],
+        allowed_origins: [],
         ui_slots: [],
+        commands: [],
         entry_artifacts: [
           {
             path: "dist/index.mjs",
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            size_bytes: 32
           }
         ],
         signature: {

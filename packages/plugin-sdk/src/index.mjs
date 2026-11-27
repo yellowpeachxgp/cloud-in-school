@@ -1,22 +1,48 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ContractError, loadPermissionCatalog } from "../../contracts/src/index.mjs";
+import { ContractError, loadPermissionCatalog, parseJsonWithNumberLiterals } from "../../contracts/src/index.mjs";
 import {
   generateEd25519KeyPair,
   signPluginManifest,
   verifyPluginManifestSignature,
   sha256Hex
 } from "../../crypto/src/index.mjs";
+import {
+  RUNTIME_UI_SLOTS,
+  RUNTIME_VALIDATION_CODES,
+  assertPluginRuntimeSchema,
+  pluginManifestValidationError
+} from "./runtime-contract.mjs";
 
-export const SUPPORTED_UI_SLOTS = Object.freeze([
-  "home.cards",
-  "campus.services",
-  "library.actions",
-  "parcel.cards",
-  "parcel.providers",
-  "settings.entries"
-]);
+// W6-00 runtime fact source: the six slots currently implemented by the cloud
+// SDK and Android parser. The contracts/** matrix still contains the older,
+// wider contract-surface list and is intentionally not edited by this card
+// while CT-01 owns contracts/**.
+export const SUPPORTED_UI_SLOTS = RUNTIME_UI_SLOTS;
+
+const PLUGIN_MANIFEST_JSON_PARSE_OPTIONS = Object.freeze({
+  rejectDuplicateKeys: true,
+  maxNumberLiteralLength: 64
+});
+
+/**
+ * Parse plugin manifest source text with the same strict lexical boundaries as
+ * Android's canonical JSON parser: duplicate object keys are rejected and any
+ * number literal longer than 64 characters is rejected before validation.
+ * Generic API JSON parsing remains intentionally unchanged; this strict mode is
+ * scoped to plugin-manifest ingress.
+ */
+export function parsePluginManifestJson(jsonText) {
+  try {
+    return parseJsonWithNumberLiterals(jsonText, PLUGIN_MANIFEST_JSON_PARSE_OPTIONS);
+  } catch (error) {
+    throw pluginManifestValidationError(
+      RUNTIME_VALIDATION_CODES.SCHEMA_INVALID,
+      "Plugin manifest JSON parse failure: " + (error?.message || String(error))
+    );
+  }
+}
 
 export function adaptLegacyCampusManifest(rawManifest) {
   if (!rawManifest || typeof rawManifest !== "object") {
@@ -50,7 +76,7 @@ export function adaptLegacyCampusManifest(rawManifest) {
         }
       ],
       entry_artifacts: rawManifest.entry_artifacts || [],
-      signature: rawManifest.signature
+      ...(rawManifest.signature ? { signature: rawManifest.signature } : {})
     };
   }
   return rawManifest;
@@ -83,59 +109,79 @@ export function assertSafeRelativeArtifactPath(relPath) {
 }
 
 export function validatePluginManifest(rawManifest, { hostApiVersion = 2 } = {}) {
-  const manifest = adaptLegacyCampusManifest(rawManifest);
+  const parsedInput = typeof rawManifest === "string" ? parsePluginManifestJson(rawManifest) : rawManifest;
+  const manifest = adaptLegacyCampusManifest(parsedInput);
 
-  if (!["dis-extension/v2", "dis-plugin/v2"].includes(manifest.schema_version)) {
-    throw new ContractError(
-      "BAD_REQUEST",
-      `Unsupported plugin schema_version: ${manifest.schema_version}`
+  // W6-00: validate the exact snake_case runtime shape before semantic checks.
+  // The transitional schema is packages/plugin-sdk/schema/, not contracts/**;
+  // the CT contract-surface slice remains explicitly pending.
+  assertPluginRuntimeSchema(manifest);
+
+  const minHost = manifest.min_host_api;
+  const maxHost = manifest.max_host_api;
+  if (minHost > maxHost) {
+    throw pluginManifestValidationError(
+      RUNTIME_VALIDATION_CODES.HOST_API_RANGE_INVALID,
+      `Plugin host API range is inverted [${minHost}..${maxHost}]`,
+      { min_host_api: minHost, max_host_api: maxHost }
     );
   }
-
-  if (!manifest.plugin_id || !/^[a-z0-9]+(\.[a-z0-9-]+)+$/.test(manifest.plugin_id)) {
-    throw new ContractError("BAD_REQUEST", `Invalid plugin_id '${manifest.plugin_id}'`);
-  }
-
-  if (!manifest.version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
-    throw new ContractError("BAD_REQUEST", `Invalid semver version '${manifest.version}'`);
-  }
-
-  const minHost = Number(manifest.min_host_api ?? 2);
-  const maxHost = Number(manifest.max_host_api ?? 2);
   if (hostApiVersion < minHost || hostApiVersion > maxHost) {
-    throw new ContractError(
-      "BAD_REQUEST",
+    throw pluginManifestValidationError(
+      RUNTIME_VALIDATION_CODES.HOST_API_OUT_OF_RANGE,
       `Plugin requires host API [${minHost}..${maxHost}], current host is ${hostApiVersion}`,
       { min_host_api: minHost, max_host_api: maxHost, current_host_api: hostApiVersion }
     );
   }
 
+  // The runtime schema carries the current permission enum; this second check
+  // keeps the SDK honest if the runtime schema and permission catalog drift.
   const catalog = loadPermissionCatalog();
   const validPermissions = new Set((catalog.permissions || []).map((p) => p.id));
   for (const perm of manifest.permissions || []) {
     if (!validPermissions.has(perm)) {
-      throw new ContractError(
-        "PLUGIN_PERMISSION_DENIED",
-        `Plugin declares unknown or forbidden permission '${perm}'`
+      throw pluginManifestValidationError(
+        RUNTIME_VALIDATION_CODES.PERMISSION_UNKNOWN,
+        `Plugin declares unknown or forbidden permission '${perm}'`,
+        { permission: perm }
+      );
+    }
+  }
+  for (const command of manifest.commands || []) {
+    if (command.required_permission && !validPermissions.has(command.required_permission)) {
+      throw pluginManifestValidationError(
+        RUNTIME_VALIDATION_CODES.PERMISSION_UNKNOWN,
+        `Command '${command.name}' requires unknown permission '${command.required_permission}'`,
+        { permission: command.required_permission, command: command.name }
       );
     }
   }
 
   for (const slot of manifest.ui_slots || []) {
     if (!SUPPORTED_UI_SLOTS.includes(slot.slot_id)) {
-      throw new ContractError(
-        "BAD_REQUEST",
-        `Unsupported UI extension slot '${slot.slot_id}'`
+      throw pluginManifestValidationError(
+        RUNTIME_VALIDATION_CODES.SLOT_UNKNOWN,
+        `Unsupported UI extension slot '${slot.slot_id}'`,
+        { slot_id: slot.slot_id, runtime_slots: [...SUPPORTED_UI_SLOTS] }
       );
     }
   }
 
   for (const art of manifest.entry_artifacts || []) {
-    assertSafeRelativeArtifactPath(art.path);
-    if (!art.sha256 || !/^[a-f0-9]{64}$/i.test(art.sha256)) {
-      throw new ContractError(
-        "PLUGIN_SIGNATURE_INVALID",
-        `Invalid sha256 digest declaration for ${art.path}`
+    try {
+      assertSafeRelativeArtifactPath(art.path);
+    } catch (error) {
+      throw pluginManifestValidationError(
+        RUNTIME_VALIDATION_CODES.PATH_UNSAFE,
+        error.message,
+        { artifact_path: art.path }
+      );
+    }
+    if (!/^[a-f0-9]{64}$/.test(art.sha256)) {
+      throw pluginManifestValidationError(
+        RUNTIME_VALIDATION_CODES.DIGEST_INVALID,
+        `Invalid lowercase sha256 digest declaration for ${art.path}`,
+        { artifact_path: art.path }
       );
     }
   }
@@ -626,7 +672,7 @@ export class PluginRegistryAndBroker {
 
 export function loadPluginDirectory(pluginDir) {
   const manifestPath = path.join(pluginDir, "manifest.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const manifest = parsePluginManifestJson(fs.readFileSync(manifestPath, "utf8"));
   const artifactMap = {};
   for (const art of manifest.entry_artifacts || []) {
     const safePath = assertSafeRelativeArtifactPath(art.path);

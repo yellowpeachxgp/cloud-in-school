@@ -30,13 +30,13 @@
   "entry_artifacts": [
     {
       "path": "dist/index.mjs",
-      "sha256": "33359efbb9e7e7bebf316777304a2eb933ef2fab5f51765180f33d3ae43b7fa0",
-      "size_bytes": 235
+      "sha256": "f0191d91bc2654fb818020c8ae827d7345bf8931ee57dc9cf9245c4c1bf62ddd",
+      "size_bytes": 451
     }
   ],
   "signature": {
     "algorithm": "Ed25519",
     "key_id": "dis-official-examples-2026",
-    "value_base64": "atk4hnwEd6llhX7O9oWrXp+IHNqTScI3tB633JEXhEpr7iXWmjXmjmRQ11Gt7zKrEhg9awPmiZY7qIgBHa1yDw=="
+    "value_base64": "UzbL8BlxnIsSBJdnXkb5ZrNjoZSl05Po2AolHtU7Q1GMWUFFTz6tsxPP7VD2EawFM/ZnnPQzxpnMqmBnPxz4AA=="
   }
 }
