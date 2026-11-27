@@ -194,6 +194,15 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
     return value !== "" && !isBlockScalarValue(value) && !/^[\[\]{}"']/.test(value);
   }
 
+  function stripPlainScalarComment(text) {
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === "#" && (index === 0 || text[index - 1] === " " || text[index - 1] === "\t")) {
+        return text.slice(0, index).trimEnd();
+      }
+    }
+    return text.trimEnd();
+  }
+
   function skipPlainScalarContinuation(startIndex, parentIndent) {
     let index = startIndex + 1;
     while (index < lines.length) {
@@ -205,7 +214,8 @@ function analyzeYamlDuplicateKeys(yamlText, label) {
       const indent = (raw.match(/^ */) || [""])[0].length;
       if (indent <= parentIndent) break;
       const text = raw.slice(indent).trimEnd();
-      if (!text.startsWith("#") && parseMappingKey(text)) {
+      const content = stripPlainScalarComment(text);
+      if (/:(?:\s|$)/.test(content)) {
         errors.push(label + ":" + (index + 1) + ": mapping syntax cannot appear inside a plain-scalar continuation");
       }
       index += 1;
@@ -436,6 +446,14 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   assert(
     anchoredFlowControl.errors.length > 0,
     "duplicate-key scanner must fail closed on anchored flow sequences"
+  );
+  const commentedContinuationControl = analyzeYamlDuplicateKeys(
+    "root:\n  description: first line\n    continuation text # Note: pagination applies\n  sibling: true\n",
+    "commented-continuation-control.yaml"
+  );
+  assert(
+    commentedContinuationControl.errors.length === 0 && commentedContinuationControl.duplicates.length === 0,
+    "duplicate-key scanner must allow colons inside plain-scalar continuation comments"
   );
   const malformedContinuationControl = analyzeYamlDuplicateKeys(
     "root:\n  description: first line\n    format: uuid\n  sibling: true\n",
