@@ -63,7 +63,9 @@ function cardTemplate(pluginId) {
         {
           name: "showCardData",
           description: "Show the signed card data shipped with this plugin",
-          required_permission: "ui.slot.render"
+          required_permission: "ui.slot.render",
+          type: "show_data",
+          artifact_path: "assets/card-data.json"
         }
       ]
     },
@@ -98,7 +100,9 @@ function serviceTemplate(pluginId) {
         {
           name: "openService",
           description: "Open the declared HTTPS service page (declarative navigation, host-rendered)",
-          required_permission: "ui.slot.render"
+          required_permission: "ui.slot.render",
+          type: "open_url",
+          url: "https://service.example.com/"
         }
       ]
     },
@@ -159,7 +163,9 @@ function datapackTemplate(pluginId) {
         {
           name: "queryDataset",
           description: "Query the signed dataset shipped inside this plugin package",
-          required_permission: "ui.slot.render"
+          required_permission: "ui.slot.render",
+          type: "show_data",
+          artifact_path: "assets/dataset.json"
         }
       ]
     },
@@ -194,7 +200,9 @@ function legacyTemplate(pluginId) {
         {
           name: "ping",
           description: "Ping custom plugin",
-          required_permission: "ui.slot.render"
+          required_permission: "ui.slot.render",
+          type: "show_data",
+          artifact_path: "dist/index.mjs"
         }
       ]
     },

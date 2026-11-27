@@ -261,6 +261,7 @@ export function createMeRoutes(ctx) {
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       const communityPurged = stagingCommunity.purgeUserCommunityData?.(auth.cloudUserId, nowMs) || null;
+      const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
       const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
@@ -271,7 +272,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, communityPurged, placeStatusPurged };
+      return { cascade, momentsPurged, communityPurged, pluginPurged, placeStatusPurged };
     });
     return {
       status: 202,
@@ -282,6 +283,7 @@ export function createMeRoutes(ctx) {
         cancelled_job_ids: outcome.cascade.cancelledJobIds,
         moments_purged: outcome.momentsPurged,
         community_purged: outcome.communityPurged,
+        plugin_purged: outcome.pluginPurged,
         place_status_purged: outcome.placeStatusPurged
       }
     };

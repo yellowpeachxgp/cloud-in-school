@@ -21,9 +21,7 @@
 3. **宿主不会加载或执行 `entry_artifacts` 中的 JavaScript、Dex、脚本或任意代码。**
    两个内置示例里的 `dist/index.mjs` 只是签名完整性示例字节；文件头也明确标注「不会被执行」。
    示例命令的可调用行为由宿主内置 reference handler 提供，不是从插件产物动态调用。
-4. 当前第三方 declarative command 的云端 broker 仍有遗留回显语义；它是兼容行为，不代表插件代码已被执行。
-   `open_host_route / open_url / show_data` 的严格声明式命令类型属于 W6-01a，不在本切片宣称完成。
-   `simulate` 复用同一个真实 broker，因此本地看到的命令输出就是这个回显语义的真实样子。
+4. 第三方 declarative command 只允许 `open_host_route / open_url / show_data` 三类声明式语义：分别返回宿主白名单路由、受 `allowed_origins` 约束的 HTTPS 打开意图、或插件签名数据。未知或缺失类型返回 `PLUGIN_COMMAND_UNSUPPORTED`；响应不得回显调用方 payload。宿主内置 reference handler 只服务随宿主发布的示例，不从插件产物加载。
 5. 不支持远程 Dex、任意脚本热加载、反射宿主私有实现、共享校园登录凭据或财务密钥。
 
 ## 2. 清单字段表（运行时 snake_case）
@@ -40,7 +38,7 @@
 | `permissions` | string array | 只能包含 §5 权限目录中的 ID |
 | `allowed_origins` | string array | 只能是无路径 HTTPS origin，例如 `https://plugin.example.com`；不允许 `http:` 或路径 |
 | `ui_slots` | object array | 每项必须有 `slot_id / card_id / title / action_command`，可选 `subtitle`；`title` 为 1–60 字符且不能是纯空白（空白集同上，与 ECMAScript `\s` 一致） |
-| `commands` | object array | 每项必须有 `name`，可选 `description / required_permission` |
+| `commands` | object array | 每项必须有 `name`，可选 `description / required_permission`；第三方声明式命令另可声明 `type`（`open_host_route/open_url/show_data`）及对应 `route/url/artifact_path`。未知 `type` 可解析但调用时 fail-closed 为 `PLUGIN_COMMAND_UNSUPPORTED` |
 | `entry_artifacts` | object array | 每项必须有 `path / sha256 / size_bytes`；`size_bytes` 为 0–2147483647 的整数字面量（按现有内存内摘要核验实现选择最严合理上限，超大文件待未来流式契约另行设计） |
 
 可选字段：
@@ -91,9 +89,19 @@ DISABLED
   ├─ ENABLE ─> ENABLED；若仍有 pending_version，先回到 PENDING_PERMISSION_REVIEW
   ├─ same-permission reinstall/upgrade ─> DISABLED(不会被静默重新启用)
   └─ UNINSTALL ─> UNINSTALLED
+
+QUARANTINED
+  └─ UNINSTALL ─> UNINSTALLED（其余 lifecycle 一律拒绝；重启恢复时只有 active_version 未过验的安装会进入该状态）
 ```
 
-首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。持久化、逐项撤权、学校作用域、卸载数据清理与故障隔离属于 W6-01a，本文不宣称已完成。
+首次安装视为用户显式同意该版本声明的权限。升级新增的权限不会静默授予；回滚会把授权收缩为「已授权 ∩ 目标版本声明」。显式版本安装、待审权限确认、逐项撤权、回滚、命令 invoke 和 UI descriptor 输出在读取持久化包前都会重新解析当前信任根、重验签名与全部声明产物摘要；持久化数据只是证据，不是信任输入。重启恢复时未过验的 package 会标为 `COMPROMISED`，正在使用该版本的 installation 会标为 `QUARANTINED`：不可 invoke、不产生 UI descriptor、只能卸载清理，并写入 `PLUGIN_PACKAGE_QUARANTINED` / `PLUGIN_INSTALLATION_QUARANTINED` 审计。为控制重复验签成本，运行时使用内存成功验签缓存；缓存键必须包含有效信任根公钥、host API 以及持久化 manifest、artifact payload 和版本元数据的内容摘要，任何篡改都会使缓存键改变并触发重验。若之后字节恢复为同一签名包且重验通过，package 可脱离 quarantine；历史审计不会删除，restart 时已 QUARANTINED 的 installation 仍需卸载清理而不会自动恢复启用。W6-01a 当前实现还包括：按 `(cloud_user_id, school_id)` 隔离安装、逐项 `REVOKE_PERMISSION`、SQL 0011/快照持久化、卸载清理授权与 scoped storage/cache、连续故障自动停用，以及管理端 kill switch。
+
+## 4.1 发布者信任根与持久化边界
+
+- 云端 Broker 不持有、生成或持久化任何发布者私钥；运行时只验证公钥签名。
+- 生产模式只接受宿主配置里的**显式 `publisher/key_id → Ed25519 SPKI base64 公钥` 映射**；`PLUGIN_TRUSTED_PUBLISHER_KEYS` 可写 JSON 对象（例如 `{"dis-official-examples-2026":"MCow..."}`）或逗号/空白分隔的 `publisher=public-key` 条目；只写裸公钥会因缺少 publisher 映射而启动失败。安装请求若携带 `public_key_base64`，它只是一致性证明：必须与宿主信任根（非生产兼容路径则为已钉扎公钥）完全一致，绝不作为信任输入替换信任根；管理员角色与 host-reference 标记也不能绕过该信任根。
+- 非生产模式为方便本地开发允许未列入信任根的公钥注册；同一 `plugin_id` 仍会被首次公钥固定，后续替换公钥失败。该宽松行为只在非生产有效，不得作为生产兼容承诺，也不代表 publisher 命名冲突在生产环境可绕过。
+- SQL 0011 定义 `plugin_publishers / plugin_versions / plugin_installations / plugin_permission_grants / plugin_storage_entries / plugin_cache_entries / plugin_runtime_states`；当前内存 Snapshot Store 镜像同一模型用于测试与开发部署。
 
 ## 5. 权限目录（声明 ≠ 能力已实现）
 
@@ -105,7 +113,7 @@ DISABLED
 |---|---|
 | `network.request` | 只允许访问 `allowed_origins` 中的 HTTPS origin；路径/方法/purpose 细粒度约束仍待 W6-01a 完整落地 |
 | `account.session` | 通过 Broker 使用特定学校/平台会话作用域；不暴露原始凭据 |
-| `storage.scoped` | **保留/未实现**：当前没有插件分区存储；不要因为目录中存在该 ID 就宣称可用 |
+| `storage.scoped` | 云端 Broker 已有按安装实例隔离的内部 scoped storage；Android 使用每 Profile 文件分区。该权限仍不是通用宿主 API，跨设备同步与容量配额待后续卡片 |
 | `notification.send` | 经宿主通知通道发送清理后的通知；实现接入仍不完整 |
 | `location.coarse` | 粗粒度校园位置，用于驿站/楼宇匹配 |
 | `library.booking.read` | 读取图书馆区域、座位快照和当前用户预约 |
@@ -180,7 +188,7 @@ CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm 
 | 命令 | 行为 |
 |---|---|
 | `keygen` | 在密钥环（`$DIS_PLUGIN_HOME/keys`，缺省 `~/.dis-plugin/keys`）生成 Ed25519 发布者密钥对；私钥权限 0600；拒绝静默覆盖，`--force` 才会换钥 |
-| `init` | 按模板生成插件工程：`--template card\|service\|datapack\|legacy`（缺省 `legacy`）；`--keyring` 时使用/创建密钥环密钥，私钥不进入工程目录 |
+| `init` | 按模板生成插件工程：`--template card\|service\|datapack\|legacy`（缺省 `legacy`）；使用/创建密钥环密钥，私钥不进入工程目录 |
 | `validate` | 清单结构与语义校验（目录或 pack zip），不验证签名 |
 | `sign` | 重新计算 `entry_artifacts` 摘要并签名；读取产物前先做安全路径检查 |
 | `pack` | 先完整验签验摘要，再产出确定性 ZIP（见 §7）；`package` 是它的别名 |
@@ -196,7 +204,7 @@ CLI 以零依赖纯 Node ESM 实现，Node ≥ 22 即可运行，不需要 `npm 
 4. 工程内 legacy `plugin-signing-private.key` / `plugin-signing-public.key`（兼容行为）；
 5. pack zip 内嵌的 `plugin-signing-public.key`（仅 zip 输入；自声明性质，信任决定仍属宿主钉扎/信任根）。
 
-**密钥卫生警告**：不带 `--keyring` 的 `init` 保持 W6-00 兼容行为，会把 `plugin-signing-private.key` 写在插件目录中。绝对不要提交、上传或分享该文件；`init` 现在会同时生成覆盖该文件的 `.gitignore`。正式发布请使用 `keygen` + `init --keyring` 流程。CLI 把私钥默认迁出插件目录是 W6-01a/AC-24 的明确待办，本指南不把现状描述为安全终态。
+**密钥卫生终态（W6-01a/AC-24）**：`init` 一律使用/创建外部密钥环私钥，插件目录只写入 public key 和 `.gitignore`，绝不会新生成 `plugin-signing-private.key`；`--keyring` 仅作为兼容脚本的无操作标志保留。既有旧工程里残留的 legacy 私钥仍可被 `sign/verify` 兼容读取，但 `doctor` 会给出 WARN；绝对不要提交、上传或分享该文件。
 
 ### 6.1 三种 init 模板
 

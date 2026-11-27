@@ -594,7 +594,9 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "consents", "operationsSchoolGrants", "reservationPlans", "reservationJobs", "scheduleEvents",
   "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
   "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
-  "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
+  "parcelSyncJobs", "installedPlugins", "pluginPublishers", "pluginVersions",
+  "pluginInstallations", "pluginPermissionGrants", "pluginStorageEntries",
+  "pluginCacheEntries", "pluginRuntimeStates", "campusContent", "groups", "groupMembers",
   "groupInvites", "notifications", "priceQuotes", "idempotencyRecords",
   "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
   "placeStatusAggregates"
@@ -904,8 +906,15 @@ export class CloudDatabaseStore {
     this.parcelSourceConnections = new Map(); // connectionId -> connection
     this.parcelSyncJobs = new Map(); // jobId -> sync job
 
-    // Plugins
-    this.pluginInstallations = new Map(); // `${userId}:${pluginId}` -> installation
+    // Plugins (W6-01a SQL 0011 durable model mirrored by the snapshot store)
+    this.installedPlugins = new Map(); // plugin_id -> legacy 0002 signed registry root row
+    this.pluginPublishers = new Map(); // publisherId -> trusted publisher/public key metadata
+    this.pluginVersions = new Map(); // `${pluginId}@${version}` -> signed immutable version record
+    this.pluginInstallations = new Map(); // `${userId}:${schoolId}:${pluginId}` -> installation
+    this.pluginPermissionGrants = new Map(); // `${installationId}:${permission}` -> grant/revocation row
+    this.pluginStorageEntries = new Map(); // `${installationId}:${namespace}:${key}` -> scoped storage row
+    this.pluginCacheEntries = new Map(); // `${installationId}:${namespace}:${key}` -> disposable cache row
+    this.pluginRuntimeStates = new Map(); // pluginId -> failure/kill-switch runtime state
 
     // Cloud-Controlled Campus Channels, Clubs & Dynamic Content
     this.campusContent = new Map();
@@ -1175,7 +1184,14 @@ export class CloudDatabaseStore {
       loadMap(this.parcelEvents, raw.parcelEvents);
       loadMap(this.parcelSourceConnections, raw.parcelSourceConnections);
       loadMap(this.parcelSyncJobs, raw.parcelSyncJobs);
+      loadMap(this.installedPlugins, raw.installedPlugins);
+      loadMap(this.pluginPublishers, raw.pluginPublishers);
+      loadMap(this.pluginVersions, raw.pluginVersions);
       loadMap(this.pluginInstallations, raw.pluginInstallations);
+      loadMap(this.pluginPermissionGrants, raw.pluginPermissionGrants);
+      loadMap(this.pluginStorageEntries, raw.pluginStorageEntries);
+      loadMap(this.pluginCacheEntries, raw.pluginCacheEntries);
+      loadMap(this.pluginRuntimeStates, raw.pluginRuntimeStates);
       loadMap(this.schoolIntegrations, raw.schoolIntegrations);
       loadMap(this.campusContent, raw.campusContent);
       loadMap(this.groups, raw.groups);
@@ -1554,7 +1570,14 @@ export class CloudDatabaseStore {
         parcelEvents: Array.from(source.parcelEvents.entries()),
         parcelSourceConnections: Array.from(source.parcelSourceConnections.entries()),
         parcelSyncJobs: Array.from(source.parcelSyncJobs.entries()),
+        installedPlugins: Array.from(source.installedPlugins.entries()),
+        pluginPublishers: Array.from(source.pluginPublishers.entries()),
+        pluginVersions: Array.from(source.pluginVersions.entries()),
         pluginInstallations: Array.from(source.pluginInstallations.entries()),
+        pluginPermissionGrants: Array.from(source.pluginPermissionGrants.entries()),
+        pluginStorageEntries: Array.from(source.pluginStorageEntries.entries()),
+        pluginCacheEntries: Array.from(source.pluginCacheEntries.entries()),
+        pluginRuntimeStates: Array.from(source.pluginRuntimeStates.entries()),
         schoolIntegrations: Array.from(source.schoolIntegrations.entries()),
         campusContent: Array.from(source.campusContent.entries()),
         groups: Array.from(source.groups.entries()),
@@ -3016,6 +3039,58 @@ export class CloudDatabaseStore {
     this.flushSnapshotStrictSync();
 
     return { cancelledJobIds };
+  }
+
+  purgeUserPluginData(cloudUserId) {
+    if (!cloudUserId) {
+      return { removed_installations: 0, removed_permission_grants: 0, removed_storage_entries: 0, removed_cache_entries: 0 };
+    }
+    const installationIds = new Set();
+    let removedInstallations = 0;
+    for (const [key, installation] of Array.from(this.pluginInstallations.entries())) {
+      const owner = installation?.cloud_user_id || installation?.user_id;
+      if (owner !== cloudUserId) continue;
+      if (installation?.installation_id) installationIds.add(installation.installation_id);
+      this.pluginInstallations.delete(key);
+      removedInstallations += 1;
+    }
+    let removedGrantRows = 0;
+    for (const [key, row] of Array.from(this.pluginPermissionGrants.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginPermissionGrants.delete(key);
+      removedGrantRows += 1;
+    }
+    let removedStorageEntries = 0;
+    for (const [key, row] of Array.from(this.pluginStorageEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginStorageEntries.delete(key);
+      removedStorageEntries += 1;
+    }
+    let removedCacheEntries = 0;
+    for (const [key, row] of Array.from(this.pluginCacheEntries.entries())) {
+      if (!installationIds.has(row?.installation_id)) continue;
+      this.pluginCacheEntries.delete(key);
+      removedCacheEntries += 1;
+    }
+    const result = {
+      removed_installations: removedInstallations,
+      removed_permission_grants: removedGrantRows,
+      removed_storage_entries: removedStorageEntries,
+      removed_cache_entries: removedCacheEntries
+    };
+    if (removedInstallations || removedStorageEntries || removedCacheEntries) {
+      this.recordAudit({
+        actor_kind: "USER",
+        actor_ref: cloudUserId,
+        action: "PURGE_USER_PLUGIN_DATA",
+        resource_kind: "user",
+        resource_ref: cloudUserId,
+        outcome: "SUCCESS",
+        detail: result
+      });
+      this.saveSnapshot();
+    }
+    return result;
   }
 
   purgeUserMomentsData(cloudUserId, nowMs = Date.now()) {

@@ -15,3 +15,8 @@ parity regressions are intentional test failures, not platform-specific expected
 
 The manifest signature field is structurally validated here only. Cryptographic
 signature verification remains the responsibility of the signed-package verifier.
+
+Itemized contract debt for these transitional runtime facts is registered in the
+cloud authority-side file packages/plugin-sdk/runtime/contract-debt.json. That
+register is governance evidence only; it is not a contract and does not make these
+files shared contract fixtures.

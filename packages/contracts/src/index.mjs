@@ -85,6 +85,7 @@ export const ERROR_CODES = Object.freeze({
   PARCEL_CONSENT_REVOKED: { status: 403, retryable: false, userAction: "GRANT_AI_OR_SYNC_CONSENT" },
   PLUGIN_SIGNATURE_INVALID: { status: 400, retryable: false, userAction: "VERIFY_PLUGIN_PACKAGE_SIGNATURE" },
   PLUGIN_PERMISSION_DENIED: { status: 403, retryable: false, userAction: "REVIEW_PLUGIN_PERMISSIONS" },
+  PLUGIN_COMMAND_UNSUPPORTED: { status: 400, retryable: false, userAction: "USE_DECLARED_PLUGIN_COMMAND_TYPE" },
   FORBIDDEN: { status: 403, retryable: false, userAction: "CHECK_PERMISSIONS" },
   NOT_FOUND: { status: 404, retryable: false, userAction: "CHECK_RESOURCE_ID" },
   BAD_REQUEST: { status: 400, retryable: false, userAction: "FIX_REQUEST_FIELDS" },

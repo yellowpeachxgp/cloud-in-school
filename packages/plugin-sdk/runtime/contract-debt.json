@@ -1,6 +1,6 @@
 {
-  "version": "w6-contract-lifecycle-2026-11-28-r2",
-  "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface. Records are retained for audit even after the contract line closes them.",
+  "version": "w6-01a-contract-lifecycle-union-2026-11-28",
+  "authority_notice": "This file is an explicit contract-debt register, not a contract and not a modification of contracts/**. cloud-in-school/contracts remains the sole authoritative contract surface; every open entry here must be resolved by the contract line before being presented as a published contract capability. Records are retained for audit even after the contract line closes them.",
   "debts": [
     {
       "id": "PLUGIN_RUNTIME_SCHEMA_TRANSITION",
