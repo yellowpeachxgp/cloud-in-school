@@ -291,7 +291,15 @@ test("AC-18: consecutive failures auto-disable only the failing plugin and admin
   const userSession = createUserSession(app, "w601a_failure_user");
   const adminSession = createUserSession(app, "w601a_failure_admin", ["PLATFORM_OWNER"]);
   const keyPair = generateEd25519KeyPair();
-  const failing = signedPlugin({ keyPair, pluginId: "org.example.w601a-failing" });
+  const failing = signedPlugin({
+    keyPair,
+    pluginId: "org.example.w601a-failing",
+    command: {
+      name: "ping",
+      description: "host-owned reference failure injection point",
+      required_permission: "network.request"
+    }
+  });
   const healthy = signedPlugin({ keyPair, pluginId: "org.example.w601a-healthy" });
 
   app.pluginBroker.registerPluginPackage({
