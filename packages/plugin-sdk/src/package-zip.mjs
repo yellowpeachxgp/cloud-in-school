@@ -310,6 +310,18 @@ export function readPluginPackageZip(archive) {
     }
     const localNameLength = buf.readUInt16LE(localHeaderOffset + 26);
     const localExtraLength = buf.readUInt16LE(localHeaderOffset + 28);
+    // Strict consistency: the local header name must be byte-identical to the
+    // central directory name. Central-driven readers otherwise silently accept
+    // archives whose two name copies disagree, which is a classic tamper signal.
+    const localNameBytes = buf.subarray(
+      localHeaderOffset + 30,
+      localHeaderOffset + 30 + localNameLength
+    );
+    if (!localNameBytes.equals(nameBytes)) {
+      throw zipStructureError("Zip local header name does not match central directory name", {
+        artifact_path: entryPath
+      });
+    }
     const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > buf.length) {
