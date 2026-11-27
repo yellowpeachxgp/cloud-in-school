@@ -67,7 +67,7 @@ test("W6-00 runtime fixtures: SDK conclusions and canonical validation codes are
   }
 });
 
-test("W6-00 parity gaps: legacy enum, nonblank display strings, and integer literals", () => {
+test("W6-00 parity gaps: legacy enum, ECMAScript whitespace, integer caps, and strict lexical JSON", () => {
   const legacy = validatePluginManifest(readFixtureText("valid-legacy-schema-version.json"));
   assert.equal(legacy.legacy_schema_version, "dis-campus-plugin/v1");
 
@@ -75,11 +75,23 @@ test("W6-00 parity gaps: legacy enum, nonblank display strings, and integer lite
   assert.equal(padded.name, "  Runtime Fixture Plugin  ");
   assert.equal(padded.ui_slots[0].title, "  Runtime Fixture Card  ");
 
+  const controlWhitespaceName = validatePluginManifest(readFixtureText("valid-ecma-whitespace-u001e-name.json"));
+  assert.equal(controlWhitespaceName.name, "\u001e");
+  const hostBoundary = validatePluginManifest(readFixtureText("valid-host-api-int32-max.json"));
+  assert.equal(hostBoundary.max_host_api, 2147483647);
+  const sizeBoundary = validatePluginManifest(readFixtureText("valid-size-bytes-int32-max.json"));
+  assert.equal(sizeBoundary.entry_artifacts[0].size_bytes, 2147483647);
+
   for (const fileName of [
     "invalid-runtime_schema_invalid-invalid-legacy-schema-version.json",
     "invalid-runtime_schema_invalid-blank-name.json",
     "invalid-runtime_schema_invalid-blank-ui-slot-title.json",
-    "invalid-runtime_schema_invalid-decimal-integer-min-host-api.json"
+    "invalid-runtime_schema_invalid-decimal-integer-min-host-api.json",
+    "invalid-runtime_schema_invalid-ecma-whitespace-feff-name.json",
+    "invalid-runtime_schema_invalid-host-api-int32-overflow.json",
+    "invalid-runtime_schema_invalid-size-bytes-int32-overflow.json",
+    "invalid-runtime_schema_invalid-duplicate-top-level-key.json",
+    "invalid-runtime_schema_invalid-overlong-number-literal.json"
   ]) {
     assert.throws(
       () => validatePluginManifest(readFixtureText(fileName)),

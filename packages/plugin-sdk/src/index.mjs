@@ -21,6 +21,29 @@ import {
 // while CT-01 owns contracts/**.
 export const SUPPORTED_UI_SLOTS = RUNTIME_UI_SLOTS;
 
+const PLUGIN_MANIFEST_JSON_PARSE_OPTIONS = Object.freeze({
+  rejectDuplicateKeys: true,
+  maxNumberLiteralLength: 64
+});
+
+/**
+ * Parse plugin manifest source text with the same strict lexical boundaries as
+ * Android's canonical JSON parser: duplicate object keys are rejected and any
+ * number literal longer than 64 characters is rejected before validation.
+ * Generic API JSON parsing remains intentionally unchanged; this strict mode is
+ * scoped to plugin-manifest ingress.
+ */
+export function parsePluginManifestJson(jsonText) {
+  try {
+    return parseJsonWithNumberLiterals(jsonText, PLUGIN_MANIFEST_JSON_PARSE_OPTIONS);
+  } catch (error) {
+    throw pluginManifestValidationError(
+      RUNTIME_VALIDATION_CODES.SCHEMA_INVALID,
+      "Plugin manifest JSON parse failure: " + (error?.message || String(error))
+    );
+  }
+}
+
 export function adaptLegacyCampusManifest(rawManifest) {
   if (!rawManifest || typeof rawManifest !== "object") {
     throw new ContractError("BAD_REQUEST", "Manifest must be an object");
@@ -86,7 +109,7 @@ export function assertSafeRelativeArtifactPath(relPath) {
 }
 
 export function validatePluginManifest(rawManifest, { hostApiVersion = 2 } = {}) {
-  const parsedInput = typeof rawManifest === "string" ? parseJsonWithNumberLiterals(rawManifest) : rawManifest;
+  const parsedInput = typeof rawManifest === "string" ? parsePluginManifestJson(rawManifest) : rawManifest;
   const manifest = adaptLegacyCampusManifest(parsedInput);
 
   // W6-00: validate the exact snake_case runtime shape before semantic checks.
@@ -649,7 +672,7 @@ export class PluginRegistryAndBroker {
 
 export function loadPluginDirectory(pluginDir) {
   const manifestPath = path.join(pluginDir, "manifest.json");
-  const manifest = parseJsonWithNumberLiterals(fs.readFileSync(manifestPath, "utf8"));
+  const manifest = parsePluginManifestJson(fs.readFileSync(manifestPath, "utf8"));
   const artifactMap = {};
   for (const art of manifest.entry_artifacts || []) {
     const safePath = assertSafeRelativeArtifactPath(art.path);

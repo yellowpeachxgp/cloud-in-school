@@ -35,10 +35,17 @@ function defineLiteralMetadata(target, literals) {
  *
  * The scanner is structural rather than value-guided: object keys are decoded
  * independently, which keeps duplicate-key input from desynchronising the
- * lexical scan from the JSON text. Duplicate-key acceptance remains unchanged
- * because the value itself still comes from JSON.parse.
+ * lexical scan from the JSON text. By default duplicate-key acceptance remains
+ * unchanged because the value itself still comes from JSON.parse. Plugin
+ * manifest ingress opts into strict duplicate-key and number-literal limits so
+ * source-text behavior matches Android's strict canonical JSON parser.
  */
-export function parseJsonWithNumberLiterals(jsonText) {
+export function parseJsonWithNumberLiterals(jsonText, options = {}) {
+  const rejectDuplicateKeys = options?.rejectDuplicateKeys === true;
+  const maxNumberLiteralLength =
+    Number.isInteger(options?.maxNumberLiteralLength) && options.maxNumberLiteralLength > 0
+      ? options.maxNumberLiteralLength
+      : null;
   const parsed = JSON.parse(jsonText);
   if (!isObjectLike(parsed)) return parsed;
 
@@ -101,6 +108,9 @@ export function parseJsonWithNumberLiterals(jsonText) {
       while (text[index] >= "0" && text[index] <= "9") index += 1;
     }
     const literal = text.slice(start, index);
+    if (maxNumberLiteralLength !== null && literal.length > maxNumberLiteralLength) {
+      fail("number literal exceeds " + maxNumberLiteralLength + " characters");
+    }
     for (const record of activeRecords) {
       if (segments.length < record.segments.length) continue;
       const belongs = record.segments.every((segment, position) => segments[position] === segment);
@@ -148,6 +158,7 @@ export function parseJsonWithNumberLiterals(jsonText) {
   function scanObject(segments) {
     expectChar("{");
     const record = { segments: [...segments], literals: Object.create(null) };
+    const seenKeys = new Set();
     records.push(record);
     activeRecords.push(record);
     skipWhitespace();
@@ -159,6 +170,10 @@ export function parseJsonWithNumberLiterals(jsonText) {
     while (index < text.length) {
       skipWhitespace();
       const key = scanStringToken();
+      if (rejectDuplicateKeys) {
+        if (seenKeys.has(key)) fail("duplicate object key " + JSON.stringify(key));
+        seenKeys.add(key);
+      }
       skipWhitespace();
       expectChar(":");
       scanValue([...segments, key]);
