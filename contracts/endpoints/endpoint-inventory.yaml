@@ -853,3 +853,87 @@ endpoints:
     owner: place-status
     status: active
     contract_card: CT-04
+  - method: GET
+    path: /api/v1/boards
+    operationId: listBoards
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: GET
+    path: /api/v1/boards/{boardId}/posts
+    operationId: listBoardPosts
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/posts
+    operationId: createPost
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: GET
+    path: /api/v1/posts/{postId}
+    operationId: getPost
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: DELETE
+    path: /api/v1/posts/{postId}
+    operationId: deletePost
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/posts/{postId}/replies
+    operationId: createPostReply
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: GET
+    path: /api/v1/search/posts
+    operationId: searchPosts
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/reports
+    operationId: createReport
+    auth: public
+    owner: ugc
+    status: reserved
+    contract_card: CT-05
+  - method: GET
+    path: /api/v1/admin/moderation/queue
+    operationId: listModerationQueue
+    auth: public
+    owner: moderation
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/admin/moderation/{itemId}/actions
+    operationId: createModerationAction
+    auth: public
+    owner: moderation
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/media/uploads
+    operationId: createMediaUpload
+    auth: public
+    owner: media
+    status: reserved
+    contract_card: CT-05
+  - method: POST
+    path: /api/v1/media/uploads/{uploadId}/complete
+    operationId: completeMediaUpload
+    auth: public
+    owner: media
+    status: reserved
+    contract_card: CT-05

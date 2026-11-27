@@ -420,3 +420,8 @@ errors:
     retryable: false
     user_action: REFRESH_PLACE_REPORT_FLAG
     description: Place report flag is already terminal or the requested review action is invalid for its current state.
+  - code: FEATURE_NOT_ENABLED
+    http_status: 501
+    retryable: false
+    user_action: NONE
+    description: Reserved feature endpoint (decision D2); the feature is contract-only with no implementation, clients must keep the entry hidden or disabled and must not retry or probe for availability.

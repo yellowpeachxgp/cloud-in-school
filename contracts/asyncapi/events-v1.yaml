@@ -150,6 +150,12 @@ channels:
       operationId: publishPlaceStatusChangedEvent
       message:
         $ref: '#/components/messages/PlaceStatusChangedEvent'
+  ugc.post.moderated:
+    description: Reserved (decision D2) versioned contract for the moderation disposition event affecting one post. No emitter exists while the ugc surface returns uniform 501 FEATURE_NOT_ENABLED; if a compliant launch is ever approved, the enabling PR wires the real outbox producer in the same PR that flips the reserved endpoints to active. The payload intentionally omits all user-generated content text.
+    publish:
+      operationId: publishUgcPostModeratedEvent
+      message:
+        $ref: '#/components/messages/UgcPostModeratedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -749,6 +755,44 @@ components:
             type: boolean
             const: false
             description: Contractual sentinel proving the event is user-reported aggregate evidence, never an official realtime occupancy/access/operation feed.
+    UgcPostModeratedEvent:
+      name: UgcPostModeratedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, school_id, post_id, board_id, moderation_item_id, action, audit_event_id]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:ugc:post:[0-9a-fA-F-]{36}:moderation-action:[0-9a-fA-F-]{36}:v1$'
+          event_type:
+            type: string
+            enum: [moderated]
+          occurred_at:
+            type: string
+            format: date-time
+          school_id:
+            type: string
+          post_id:
+            type: string
+            format: uuid
+          board_id:
+            type: string
+            format: uuid
+          moderation_item_id:
+            type: string
+            format: uuid
+            description: Moderation queue item whose audited disposition affected the post; consumers must treat event_key as idempotent.
+          action:
+            type: string
+            enum: [KEEP_VISIBLE, HIDE_CONTENT, DELETE_CONTENT, REJECT_REPORT]
+            description: Disposition applied by operations; never a rewrite of user content.
+          audit_event_id:
+            type: string
+            format: uuid
+            description: Tamper-evident security audit event id carrying the disposition evidence; the payload intentionally carries no operator identity, no reporter identity, and no user-generated content text.
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:
