@@ -591,11 +591,13 @@ export function simulateMigration0004OnCatalog(
 const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "users", "userRoles", "userSsoRoles", "authTransactions", "exchangeTickets",
   "deviceSessions", "schoolIntegrations", "schoolBindings", "encryptedCredentials",
-  "consents", "reservationPlans", "reservationJobs", "scheduleEvents",
+  "consents", "operationsSchoolGrants", "reservationPlans", "reservationJobs", "scheduleEvents",
   "schoolReservations", "reservationAttempts", "reservationOrders", "financeOperations",
   "refundRequests", "parcels", "parcelEvents", "parcelSourceConnections",
   "parcelSyncJobs", "pluginInstallations", "campusContent", "groups", "groupMembers",
-  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords"
+  "groupInvites", "notifications", "priceQuotes", "idempotencyRecords",
+  "campusGraphPlaces", "placeReports", "placeReportFlags", "placeStatusSubscriptions",
+  "placeStatusAggregates"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -879,6 +881,7 @@ export class CloudDatabaseStore {
     // School & Credentials & Consents
     this.schoolIntegrations = new Map(); // school_id -> integration config
     this.schoolBindings = new Map(); // bindingId -> binding
+    this.operationsSchoolGrants = new Map(); // grantId -> explicit per-school operations authorization
     this.encryptedCredentials = new Map(); // credId -> encrypted record
     this.consents = new Map(); // consentId -> consent
 
@@ -912,6 +915,14 @@ export class CloudDatabaseStore {
     this.groups = new Map(); // groupId -> group
     this.groupMembers = new Map(); // memberId -> membership-period record
     this.groupInvites = new Map(); // inviteId -> invite
+
+    // Place Status (W4-04): bootstrap Campus Graph snapshot, immutable user
+    // observations, flags, subscriptions, and aggregate revision state.
+    this.campusGraphPlaces = new Map(); // placeRef -> coarse graph entity
+    this.placeReports = new Map(); // reportId -> immutable observation + moderation eligibility
+    this.placeReportFlags = new Map(); // flagId -> review request
+    this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
+    this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
 
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
@@ -952,7 +963,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -1149,6 +1160,7 @@ export class CloudDatabaseStore {
       loadMap(this.exchangeTickets, raw.exchangeTickets);
       loadMap(this.deviceSessions, raw.deviceSessions);
       loadMap(this.schoolBindings, raw.schoolBindings);
+      loadMap(this.operationsSchoolGrants, raw.operationsSchoolGrants);
       loadMap(this.encryptedCredentials, raw.encryptedCredentials);
       loadMap(this.consents, raw.consents);
       loadMap(this.reservationPlans, raw.reservationPlans);
@@ -1169,6 +1181,11 @@ export class CloudDatabaseStore {
       loadMap(this.groups, raw.groups);
       loadMap(this.groupMembers, raw.groupMembers);
       loadMap(this.groupInvites, raw.groupInvites);
+      loadMap(this.campusGraphPlaces, raw.campusGraphPlaces);
+      loadMap(this.placeReports, raw.placeReports);
+      loadMap(this.placeReportFlags, raw.placeReportFlags);
+      loadMap(this.placeStatusSubscriptions, raw.placeStatusSubscriptions);
+      loadMap(this.placeStatusAggregates, raw.placeStatusAggregates);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1403,6 +1420,26 @@ export class CloudDatabaseStore {
         throw new Error("群组邀请快照与学校作用域不一致");
       }
     }
+
+    const graphPlaces = new Map(raw.campusGraphPlaces || []);
+    const placeReports = new Map(raw.placeReports || []);
+    for (const [, report] of placeReports) {
+      const place = graphPlaces.get(report?.place_ref);
+      if (!place || place.school_id !== report.school_id || place.campus_id !== report.campus_id || place.place_type !== report.place_type) {
+        throw new Error("地点状态报告快照与 Campus Graph 学校作用域不一致");
+      }
+    }
+    for (const [, flag] of raw.placeReportFlags || []) {
+      const report = placeReports.get(flag?.report_id);
+      if (!report || report.school_id !== flag.school_id || report.place_ref !== flag.place_ref) {
+        throw new Error("地点状态举报快照与报告作用域不一致");
+      }
+    }
+    for (const [, subscription] of raw.placeStatusSubscriptions || []) {
+      if (subscription?.target?.type === "PLACE" && !graphPlaces.has(subscription.target.place_ref)) {
+        throw new Error("地点状态订阅快照引用了缺失的 Campus Graph 实体");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -1502,6 +1539,7 @@ export class CloudDatabaseStore {
         exchangeTickets: Array.from(source.exchangeTickets.entries()).slice(-200),
         deviceSessions: Array.from(source.deviceSessions.entries()),
         schoolBindings: Array.from(source.schoolBindings.entries()),
+        operationsSchoolGrants: Array.from(source.operationsSchoolGrants.entries()),
         encryptedCredentials: Array.from(source.encryptedCredentials.entries()),
         consents: Array.from(source.consents.entries()),
         reservationPlans: Array.from(source.reservationPlans.entries()).map(serializeRecord),
@@ -1522,6 +1560,11 @@ export class CloudDatabaseStore {
         groups: Array.from(source.groups.entries()),
         groupMembers: Array.from(source.groupMembers.entries()),
         groupInvites: Array.from(source.groupInvites.entries()),
+        campusGraphPlaces: Array.from(source.campusGraphPlaces.entries()),
+        placeReports: Array.from(source.placeReports.entries()),
+        placeReportFlags: Array.from(source.placeReportFlags.entries()),
+        placeStatusSubscriptions: Array.from(source.placeStatusSubscriptions.entries()),
+        placeStatusAggregates: Array.from(source.placeStatusAggregates.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
@@ -2127,6 +2170,91 @@ export class CloudDatabaseStore {
   setUserRoles(cloudUserId, roles) {
     this.userRoles.set(cloudUserId, new Set(["USER", ...(roles || [])]));
     this.saveSnapshot();
+  }
+
+  _requireOperationsGrantPart(value, field) {
+    const clean = String(value || "").trim();
+    if (!clean) throw new ContractError("BAD_REQUEST", field + " must not be empty");
+    if (clean.length > 128) throw new ContractError("BAD_REQUEST", field + " exceeds maximum length 128");
+    return clean;
+  }
+
+  grantOperationsSchoolScope(cloudUserId, schoolId, permission, { grantedByRef = "system", nowMs = Date.now() } = {}) {
+    const userId = this._requireOperationsGrantPart(cloudUserId, "cloud_user_id");
+    const scopedSchoolId = this._requireOperationsGrantPart(schoolId, "school_id");
+    const scopedPermission = this._requireOperationsGrantPart(permission, "permission");
+    const existing = Array.from(this.operationsSchoolGrants.values()).find((grant) =>
+      grant.cloud_user_id === userId &&
+      grant.school_id === scopedSchoolId &&
+      grant.permission === scopedPermission &&
+      grant.status === "ACTIVE" &&
+      !grant.revoked_at
+    );
+    if (existing) return existing;
+    const ts = new Date(nowMs).toISOString();
+    const grant = {
+      id: crypto.randomUUID(),
+      cloud_user_id: userId,
+      school_id: scopedSchoolId,
+      permission: scopedPermission,
+      status: "ACTIVE",
+      granted_by_ref: this._requireOperationsGrantPart(grantedByRef, "granted_by_ref"),
+      created_at: ts,
+      updated_at: ts,
+      revoked_at: null
+    };
+    this.operationsSchoolGrants.set(grant.id, grant);
+    this.saveSnapshot();
+    return grant;
+  }
+
+  revokeOperationsSchoolScope(cloudUserId, schoolId, permission, nowMs = Date.now()) {
+    const userId = this._requireOperationsGrantPart(cloudUserId, "cloud_user_id");
+    const scopedSchoolId = this._requireOperationsGrantPart(schoolId, "school_id");
+    const scopedPermission = this._requireOperationsGrantPart(permission, "permission");
+    const ts = new Date(nowMs).toISOString();
+    let revoked = 0;
+    for (const grant of this.operationsSchoolGrants.values()) {
+      if (
+        grant.cloud_user_id === userId &&
+        grant.school_id === scopedSchoolId &&
+        grant.permission === scopedPermission &&
+        grant.status === "ACTIVE" &&
+        !grant.revoked_at
+      ) {
+        grant.status = "REVOKED";
+        grant.updated_at = ts;
+        grant.revoked_at = ts;
+        revoked += 1;
+      }
+    }
+    if (revoked) this.saveSnapshot();
+    return revoked;
+  }
+
+  revokeOperationsSchoolGrant(grantId, nowMs = Date.now()) {
+    const grant = this.operationsSchoolGrants.get(grantId);
+    if (!grant || grant.status !== "ACTIVE" || grant.revoked_at) return false;
+    const ts = new Date(nowMs).toISOString();
+    grant.status = "REVOKED";
+    grant.updated_at = ts;
+    grant.revoked_at = ts;
+    this.saveSnapshot();
+    return true;
+  }
+
+  hasOperationsSchoolScope(cloudUserId, schoolId, permission) {
+    const userId = String(cloudUserId || "").trim();
+    const scopedSchoolId = String(schoolId || "").trim();
+    const scopedPermission = String(permission || "").trim();
+    if (!userId || !scopedSchoolId || !scopedPermission) return false;
+    return Array.from(this.operationsSchoolGrants.values()).some((grant) =>
+      grant.cloud_user_id === userId &&
+      grant.school_id === scopedSchoolId &&
+      grant.permission === scopedPermission &&
+      grant.status === "ACTIVE" &&
+      !grant.revoked_at
+    );
   }
 
   requireRole(authContext, requiredRoles) {
