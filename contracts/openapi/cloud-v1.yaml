@@ -8114,10 +8114,10 @@ components:
           description: Canonical artifact payload map keyed by the exact safe relative paths declared in manifest.entry_artifacts. JSON string values are interpreted as UTF-8 artifact content before SHA-256 verification; the host persists the verified bytes in its own Base64 storage form.
         public_key_base64:
           type: string
-          minLength: 44
-          maxLength: 128
+          minLength: 60
+          maxLength: 60
           pattern: '^[A-Za-z0-9+/]+={0,2}$'
-          description: Optional client consistency proof for the host-configured publisher trust root. It is never trust input, never overrides the publisher/key_id trust root, and is not required.
+          description: Optional client consistency proof encoded as the base64 Ed25519 SPKI DER public key for the host-configured publisher trust root. It is never trust input, never overrides the publisher/key_id trust root, and is not required.
         school_id:
           $ref: '#/components/schemas/PluginSchoolId'
     PluginLifecycleRequest:
