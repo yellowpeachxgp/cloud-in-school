@@ -1210,6 +1210,16 @@ export class SyncService {
     counts.transfer_usage = purgeMap("syncTransferUsage", (row) => row?.cloud_user_id === cloudUserId);
     counts.rate_windows = purgeMap("syncRateWindows", (row) => row?.cloud_user_id === cloudUserId);
     counts.user_states = purgeMap("syncUserStates", (row, key) => key === cloudUserId || row?.cloud_user_id === cloudUserId);
+    counts.idempotency_receipts = 0;
+    for (const op of ["registerSyncDevice", "revokeSyncDevice", "putSyncBlob", "deleteSyncBlob"]) {
+      const prefix = op + "|" + cloudUserId + "|";
+      for (const key of Array.from(this.store.idempotencyRecords.keys())) {
+        if (key.startsWith(prefix)) {
+          this.store.idempotencyRecords.delete(key);
+          counts.idempotency_receipts += 1;
+        }
+      }
+    }
     for (const event of this.store.outboxEvents || []) {
       if (event?.payload_json?.cloud_user_id === cloudUserId && String(event.event_type || "").startsWith("sync.")) {
         event.payload_json = { redacted: true, purged_at: iso(nowMs) };

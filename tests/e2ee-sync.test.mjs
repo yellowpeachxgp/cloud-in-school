@@ -583,6 +583,9 @@ test("W4-11 sync export and account erasure: export is ciphertext+metadata only 
   for (const field of ["syncDevices", "syncBlobs", "syncMutations", "syncBlobAntiResurrection", "syncCursors", "syncTransferUsage", "syncRateWindows", "syncUserStates"]) {
     assert.equal(app.store[field].size, 0, field + " must be zero after account data deletion");
   }
+  for (const key of app.store.idempotencyRecords.keys()) {
+    assert.equal(key.includes("putSyncBlob|" + fixture.user.id + "|"), false, "sync idempotency receipts must not retain deleted-account metadata");
+  }
 });
 
 test("W4-11 sync durability: device, ciphertext metadata, cursor state, and idempotent replay survive restart", async (t) => {

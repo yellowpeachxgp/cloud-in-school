@@ -3076,11 +3076,7 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
       const r = await req("POST", `/api/v1/school-bindings/${b.body.data.id}/complete`, {
         credential_kind: "DELEGATED_SESSION_BUNDLE",
         consent_id: c.body.data.id,
-        delegated_secret: secret,
-        // FI21 exercises revocation races, not credential expiry. Pin the test
-        // credential far in the future so the fixed 2026-11-21 logical clock cannot
-        // time-bomb against the real wall clock used by background prewarm decrypt.
-        expires_at: "2099-01-01T00:00:00.000Z"
+        delegated_secret: secret, expires_at: "2099-01-01T00:00:00.000Z" // FI21 tests revocation races, not expiry; fixed logical clock must not time-bomb against real wall-clock prewarm decrypt.
       });
       assert.equal(r.status, 200);
       const bindingId = b.body.data.id;
