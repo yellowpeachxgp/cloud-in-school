@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   token_sha256 TEXT NOT NULL UNIQUE CHECK (token_sha256 ~ '^[0-9a-f]{64}$'),
   position BIGINT NOT NULL CHECK (position >= 0),
   scan_epoch BIGINT NOT NULL CHECK (scan_epoch >= 0),
+  scan_mode TEXT NOT NULL CHECK (scan_mode IN ('FULL', 'INCREMENTAL')),
   terminal BOOLEAN NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_used_at TIMESTAMPTZ,

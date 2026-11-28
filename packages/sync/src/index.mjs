@@ -26,6 +26,9 @@ const WRITE_RATE_LIMIT_PER_MINUTE = 120;
 const READ_RATE_LIMIT_PER_MINUTE = 240;
 const RATE_WINDOW_MS = 60_000;
 const TRANSFER_WINDOW_MS = 24 * 60 * 60 * 1000;
+const WEB_COOKIE_FAMILY_ID = "web_cookie_family";
+const WEB_COOKIE_SESSION_ID = "web_cookie_session";
+const SYNC_CURSOR_SCAN_MODES = new Set(["FULL", "INCREMENTAL"]);
 
 function iso(nowMs) {
   return new Date(nowMs).toISOString();
@@ -451,13 +454,19 @@ export class SyncService {
     return consent;
   }
 
+  _timelyActiveE2eeGrantMs(userId, expiryMs, nowMs) {
+    const grants = this._activeE2eeConsents(userId, nowMs)
+      .map((consent) => Date.parse(consent?.granted_at || ""))
+      .filter((grantedMs) => Number.isFinite(grantedMs) && grantedMs < expiryMs);
+    return grants.length > 0 ? Math.max(...grants) : null;
+  }
+
   _lifecycleIntent(userId, nowMs) {
     const state = this._stateFor(userId);
     if (!state?.consent_withdrawn_at || !state.retention_expires_at) return null;
     const expiryMs = Date.parse(state.retention_expires_at);
     if (!Number.isFinite(expiryMs)) return "cleanup";
-    const active = this._hasActiveE2eeConsent(userId, nowMs);
-    if (active && nowMs < expiryMs) return "reauthorized";
+    if (this._timelyActiveE2eeGrantMs(userId, expiryMs, nowMs) !== null) return "reauthorized";
     if (nowMs >= expiryMs && !state.expired_cleanup_at) return "cleanup";
     return null;
   }
@@ -482,19 +491,60 @@ export class SyncService {
     if (!intent) return;
     this._commitMutation((undo) => {
       const state = this._ensureUserState(userId, nowMs, undo);
-      if (intent === "reauthorized") this._applyConsentReauthorized(state, nowMs, undo);
-      else this._applyConsentExpiryCleanup(userId, state, nowMs, undo);
+      if (intent === "reauthorized") {
+        const expiryMs = Date.parse(state.retention_expires_at);
+        const effectiveGrantMs = this._timelyActiveE2eeGrantMs(userId, expiryMs, nowMs) ?? nowMs;
+        this._applyConsentReauthorized(state, effectiveGrantMs, nowMs, undo);
+      } else {
+        this._applyConsentExpiryCleanup(userId, state, nowMs, undo);
+      }
       return { settled: intent };
     }, nowMs);
   }
 
-  _applyConsentReauthorized(state, nowMs, undo) {
+  _applyConsentReauthorized(state, effectiveGrantMs, nowMs, undo) {
     mutateObject(state, {
       consent_withdrawn_at: null,
       retention_expires_at: null,
-      reauthorized_at: iso(nowMs),
+      reauthorized_at: iso(effectiveGrantMs),
       updated_at: iso(nowMs)
     }, undo);
+  }
+
+  _deleteSyncBlobReceiptsInPlace(userId, undo) {
+    let count = 0;
+    for (const op of ["putSyncBlob", "deleteSyncBlob"]) {
+      const prefix = op + "|" + userId + "|";
+      for (const key of Array.from(this.store.idempotencyRecords.keys())) {
+        if (key.startsWith(prefix)) {
+          deleteMapCommitted(this.store.idempotencyRecords, key, undo);
+          count += 1;
+        }
+      }
+    }
+    return count;
+  }
+
+  _redactSyncBlobOutboxEventsInPlace(userId, nowMs, undo) {
+    const ts = iso(nowMs);
+    let count = 0;
+    for (const event of this.store.outboxEvents || []) {
+      if (
+        event?.payload_json?.cloud_user_id === userId &&
+        String(event.event_type || "").startsWith("sync.blob.")
+      ) {
+        mutateObject(event, {
+          payload_json: {
+            redacted: true,
+            redaction_reason: "E2EE_CONSENT_RETENTION_EXPIRED",
+            purged_at: ts
+          },
+          delivered_at: event.delivered_at || ts
+        }, undo);
+        count += 1;
+      }
+    }
+    return count;
   }
 
   _applyConsentExpiryCleanup(userId, state, nowMs, undo) {
@@ -508,8 +558,12 @@ export class SyncService {
     for (const [cursorId, cursor] of Array.from(this.store.syncCursors.entries())) {
       if (cursor?.cloud_user_id === userId) deleteMapCommitted(this.store.syncCursors, cursorId, undo);
     }
+    this._deleteSyncBlobReceiptsInPlace(userId, undo);
+    this._redactSyncBlobOutboxEventsInPlace(userId, nowMs, undo);
     for (const device of this._devicesForUser(userId)) {
-      mutateObject(device, { acknowledged_cursor_position: 0 }, undo);
+      if (Number(device.acknowledged_cursor_position || 0) !== 0) {
+        mutateObject(device, { acknowledged_cursor_position: 0 }, undo);
+      }
       if (device.status === "ACTIVE") {
         this._revokeDeviceInPlace(device, "CONSENT_WITHDRAWN", nowMs, undo, true);
       }
@@ -526,34 +580,138 @@ export class SyncService {
     this._settleConsentLifecycle(userId, nowMs);
   }
 
-  handleConsentWithdrawn(userId, consent, nowMs = Date.now()) {
-    if (!consentHasE2eeScope(consent)) return null;
+  _noteE2eeConsentWithdrawnInPlace(userId, nowMs, undo) {
     if (this._hasActiveE2eeConsent(userId, nowMs)) return null;
-    const state = this._stateFor(userId) || {
-      cloud_user_id: userId,
-      latest_change_sequence: 0,
-      compaction_epoch: 0,
-      consent_withdrawn_at: null,
-      retention_expires_at: null,
-      reauthorized_at: null,
-      expired_cleanup_at: null,
-      updated_at: iso(nowMs)
-    };
-    if (!this.store.syncUserStates.has(userId)) this.store.syncUserStates.set(userId, state);
+    const state = this._ensureUserState(userId, nowMs, undo);
     if (!state.consent_withdrawn_at) {
       const ts = iso(nowMs);
-      state.consent_withdrawn_at = ts;
-      state.retention_expires_at = iso(nowMs + SYNC_RETENTION_MS);
-      state.updated_at = ts;
+      mutateObject(state, {
+        consent_withdrawn_at: ts,
+        retention_expires_at: iso(nowMs + SYNC_RETENTION_MS),
+        updated_at: ts
+      }, undo);
     }
+    const cursorTs = iso(nowMs);
     for (const cursor of this.store.syncCursors.values()) {
-      if (cursor.cloud_user_id === userId && !cursor.invalidated_at) cursor.invalidated_at = iso(nowMs);
+      if (cursor.cloud_user_id === userId && !cursor.invalidated_at) {
+        mutateObject(cursor, { invalidated_at: cursorTs }, undo);
+      }
     }
-    for (const device of this._devicesForUser(userId)) device.acknowledged_cursor_position = 0;
+    for (const device of this._devicesForUser(userId)) {
+      if (Number(device.acknowledged_cursor_position || 0) !== 0) {
+        mutateObject(device, { acknowledged_cursor_position: 0 }, undo);
+      }
+    }
     return {
       consent_withdrawn_at: state.consent_withdrawn_at,
       retention_expires_at: state.retention_expires_at
     };
+  }
+
+  handleConsentWithdrawn(userId, consent, nowMs = Date.now()) {
+    if (!consentHasE2eeScope(consent)) return null;
+    const result = this._commitMutation((undo) => ({
+      syncWithdrawal: this._noteE2eeConsentWithdrawnInPlace(userId, nowMs, undo)
+    }), nowMs);
+    return result.syncWithdrawal;
+  }
+
+  withdrawE2eeConsent(userId, consentId, nowMs = Date.now()) {
+    const consent = this.store.consents.get(consentId);
+    if (!consent || consent.cloud_user_id !== userId) {
+      throw new ContractError("NOT_FOUND", "Consent record not found");
+    }
+    if (!consentHasE2eeScope(consent)) return null;
+    return this._commitMutation((undo) => {
+      if (!consent.withdrawn_at) mutateObject(consent, { withdrawn_at: iso(nowMs) }, undo);
+      return {
+        consent,
+        syncWithdrawal: this._noteE2eeConsentWithdrawnInPlace(userId, nowMs, undo)
+      };
+    }, nowMs);
+  }
+
+  _settleConsentGrantInPlace(userId, consent, nowMs, undo) {
+    const state = this._ensureUserState(userId, nowMs, undo);
+    const grantedMs = Date.parse(consent?.granted_at || "");
+    const effectiveGrantMs = Number.isFinite(grantedMs) ? grantedMs : nowMs;
+    if (!state.consent_withdrawn_at || !state.retention_expires_at) {
+      if (state.expired_cleanup_at) {
+        mutateObject(state, {
+          expired_cleanup_at: null,
+          reauthorized_at: iso(effectiveGrantMs),
+          updated_at: iso(nowMs)
+        }, undo);
+      }
+      return { outcome: "NO_PENDING_WITHDRAWAL", preserved_existing_content: false };
+    }
+    const expiryMs = Date.parse(state.retention_expires_at);
+    if (Number.isFinite(expiryMs) && effectiveGrantMs < expiryMs) {
+      this._applyConsentReauthorized(state, effectiveGrantMs, nowMs, undo);
+      return { outcome: "TIMELY_REAUTHORIZED", preserved_existing_content: true };
+    }
+    this._applyConsentExpiryCleanup(userId, state, nowMs, undo);
+    mutateObject(state, { reauthorized_at: iso(nowMs), updated_at: iso(nowMs) }, undo);
+    return { outcome: "EXPIRED_CLEANUP_COMPLETED", preserved_existing_content: false };
+  }
+
+  grantE2eeConsent({
+    cloudUserId,
+    schoolId = "user",
+    documentVersion,
+    documentSha256,
+    authVersion = 1,
+    schoolBindingId = null
+  }, nowMs = Date.now()) {
+    const userId = requireString(cloudUserId, "cloudUserId", { max: 128 });
+    const cleanDocumentVersion = requireString(documentVersion, "document_version", { max: 128 });
+    const cleanDocumentSha256 = requireString(documentSha256, "document_sha256", { min: 64, max: 64, trim: false }).toLowerCase();
+    if (!HEX_SHA256_RE.test(cleanDocumentSha256)) throw badRequest("document_sha256 must be a lowercase SHA-256 hex digest");
+    const purposeSchoolId = requireString(schoolId || "user", "school_id", { max: 128 });
+    return this._commitMutation((undo) => {
+      const grantedAt = iso(nowMs);
+      const activeSamePurpose = Array.from(this.store.consents.values()).filter((row) => (
+        row &&
+        row.cloud_user_id === userId &&
+        (row.school_id || "user") === purposeSchoolId &&
+        !row.withdrawn_at &&
+        Number(row.auth_version || 1) === Number(authVersion) &&
+        row.purpose === E2EE_PURPOSE
+      ));
+      let record = activeSamePurpose.find((row) => (
+        row.document_version === cleanDocumentVersion &&
+        String(row.document_sha256 || "").toLowerCase() === cleanDocumentSha256
+      )) || null;
+      let created = false;
+      if (!record) {
+        const id = crypto.randomUUID();
+        record = {
+          id,
+          cloud_user_id: userId,
+          school_id: purposeSchoolId,
+          purpose: E2EE_PURPOSE,
+          document_version: cleanDocumentVersion,
+          document_sha256: cleanDocumentSha256,
+          school_binding_id: schoolBindingId,
+          scope_list: [E2EE_PURPOSE],
+          policy_version: cleanDocumentVersion,
+          auth_version: authVersion,
+          granted_at: grantedAt,
+          withdrawn_at: null
+        };
+        for (const prior of activeSamePurpose) {
+          mutateObject(prior, {
+            withdrawn_at: grantedAt,
+            superseded_by_consent_id: id
+          }, undo);
+        }
+        setMapCommitted(this.store.consents, id, record, undo);
+        this.store.indexUserScoped?.("consents", id, userId);
+        created = true;
+      }
+      const lifecycle = this._settleConsentGrantInPlace(userId, record, nowMs, undo);
+      return { record, created, lifecycle };
+    }, nowMs);
   }
 
   _devicesForUser(userId) {
@@ -641,6 +799,10 @@ export class SyncService {
     }
   }
 
+  recordIngressAttempt(userId, bytes, nowMs = Date.now()) {
+    this._recordIngressAttempt(userId, bytes, nowMs);
+  }
+
   _consumeEgressInPlace(userId, bytes, nowMs, undo) {
     this._pruneTransferUsageInPlace(userId, "EGRESS", nowMs, undo);
     const current = this._transferTotal(userId, "EGRESS", nowMs);
@@ -663,9 +825,20 @@ export class SyncService {
     return device;
   }
 
+  _isWebCookieAuth(auth) {
+    return Boolean(
+      auth?.auth_kind === "WEB_COOKIE" ||
+      auth?.familyId === WEB_COOKIE_FAMILY_ID ||
+      auth?.sessionId === WEB_COOKIE_SESSION_ID
+    );
+  }
+
   _requireBoundActiveDevice(auth, headers) {
     const { syncDeviceId } = normalizeHeaders(headers);
     if (!syncDeviceId) throw badRequest("X-Dis-Sync-Device-Id header is required");
+    if (this._isWebCookieAuth(auth)) {
+      throw syncError("SYNC_PERMISSION_DENIED", "web cookie sessions cannot use device-bound E2EE sync; use the device-bound cloud bearer session");
+    }
     const device = this._activeDevice(auth.cloudUserId, syncDeviceId);
     if (!auth.familyId || device.session_family_id !== auth.familyId) {
       throw syncError("SYNC_PERMISSION_DENIED", "sync device is not bound to the authenticated cloud session family");
@@ -796,6 +969,9 @@ export class SyncService {
     if (body.sync_protocol_version !== 1) throw syncError("SYNC_DEVICE_INVALID", "sync_protocol_version must be 1");
     const label = optionalString(body.device_label, "device_label", { max: 80 });
     if (!auth.familyId) throw syncError("SYNC_DEVICE_INVALID", "authenticated cloud session family is required for sync device binding");
+    if (this._isWebCookieAuth(auth)) {
+      throw syncError("SYNC_PERMISSION_DENIED", "web cookie sessions cannot register E2EE sync devices; use the device-bound cloud bearer session");
+    }
     const key = deviceKey(auth.cloudUserId, deviceId);
     const existing = this.store.syncDevices.get(key);
     if (existing?.status === "REVOKED") {
@@ -926,8 +1102,12 @@ export class SyncService {
   }
 
   putSyncBlob(auth, params, body, headers, nowMs = Date.now(), requestId = undefined, bodyBytes = null) {
-    const ingressBytes = Number.isSafeInteger(bodyBytes) && bodyBytes > 0 ? bodyBytes : byteLengthJson(body || {});
-    this._recordIngressAttempt(auth.cloudUserId, ingressBytes, nowMs);
+    // HTTP/inject boundaries meter exactly once before JSON/envelope validation.
+    // Direct service callers that did not cross that boundary keep the conservative
+    // estimate fallback so the package method never becomes a quota bypass.
+    if (!Number.isSafeInteger(bodyBytes) || bodyBytes < 0) {
+      this._recordIngressAttempt(auth.cloudUserId, byteLengthJson(body || {}), nowMs);
+    }
     this._settleConsentLifecycle(auth.cloudUserId, nowMs);
     this._requireE2eeConsent(auth.cloudUserId, nowMs);
     const device = this._requireBoundActiveDevice(auth, headers);
@@ -1060,7 +1240,8 @@ export class SyncService {
     return crypto.createHash("sha256").update(String(token)).digest("hex");
   }
 
-  _issueCursorInPlace(userId, deviceId, position, scanEpoch, terminal, nowMs, undo) {
+  _issueCursorInPlace(userId, deviceId, position, scanEpoch, scanMode, terminal, nowMs, undo) {
+    if (!SYNC_CURSOR_SCAN_MODES.has(scanMode)) throw syncError("SYNC_CURSOR_INVALID", "internal sync cursor scan mode is invalid");
     const token = "synccur_" + crypto.randomBytes(32).toString("base64url");
     const cursorId = crypto.randomUUID();
     setMapCommitted(this.store.syncCursors, cursorId, {
@@ -1070,6 +1251,7 @@ export class SyncService {
       token_sha256: this._cursorHash(token),
       position,
       scan_epoch: scanEpoch,
+      scan_mode: scanMode,
       terminal,
       created_at: iso(nowMs),
       last_used_at: null,
@@ -1086,6 +1268,9 @@ export class SyncService {
     const cursor = Array.from(this.store.syncCursors.values()).find((row) => row.token_sha256 === hash);
     if (!cursor || cursor.cloud_user_id !== userId || cursor.device_id !== deviceId || cursor.invalidated_at) {
       throw syncError("SYNC_CURSOR_INVALID", "sync cursor is malformed, cross-device, or invalidated");
+    }
+    if (!SYNC_CURSOR_SCAN_MODES.has(cursor.scan_mode)) {
+      throw syncError("SYNC_CURSOR_INVALID", "sync cursor predates explicit scan-mode binding; resync without cursor");
     }
     return cursor;
   }
@@ -1119,10 +1304,12 @@ export class SyncService {
       throw syncError("SYNC_CURSOR_EXPIRED", "sync cursor is below the retained compaction epoch; resync without cursor");
     }
     const cursorless = !inputCursor;
+    const continuingFullScan = Boolean(inputCursor && !inputCursor.terminal && inputCursor.scan_mode === "FULL");
+    const fullSnapshotScan = cursorless || continuingFullScan;
     const scanEpoch = inputCursor && !inputCursor.terminal ? inputCursor.scan_epoch : Number(stateBefore.latest_change_sequence || 0);
     const startPosition = inputCursor ? inputCursor.position : 0;
     const compactionEpoch = Number(stateBefore.compaction_epoch || 0);
-    const rows = cursorless
+    const rows = fullSnapshotScan
       ? this._cursorlessRows(auth.cloudUserId, scanEpoch, startPosition, compactionEpoch)
       : this._incrementalRows(auth.cloudUserId, scanEpoch, startPosition);
     const page = rows.slice(0, limit).map(metadataView);
@@ -1138,11 +1325,13 @@ export class SyncService {
         }
       }
       const terminal = !hasMore;
+      const nextScanMode = terminal ? "INCREMENTAL" : (fullSnapshotScan ? "FULL" : "INCREMENTAL");
       const nextCursor = this._issueCursorInPlace(
         auth.cloudUserId,
         device.device_id,
         nextPosition,
         scanEpoch,
+        nextScanMode,
         terminal,
         nowMs,
         undo
@@ -1183,6 +1372,7 @@ export class SyncService {
           device_id: row.device_id,
           position: row.position,
           scan_epoch: row.scan_epoch,
+          scan_mode: row.scan_mode,
           terminal: row.terminal,
           created_at: row.created_at,
           last_used_at: row.last_used_at,

@@ -154,7 +154,7 @@ if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO sync_devices (clo
 fi
 
 # Cursor positions cannot move beyond their represented scan epoch.
-if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO sync_cursors (cursor_id, cloud_user_id, device_id, token_sha256, position, scan_epoch, terminal) VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 2, 1, false);" >/dev/null 2>&1; then
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO sync_cursors (cursor_id, cloud_user_id, device_id, token_sha256, position, scan_epoch, scan_mode, terminal) VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 2, 1, 'INCREMENTAL', false);" >/dev/null 2>&1; then
   echo "FAIL: cursor position beyond scan epoch accepted"; exit 1;
 fi
 
@@ -165,7 +165,7 @@ VALUES ('11111111-1111-4111-8111-111111111111', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbb
 INSERT INTO sync_transfer_usage (cloud_user_id, direction, bytes, occurred_at)
 VALUES ('11111111-1111-4111-8111-111111111111', 'INGRESS', 1024, now());
 INSERT INTO sync_cursors (cursor_id, cloud_user_id, device_id, token_sha256, position, scan_epoch, terminal)
-VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, 1, true);
+VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, 1, 'INCREMENTAL', true);
 EOSQL
 
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0010_e2ee_sync_block_storage.down.sql >/dev/null

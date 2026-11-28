@@ -737,3 +737,264 @@ test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas
   const afterIngressRows = Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS").length;
   assert.equal(afterIngressRows, beforeIngressRows + 1, "even bandwidth-rejected authenticated PUT attempts count ingress once");
 });
+
+test("W4-11 review regression: paginated cursorless resync keeps FULL scan mode and never returns obsolete mutations", async () => {
+  const app = createTestApp();
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_full_scan_mode_user");
+  const blobA = crypto.randomUUID();
+  const blobB = crypto.randomUUID();
+  assert.equal((await putBlob(app, fixture, deviceId, blobA, { seed: 1 })).status, 201);
+  assert.equal((await putBlob(app, fixture, deviceId, blobB, { seed: 2 })).status, 201);
+  assert.equal((await putBlob(app, fixture, deviceId, blobB, { baseVector: vector(deviceId, 1), counter: 2, seed: 7 })).status, 200);
+
+  const page1 = await listChanges(app, fixture, deviceId, "?limit=1");
+  assert.equal(page1.status, 200, JSON.stringify(page1.body));
+  assert.deepEqual(page1.body.data.map((row) => [row.blob_id, row.change_sequence]), [[blobA, 1]]);
+  assert.equal(page1.body.meta.has_more, true);
+  const continuationRow = Array.from(app.store.syncCursors.values()).find((row) => row.position === 1 && row.terminal === false);
+  assert.equal(continuationRow?.scan_mode, "FULL", "nonterminal cursorless continuation must persist FULL scan mode");
+
+  const page2 = await listChanges(app, fixture, deviceId, "?limit=1&cursor=" + encodeURIComponent(page1.body.meta.next_cursor));
+  assert.equal(page2.status, 200, JSON.stringify(page2.body));
+  assert.deepEqual(page2.body.data.map((row) => [row.blob_id, row.change_sequence]), [[blobB, 3]]);
+  assert.equal(page2.body.data.some((row) => row.change_sequence === 2), false, "obsolete intermediate B write must not leak into full resync continuation");
+  assert.equal(page2.body.meta.has_more, false);
+  const terminalRow = Array.from(app.store.syncCursors.values()).find((row) => row.position === 3 && row.terminal === true);
+  assert.equal(terminalRow?.scan_mode, "INCREMENTAL", "terminal cursor starts later incremental scans");
+});
+
+test("W4-11 review regression: web cookie sessions cannot register or use device-bound sync devices", async () => {
+  const app = createTestApp();
+  const fixture = setupUser(app, "sync_web_cookie_user");
+  const consent = await grantE2ee(app, fixture);
+  const cookieValue = app.identity.signWebSessionCookie({
+    cloudUserId: fixture.user.id,
+    accessToken: fixture.session.access_token,
+    refreshToken: fixture.session.refresh_token
+  });
+  const cookieHeaders = { cookie: "dis_web_session=" + encodeURIComponent(cookieValue) };
+  const deviceId = crypto.randomUUID();
+  const registered = await app.inject({
+    method: "PUT",
+    url: "/api/v1/sync/devices/" + deviceId,
+    headers: { ...cookieHeaders, "idempotency-key": nextKey("sync-web-register") },
+    body: { consent_id: consent.id, device_label: "browser", platform: "ANDROID", sync_protocol_version: 1 }
+  });
+  assert.equal(registered.status, 403);
+  assert.equal(registered.body.error.code, "SYNC_PERMISSION_DENIED");
+  assert.equal(app.store.syncDevices.has(fixture.user.id + ":" + deviceId), false);
+
+  // Defense in depth for rows written by the vulnerable pre-review implementation:
+  // even if a web-family binding exists, cookie auth still cannot use it.
+  app.store.syncDevices.set(fixture.user.id + ":" + deviceId, {
+    cloud_user_id: fixture.user.id,
+    device_id: deviceId,
+    session_family_id: "web_cookie_family",
+    consent_id: consent.id,
+    device_label: "legacy web binding",
+    platform: "ANDROID",
+    sync_protocol_version: 1,
+    status: "ACTIVE",
+    registered_at: new Date(BASE_NOW).toISOString(),
+    revoked_at: null,
+    revocation_reason: null,
+    last_seen_at: null,
+    acknowledged_cursor_position: 0
+  });
+  const use = await app.inject({
+    method: "GET",
+    url: "/api/v1/sync/blobs/" + crypto.randomUUID(),
+    headers: { ...cookieHeaders, "x-dis-sync-device-id": deviceId }
+  });
+  assert.equal(use.status, 403);
+  assert.equal(use.body.error.code, "SYNC_PERMISSION_DENIED");
+});
+
+test("W4-11 review regression: timely consent renewal settles by grant time without an intervening worker or sync request", async () => {
+  const app = createTestApp();
+  const { fixture, consent, deviceId } = await setupDeviceUser(app, "sync_timely_renewal_user");
+  const blobId = crypto.randomUUID();
+  assert.equal((await putBlob(app, fixture, deviceId, blobId)).status, 201);
+  const withdrawMs = BASE_NOW + HOUR;
+  const withdrawn = await app.inject({
+    method: "DELETE",
+    url: "/api/v1/me/consents/" + consent.id,
+    headers: fixture.authAt(withdrawMs),
+    nowMs: withdrawMs
+  });
+  assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+  const expiryMs = withdrawMs + 30 * DAY;
+  const timelyGrantMs = expiryMs - 1000;
+  const renewed = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: fixture.authAt(timelyGrantMs),
+    body: { purpose: "E2EE_CLOUD_SYNC", document_version: "e2ee-sync-consent-v1", document_sha256: DOC_SHA },
+    nowMs: timelyGrantMs
+  });
+  assert.equal(renewed.status, 201, JSON.stringify(renewed.body));
+  const stateAfterGrant = app.store.syncUserStates.get(fixture.user.id);
+  assert.equal(stateAfterGrant.consent_withdrawn_at, null, "timely grant must clear the pending withdrawal in the grant commit itself");
+  assert.equal(stateAfterGrant.reauthorized_at, new Date(timelyGrantMs).toISOString(), "settlement must use effective grant time, not a later worker clock");
+
+  // No sync endpoint and no worker tick intervened before expiry.  A late worker
+  // must still see that the grant happened before the deadline and preserve data.
+  app.syncE2ee.settleConsentLifecycle(fixture.user.id, expiryMs + 5000);
+  assert.ok(app.store.syncBlobs.has(fixture.user.id + ":" + blobId), "timely-renewed ciphertext must survive a post-deadline worker tick");
+  const download = await downloadBlob(app, fixture, deviceId, blobId, expiryMs + 5001);
+  assert.equal(download.status, 200, JSON.stringify(download.body));
+});
+
+test("W4-11 review regression: post-expiry renewal finishes old cleanup atomically and purges blob receipts/outbox metadata", async () => {
+  const app = createTestApp();
+  const { fixture, consent, deviceId } = await setupDeviceUser(app, "sync_late_renewal_user");
+  const blobId = crypto.randomUUID();
+  const putKey = nextKey("sync-expiry-put-receipt");
+  assert.equal((await putBlob(app, fixture, deviceId, blobId, { key: putKey })).status, 201);
+  const deleteKey = nextKey("sync-expiry-delete-receipt");
+  assert.equal((await deleteBlob(app, fixture, deviceId, blobId, vector(deviceId, 1), 2, { key: deleteKey })).status, 200);
+  assert.ok(Array.from(app.store.idempotencyRecords.keys()).some((key) => key.startsWith("putSyncBlob|" + fixture.user.id + "|")));
+  assert.ok(Array.from(app.store.idempotencyRecords.keys()).some((key) => key.startsWith("deleteSyncBlob|" + fixture.user.id + "|")));
+  assert.ok(app.store.outboxEvents.some((event) => event.event_type === "sync.blob.deleted" && Array.isArray(event.payload_json.version_vector)));
+
+  const withdrawMs = BASE_NOW + HOUR;
+  const withdrawn = await app.inject({
+    method: "DELETE",
+    url: "/api/v1/me/consents/" + consent.id,
+    headers: fixture.authAt(withdrawMs),
+    nowMs: withdrawMs
+  });
+  assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+  const expiryMs = withdrawMs + 30 * DAY;
+  const lateGrantMs = expiryMs + 1000;
+  const renewed = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: fixture.authAt(lateGrantMs),
+    body: { purpose: "E2EE_CLOUD_SYNC", document_version: "e2ee-sync-consent-v1", document_sha256: DOC_SHA },
+    nowMs: lateGrantMs
+  });
+  assert.equal(renewed.status, 201, JSON.stringify(renewed.body));
+
+  assert.equal(Array.from(app.store.syncBlobs.values()).filter((row) => row.cloud_user_id === fixture.user.id).length, 0, "late renewal must finish the expired cleanup before accepting a new lifecycle");
+  assert.equal(Array.from(app.store.syncMutations.values()).filter((row) => row.cloud_user_id === fixture.user.id).length, 0);
+  assert.equal(Array.from(app.store.syncCursors.values()).filter((row) => row.cloud_user_id === fixture.user.id).length, 0);
+  assert.equal(app.store.syncDevices.get(fixture.user.id + ":" + deviceId).status, "REVOKED");
+  assert.equal(app.store.syncBlobAntiResurrection.has(fixture.user.id + ":" + blobId), true, "minimal anti-resurrection marker survives expiry cleanup");
+  for (const key of app.store.idempotencyRecords.keys()) {
+    assert.equal(key.startsWith("putSyncBlob|" + fixture.user.id + "|"), false, "expiry cleanup must erase put receipts containing vectors");
+    assert.equal(key.startsWith("deleteSyncBlob|" + fixture.user.id + "|"), false, "expiry cleanup must erase delete receipts containing vectors");
+  }
+  const blobEvents = app.store.outboxEvents.filter((event) => String(event.event_type).startsWith("sync.blob."));
+  assert.ok(blobEvents.length >= 2, "blob outbox shells may remain only in redacted form");
+  for (const event of blobEvents) {
+    assert.equal(event.payload_json.redacted, true);
+    assert.equal(Object.hasOwn(event.payload_json, "version_vector"), false);
+    assert.equal(Object.hasOwn(event.payload_json, "key_id"), false);
+    assert.equal(Object.hasOwn(event.payload_json, "ciphertext_sha256"), false);
+    assert.ok(event.delivered_at, "redacted sync blob events must not remain pending for delivery");
+  }
+  const deviceEvents = app.store.outboxEvents.filter((event) => String(event.event_type).startsWith("sync.device."));
+  assert.ok(deviceEvents.length > 0, "revoked-device security records must survive expiry cleanup");
+});
+
+test("W4-11 review regression: school consent cascade leaves independent E2EE consent and retention clock untouched", async () => {
+  const app = createTestApp();
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_school_cascade_user");
+  const blobId = crypto.randomUUID();
+  assert.equal((await putBlob(app, fixture, deviceId, blobId)).status, 201);
+  const schoolConsent = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/consents",
+    headers: fixture.auth,
+    body: { school_id: "haut" }
+  });
+  assert.equal(schoolConsent.status, 201, JSON.stringify(schoolConsent.body));
+  const withdrawn = await app.inject({
+    method: "DELETE",
+    url: "/api/v1/me/consents/" + schoolConsent.body.data.id,
+    headers: fixture.auth,
+    nowMs: BASE_NOW + HOUR
+  });
+  assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+  const activeE2ee = Array.from(app.store.consents.values()).find((row) => row.cloud_user_id === fixture.user.id && row.purpose === "E2EE_CLOUD_SYNC");
+  assert.equal(activeE2ee.withdrawn_at, null, "school-only cascade must not withdraw independent E2EE consent");
+  const syncState = app.store.syncUserStates.get(fixture.user.id);
+  assert.equal(syncState.consent_withdrawn_at ?? null, null, "school-only cascade must not start the E2EE 30-day retention clock");
+  assert.equal(syncState.retention_expires_at ?? null, null);
+  const download = await downloadBlob(app, fixture, deviceId, blobId, BASE_NOW + HOUR + 1);
+  assert.equal(download.status, 200, JSON.stringify(download.body));
+});
+
+test("W4-11 review regression: export allowlist preserves AEAD key_id byte-for-byte while redacting free-form labels", async () => {
+  const app = createTestApp();
+  const { fixture, consent, deviceId } = await setupDeviceUser(app, "sync_export_key_id_user");
+  const keyIdEncryption = { ...encryption(), key_id: "token:epoch1" };
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId, { mutateBody: { encryption: keyIdEncryption } });
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+  const exported = await app.inject({ method: "POST", url: "/api/v1/me/data-export", headers: fixture.auth });
+  assert.equal(exported.status, 200, JSON.stringify(exported.body));
+  assert.equal(exported.body.data.sync_blobs[0].encryption.key_id, "token:epoch1", "validated opaque key_id is AEAD AAD and must survive export byte-for-byte");
+  assert.equal(exported.body.data.sync_blob_mutations[0].encryption.key_id, "token:epoch1");
+  assert.notEqual(exported.body.data.sync_blobs[0].encryption.key_id, "token=[REDACTED]");
+});
+
+test("W4-11 review regression: authenticated malformed, over-limit, and wrong-shape PUT bodies count ingress once at HTTP boundary", async (t) => {
+  const app = createTestApp();
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_http_ingress_user");
+  const server = app.createHttpServer();
+  t.after(() => {
+    try { server.closeAllConnections?.(); } catch {}
+    server.close();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = server.address().port;
+  async function rawPut(rawBody, label) {
+    const response = await fetch("http://127.0.0.1:" + port + "/api/v1/sync/blobs/" + crypto.randomUUID(), {
+      method: "PUT",
+      headers: {
+        ...fixture.auth,
+        "content-type": "application/json",
+        "x-dis-sync-device-id": deviceId,
+        "idempotency-key": nextKey(label)
+      },
+      body: rawBody
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return { status: response.status, body: json, rawText: text };
+  }
+  const ingressRows = () => Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+
+  const beforeMalformed = ingressRows().length;
+  const malformedRaw = '{"encryption":';
+  const malformed = await rawPut(malformedRaw, "sync-http-malformed");
+  assert.equal(malformed.status, 400, malformed.rawText);
+  assert.equal(malformed.body.error.code, "BAD_REQUEST");
+  const afterMalformed = ingressRows();
+  assert.equal(afterMalformed.length, beforeMalformed + 1, "malformed JSON must still meter exactly one authenticated ingress attempt");
+  assert.equal(afterMalformed.at(-1).bytes, Buffer.byteLength(malformedRaw));
+
+  const wrongShapeRaw = JSON.stringify([]);
+  const beforeShape = ingressRows().length;
+  const wrongShape = await rawPut(wrongShapeRaw, "sync-http-wrong-shape");
+  assert.equal(wrongShape.status, 400, wrongShape.rawText);
+  assert.equal(wrongShape.body.error.code, "BAD_REQUEST");
+  const afterShape = ingressRows();
+  assert.equal(afterShape.length, beforeShape + 1, "syntactically valid but wrong-shape JSON must meter exactly one ingress attempt");
+  assert.equal(afterShape.at(-1).bytes, Buffer.byteLength(wrongShapeRaw));
+
+  const oversizedRaw = '{"padding":"' + "x".repeat(1536 * 1024) + '"}';
+  const beforeOversized = ingressRows().length;
+  const oversized = await rawPut(oversizedRaw, "sync-http-oversized");
+  assert.equal(oversized.status, 413, oversized.rawText);
+  assert.equal(oversized.body.error.code, "PAYLOAD_TOO_LARGE");
+  const afterOversized = ingressRows();
+  assert.equal(afterOversized.length, beforeOversized + 1, "over-limit authenticated PUT must meter exactly one ingress attempt");
+  assert.ok(afterOversized.at(-1).bytes > 1536 * 1024, "over-limit metering uses actual boundary bytes already read");
+});

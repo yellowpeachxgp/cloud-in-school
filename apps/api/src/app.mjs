@@ -283,7 +283,7 @@ export function createCampusCloudApp(options = {}) {
         if (!u || u.status !== "ACTIVE") {
           throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is inactive or deleted");
         }
-        return verified;
+        return { ...verified, auth_kind: "DEVICE_BEARER" };
       } catch (err) {
         bearerErr = err;
       }
@@ -331,7 +331,8 @@ export function createCampusCloudApp(options = {}) {
         sessionId: "web_cookie_session",
         ssoIssuer: cookieAuth.user.issuer,
         ssoSubject: cookieAuth.user.subject,
-        roles: cookieAuth.roles
+        roles: cookieAuth.roles,
+        auth_kind: "WEB_COOKIE"
       };
     }
     if (bearerErr) throw bearerErr;

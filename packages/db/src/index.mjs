@@ -1898,6 +1898,9 @@ export class CloudDatabaseStore {
       if (!Number.isSafeInteger(cursor.position) || !Number.isSafeInteger(cursor.scan_epoch) || cursor.position < 0 || cursor.position > cursor.scan_epoch) {
         throw new Error("E2EE cursor 快照位置越界");
       }
+      if (!["FULL", "INCREMENTAL"].includes(cursor.scan_mode)) {
+        throw new Error("E2EE cursor 快照缺少显式 scan mode");
+      }
     }
     for (const [, usage] of raw.syncTransferUsage || []) {
       if (!usage?.cloud_user_id || !["INGRESS", "EGRESS"].includes(usage.direction) || !Number.isSafeInteger(usage.bytes) || usage.bytes <= 0 || !finiteTime(usage.occurred_at)) {
@@ -3482,9 +3485,54 @@ export class CloudDatabaseStore {
       }
     }
 
+    const hasIndependentE2eeScope = (consent) => Boolean(
+      consent?.purpose === "E2EE_CLOUD_SYNC" ||
+      (Array.isArray(consent?.scope_list) && consent.scope_list.includes("E2EE_CLOUD_SYNC"))
+    );
+    // School delegation cascades must not sweep the independent user-scoped
+    // E2EE consent domain into withdrawal.  Only genuinely account-global stop
+    // flows may include it, and those flows start the sync retention lifecycle
+    // in the same durable halt commit rather than stranding ciphertext.
+    const includeIndependentE2ee = reason === "XPEACH_UNLINKED" || reason === "USER_DATA_DELETE";
+    let withdrewE2eeConsent = false;
     for (const c of this.consents.values()) {
-      if (c.cloud_user_id === cloudUserId && !c.withdrawn_at) {
-        c.withdrawn_at = ts;
+      if (c.cloud_user_id !== cloudUserId || c.withdrawn_at) continue;
+      const e2eeConsent = hasIndependentE2eeScope(c);
+      if (e2eeConsent && !includeIndependentE2ee) continue;
+      c.withdrawn_at = ts;
+      if (e2eeConsent) withdrewE2eeConsent = true;
+    }
+
+    if (includeIndependentE2ee && withdrewE2eeConsent) {
+      const stillActiveE2ee = Array.from(this.consents.values()).some((c) => (
+        c?.cloud_user_id === cloudUserId && !c.withdrawn_at && hasIndependentE2eeScope(c)
+      ));
+      if (!stillActiveE2ee) {
+        let syncState = this.syncUserStates.get(cloudUserId);
+        if (!syncState) {
+          syncState = {
+            cloud_user_id: cloudUserId,
+            latest_change_sequence: 0,
+            compaction_epoch: 0,
+            consent_withdrawn_at: null,
+            retention_expires_at: null,
+            reauthorized_at: null,
+            expired_cleanup_at: null,
+            updated_at: ts
+          };
+          this.syncUserStates.set(cloudUserId, syncState);
+        }
+        if (!syncState.consent_withdrawn_at) {
+          syncState.consent_withdrawn_at = ts;
+          syncState.retention_expires_at = new Date(nowMs + 30 * 24 * 60 * 60 * 1000).toISOString();
+          syncState.updated_at = ts;
+        }
+        for (const cursor of this.syncCursors.values()) {
+          if (cursor.cloud_user_id === cloudUserId && !cursor.invalidated_at) cursor.invalidated_at = ts;
+        }
+        for (const device of this.syncDevices.values()) {
+          if (device.cloud_user_id === cloudUserId) device.acknowledged_cursor_position = 0;
+        }
       }
     }
 
