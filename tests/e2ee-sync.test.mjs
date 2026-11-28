@@ -286,11 +286,16 @@ test("W4-11 sync devices: E2EE consent fail-closed, immutable binding, permanent
   const repeat = await app.inject({
     method: "DELETE",
     url: "/api/v1/sync/devices/" + deviceId,
-    headers: { ...fixture.auth, "idempotency-key": nextKey("sync-device-revoke-repeat") },
+    headers: { authorization: "Bearer " + fixture.session.access_token, "idempotency-key": nextKey("sync-device-revoke-repeat") },
     body: { reason: "USER_REMOVED" }
   });
   assert.equal(repeat.status, 401, "the revoked session family itself must fail closed on subsequent use");
-  const resurrect = await registerDevice(app, fixture, consent, { deviceId });
+  const resurrect = await app.inject({
+    method: "PUT",
+    url: "/api/v1/sync/devices/" + deviceId,
+    headers: { authorization: "Bearer " + fixture.session.access_token, "idempotency-key": nextKey("sync-device-resurrect") },
+    body: { consent_id: consent.id, device_label: "测试 Android", platform: "ANDROID", sync_protocol_version: 1 }
+  });
   assert.equal(resurrect.status, 401);
   const revokedEvents = app.store.outboxEvents.filter((event) => event.event_type === "sync.device.revoked" && event.payload_json.device_id === deviceId);
   assert.equal(revokedEvents.length, 1);

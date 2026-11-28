@@ -1803,6 +1803,107 @@ export class CloudDatabaseStore {
       }
     }
 
+    // W4-11 E2EE sync snapshot invariants: ciphertext may exist only on the
+    // current UPSERT row; mutation history, cursors, devices, and anti-resurrection
+    // markers are metadata-only.  These checks intentionally mirror SQL 0010's
+    // shape constraints without ever attempting decryption or plaintext inference.
+    const syncDevices = new Map(raw.syncDevices || []);
+    const syncBlobs = new Map(raw.syncBlobs || []);
+    const syncMutations = new Map(raw.syncMutations || []);
+    const syncVectorValid = (vector) => {
+      if (!Array.isArray(vector) || vector.length > 512) return false;
+      const seen = new Set();
+      for (const entry of vector) {
+        if (!entry || typeof entry.device_id !== "string" || seen.has(entry.device_id)) return false;
+        if (!Number.isSafeInteger(entry.counter) || entry.counter < 1 || entry.counter > 2147483647) return false;
+        seen.add(entry.device_id);
+      }
+      return true;
+    };
+    const syncBucketSizes = new Set([1024, 4096, 16384, 65536, 262144, 1048576]);
+    for (const [key, device] of syncDevices) {
+      if (!device?.cloud_user_id || !device.device_id || key !== device.cloud_user_id + ":" + device.device_id) {
+        throw new Error("E2EE 同步设备快照键或用户作用域不一致");
+      }
+      if (device.platform !== "ANDROID" || device.sync_protocol_version !== 1) {
+        throw new Error("E2EE 同步设备快照协议形状无效");
+      }
+      const deviceShape =
+        (device.status === "ACTIVE" && device.revoked_at == null && device.revocation_reason == null) ||
+        (device.status === "REVOKED" && finiteTime(device.revoked_at) && typeof device.revocation_reason === "string");
+      if (!deviceShape) throw new Error("E2EE 同步设备快照撤销状态形状不一致");
+      if (!Number.isSafeInteger(device.acknowledged_cursor_position) || device.acknowledged_cursor_position < 0) {
+        throw new Error("E2EE 同步设备快照 cursor 确认水位无效");
+      }
+    }
+    const validateSyncMutationShape = (row, requireCurrentCiphertext) => {
+      if (!row?.cloud_user_id || !row.blob_id || !syncVectorValid(row.version_vector)) return false;
+      if (!Number.isSafeInteger(row.change_sequence) || row.change_sequence < 1) return false;
+      if (!finiteTime(row.committed_at)) return false;
+      const device = syncDevices.get(row.cloud_user_id + ":" + row.author_device_id);
+      if (!device) return false;
+      if (row.change_kind === "UPSERT") {
+        if (!row.encryption || row.encryption.format !== "dis-sync-e2ee/v1" || row.encryption.cipher_suite !== "AES-256-GCM" || row.encryption.padding_scheme !== "DIS_SYNC_SIZE_BUCKETS_POW4_V1") return false;
+        if (typeof row.ciphertext_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.ciphertext_sha256)) return false;
+        if (!syncBucketSizes.has(row.ciphertext_size_bytes)) return false;
+        if (requireCurrentCiphertext) {
+          if (typeof row.ciphertext_base64 !== "string") return false;
+          const decodedCiphertext = Buffer.from(row.ciphertext_base64, "base64");
+          if (decodedCiphertext.length !== row.ciphertext_size_bytes) return false;
+          if (crypto.createHash("sha256").update(decodedCiphertext).digest("hex") !== row.ciphertext_sha256) return false;
+        } else if (Object.hasOwn(row, "ciphertext_base64") || Object.hasOwn(row, "ciphertext")) {
+          return false;
+        }
+        return true;
+      }
+      if (row.change_kind !== "TOMBSTONE") return false;
+      return row.encryption === null && row.ciphertext_sha256 === null && row.ciphertext_size_bytes === null &&
+        !Object.hasOwn(row, "ciphertext_base64") && !Object.hasOwn(row, "ciphertext");
+    };
+    const sequenceOwners = new Set();
+    for (const [key, blob] of syncBlobs) {
+      if (!blob?.cloud_user_id || !blob.blob_id || key !== blob.cloud_user_id + ":" + blob.blob_id) {
+        throw new Error("E2EE 同步当前块快照键或用户作用域不一致");
+      }
+      if (!validateSyncMutationShape(blob, true)) throw new Error("E2EE 同步当前块快照不是合法密文桶或 tombstone");
+      const seqOwner = blob.cloud_user_id + ":" + blob.change_sequence;
+      if (sequenceOwners.has(seqOwner)) throw new Error("E2EE 同步 change_sequence 快照重复");
+      sequenceOwners.add(seqOwner);
+    }
+    for (const [key, mutation] of syncMutations) {
+      if (!mutation?.cloud_user_id || key !== mutation.cloud_user_id + ":" + mutation.change_sequence) {
+        throw new Error("E2EE 同步变更史快照键或序列不一致");
+      }
+      if (!validateSyncMutationShape(mutation, false)) throw new Error("E2EE 同步变更史快照含密文或元数据形状无效");
+      const seqOwner = mutation.cloud_user_id + ":" + mutation.change_sequence;
+      if (sequenceOwners.has(seqOwner)) throw new Error("E2EE 同步 change_sequence 快照重复");
+      sequenceOwners.add(seqOwner);
+    }
+    for (const [key, marker] of raw.syncBlobAntiResurrection || []) {
+      if (!marker?.cloud_user_id || !marker.blob_id || key !== marker.cloud_user_id + ":" + marker.blob_id) {
+        throw new Error("E2EE 防复活标记快照作用域不一致");
+      }
+      if (Object.hasOwn(marker, "ciphertext_base64") || Object.hasOwn(marker, "version_vector") || Object.hasOwn(marker, "encryption")) {
+        throw new Error("E2EE 防复活标记快照不是最小元数据");
+      }
+    }
+    for (const [, cursor] of raw.syncCursors || []) {
+      if (!cursor?.cloud_user_id || !cursor.device_id || !syncDevices.has(cursor.cloud_user_id + ":" + cursor.device_id)) {
+        throw new Error("E2EE cursor 快照未绑定已登记设备");
+      }
+      if (Object.hasOwn(cursor, "token") || Object.hasOwn(cursor, "token_base64") || typeof cursor.token_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(cursor.token_sha256)) {
+        throw new Error("E2EE cursor 快照必须只保存 opaque token 摘要");
+      }
+      if (!Number.isSafeInteger(cursor.position) || !Number.isSafeInteger(cursor.scan_epoch) || cursor.position < 0 || cursor.position > cursor.scan_epoch) {
+        throw new Error("E2EE cursor 快照位置越界");
+      }
+    }
+    for (const [, usage] of raw.syncTransferUsage || []) {
+      if (!usage?.cloud_user_id || !["INGRESS", "EGRESS"].includes(usage.direction) || !Number.isSafeInteger(usage.bytes) || usage.bytes <= 0 || !finiteTime(usage.occurred_at)) {
+        throw new Error("E2EE 同步传输配额快照无效");
+      }
+    }
+
     const graphPlaces = new Map(raw.campusGraphPlaces || []);
     const placeReports = new Map(raw.placeReports || []);
     for (const [, report] of placeReports) {

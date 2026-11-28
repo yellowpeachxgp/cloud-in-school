@@ -932,7 +932,7 @@ export class SyncService {
     if (replay) return replay;
     requireNoUnknownFields(body, ["encryption", "ciphertext_base64", "ciphertext_sha256", "base_vector", "writer_counter"], "sync blob put request");
     const encryption = validateEncryption(body.encryption);
-    const ciphertextBase64 = requireString(body.ciphertext_base64, "ciphertext_base64", { min: 1368, max: 1398104, trim: false });
+    const ciphertextBase64 = requireString(body.ciphertext_base64, "ciphertext_base64", { max: 1398104, trim: false });
     const ciphertext = decodeStrictBase64(ciphertextBase64, "ciphertext_base64");
     if (ciphertext.length > SYNC_BUCKET_SIZES[SYNC_BUCKET_SIZES.length - 1]) {
       throw syncError("SYNC_BLOB_TOO_LARGE", "decoded ciphertext exceeds the 1,048,576-byte sync block ceiling");
