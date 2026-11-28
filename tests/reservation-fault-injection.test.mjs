@@ -3076,9 +3076,7 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
       const r = await req("POST", `/api/v1/school-bindings/${b.body.data.id}/complete`, {
         credential_kind: "DELEGATED_SESSION_BUNDLE",
         consent_id: c.body.data.id,
-        delegated_secret: secret,
-        // FI21 的异步 prewarm 使用真实 Date.now() 解密；固定业务时间 + 默认 7 天有效期会在 2026-11-28 后变成时间炸弹。
-        expires_at: "2099-01-01T00:00:00.000Z"
+        delegated_secret: secret, expires_at: "2099-01-01T00:00:00.000Z" /* FI21 async prewarm uses real Date.now(); do not reintroduce the 7-day time bomb */
       });
       assert.equal(r.status, 200);
       const bindingId = b.body.data.id;
