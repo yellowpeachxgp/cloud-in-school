@@ -172,6 +172,12 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
       if (/^[!&*]/.test(parsed.key)) {
         fail(line, "YAML anchor, tag, or alias key node properties are outside the supported contract subset");
       }
+      if (/^[,\[\]{}|>]/.test(parsed.key)) {
+        fail(line, "flow collection or block scalar indicator cannot start a plain mapping key");
+      }
+      if (/^[%@]/.test(parsed.key) || parsed.key.startsWith(String.fromCharCode(96))) {
+        fail(line, "reserved YAML indicator cannot start a plain mapping key");
+      }
     }
   }
 
@@ -209,7 +215,7 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
       if (pos >= text.length) return node;
       if (text[pos] === "#" && commentCanStart()) {
         pos = text.length;
-        return node;
+        return { ...node, trailingComment: true };
       }
       inlineFail("unexpected trailing characters after YAML node: " + JSON.stringify(text.slice(pos)));
       return node;
@@ -225,6 +231,9 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
       if ((first === "-" || first === "?" || first === ":") && (pos + 1 >= text.length || /\s/.test(text[pos + 1]))) {
         inlineFail("YAML indicator " + JSON.stringify(first) + " cannot start an inline plain scalar here");
       }
+      if (first === ":" && flowContext === "flow") {
+        inlineFail("YAML mapping indicator cannot start a plain scalar in flow context");
+      }
       if (first === "@" || first === String.fromCharCode(96) || first === "%") {
         inlineFail("reserved YAML indicator " + JSON.stringify(first) + " cannot start a plain scalar");
       }
@@ -236,6 +245,9 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
         const char = text[pos];
         if (char === "#" && (pos === start || /\s/.test(text[pos - 1]))) break;
         if (flowContext === "flow" && isFlowDelimiter(char)) break;
+        if (flowContext === "flow" && (char === "[" || char === "{")) {
+          inlineFail("flow collection indicators cannot appear inside a plain scalar in flow context");
+        }
         if (char === ":") {
           const next = text[pos + 1];
           if (
@@ -310,6 +322,9 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
           if (next === undefined || /\s/.test(next) || isFlowDelimiter(next)) return;
         }
         if (char === "," || char === "}") return;
+        if (char === "[" || char === "]" || char === "{") {
+          inlineFail("flow collection indicators cannot appear inside a plain flow mapping key");
+        }
         if (char === "#" && (pos === start || /\s/.test(text[pos - 1]))) inlineFail("comment inside an unterminated flow mapping");
         pos += 1;
       }
@@ -321,6 +336,10 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
       if (!trimmed) inlineFail("empty flow mapping keys are outside the supported contract subset");
       if (trimmed === "<<") inlineFail("YAML merge keys are outside the supported contract subset");
       if (/^[!&*]/.test(trimmed)) inlineFail("anchors, tags, and aliases are outside the supported contract subset");
+      if (/^[,\[\]{}|>]/.test(trimmed)) inlineFail("flow collection or block scalar indicators cannot start a plain flow mapping key");
+      if (trimmed[0] === ":" || trimmed[0] === "%" || trimmed[0] === "@" || trimmed[0] === String.fromCharCode(96)) {
+        inlineFail("reserved YAML indicators cannot start a plain flow mapping key");
+      }
     }
 
     function parseFlowMapping() {
@@ -503,7 +522,7 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
     }
     if (inline.kind === "error") return lineIndex + 1;
     if (inline.kind === "blockScalar") return consumeBlockScalar(lineIndex, keyIndent, inline);
-    if (inline.kind === "plain") return consumePlainContinuation(lineIndex, keyIndent);
+    if (inline.kind === "plain" && !inline.trailingComment) return consumePlainContinuation(lineIndex, keyIndent);
     return lineIndex + 1;
   }
 
@@ -572,7 +591,7 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
 
       const inline = parseInlineValue(item.body, info.line, indent + 1 + item.separatorLength, "block");
       if (inline.kind === "blockScalar") cursor = consumeBlockScalar(info.index, indent, inline);
-      else if (inline.kind === "plain") cursor = consumePlainContinuation(info.index, indent);
+      else if (inline.kind === "plain" && !inline.trailingComment) cursor = consumePlainContinuation(info.index, indent);
       else cursor = info.index + 1;
     }
     return cursor;
@@ -580,7 +599,7 @@ export function analyzeYamlSyntax(yamlText, label = "contracts.yaml") {
 
   function parseBlockScalarNode(info, parentIndent) {
     const inline = parseInlineValue(info.text, info.line, info.indent, "block");
-    if (inline.kind === "plain") return consumePlainContinuation(info.index, parentIndent);
+    if (inline.kind === "plain" && !inline.trailingComment) return consumePlainContinuation(info.index, parentIndent);
     if (inline.kind === "blockScalar") return consumeBlockScalar(info.index, info.indent, inline);
     return info.index + 1;
   }
@@ -648,6 +667,16 @@ export function analyzeYamlStrictParserSelfTest() {
       text: "root: [active, {planned: reserved]\n"
     },
     {
+      name: "strict-flow-key-indicator-negative.yaml",
+      expectError: true,
+      text: "root: {bad]: value}\n"
+    },
+    {
+      name: "strict-flow-plain-indicator-negative.yaml",
+      expectError: true,
+      text: "root: [bad{value]\n"
+    },
+    {
       name: "strict-quoted-trailing-negative.yaml",
       expectError: true,
       text: "root: 'abc' junk\n"
@@ -686,6 +715,21 @@ export function analyzeYamlStrictParserSelfTest() {
       name: "strict-colon-end-negative.yaml",
       expectError: true,
       text: "root: abc def:\n"
+    },
+    {
+      name: "strict-key-indicator-negative.yaml",
+      expectError: true,
+      text: "root:\n  |bad: value\n"
+    },
+    {
+      name: "strict-commented-scalar-continuation-negative.yaml",
+      expectError: true,
+      text: "root: first # comment\n  continuation\n"
+    },
+    {
+      name: "strict-flow-leading-colon-negative.yaml",
+      expectError: true,
+      text: "root: [:value]\n"
     },
     {
       name: "strict-indentless-sequence-control.yaml",
