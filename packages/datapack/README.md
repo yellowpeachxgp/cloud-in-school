@@ -28,6 +28,6 @@ dis-datapack/v1\n<canonical sha256 lowercase hex>\n
 
 ## Android 对接边界（记录于配对实现）
 
-`DisDatapackCampusGraphDecoder` 只把已验证 datapack 投影到 Campus Graph。当前无损支持：`procedure-guide`（placeRef 为 service/campus，或调用方显式 defaultCampusId）和 `facility-catalog`（placeRef 为 campus/building）。`indoor-graph` 的 edge/level、`opportunity-catalog`、`period-preset`、`pharmacy-catalog` 以及语义未明确的 `dependsOn` 全部 fail-closed；不得静默丢弃边、层级或依赖语义。
+`DisDatapackCampusGraphDecoder`（独立分发入口 `decodeVerified`）只把已验证 datapack 投影到 Campus Graph。当前可投影支持：`procedure-guide`（placeRef 为 service/campus，或调用方显式 defaultCampusRef）和 `facility-catalog`（placeRef 为 campus/building）。`indoor-graph` 的 edge/level、`opportunity-catalog`、`period-preset`、`pharmacy-catalog` 以及语义未明确的 `dependsOn` 全部 fail-closed；分支、材料有效期等完整 item 细节仍由 typed datapack 提供，不在图实体中伪造或静默截断。
 
 Room v18 已评估但**本卡不消耗**：当前 main 的 Room 迁移链仍处低位版本且 v12–v17 由前置/在途卡片按 D14 串行使用；W5-01 没有首个真实安装消费方，catalog lifecycle、签名信任与回滚语义也依赖 W5-02/CT-06 才能定稿。此时新增“已安装数据包表”会形成无消费者死 schema 并抢跑迁移顺序。v18 继续保留，待首个安装/回滚消费卡重新评估；当前加载器保持纯 JVM、无持久化副作用。
