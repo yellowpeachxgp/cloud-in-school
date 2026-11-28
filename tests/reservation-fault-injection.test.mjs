@@ -3041,11 +3041,12 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
     blockedNetwork += 1;
     throw new Error("OFFLINE_TEST_GUARD: unexpected external fetch blocked");
   };
+  const fixtureApps = [];
 
   try {
     const baseMs = Date.parse("2026-11-21T12:00:00+08:00");
-    const newApp = (name) =>
-      createCampusCloudApp({
+    const newApp = (name) => {
+      const app = createCampusCloudApp({
         requireAdminAccess: false,
         redisEnabled: false,
         storeOptions: {
@@ -3053,6 +3054,9 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
           requireDurableSnapshot: true
         }
       });
+      fixtureApps.push(app);
+      return app;
+    };
 
     async function setupCancelFixture(name, secret) {
       const app = newApp(name);
@@ -3076,7 +3080,12 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
       const r = await req("POST", `/api/v1/school-bindings/${b.body.data.id}/complete`, {
         credential_kind: "DELEGATED_SESSION_BUNDLE",
         consent_id: c.body.data.id,
-        delegated_secret: secret, expires_at: "2099-01-01T00:00:00.000Z" /* FI21 async prewarm uses real Date.now(); do not reintroduce the 7-day time bomb */
+        delegated_secret: secret,
+        // The production prewarm path intentionally evaluates credential expiry
+        // against the real wall clock (Date.now()), while the request timeline
+        // uses baseMs. Keep this offline fixture valid in both clocks; expiry
+        // semantics themselves are not the behaviour under test here.
+        expires_at: "2099-01-01T00:00:00.000Z"
       });
       assert.equal(r.status, 200);
       const bindingId = b.body.data.id;
@@ -3289,17 +3298,24 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
         "async-cred-refresh-revoke",
         secret
       );
-      let enterPrewarm;
+      let prewarmEntered = false;
+      let prewarmReturned = false;
       let finishPrewarm;
-      const prewarmStarted = new Promise((r) => {
-        enterPrewarm = r;
-      });
       const prewarmHeld = new Promise((r) => {
         finishPrewarm = r;
       });
+      const settlePrewarmChain = async () => {
+        finishPrewarm();
+        // After the held provider promise resolves, the remaining engine path
+        // is a finite microtask chain with synchronous KMS/store work. Await
+        // one check-phase turn so that chain is fully settled even when an
+        // earlier assertion fails; never leave the controlled promise pending.
+        await new Promise((r) => setImmediate(r));
+      };
       app.schoolProvider.prewarmJobTargetSeats = async () => {
-        enterPrewarm();
+        prewarmEntered = true;
         await prewarmHeld;
+        prewarmReturned = true;
         return {
           auth: {
             rawToken: "refreshed_after_revocation_token_012345678901234",
@@ -3309,30 +3325,39 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
         };
       };
 
-      const createPlanRes = await req(
-        "POST",
-        "/api/v1/reservation-plans",
-        {
-          school_binding_id: bindingId,
-          consent_id: consentId,
-          target_local_date: "2026-11-22",
-          target_local_time: "07:00:00",
-          slot_window: "08:00-22:00",
-          area_name: "五层东区",
-          candidate_seats: ["01桌 A座"]
-        },
-        10
+      try {
+        const createPlanRes = await req(
+          "POST",
+          "/api/v1/reservation-plans",
+          {
+            school_binding_id: bindingId,
+            consent_id: consentId,
+            target_local_date: "2026-11-22",
+            target_local_time: "07:00:00",
+            slot_window: "08:00-22:00",
+            area_name: "五层东区",
+            candidate_seats: ["01桌 A座"]
+          },
+          10
+        );
+        assert.equal(createPlanRes.status, 201);
+        assert.equal(
+          prewarmEntered,
+          true,
+          "create-plan background prewarm must enter the controlled provider before the revocation race"
+        );
+
+        const revokeRes = await req("DELETE", `/api/v1/school-bindings/${bindingId}`, null, 20);
+        assert.equal(revokeRes.status, 200);
+        assert.ok(binding.revoked_at);
+      } finally {
+        await settlePrewarmChain();
+      }
+      assert.equal(
+        prewarmReturned,
+        true,
+        "controlled prewarm provider promise must have fully returned before credential assertions"
       );
-      assert.equal(createPlanRes.status, 201);
-      await prewarmStarted;
-
-      const revokeRes = await req("DELETE", `/api/v1/school-bindings/${bindingId}`, null, 20);
-      assert.equal(revokeRes.status, 200);
-      assert.ok(binding.revoked_at);
-
-      finishPrewarm();
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r));
 
       // Also test direct _updateBindingCredentialTokens call on revoked binding
       app.reservationEngine._updateBindingCredentialTokens(
@@ -3358,6 +3383,17 @@ test("Fault Injection 21 (Cloud P1-2 — Async Revocation Inside cancel-seat Pro
     assert.equal(blockedNetwork, 0);
   } finally {
     globalThis.fetch = origFetch;
+    // saveSnapshot() uses an unref'ed debounce timer. The full suite can keep
+    // the process alive long enough for that timer to fire after tmpDir has
+    // been removed, so disarm every fixture-store timer before cleanup. This
+    // intentionally discards only the test's pending debounced snapshot write;
+    // all durable state needed by assertions was already flushed synchronously.
+    for (const app of fixtureApps) {
+      if (app.store?._snapshotFlushTimer) {
+        clearTimeout(app.store._snapshotFlushTimer);
+        app.store._snapshotFlushTimer = null;
+      }
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

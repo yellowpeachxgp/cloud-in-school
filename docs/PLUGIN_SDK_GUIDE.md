@@ -105,7 +105,7 @@ QUARANTINED
 
 ## 5. 权限目录（声明 ≠ 能力已实现）
 
-当前权限 ID 以 `contracts/permissions/permission-catalog.yaml` 为契约目录。插件运行时 Schema 枚举覆盖其中 `scope: plugin`、`scope: host_and_plugin` 与 `scope: host_only_gated` 的条目（后两者的授予仍受宿主门禁约束）；`scope: user_school_scope` 的条目是组队等领域功能的用户态权限，**插件清单声明它们会被运行时以 `runtime_permission_unknown` 拒绝**。声明权限只表示请求能力，是否真正可用取决于宿主 Broker 与对应功能实现。
+当前权限 ID 以 `contracts/permissions/permission-catalog.yaml` 为契约目录。插件运行时 Schema 枚举覆盖其中 `scope: plugin`、`scope: host_and_plugin` 与 `scope: host_only_gated` 的条目（后两者的授予仍受宿主门禁约束）；`scope: user_school_scope` 的条目是组队等领域功能的用户态权限，`scope: user_scope` 的条目是账号级跨设备同步等用户自服务权限，**插件清单声明这两类都会被运行时以 `runtime_permission_unknown` 拒绝**。声明权限只表示请求能力，是否真正可用取决于宿主 Broker 与对应功能实现。
 
 插件可声明权限（运行时 Schema 枚举集合）：
 
@@ -191,6 +191,19 @@ CT-06 contract-first planned 权限（内容包目录用户态/运营审核态�
 | `content_pack.retire` | CT-06 planned 语义：独立的高危下架授权；只追加 retirement 元数据、拒绝新下载/安装且不删除历史 |
 
 CT-06 上述端点在契约中均为 `planned`；登记授权语义不表示 content-catalog 运行时已经存在。签名数据包可以是插件产物或独立内容包，但携带/安装数据包本身**不授予任何 `content_pack.*` 宿主权限**。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
+
+CT-07 contract-first planned 权限（E2EE 跨设备同步账号级用户自服务授权语义；同样**不是插件可声明权限**。这些端点在契约中是 `planned`：方向已冻结但 runtime-inert，W4-11 实现卡必须在同一 PR 注册运行时并翻转 active）：
+
+| 权限 | 当前语义与诚实状态 |
+|---|---|
+| `sync.device.read` | CT-07 planned 语义：读取本人 active/revoked 同步设备登记的账户安全元数据；不暴露 ciphertext、plaintext、密钥、session token 或硬件标识 |
+| `sync.device.register` | CT-07 planned 语义：在显式 E2EE_CLOUD_SYNC 同意后登记新鲜客户端 installation UUID；设备身份不可复用撤销 tombstone，且不是硬件标识 |
+| `sync.device.revoke` | CT-07 planned 语义：永久撤销本人同步设备并使内部绑定 session family 失效；不删除已接受 ciphertext history 或版本向量 authorship |
+| `sync.blob.read` | CT-07 planned 语义：读取密文块、非秘密加密元数据、版本向量、tombstone 与增量变更元数据；绝不暗示服务端 plaintext/key 能力 |
+| `sync.blob.write` | CT-07 planned 语义：从 active 登记设备按严格版本向量 CAS 上传 ciphertext-only 块；禁止 plaintext/hash、keys 或隐藏冲突 sibling |
+| `sync.blob.delete` | CT-07 planned 语义：按严格版本向量 CAS tombstone 密文块，避免删除未看见的并发更新 |
+
+CT-07 上述端点在契约中均为 `planned`；登记授权语义不表示 `packages/sync` 运行时已经存在。端到端加密的密钥 provisioning、备份口令与设备间恢复仍属客户端/Vault 边界，云端不得代理或保存。以上条目是账号级用户自服务权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。
 
 ## 6. CLI（`dis-plugin`）
 

@@ -65,6 +65,32 @@ tags:
     description: Signed plugin registry (`dis-campus-plugin/v1` & `dis-extension/v2`) and sandboxed command broker
   - name: admin
     description: RBAC operations console, school kill-switch, dual-person approval, finance reconciliation, and security audit
+x-dis-sync-e2ee-v1:
+  length_side_channel:
+    mitigation: CLIENT_FIXED_BUCKET_PADDING
+    padding_scheme: DIS_SYNC_SIZE_BUCKETS_POW4_V1
+    bucket_sizes_bytes: [1024, 4096, 16384, 65536, 262144, 1048576]
+    ciphertext_size_semantics: PADDED_BUCKET_BYTES_INCLUDING_AEAD_TAG
+    plaintext_length_visibility: BUCKET_UPPER_BOUND_ONLY
+    residual_metadata_visible: [bucket_size, mutation_count, mutation_timing, device_online_pattern]
+  vector_limits:
+    max_entries_per_blob: 512
+    counter_maximum: 2147483647
+    overflow_error: SYNC_VECTOR_OVERFLOW
+  quotas:
+    active_devices_per_user_max: 32
+    registered_devices_per_user_max: 256
+    live_blobs_per_user_max: 4096
+    live_padded_ciphertext_bytes_per_user_max: 268435456
+    sync_transfer_ingress_bytes_per_24h_per_user_max: 536870912
+    sync_transfer_egress_bytes_per_24h_per_user_max: 536870912
+  consent_withdrawal:
+    ciphertext_retention_days: 30
+    cursor_policy: INVALIDATE_ON_WITHDRAWAL_REQUIRE_CURSORLESS_RESYNC
+    device_policy: ACTIVE_DEVICES_AUTO_REVOKE_WITH_CONSENT_WITHDRAWN_AFTER_RETENTION_EXPIRY
+    export_policy: USER_INITIATED_CIPHERTEXT_AND_METADATA_EXPORT_UNTIL_DELETION
+    sync_metadata_deletion_policy: RETENTION_EXPIRY_ERASES_CIPHERTEXT_VECTORS_TOMBSTONES_AND_CURSORS
+    anti_resurrection_marker_policy: RETAINED_UNTIL_ACCOUNT_DATA_DELETION
 paths:
   /healthz:
     get:
@@ -4867,6 +4893,337 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/sync/devices:
+    get:
+      operationId: listSyncDevices
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SYNC_PERMISSION_DENIED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: List E2EE sync device registrations for the current user
+      description: |
+        Returns active and revoked sync device registrations owned by the authenticated cloud user. The response is account-security metadata only: it never contains ciphertext, plaintext, encryption keys, key encryption keys, session tokens, hardware serials, IMEI/SSAID, push tokens, or linked refresh-session identifiers. Device management remains available after E2EE sync consent is withdrawn so a user can still inspect and revoke a lost device. Example 87.
+      responses:
+        '200':
+          description: Sync device registration list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/sync/devices/{deviceId}:
+    put:
+      operationId: registerSyncDevice
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.register]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_INVALID, SYNC_DEVICE_CONFLICT, SYNC_DEVICE_REVOKED, SYNC_PERMISSION_DENIED, SYNC_QUOTA_EXCEEDED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.device.registered]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Register one client-generated sync device identity for E2EE block synchronization
+      description: |
+        Creates an immutable sync device registration for the authenticated cloud user. device_id is a fresh client-generated UUID for this installation, never a hardware serial, IMEI, SSAID, push token, or stable operating-system identifier. The device_id is permanently bound server-side to the authenticated user and the cloud session family present at registration; the binding is internal authorization metadata and is never returned. Registration requires an active E2EE_CLOUD_SYNC consent id whose document explicitly discloses ciphertext-only storage, fixed-size bucket padding, v1 resource quotas, and the withdrawal lifecycle. No plaintext, encryption key, key encryption key, private key, password, or key derivation secret is accepted or stored in any field.
+        The v1 device quotas are 32 ACTIVE devices and 256 total device registration records (ACTIVE plus REVOKED) per cloud user. Attempting to register a 33rd active device or a 257th total registration record fails with 403 SYNC_QUOTA_EXCEEDED. Revoked devices remain permanent security history and anti-reuse evidence, so they count toward the total registration-records quota even though they do not count toward the active-device quota.
+        Consent withdrawal lifecycle is explicit. Withdrawal immediately disables ciphertext upload, download, deletion, and incremental pull with SYNC_CONSENT_REQUIRED, while device list and device revocation remain available as account-security controls. Existing ciphertext and mutation metadata become inert: the server does not process them for synchronization while consent is withdrawn. They are retained for at most 30 days solely so the user can export ciphertext plus metadata or reauthorize without losing cloud state; export never contains plaintext or keys. Withdrawal invalidates every device-bound cursor and acknowledgement watermark. Reauthorization within the 30-day retention period preserves devices and ciphertext but requires every client to resync without a cursor. Thirty days after withdrawal without reauthorization, the server deletes ciphertext, version vectors, tombstone propagation metadata, cursors, and acknowledgement watermarks, and automatically revokes every still-active sync device with reason CONSENT_WITHDRAWN. Minimal anti-resurrection markers and revoked-device security records remain until account data deletion. Reauthorization after expiry starts from empty sync content state (anti-resurrection markers remain) and requires fresh device registrations. Account data deletion supersedes the grace period and erases all sync ciphertext, mutation metadata, anti-resurrection markers, cursors, and device registrations.
+        Replaying the same Idempotency-Key with the same request returns the original registration. Reusing an active device_id from another session family or with different immutable metadata is SYNC_DEVICE_CONFLICT; a revoked device_id is permanently closed and returns SYNC_DEVICE_REVOKED rather than being resurrected. Example 88.
+      parameters:
+        - $ref: '#/components/parameters/SyncDeviceIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterSyncDeviceRequest'
+      responses:
+        '201':
+          description: Device registration created and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '200':
+          description: Durable idempotent replay of the original registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Device id was previously revoked and is permanently closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: revokeSyncDevice
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.revoke]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.device.revoked]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Permanently revoke one E2EE sync device without deleting user ciphertext history
+      description: |
+        Revocation is a permanent tombstone for the device identity and is linearized with blob writes: every write durably committed before revocation remains part of the user's encrypted history, while every read, write, or incremental pull using the revoked device after the revocation commit fails closed with SYNC_DEVICE_REVOKED. The same device_id can never be registered again. The server atomically invalidates the internally bound cloud session family; when the caller revokes its own current device, this response is still completed but subsequent use of that session family is rejected. Revocation never deletes ciphertext blobs or version-vector authorship entries, because silently dropping the user's only copy would violate data preservation; other still-active devices retain access. Delete individual blobs or invoke account data deletion when erasure is intended. Repeating revocation for an already revoked device returns the current tombstone without emitting a second event. Example 89.
+      parameters:
+        - $ref: '#/components/parameters/SyncDeviceIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeSyncDeviceRequest'
+      responses:
+        '200':
+          description: Device revoked, already revoked, or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/sync/blobs/{blobId}:
+    put:
+      operationId: putSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_ENVELOPE_INVALID, SYNC_VECTOR_INVALID, SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT, SYNC_BLOB_TOO_LARGE, SYNC_BLOB_DELETED, SYNC_QUOTA_EXCEEDED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.blob.written]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Upload one encrypted sync blob version with strict version-vector compare-and-set semantics
+      description: |
+        Accepts one ciphertext-only replacement for a caller-scoped blob. This collection is scoped to the authenticated cloud_user_id rather than a school_id: school/profile separation is application plaintext and therefore remains inside encrypted blocks, because exposing it to the server would add metadata without any authorization benefit. The server stores at most one current version per blob_id and never sees plaintext, plaintext hashes, content titles, content types, encryption keys, key encryption keys, private keys, passwords, or key derivation secrets. ciphertext_base64 is the exact AES-256-GCM ciphertext plus authentication tag. The decoded ciphertext ceiling is 1,048,576 bytes including the tag. Clients must split larger logical objects into independently encrypted blocks before upload rather than asking the server to inspect or reassemble plaintext.
+        dis-sync-e2ee/v1 closes the exact-length side channel with fixed-size bucket padding. Before encryption the client builds a binary envelope of a big-endian unsigned 32-bit original plaintext byte length, plaintext bytes, and zero padding; the envelope length must be exactly bucket_size minus 16 bytes for the AEAD tag. The client chooses the smallest bucket from 1,024 / 4,096 / 16,384 / 65,536 / 262,144 / 1,048,576 bytes that fits the envelope. The resulting decoded ciphertext length including the tag must equal that bucket size. The server rejects any other decoded length as SYNC_ENVELOPE_INVALID, and ciphertext_size_bytes always means this padded bucket size rather than unpadded plaintext length. After decryption the client must validate the length prefix and zero padding and fail closed on malformed padding. The server still inevitably sees bucket size, mutation count, timing, and device online pattern; it must not infer or expose finer plaintext length.
+        The v1 resource quotas are 4,096 live blobs, 268,435,456 bytes of live padded ciphertext, and 32 ACTIVE devices per cloud user. A PUT that would exceed the live-blob or live-byte quota fails with 403 SYNC_QUOTA_EXCEEDED. Separate rolling 24-hour sync-transfer bandwidth quotas are 536,870,912 uncompressed ingress bytes and 536,870,912 uncompressed egress bytes per cloud user. Ingress counts every authenticated PUT request body once per HTTP attempt, even if later envelope or vector validation rejects it. Egress counts successful downloadSyncBlob and listSyncChanges response bodies. Device management and small mutation envelopes are outside this bulk-transfer quota and remain rate-limited. Upload or bulk-read excess fails with 429 SYNC_BANDWIDTH_QUOTA_EXCEEDED. Account data export may contain only this ciphertext plus metadata; account data deletion erases both, and neither path requires or permits server decryption.
+        A blob_id that has ever been tombstoned is permanently closed. PUT on that id returns 410 SYNC_BLOB_DELETED even after propagational tombstone metadata compacts, because the server retains a minimal anti-resurrection marker until account data deletion. There is no causal recreation under the same blob_id; clients must use a fresh random blob_id for a logically new object. Old ciphertext is never restored.
+        Version-vector acceptance is strict compare-and-set. base_vector must equal the current server vector as a logical device-id/counter map (empty when the blob does not exist), and writer_counter must be exactly the base counter for the uploading device plus one. The accepted vector is base_vector with only that writer entry advanced. If the base is stale, advanced, or concurrent with the server vector, the server rejects with 409 SYNC_VECTOR_CONFLICT; it never silently overwrites, merges, picks a winner, or stores a hidden sibling. A vector may contain at most 512 distinct device entries. A write that would introduce the 513th entry, or whose writer counter increment would exceed 2,147,483,647, fails closed with 409 SYNC_VECTOR_OVERFLOW; the server must not truncate, evict, wrap, reset, or reuse counters. The overflow rejection does not enter causality. Client recovery is client-side plaintext migration to a fresh blob_id using an active device within both limits, followed by a causally valid tombstone of the old blob when possible.
+        Version-vector CAS orders accepted server writes; it does not prove plaintext freshness or application logical version. In particular, the server cannot prevent an authorized device from presenting a correctly fast-forwarded vector while uploading older ciphertext, because it cannot inspect plaintext. AEAD associated-data binding prevents ciphertext transplant across blobs or key generations but does not prevent same-blob rollback by an authorized writer. Application plaintext must therefore carry its own logical version, revision, timestamp/manifest, or domain-specific conflict data inside the ciphertext, and clients must detect rollback, present conflicts, or require user resolution client-side.
+        The rejected writer keeps its local ciphertext, downloads the current remote version, presents both versions for user choice or merge, and retries with a fast-forward vector. A definitively rejected write never entered server causality, so the client may reuse its unpublished counter after resolution; when the outcome is uncertain the client must first reconcile with the same Idempotency-Key and canonical request rather than reusing the counter for different bytes. The 409 detail may carry current vector, sequence, and ciphertext digest metadata but never ciphertext. Replaying the same Idempotency-Key with the same canonical request returns the original accepted result even if the blob later advanced. Examples 90 and 91.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncBlobPutRequest'
+      responses:
+        '201':
+          description: First encrypted blob version accepted and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '200':
+          description: Subsequent encrypted blob version accepted or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Sync device was permanently revoked or blob id was permanently tombstoned and closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: Decoded ciphertext exceeds the 1,048,576-byte sync block ceiling
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: downloadSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_BLOB_DELETED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Download the current ciphertext and sync metadata for one encrypted blob
+      description: |
+        Returns the exact current ciphertext bytes as base64 together with the non-secret encryption envelope and causal metadata needed to verify and decrypt client-side. The server never decrypts, validates plaintext semantics, derives searchable content metadata, or learns anything finer than the fixed padded bucket size. Clients must authenticate the ciphertext before use, validate the fixed-bucket plaintext padding envelope, treat authentication or padding failure as corruption or attack rather than partially applying plaintext, and compare blob_id/key_id/nonce binding as specified by SyncEncryptionEnvelope. A tombstoned blob returns 410 SYNC_BLOB_DELETED without ciphertext. Successful downloads count uncompressed response body bytes against the rolling 24-hour egress quota; excess fails with 429 SYNC_BANDWIDTH_QUOTA_EXCEEDED. Version metadata orders server writes but does not prove plaintext freshness or prevent an authorized writer rollback; plaintext logical-version and rollback detection remain client-side responsibilities. Example 91.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+      responses:
+        '200':
+          description: Current encrypted blob payload and metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobDownloadEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Blob is tombstoned or sync device was permanently revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      operationId: deleteSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.delete]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_VECTOR_INVALID, SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.blob.deleted]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Tombstone one encrypted blob with the same strict version-vector compare-and-set rules
+      description: |
+        Deletes are causal writes, not silent local erasure. The request uses the same base_vector and writer_counter rules as PUT; a stale or concurrent delete is rejected with SYNC_VECTOR_CONFLICT so deletion cannot erase an unseen concurrent update. Counter increment overflow or a write that would require a 513th vector entry fails closed with SYNC_VECTOR_OVERFLOW without entering causality. On the first accepted tombstone the ciphertext becomes unavailable and is removed from primary durable storage in the same atomic commit; asynchronous backups, if any, remain ciphertext-only and age out under the deployment backup rotation while never becoming readable plaintext.
+        The server retains blob_id, vector, author, sequence, timestamp, and compaction metadata needed to propagate deletion. Tombstone propagation metadata is retained for at least 30 days and until every still-active registered device has acknowledged a changes cursor beyond the tombstone sequence or has been revoked; account data deletion supersedes this retention and erases the user's sync metadata and ciphertext history. The blob_id itself is permanently closed: a later PUT cannot resurrect or causally recreate it and receives SYNC_BLOB_DELETED. A minimal anti-resurrection marker survives tombstone compaction and consent-retention cleanup until account data deletion. Clients must allocate a fresh random blob_id for a logically new object.
+        Deleting an already tombstoned blob with the current vector returns the existing tombstone without a second mutation or event. Deleting a never-existing blob returns 404 SYNC_BLOB_NOT_FOUND. Example 92.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncBlobDeleteRequest'
+      responses:
+        '200':
+          description: Tombstone accepted, existing tombstone returned, or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Sync device was permanently revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/sync/changes:
+    get:
+      operationId: listSyncChanges
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE incremental sync surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_CURSOR_INVALID, SYNC_CURSOR_EXPIRED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Pull encrypted-sync mutation metadata incrementally with a device-bound cursor
+      description: |
+        Returns mutation metadata in ascending per-user change_sequence order. Rows contain blob_id, UPSERT/TOMBSTONE kind, version vector, author device, server sequence, non-secret encryption metadata, padded ciphertext digest/size bucket, and commit time; rows never contain ciphertext bytes, plaintext, plaintext hashes, keys, key encryption keys, key derivation secrets, or exact unpadded plaintext length. Clients download ciphertext separately from the blob endpoint after deciding that a row is relevant. Successful response bodies count uncompressed bytes against the rolling 24-hour sync-transfer egress quota; excess fails with 429 SYNC_BANDWIDTH_QUOTA_EXCEEDED.
+        Pagination is explicitly closed. limit is at most 100 and data never contains more than 100 rows. meta.has_more is the authoritative continuation signal. meta.next_cursor is always non-null, opaque, user-scoped, and bound to X-Dis-Sync-Device-Id. When has_more is true the client passes exactly that cursor in the next request to continue the same scan. When has_more is false the bounded scan is complete and next_cursor is the terminal position at meta.snapshot_epoch that may be used as the cursor for a later incremental pull. The server must not return an empty data page with has_more=true; an empty page is terminal exactly when has_more=false. Clients must not infer termination from emptiness, token repetition, or page count independent of has_more.
+        meta.snapshot_epoch is the fixed per-user change_sequence upper bound selected by the server for the first request of a scan and repeated unchanged on every continuation page. A cursorless scan returns a current-state snapshot as of that epoch containing every live blob and every uncompacted tombstone rather than obsolete intermediate versions. A scan with a cursor returns mutation rows after that cursor position and at or below the epoch. Because change_sequence is assigned in commit order, mutations committed during pagination receive sequences greater than the fixed epoch, are excluded from every page of that scan, and are returned by a later pull after the terminal cursor. If the server cannot continue the represented epoch without skipping required rows it must fail with SYNC_CURSOR_EXPIRED rather than silently omitting rows.
+        meta.compaction_epoch is the server's current contiguous per-user mutation-metadata compaction watermark C. Rows with change_sequence <= C may be absent; rows with change_sequence > C must remain available. The server may advance C only across a contiguous prefix whose rows are all at least 30 days old and, for every device that was still active when each row was committed, either that device has acknowledged a cursor beyond the row or that device has since been revoked. Live current state and permanent anti-resurrection markers are never removed by compaction. A cursor whose position is below C is SYNC_CURSOR_EXPIRED; a cursor at or above C remains valid subject to the normal malformed/cross-device checks.
+        Cursor tokens must be persisted locally only after the page has been applied durably and must never be copied between devices. Presenting a previously issued cursor on a later pull is the client's acknowledgement that rows through that cursor were durably applied; mere issuance of a cursor is not acknowledgement. The server may use only these acknowledgement watermarks, together with device revocation and the minimum 30-day mutation-metadata retention rule, when advancing compaction_epoch; if a device never acknowledges, required uncompacted mutation metadata remains rather than risking resurrection or lost deletion propagation. A syntactically malformed or cross-device cursor is SYNC_CURSOR_INVALID. A well-formed cursor that is too old for retained mutation metadata is SYNC_CURSOR_EXPIRED; the client must discard only its sync cursor, resync without cursor, and reconcile locally. It must not delete local user data merely because the server cursor expired, and must preserve locally dirty or never-acknowledged objects during that reconciliation.
+        The cursor is an ordering optimization and never replaces causal version-vector comparison. Writers must still use the exact current vector from downloaded metadata before PUT or DELETE. Presenting a terminal cursor on a later request starts a new incremental scan with a fresh snapshot_epoch; it does not reopen the completed scan. Vector CAS does not prove plaintext freshness and cannot stop an authorized device from uploading older ciphertext with a fast-forwarded vector; clients must enforce plaintext logical-version and rollback rules inside the encrypted application payload. Example 93.
+      parameters:
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/SyncCursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Encrypted-sync mutation metadata page; meta.has_more is authoritative and meta.next_cursor is the non-null durable scan position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncChangeListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Sync device was permanently revoked or cursor expired beyond retained mutation metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 components:
   securitySchemes:
     bearerAuth:
@@ -5086,6 +5443,36 @@ components:
       required: true
       schema:
         type: string
+    SyncDeviceIdParam:
+      name: deviceId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncDeviceIdValue'
+      description: Client-generated sync device UUID percent-encoded as one path segment.
+    SyncBlobIdParam:
+      name: blobId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncBlobIdValue'
+      description: Client-generated opaque blob UUID percent-encoded as one path segment.
+    XDisSyncDeviceIdHeader:
+      name: X-Dis-Sync-Device-Id
+      in: header
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncDeviceIdValue'
+      description: Registered active sync device making this ciphertext read or write. The server compares it with the authenticated user and internal registration binding.
+    SyncCursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 1024
+      description: Opaque user-scoped and device-bound sync scan position. The client must pass the exact server-issued token unchanged and must never copy it between devices.
   responses:
     BadRequest:
       description: Invalid request parameters or schema validation failure
@@ -5481,6 +5868,7 @@ components:
             - SERVICE_FEE_TERMS
             - PARCEL_CLOUD_BACKUP
             - PARCEL_AI_ASSISTANT
+            - E2EE_CLOUD_SYNC
         document_version:
           type: string
         document_sha256:
@@ -9578,3 +9966,334 @@ components:
             type: object
         meta:
           $ref: '#/components/schemas/ResponseMeta'
+    SyncDeviceIdValue:
+      type: string
+      format: uuid
+      description: Fresh client-generated installation UUID. It is not a hardware serial, IMEI, SSAID, push token, or stable operating-system identifier.
+    SyncDevicePlatform:
+      type: string
+      enum: [ANDROID]
+      description: v1 has an Android implementation only. Additional platforms require a backwards-compatible contract revision rather than informal free text.
+    SyncDeviceStatus:
+      type: string
+      enum: [ACTIVE, REVOKED]
+    SyncDeviceRevocationReason:
+      type: string
+      enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY, CONSENT_WITHDRAWN]
+    SyncDeviceRevocationRequestReason:
+      type: string
+      enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY]
+    RegisterSyncDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [consent_id, platform, sync_protocol_version]
+      properties:
+        consent_id:
+          type: string
+          format: uuid
+          description: Active consent record whose purpose is E2EE_CLOUD_SYNC. The linked consent document must disclose ciphertext-only server storage, fixed-size bucket padding, v1 resource quotas, cross-device sync processing, and the withdrawal retention/deletion/reauthorization lifecycle.
+        device_label:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Optional user-chosen management label. Clients must not auto-populate precise hardware serials, phone numbers, student numbers, or device-location text.
+        platform:
+          $ref: '#/components/schemas/SyncDevicePlatform'
+        sync_protocol_version:
+          type: integer
+          const: 1
+      description: Immutable registration metadata. No encryption key, private key, password, session token, hardware identifier, or plaintext sync payload field is permitted.
+    RevokeSyncDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          $ref: '#/components/schemas/SyncDeviceRevocationRequestReason'
+    SyncDevice:
+      type: object
+      additionalProperties: false
+      required: [device_id, status, device_label, platform, sync_protocol_version, registered_at, revoked_at, revocation_reason, last_seen_at]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        status:
+          $ref: '#/components/schemas/SyncDeviceStatus'
+        device_label:
+          type: [string, 'null']
+          maxLength: 80
+        platform:
+          $ref: '#/components/schemas/SyncDevicePlatform'
+        sync_protocol_version:
+          type: integer
+          const: 1
+        registered_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+        revocation_reason:
+          anyOf:
+            - $ref: '#/components/schemas/SyncDeviceRevocationReason'
+            - type: 'null'
+        last_seen_at:
+          type: [string, 'null']
+          format: date-time
+          description: Last time this device was accepted for a sync read or write. It is operational metadata only and is never derived from plaintext payload inspection.
+    SyncResponseMeta:
+      type: object
+      additionalProperties: false
+      required: [request_id, api_version]
+      properties:
+        request_id:
+          type: string
+        api_version:
+          type: string
+          default: v1
+    SyncDeviceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncDevice'
+        meta:
+          $ref: '#/components/schemas/SyncResponseMeta'
+    SyncDeviceListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/SyncDevice'
+        meta:
+          $ref: '#/components/schemas/SyncResponseMeta'
+    SyncBlobIdValue:
+      type: string
+      format: uuid
+      description: Fresh client-generated opaque blob identifier. It must be random or otherwise non-semantics-bearing; clients must not encode plaintext titles, entity types, school ids, student numbers, or timestamps in it.
+    SyncVersionVectorEntry:
+      type: object
+      additionalProperties: false
+      required: [device_id, counter]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Monotone per-(blob_id,device_id) logical write counter. It is not a wall-clock timestamp and is not global across unrelated blobs.
+    SyncVersionVector:
+      type: array
+      maxItems: 512
+      items:
+        $ref: '#/components/schemas/SyncVersionVectorEntry'
+      description: Logical set of device-id/counter entries. device_id values must be unique and are serialized in ascending lexical UUID order for deterministic comparison and display. Vector comparison is always performed after conversion to a map, never by array position. A vector dominates another when every counter is greater than or equal and at least one is strictly greater; equal vectors are the same causal position; otherwise the versions are concurrent. Historical entries for revoked devices remain valid authorship evidence. maxItems 512 is a hard per-blob protocol bound; a write introducing a 513th distinct device entry or advancing a counter beyond 2,147,483,647 fails with SYNC_VECTOR_OVERFLOW rather than truncating, evicting, wrapping, or resetting entries.
+    SyncEncryptionEnvelope:
+      type: object
+      additionalProperties: false
+      required: [format, cipher_suite, padding_scheme, key_id, nonce_base64]
+      properties:
+        format:
+          type: string
+          const: dis-sync-e2ee/v1
+        cipher_suite:
+          type: string
+          const: AES-256-GCM
+        padding_scheme:
+          type: string
+          const: DIS_SYNC_SIZE_BUCKETS_POW4_V1
+          description: Required fixed-bucket length padding scheme. Before encryption the client uses a big-endian unsigned 32-bit original-plaintext-length prefix plus plaintext plus zero bytes so plaintext input length is bucket_size minus the 16-byte AEAD tag. Valid decoded ciphertext bucket sizes including the tag are 1,024 / 4,096 / 16,384 / 65,536 / 262,144 / 1,048,576 bytes. The server rejects any other length and learns only the bucket upper bound, never exact unpadded plaintext length.
+        key_id:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9._:-]+$
+          description: Opaque non-secret client key identifier used to select the correct user-controlled key. It must not be a password, key, key encryption key, private key, plaintext hash, or unkeyed password hash. Cross-device key provisioning remains a client-side backup/recovery concern outside this server contract.
+        nonce_base64:
+          type: string
+          pattern: ^[A-Za-z0-9+/]{16}$
+          description: Base64-encoded 12-byte AES-GCM nonce without padding. Clients must never reuse a nonce under the same key. The nonce is non-secret metadata and is safe for the server to store.
+      description: Non-secret encryption metadata. Clients must use UTF-8 text "dis-sync-e2ee/v1\n<lowercase blob_id>\n<key_id>\n" as AEAD associated data so ciphertext cannot be transplanted across blobs or key generations. The server stores these fields but must not attempt decryption or plaintext inference. The associated-data binding prevents transplant, not same-blob rollback by an authorized writer; plaintext logical-version and rollback detection remain client responsibilities.
+    SyncBlobPutRequest:
+      type: object
+      additionalProperties: false
+      required: [encryption, ciphertext_base64, ciphertext_sha256, base_vector, writer_counter]
+      properties:
+        encryption:
+          $ref: '#/components/schemas/SyncEncryptionEnvelope'
+        ciphertext_base64:
+          type: string
+          minLength: 1368
+          maxLength: 1398104
+          pattern: ^[A-Za-z0-9+/]+={0,2}$
+          description: Base64 of exact ciphertext bytes with the 16-byte AES-GCM authentication tag appended. The decoded length including the tag must be exactly one fixed bucket size among 1,024 / 4,096 / 16,384 / 65,536 / 262,144 / 1,048,576 bytes. The maximum base64 length corresponds to the 1,048,576-byte bucket; implementations must verify canonical base64 padding, decoded length, and bucket membership rather than relying on characters alone.
+        ciphertext_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          description: Lowercase SHA-256 of the exact decoded ciphertext bytes. This is never a plaintext hash.
+        base_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        writer_counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Next per-(blob_id,device_id) counter for the device named by X-Dis-Sync-Device-Id; it must be exactly the base vector entry for that device plus one. If that base entry is already 2,147,483,647 no valid next counter exists; the server rejects the write as SYNC_VECTOR_OVERFLOW before treating writer_counter as a usable fast-forward value.
+    SyncBlobDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [base_vector, writer_counter]
+      properties:
+        base_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        writer_counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Next per-(blob_id,device_id) counter for the deleting device. If its base entry is already 2,147,483,647 no valid next counter exists and the server returns SYNC_VECTOR_OVERFLOW rather than wrapping or resetting it.
+    SyncBlobChangeKind:
+      type: string
+      enum: [UPSERT, TOMBSTONE]
+    SyncBlobMetadata:
+      type: object
+      additionalProperties: false
+      required: [blob_id, change_kind, version_vector, author_device_id, change_sequence, encryption, ciphertext_sha256, ciphertext_size_bytes, committed_at]
+      properties:
+        blob_id:
+          $ref: '#/components/schemas/SyncBlobIdValue'
+        change_kind:
+          $ref: '#/components/schemas/SyncBlobChangeKind'
+        version_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        author_device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        change_sequence:
+          type: integer
+          minimum: 1
+          description: Server-assigned per-user monotone mutation sequence used only for incremental ordering; it does not replace causal version-vector comparison.
+        encryption:
+          anyOf:
+            - $ref: '#/components/schemas/SyncEncryptionEnvelope'
+            - type: 'null'
+          description: Present for UPSERT, null for TOMBSTONE.
+        ciphertext_sha256:
+          type: [string, 'null']
+          pattern: ^[0-9a-f]{64}$
+          description: Present for UPSERT, null for TOMBSTONE; always a ciphertext digest, never a plaintext digest.
+        ciphertext_size_bytes:
+          type: [integer, 'null']
+          enum: [1024, 4096, 16384, 65536, 262144, 1048576, null]
+          description: Exact padded decoded ciphertext bucket size in bytes including the authentication tag; null for TOMBSTONE. Because dis-sync-e2ee/v1 requires fixed-bucket padding, this value is never the exact unpadded plaintext length.
+        committed_at:
+          type: string
+          format: date-time
+    SyncBlobMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncBlobMetadata'
+        meta:
+          $ref: '#/components/schemas/SyncResponseMeta'
+    SyncBlobDownload:
+      type: object
+      additionalProperties: false
+      required: [metadata, ciphertext_base64]
+      properties:
+        metadata:
+          $ref: '#/components/schemas/SyncBlobMetadata'
+        ciphertext_base64:
+          type: string
+          minLength: 1368
+          maxLength: 1398104
+          pattern: ^[A-Za-z0-9+/]+={0,2}$
+          description: Exact current ciphertext bytes as base64. The decoded length including the AEAD tag is always one of the fixed padded bucket sizes. Clients must compare ciphertext_sha256 before decryption, validate the padded plaintext envelope, and fail closed on authentication or padding failure.
+    SyncBlobDownloadEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncBlobDownload'
+        meta:
+          $ref: '#/components/schemas/SyncResponseMeta'
+    SyncChangePageMeta:
+      type: object
+      additionalProperties: false
+      required: [request_id, api_version, has_more, next_cursor, snapshot_epoch, compaction_epoch]
+      properties:
+        request_id:
+          type: string
+        api_version:
+          type: string
+          default: v1
+        has_more:
+          type: boolean
+          description: Authoritative continuation signal for the bounded scan. true means next_cursor continues the same snapshot_epoch; false means the scan is complete even when data is empty.
+        next_cursor:
+          type: string
+          minLength: 8
+          maxLength: 1024
+          description: Always non-null opaque user-scoped and device-bound scan position. When has_more=false it is the terminal position at snapshot_epoch for a later incremental pull; it is never a permission to copy cursors between devices.
+        snapshot_epoch:
+          type: integer
+          minimum: 0
+          description: Fixed per-user change_sequence upper bound for this scan. Mutations committed after this epoch are excluded from every page and returned after the terminal cursor.
+        compaction_epoch:
+          type: integer
+          minimum: 0
+          description: Contiguous per-user mutation-metadata compaction watermark C. Rows at or below C may be absent, while rows after C must remain available for incremental convergence.
+    SyncChangeListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/SyncBlobMetadata'
+          description: Mutation metadata rows in ascending change_sequence order, at most the limit ceiling of 100. Ciphertext bytes are intentionally absent; use downloadSyncBlob for live UPSERT rows.
+        meta:
+          $ref: '#/components/schemas/SyncChangePageMeta'

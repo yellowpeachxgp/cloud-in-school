@@ -961,9 +961,20 @@ const EXPECTED_CT06_PLANNED_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/admin/content-packs/{packId}/versions/{version}/retire", operationId: "retireContentPackVersion", auth: "bearer" }
 ]);
 
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT06_PLANNED_ROUTES.length;
 
-test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, CT-05 stays reserved, and CT-06 stays planned/runtime-inert", () => {
+const EXPECTED_CT07_PLANNED_ROUTES = Object.freeze([
+  { method: "GET", path: "/api/v1/sync/devices", operationId: "listSyncDevices", auth: "bearer" },
+  { method: "PUT", path: "/api/v1/sync/devices/{deviceId}", operationId: "registerSyncDevice", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/sync/devices/{deviceId}", operationId: "revokeSyncDevice", auth: "bearer" },
+  { method: "PUT", path: "/api/v1/sync/blobs/{blobId}", operationId: "putSyncBlob", auth: "bearer" },
+  { method: "GET", path: "/api/v1/sync/blobs/{blobId}", operationId: "downloadSyncBlob", auth: "bearer" },
+  { method: "DELETE", path: "/api/v1/sync/blobs/{blobId}", operationId: "deleteSyncBlob", auth: "bearer" },
+  { method: "GET", path: "/api/v1/sync/changes", operationId: "listSyncChanges", auth: "bearer" }
+]);
+
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT06_PLANNED_ROUTES.length + EXPECTED_CT07_PLANNED_ROUTES.length;
+
+test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, CT-05 stays reserved, and CT-06/CT-07 stay planned/runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -975,8 +986,8 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, 
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 10 CT-06 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 10 CT-06 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 10 CT-06 + 7 CT-07 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 10 CT-06 + 7 CT-07 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -1022,6 +1033,14 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, 
     ct06Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
     EXPECTED_CT06_PLANNED_ROUTES,
     "CT-06 planned inventory must exactly match the approved content-pack catalog/review route slice"
+  );
+
+  const ct07Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-07");
+  assert.equal(ct07Inventory.length, EXPECTED_CT07_PLANNED_ROUTES.length, "CT-07 planned inventory entries must be explicitly countable");
+  assert.deepEqual(
+    ct07Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT07_PLANNED_ROUTES,
+    "CT-07 planned inventory must exactly match the approved E2EE sync device/blob/changes route slice"
   );
 
   const coreByKey = byRouteKey(coreRegistered);
@@ -1128,4 +1147,91 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, 
     "[CONTRACT-PARITY] active=151 planned=" + plannedOpenApi.length +
       " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length + " moments_extension=12"
   );
+});
+
+
+test("Contract Parity: CT-07 second-review privacy, pagination, quota, and lifecycle closures are machine-frozen", () => {
+  const openApi = loadOpenApiText();
+  const asyncApi = fs.readFileSync(path.join(REPO_ROOT, "contracts/asyncapi/events-v1.yaml"), "utf8");
+  const errorCatalog = fs.readFileSync(path.join(REPO_ROOT, "contracts/errors/error-catalog.yaml"), "utf8");
+  const examples = fs.readFileSync(path.join(REPO_ROOT, "contracts/examples/cloud-api-examples.http"), "utf8");
+
+  function assertIncludes(text, fragments, label) {
+    for (const fragment of fragments) {
+      assert.ok(text.includes(fragment), label + " missing required fragment: " + fragment.slice(0, 120));
+    }
+  }
+
+  assertIncludes(openApi, [
+    "x-dis-sync-e2ee-v1:\n  length_side_channel:",
+    "padding_scheme: DIS_SYNC_SIZE_BUCKETS_POW4_V1",
+    "bucket_sizes_bytes: [1024, 4096, 16384, 65536, 262144, 1048576]",
+    "plaintext_length_visibility: BUCKET_UPPER_BOUND_ONLY",
+    "required: [format, cipher_suite, padding_scheme, key_id, nonce_base64]",
+    "const: DIS_SYNC_SIZE_BUCKETS_POW4_V1",
+    "enum: [1024, 4096, 16384, 65536, 262144, 1048576, null]",
+    "ciphertext_size_bytes always means this padded bucket size rather than unpadded plaintext length"
+  ], "CT-07 length side-channel closure");
+
+  assertIncludes(openApi, [
+    "meta.has_more is the authoritative continuation signal",
+    "The server must not return an empty data page with has_more=true",
+    "meta.snapshot_epoch is the fixed per-user change_sequence upper bound",
+    "mutations committed during pagination receive sequences greater than the fixed epoch",
+    "meta.compaction_epoch is the server's current contiguous per-user mutation-metadata compaction watermark",
+    "A cursor whose position is below C is SYNC_CURSOR_EXPIRED",
+    "- $ref: '#/components/parameters/SyncCursorParam'",
+    "maxItems: 100",
+    "required: [request_id, api_version, has_more, next_cursor, snapshot_epoch, compaction_epoch]"
+  ], "CT-07 pagination closure");
+
+  assertIncludes(openApi, [
+    "x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]",
+    "SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT, SYNC_BLOB_TOO_LARGE, SYNC_BLOB_DELETED, SYNC_QUOTA_EXCEEDED, SYNC_BANDWIDTH_QUOTA_EXCEEDED",
+    "SYNC_BLOB_NOT_FOUND, SYNC_BLOB_DELETED, SYNC_BANDWIDTH_QUOTA_EXCEEDED",
+    "SYNC_VECTOR_INVALID, SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT",
+    "SYNC_CURSOR_EXPIRED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED",
+    "active_devices_per_user_max: 32",
+    "registered_devices_per_user_max: 256",
+    "live_blobs_per_user_max: 4096",
+    "live_padded_ciphertext_bytes_per_user_max: 268435456",
+    "sync_transfer_ingress_bytes_per_24h_per_user_max: 536870912",
+    "sync_transfer_egress_bytes_per_24h_per_user_max: 536870912"
+  ], "CT-07 error and quota closure");
+
+  assertIncludes(openApi, [
+    "A blob_id that has ever been tombstoned is permanently closed",
+    "There is no causal recreation under the same blob_id",
+    "A write that would introduce the 513th entry",
+    "writer counter increment would exceed 2,147,483,647",
+    "does not prove plaintext freshness or application logical version",
+    "cannot prevent an authorized device from presenting a correctly fast-forwarded vector while uploading older ciphertext",
+    "Consent withdrawal lifecycle is explicit",
+    "Withdrawal invalidates every device-bound cursor and acknowledgement watermark",
+    "automatically revokes every still-active sync device with reason CONSENT_WITHDRAWN",
+    "Reauthorization after expiry starts from empty sync content state"
+  ], "CT-07 tombstone, vector, CAS, and consent lifecycle closure");
+
+  assertIncludes(asyncApi, [
+    "pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:device:[0-9a-fA-F-]{36}:(registered|revoked):v1$'",
+    "pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:blob:[0-9a-fA-F-]{36}:change:[0-9]+:written:v1$'",
+    "pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:blob:[0-9a-fA-F-]{36}:change:[0-9]+:deleted:v1$'",
+    "padding_scheme, key_id, nonce_base64, ciphertext_sha256, ciphertext_size_bytes]",
+    "const: DIS_SYNC_SIZE_BUCKETS_POW4_V1",
+    "enum: [1024, 4096, 16384, 65536, 262144, 1048576]",
+    "CONSENT_WITHDRAWN"
+  ], "CT-07 AsyncAPI closure");
+  const syncEventSchemas = asyncApi.slice(asyncApi.indexOf("    SyncDeviceLifecycleEvent:"));
+  assert.equal((syncEventSchemas.match(/additionalProperties: false/g) || []).length, 5, "CT-07 AsyncAPI three payloads plus two nested vector entries must be additionalProperties:false");
+
+  assertIncludes(errorCatalog, [
+    "code: SYNC_QUOTA_EXCEEDED",
+    "code: SYNC_BANDWIDTH_QUOTA_EXCEEDED",
+    "code: SYNC_VECTOR_OVERFLOW"
+  ], "CT-07 error catalog closure");
+  assertIncludes(examples, [
+    "\"padding_scheme\": \"DIS_SYNC_SIZE_BUCKETS_POW4_V1\"",
+    "1,024-byte synthetic ciphertext+tag shape example in the smallest fixed bucket",
+    "meta.has_more is authoritative"
+  ], "CT-07 example closure");
 });
