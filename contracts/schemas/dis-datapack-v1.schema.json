@@ -1,0 +1,389 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://campus.yellowpeachxgp.com/schemas/dis-datapack-v1.schema.json",
+  "title": "Day in School Signed Data Pack (dis-datapack/v1)",
+  "description": "Unsigned canonical JSON payload for a distributable school data pack. Catalog distribution carries a detached Ed25519 signature using DIS_DATAPACK_CANONICAL_JSON_SHA256_V1: UTF-8 format line dis-datapack/v1, LF, lowercase SHA-256 hex of the RFC-8785-canonical bytes of this document, LF. Exact-byte canonicality is mandatory: implementations must require the artifact UTF-8 bytes to equal RFC8785(parse(bytes)) before acceptance, so semantically equivalent whitespace, key-order, string-escape, or number variants are rejected rather than normalized into acceptance. Android's existing Json.canonical BigDecimal normalization is not RFC 8785/JCS and must not be reused for this datapack canonicalizer. This schema intentionally contains no executable content and no signature field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "packId",
+    "schoolId",
+    "kind",
+    "version",
+    "sources",
+    "verifiedAt",
+    "reviewBy",
+    "maintainers",
+    "items"
+  ],
+  "properties": {
+    "format": { "const": "dis-datapack/v1" },
+    "packId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+      "description": "Stable id normally shaped as <schoolId>.<topic>; because schoolId never contains a dot, loaders must additionally require the first dot-separated segment to equal the complete schoolId."
+    },
+    "schoolId": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$",
+      "description": "Stable school scope id. Dots are forbidden, matching the PluginSchoolId/Android SchoolId direction, so the first dot-separated packId segment unambiguously identifies the complete schoolId."
+    },
+    "kind": {
+      "enum": [
+        "procedure-guide",
+        "opportunity-catalog",
+        "facility-catalog",
+        "indoor-graph",
+        "period-preset",
+        "pharmacy-catalog"
+      ]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "verifiedAt": { "type": "string", "format": "date" },
+    "reviewBy": {
+      "type": "string",
+      "format": "date",
+      "description": "After this date clients must display the data as needing re-verification even if the pack remains installed."
+    },
+    "maintainers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 120,
+        "pattern": "^[a-z0-9-]+:[^\\s]+$"
+      }
+    },
+    "verificationLevel": {
+      "enum": ["UNVERIFIED", "SOURCE_CONFIRMED", "MOCK_TESTED", "DEVICE_TESTED", "SCHOOL_VERIFIED", "DISTRIBUTION_READY"],
+      "default": "UNVERIFIED",
+      "description": "D1 public-source maintainer/agent compiled data is normally UNVERIFIED until independently checked. Catalog publication never upgrades this field implicitly."
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/itemBase" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "procedure-guide" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/procedureGuideItem" } } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "opportunity-catalog" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/opportunityCatalogItem" } } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "facility-catalog" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/facilityCatalogItem" } } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "indoor-graph" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/indoorGraphItem" } } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "period-preset" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/periodPresetItem" } } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "pharmacy-catalog" } }, "required": ["kind"] },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/pharmacyCatalogItem" } } } }
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "title", "retrievedAt"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "retrievedAt": { "type": "string", "format": "date" }
+      }
+    },
+    "provenanceOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/source" }
+        },
+        "verifiedAt": { "type": "string", "format": "date" },
+        "reviewBy": { "type": "string", "format": "date" },
+        "verificationLevel": {
+          "enum": ["UNVERIFIED", "SOURCE_CONFIRMED", "MOCK_TESTED", "DEVICE_TESTED", "SCHOOL_VERIFIED", "DISTRIBUTION_READY"]
+        }
+      }
+    },
+    "itemBase": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$"
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "summary": { "type": "string", "maxLength": 500 },
+        "provenance": { "$ref": "#/$defs/provenanceOverride" }
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "required": { "type": "boolean", "default": true },
+        "validDays": { "type": ["integer", "null"], "minimum": 1, "maximum": 3650 },
+        "note": { "type": ["string", "null"], "maxLength": 500 }
+      }
+    },
+    "contact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": { "enum": ["office", "phone", "email", "website"] },
+        "value": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "label": { "type": ["string", "null"], "maxLength": 120 }
+      }
+    },
+    "procedureStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "instruction"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "instruction": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "placeRef": { "type": ["string", "null"], "maxLength": 240 },
+        "estimatedMinutes": { "type": ["integer", "null"], "minimum": 0, "maximum": 10080 }
+      }
+    },
+    "procedureQuestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "options"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "label"],
+            "properties": {
+              "value": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "nextStepId": { "type": ["string", "null"], "maxLength": 80 }
+            }
+          }
+        }
+      }
+    },
+    "procedureGuideItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "steps"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/procedureStep" }
+            },
+            "questions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/procedureQuestion" }
+            },
+            "materials": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/material" }
+            },
+            "placeRef": { "type": ["string", "null"], "maxLength": 240 },
+            "officeHours": { "type": ["string", "null"], "maxLength": 240 },
+            "contacts": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/contact" }
+            },
+            "dependsOn": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "maxLength": 120 }
+            }
+          }
+        }
+      ]
+    },
+    "opportunityCatalogItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "category", "requirements", "materials"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "category": { "enum": ["certification", "competition", "grant", "scholarship", "program"] },
+            "organizer": { "type": ["string", "null"], "maxLength": 200 },
+            "deadlineAt": { "type": ["string", "null"], "format": "date-time" },
+            "requirements": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "text"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+                  "text": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "computable": { "type": "boolean", "default": false }
+                }
+              }
+            },
+            "materials": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/material" }
+            },
+            "applicationUrl": { "type": ["string", "null"], "format": "uri", "pattern": "^https://" }
+          }
+        }
+      ]
+    },
+    "facilityCatalogItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "facilityType", "placeRef"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "facilityType": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "placeRef": { "type": "string", "minLength": 3, "maxLength": 240 },
+            "capabilities": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "maxLength": 80 }
+            },
+            "openingHours": { "type": ["string", "null"], "maxLength": 240 },
+            "accessNotes": { "type": ["string", "null"], "maxLength": 500 }
+          }
+        }
+      ]
+    },
+    "indoorGraphItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "itemType"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "itemType": { "enum": ["node", "edge", "level"] },
+            "placeRef": { "type": ["string", "null"], "maxLength": 240 },
+            "levelRef": { "type": ["string", "null"], "maxLength": 120 },
+            "nodeKind": { "type": ["string", "null"], "enum": ["room", "corridor", "stairs", "elevator", "entrance", "junction", null] },
+            "latitude": { "type": ["number", "null"], "minimum": -90, "maximum": 90 },
+            "longitude": { "type": ["number", "null"], "minimum": -180, "maximum": 180 },
+            "fromNodeId": { "type": ["string", "null"], "maxLength": 120 },
+            "toNodeId": { "type": ["string", "null"], "maxLength": 120 },
+            "distanceMeters": { "type": ["number", "null"], "minimum": 0, "maximum": 10000 },
+            "accessible": { "type": ["boolean", "null"] }
+          }
+        }
+      ]
+    },
+    "periodPresetItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "periods"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "periods": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["index", "start", "end"],
+                "properties": {
+                  "index": { "type": "integer", "minimum": 1, "maximum": 40 },
+                  "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+                  "end": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pharmacyCatalogItem": {
+      "allOf": [
+        { "$ref": "#/$defs/itemBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "category"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9._/-]{0,119}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "summary": { "type": "string", "maxLength": 500 },
+            "provenance": { "$ref": "#/$defs/provenanceOverride" },
+            "category": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "specification": { "type": ["string", "null"], "maxLength": 160 },
+            "usageNote": { "type": ["string", "null"], "maxLength": 500 },
+            "stockState": {
+              "enum": ["UNKNOWN", "LISTED_ONLY", "REPORTED_AVAILABLE", "REPORTED_UNAVAILABLE"],
+              "default": "UNKNOWN"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

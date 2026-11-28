@@ -8,6 +8,10 @@ import {
   partitionByStatus,
   routeKey
 } from "./contract-utils.mjs";
+import {
+  analyzeYamlStrictParserSelfTest,
+  analyzeYamlSyntax
+} from "./strict-yaml.mjs";
 
 const rootDir = process.cwd();
 
@@ -37,11 +41,14 @@ const openApiText = fs.readFileSync(openApiPath, "utf8");
 assert(openApiText.startsWith("openapi: 3.1.2"), "OpenAPI version must be >= 3.1.2");
 
 assertYamlDuplicateKeyScannerSelfTest();
+assertStrictYamlParserSelfTest();
 const contractYamlFiles = collectYamlFiles(path.join(rootDir, "contracts"));
 assert(contractYamlFiles.length >= 5, "Expected at least 5 YAML files under contracts/");
 for (const yamlFile of contractYamlFiles) {
   const displayPath = path.relative(rootDir, yamlFile).split(path.sep).join("/");
-  assertNoDuplicateYamlMappingKeys(fs.readFileSync(yamlFile, "utf8"), displayPath);
+  const yamlText = fs.readFileSync(yamlFile, "utf8");
+  assertNoYamlSyntaxErrors(yamlText, displayPath);
+  assertNoDuplicateYamlMappingKeys(yamlText, displayPath);
 }
 
 function yamlScalar(value) {
@@ -641,6 +648,22 @@ function assertYamlDuplicateKeyScannerSelfTest() {
   );
 }
 
+function assertStrictYamlParserSelfTest() {
+  const failures = analyzeYamlStrictParserSelfTest();
+  assert(
+    failures.length === 0,
+    "strict YAML parser self-test failed: " + failures.slice(0, 5).join(" | ")
+  );
+}
+
+function assertNoYamlSyntaxErrors(yamlText, label) {
+  const result = analyzeYamlSyntax(yamlText, label);
+  assert(
+    result.errors.length === 0,
+    "Strict YAML syntax parse failed for " + label + ": " + result.errors.slice(0, 5).join(" | ")
+  );
+}
+
 function assertNoDuplicateYamlMappingKeys(yamlText, label) {
   const result = analyzeYamlDuplicateKeys(yamlText, label);
   const problems = [...result.errors, ...result.duplicates];
@@ -1007,5 +1030,5 @@ for (const file of schemaFiles) {
 }
 
 console.log(
-  `[CONTRACT-CI PASS] Verified SYSTEM_CONTRACT.md, strict duplicate-key scan across ${contractYamlFiles.length} YAML files, ${openApiPartitions.active.length} active + ${openApiPartitions.planned.length} planned + ${openApiPartitions.reserved.length} reserved OpenAPI 3.1.2 operations (100% lifecycle inventory parity), and ${schemaFiles.length} JSON Schema 2020-12 files.`
+  `[CONTRACT-CI PASS] Verified SYSTEM_CONTRACT.md, strict full YAML syntax parse + duplicate-key scan across ${contractYamlFiles.length} YAML files, ${openApiPartitions.active.length} active + ${openApiPartitions.planned.length} planned + ${openApiPartitions.reserved.length} reserved OpenAPI 3.1.2 operations (100% lifecycle inventory parity), and ${schemaFiles.length} JSON Schema 2020-12 files.`
 );
