@@ -1299,7 +1299,7 @@ test("W4-11 review regression: sweep failure is logged, metered, and retried unt
   assert.equal(sweepEvents[0].trigger, "post_publish");
   assert.equal(sweepEvents[0].error_code, "EIO");
   assert.equal(sweepEvents[0].retry_scheduled, true);
-  assert.equal(sweepEvents[0].retry_delay_ms, 60_000);
+  assert.equal(sweepEvents[0].retry_delay_ms, 30_000, "retry backoff is capped at the operator-visible maximum");
   assert.equal(io.existsSync(sidecarPath), false, "unlink may already be volatile-visible even though durability is unknown");
 
   // The retry path must not confuse volatile absence with durable erasure: the
