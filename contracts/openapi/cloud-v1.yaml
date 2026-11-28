@@ -5142,6 +5142,49 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/sync/changes:
+    get:
+      operationId: listSyncChanges
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE incremental sync surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_CURSOR_INVALID, SYNC_CURSOR_EXPIRED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Pull encrypted-sync mutation metadata incrementally with a device-bound cursor
+      description: |
+        Returns mutation metadata in ascending per-user change_sequence order. Rows contain blob_id, UPSERT/TOMBSTONE kind, version vector, author device, server sequence, non-secret encryption metadata, ciphertext digest/size, and commit time; rows never contain ciphertext bytes, plaintext, plaintext hashes, keys, key encryption keys, or key derivation secrets. Clients download ciphertext separately from the blob endpoint after deciding that a row is relevant.
+        When cursor is omitted, the server returns a current-state snapshot page containing every live blob and every uncompacted tombstone rather than obsolete intermediate versions. When cursor is present, it returns rows after that position. meta.next_cursor is always non-null, even for an empty page, and is the only token the client may use for the next pull. Cursor tokens are opaque, user-scoped, and bound to X-Dis-Sync-Device-Id; they must be persisted locally only after the page has been applied durably and must never be copied between devices. A syntactically malformed or cross-device cursor is SYNC_CURSOR_INVALID. A well-formed cursor that is too old for retained mutation metadata is SYNC_CURSOR_EXPIRED; the client must discard only its sync cursor, resync without cursor, and reconcile locally rather than deleting user data solely because the server cursor expired.
+        The cursor is an ordering optimization and never replaces causal version-vector comparison. Writers must still use the exact current vector from downloaded metadata before PUT or DELETE. Pagination is sequence-monotonic: a later page never repeats or skips a row needed to reach the represented current state, and mutations committed after a page's cursor position appear in a later pull. Example 93.
+      parameters:
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Encrypted-sync mutation metadata page; meta.next_cursor is non-null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncChangeListEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Sync device was permanently revoked or cursor expired beyond retained mutation metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 components:
   securitySchemes:
     bearerAuth:
@@ -10136,5 +10179,23 @@ components:
           type: string
         data:
           $ref: '#/components/schemas/SyncBlobDownload'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SyncChangeListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncBlobMetadata'
+          description: Mutation metadata rows in ascending change_sequence order. Ciphertext bytes are intentionally absent; use downloadSyncBlob for live UPSERT rows.
         meta:
           $ref: '#/components/schemas/ResponseMeta'

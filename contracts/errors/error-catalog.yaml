@@ -570,3 +570,13 @@ errors:
     retryable: true
     user_action: WAIT_FOR_SYNC_RATE_LIMIT_WINDOW
     description: Encrypted synchronization read or write rate limit reached; clients must back off rather than amplify retries.
+  - code: SYNC_CURSOR_INVALID
+    http_status: 400
+    retryable: false
+    user_action: RESET_SYNC_CURSOR
+    description: Incremental sync cursor is malformed, crosses the bound sync device, or does not belong to the authenticated user; discard only the cursor and resync without copying cursors between devices.
+  - code: SYNC_CURSOR_EXPIRED
+    http_status: 410
+    retryable: false
+    user_action: RESYNC_WITHOUT_CURSOR
+    description: Incremental sync cursor is older than retained mutation metadata; perform a current-state resync without cursor and reconcile locally instead of deleting user data merely because the cursor expired.

@@ -878,3 +878,10 @@ Idempotency-Key: sync_blob_delete_demo_0001
   ],
   "writer_counter": 2
 }
+
+### 93. CT-07 Pull Incremental Encrypted-Sync Changes (planned)
+# Runtime truth: rows are metadata only and never include ciphertext. cursor is opaque, device-bound, and must not be copied between devices; omit it for a current-state resync.
+GET http://127.0.0.1:4100/api/v1/sync/changes?cursor=opaque-device-bound-cursor&limit=50
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+X-Dis-Sync-Device-Id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa

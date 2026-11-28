@@ -1042,3 +1042,10 @@ endpoints:
     owner: sync
     status: planned
     contract_card: CT-07
+  - method: GET
+    path: /api/v1/sync/changes
+    operationId: listSyncChanges
+    auth: bearer
+    owner: sync
+    status: planned
+    contract_card: CT-07
