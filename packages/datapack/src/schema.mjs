@@ -145,8 +145,24 @@ function expectDateTime(value, path) {
   return value;
 }
 
+function isRfc3986UriCharactersValid(value) {
+  const allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&\u0027()*+,;=";
+  const hex = "0123456789abcdefABCDEF";
+  for (let index = 0; index < value.length; index += 1) {
+    const ch = value[index];
+    if (ch === "%") {
+      if (index + 2 >= value.length || !hex.includes(value[index + 1]) || !hex.includes(value[index + 2])) return false;
+      index += 2;
+      continue;
+    }
+    if (!allowed.includes(ch)) return false;
+  }
+  return true;
+}
+
 function expectHttpsUri(value, path) {
   expectString(value, path, { pattern: /^https:\/\// });
+  if (!isRfc3986UriCharactersValid(value)) fail(path, "must be an RFC 3986 URI without raw non-ASCII/control characters or invalid percent escapes");
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || !url.hostname) fail(path, "must be an absolute HTTPS URI");

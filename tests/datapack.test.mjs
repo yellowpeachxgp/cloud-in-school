@@ -242,6 +242,8 @@ test("W5-01 schema validator rejects additional properties type errors duplicate
   expectDataPackError("CONTENT_PACK_INVALID", () => canonicalValidate({ ...valid, packId: "other.procedures" }));
   expectDataPackError("CONTENT_PACK_INVALID", () => canonicalValidate({ ...valid, maintainers: ["github:a", "github:a"] }));
   expectDataPackError("CONTENT_PACK_INVALID", () => canonicalValidate({ ...valid, sources: [{ ...valid.sources[0], url: "http://example.com" }] }));
+  expectDataPackError("CONTENT_PACK_INVALID", () => canonicalValidate({ ...valid, sources: [{ ...valid.sources[0], url: "https://example.com/%zz" }] }));
+  expectDataPackError("CONTENT_PACK_INVALID", () => canonicalValidate({ ...valid, sources: [{ ...valid.sources[0], url: "https://example.com/{}" }] }));
 
   const badItem = structuredClone(valid);
   badItem.items[0].unexpected = true;
