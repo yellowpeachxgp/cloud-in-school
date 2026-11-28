@@ -539,17 +539,32 @@ errors:
     http_status: 400
     retryable: false
     user_action: FIX_SYNC_ENCRYPTION_METADATA
-    description: Encrypted sync envelope format, cipher suite, opaque key id, nonce encoding, ciphertext encoding, or ciphertext digest failed validation; plaintext fields and key material are forbidden.
+    description: Encrypted sync envelope format, cipher suite, padding scheme, opaque key id, nonce encoding, ciphertext encoding, fixed-bucket decoded length, or ciphertext digest failed validation; plaintext fields and key material are forbidden.
   - code: SYNC_BLOB_TOO_LARGE
     http_status: 413
     retryable: false
     user_action: SPLIT_SYNC_PLAINTEXT_INTO_SMALLER_BLOCKS
     description: Decoded encrypted sync block exceeds the 1,048,576-byte ceiling including the AEAD authentication tag; clients must chunk larger logical objects client-side before encryption.
+  - code: SYNC_QUOTA_EXCEEDED
+    http_status: 403
+    retryable: false
+    user_action: FREE_SYNC_QUOTA_OR_REVOKE_UNUSED_DEVICE
+    description: Per-user encrypted sync resource quota would be exceeded. v1 dimensions are 32 ACTIVE devices, 256 total device registration records, 4,096 live blobs, and 268,435,456 bytes of live padded ciphertext; the error detail must name the exceeded dimension and limit without exposing plaintext or other users' usage.
+  - code: SYNC_BANDWIDTH_QUOTA_EXCEEDED
+    http_status: 429
+    retryable: true
+    user_action: WAIT_FOR_SYNC_BANDWIDTH_QUOTA_WINDOW
+    description: Rolling 24-hour per-user sync-transfer bandwidth quota would be exceeded. v1 dimensions are 536,870,912 uncompressed ingress bytes in authenticated PUT bodies and 536,870,912 uncompressed egress bytes in successful download or changes response bodies; clients must back off rather than amplify retries.
   - code: SYNC_VECTOR_INVALID
     http_status: 400
     retryable: false
     user_action: FIX_SYNC_VERSION_VECTOR
     description: Version vector entries, per-device counters, writer counter progression, uniqueness, or shape failed validation.
+  - code: SYNC_VECTOR_OVERFLOW
+    http_status: 409
+    retryable: false
+    user_action: MIGRATE_TO_FRESH_SYNC_BLOB_OR_DEVICE
+    description: Version-vector hard bound would be exceeded because a write would introduce a 513th distinct device entry for one blob or advance a per-device counter beyond 2,147,483,647. The server must not truncate, evict, wrap, reset, or reuse counters; migrate plaintext client-side to a fresh blob id within protocol limits.
   - code: SYNC_VECTOR_CONFLICT
     http_status: 409
     retryable: false
@@ -564,7 +579,7 @@ errors:
     http_status: 410
     retryable: false
     user_action: REMOVE_LOCAL_COPY_AFTER_TOMBSTONE
-    description: Encrypted sync blob was tombstoned; ciphertext is unavailable and only deletion propagation metadata remains.
+    description: Encrypted sync blob was tombstoned and the blob id is permanently closed; ciphertext is unavailable, deletion propagation metadata may remain, and even compaction or consent-retention cleanup does not permit resurrection under the same blob id before account data deletion.
   - code: SYNC_RATE_LIMITED
     http_status: 429
     retryable: true
@@ -579,4 +594,4 @@ errors:
     http_status: 410
     retryable: false
     user_action: RESYNC_WITHOUT_CURSOR
-    description: Incremental sync cursor is older than retained mutation metadata; perform a current-state resync without cursor and reconcile locally instead of deleting user data merely because the cursor expired.
+    description: Incremental sync cursor is below the per-user compaction_epoch or otherwise older than retained mutation metadata; perform a current-state resync without cursor and reconcile locally instead of deleting user data merely because the cursor expired.

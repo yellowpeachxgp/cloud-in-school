@@ -175,13 +175,13 @@ channels:
       message:
         $ref: '#/components/messages/SyncDeviceLifecycleEvent'
   sync.blob.written:
-    description: An encrypted sync blob version was accepted by strict version-vector compare-and-set. The payload carries causal and ciphertext metadata only—never ciphertext bytes, plaintext, plaintext hashes, keys, or key derivation secrets.
+    description: An encrypted sync blob version was accepted by strict version-vector compare-and-set. The payload carries causal, fixed-bucket padding, and ciphertext metadata only—never ciphertext bytes, plaintext, plaintext hashes, keys, key derivation secrets, or exact unpadded plaintext length.
     publish:
       operationId: publishSyncBlobWrittenEvent
       message:
         $ref: '#/components/messages/SyncBlobWrittenEvent'
   sync.blob.deleted:
-    description: An encrypted sync blob was tombstoned by strict version-vector compare-and-set. The payload carries tombstone metadata only; ciphertext bytes are not emitted.
+    description: An encrypted sync blob was tombstoned by strict version-vector compare-and-set. The payload carries tombstone metadata only; ciphertext bytes are not emitted. The blob_id is permanently closed and cannot be causally recreated under the same id.
     publish:
       operationId: publishSyncBlobDeletedEvent
       message:
@@ -1010,6 +1010,7 @@ components:
       name: SyncDeviceLifecycleEvent
       payload:
         type: object
+        additionalProperties: false
         required: [event_id, event_key, event_type, occurred_at, cloud_user_id, device_id, status, revocation_reason]
         properties:
           event_id:
@@ -1017,8 +1018,8 @@ components:
             format: uuid
           event_key:
             type: string
-            pattern: '^dis:sync:device:[0-9a-fA-F-]{36}:(registered|revoked):v1$'
-            description: Exactly-once consumer dedupe key for the first registration or first durable revocation of this immutable device identity.
+            pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:device:[0-9a-fA-F-]{36}:(registered|revoked):v1$'
+            description: Exactly-once consumer dedupe key for the first registration or first durable revocation of this immutable device identity. cloud_user_id is part of the key because device identifiers are user-scoped client-generated values.
           event_type:
             type: string
             enum: [registered, revoked]
@@ -1036,21 +1037,22 @@ components:
             enum: [ACTIVE, REVOKED]
           revocation_reason:
             type: [string, 'null']
-            enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY, null]
-            description: Null for registration; no free-text reason is emitted because free text can contain personal data.
+            enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY, CONSENT_WITHDRAWN, null]
+            description: Null for registration; CONSENT_WITHDRAWN is system-generated when the post-withdrawal retention period expires. No free-text reason is emitted because free text can contain personal data.
     SyncBlobWrittenEvent:
       name: SyncBlobWrittenEvent
       payload:
         type: object
-        required: [event_id, event_key, event_type, occurred_at, cloud_user_id, blob_id, author_device_id, change_sequence, version_vector, encryption_format, cipher_suite, key_id, nonce_base64, ciphertext_sha256, ciphertext_size_bytes]
+        additionalProperties: false
+        required: [event_id, event_key, event_type, occurred_at, cloud_user_id, blob_id, author_device_id, change_sequence, version_vector, encryption_format, cipher_suite, padding_scheme, key_id, nonce_base64, ciphertext_sha256, ciphertext_size_bytes]
         properties:
           event_id:
             type: string
             format: uuid
           event_key:
             type: string
-            pattern: '^dis:sync:blob:[0-9a-fA-F-]{36}:change:[0-9]+:written:v1$'
-            description: Exactly-once consumer dedupe key derived from the accepting per-user change sequence.
+            pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:blob:[0-9a-fA-F-]{36}:change:[0-9]+:written:v1$'
+            description: Exactly-once consumer dedupe key derived from cloud_user_id plus the accepting per-user change sequence, preventing cross-user blob_id/sequence collisions.
           event_type:
             type: string
             enum: [written]
@@ -1074,6 +1076,7 @@ components:
             maxItems: 512
             items:
               type: object
+              additionalProperties: false
               required: [device_id, counter]
               properties:
                 device_id:
@@ -1090,6 +1093,10 @@ components:
           cipher_suite:
             type: string
             const: AES-256-GCM
+          padding_scheme:
+            type: string
+            const: DIS_SYNC_SIZE_BUCKETS_POW4_V1
+            description: Fixed-bucket length padding scheme; valid ciphertext bucket sizes including the AEAD tag are 1,024 / 4,096 / 16,384 / 65,536 / 262,144 / 1,048,576 bytes.
           key_id:
             type: string
             minLength: 8
@@ -1104,12 +1111,13 @@ components:
             description: Digest of exact ciphertext bytes only; plaintext hashes are forbidden.
           ciphertext_size_bytes:
             type: integer
-            minimum: 16
-            maximum: 1048576
+            enum: [1024, 4096, 16384, 65536, 262144, 1048576]
+            description: Padded decoded ciphertext bucket size in bytes including the AEAD tag; never exact unpadded plaintext length.
     SyncBlobDeletedEvent:
       name: SyncBlobDeletedEvent
       payload:
         type: object
+        additionalProperties: false
         required: [event_id, event_key, event_type, occurred_at, cloud_user_id, blob_id, author_device_id, change_sequence, version_vector]
         properties:
           event_id:
@@ -1117,8 +1125,8 @@ components:
             format: uuid
           event_key:
             type: string
-            pattern: '^dis:sync:blob:[0-9a-fA-F-]{36}:change:[0-9]+:deleted:v1$'
-            description: Exactly-once consumer dedupe key derived from the accepting per-user tombstone sequence.
+            pattern: '^dis:sync:user:[0-9a-fA-F-]{36}:blob:[0-9a-fA-F-]{36}:change:[0-9]+:deleted:v1$'
+            description: Exactly-once consumer dedupe key derived from cloud_user_id plus the accepting per-user tombstone sequence, preventing cross-user blob_id/sequence collisions.
           event_type:
             type: string
             enum: [deleted]
@@ -1142,6 +1150,7 @@ components:
             maxItems: 512
             items:
               type: object
+              additionalProperties: false
               required: [device_id, counter]
               properties:
                 device_id:
