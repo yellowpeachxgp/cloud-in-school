@@ -773,12 +773,17 @@ test("W4-11 review regression: web cookie sessions cannot register or use device
     refreshToken: fixture.session.refresh_token
   });
   const cookieHeaders = { cookie: "dis_web_session=" + encodeURIComponent(cookieValue) };
+  // signWebSessionCookie intentionally uses the real wall clock, while the rest
+  // of this suite uses a fixed future protocol clock.  Exercise the cookie at
+  // its real issuance time; the authorization decision itself remains deterministic.
+  const cookieNowMs = Date.now();
   const deviceId = crypto.randomUUID();
   const registered = await app.inject({
     method: "PUT",
     url: "/api/v1/sync/devices/" + deviceId,
     headers: { ...cookieHeaders, "idempotency-key": nextKey("sync-web-register") },
-    body: { consent_id: consent.id, device_label: "browser", platform: "ANDROID", sync_protocol_version: 1 }
+    body: { consent_id: consent.id, device_label: "browser", platform: "ANDROID", sync_protocol_version: 1 },
+    nowMs: cookieNowMs
   });
   assert.equal(registered.status, 403);
   assert.equal(registered.body.error.code, "SYNC_PERMISSION_DENIED");
@@ -804,7 +809,8 @@ test("W4-11 review regression: web cookie sessions cannot register or use device
   const use = await app.inject({
     method: "GET",
     url: "/api/v1/sync/blobs/" + crypto.randomUUID(),
-    headers: { ...cookieHeaders, "x-dis-sync-device-id": deviceId }
+    headers: { ...cookieHeaders, "x-dis-sync-device-id": deviceId },
+    nowMs: cookieNowMs
   });
   assert.equal(use.status, 403);
   assert.equal(use.body.error.code, "SYNC_PERMISSION_DENIED");

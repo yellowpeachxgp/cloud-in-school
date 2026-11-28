@@ -164,7 +164,7 @@ INSERT INTO sync_blob_anti_resurrection (cloud_user_id, blob_id, first_tombstone
 VALUES ('11111111-1111-4111-8111-111111111111', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 1, now());
 INSERT INTO sync_transfer_usage (cloud_user_id, direction, bytes, occurred_at)
 VALUES ('11111111-1111-4111-8111-111111111111', 'INGRESS', 1024, now());
-INSERT INTO sync_cursors (cursor_id, cloud_user_id, device_id, token_sha256, position, scan_epoch, terminal)
+INSERT INTO sync_cursors (cursor_id, cloud_user_id, device_id, token_sha256, position, scan_epoch, scan_mode, terminal)
 VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, 1, 'INCREMENTAL', true);
 EOSQL
 
