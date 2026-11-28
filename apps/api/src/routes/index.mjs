@@ -16,6 +16,7 @@ import { createPlaceStatusRoutes } from "./place-status.mjs";
 import { createLedgerRoutes } from "./ledger.mjs";
 import { createE2eeSyncRoutes } from "./sync-e2ee.mjs";
 import { createContentCatalogRoutes } from "./content-catalog.mjs";
+import { createReservedUgcRoutes } from "./ugc-reserved.mjs";
 
 export function createCoreRoutes(ctx) {
   return [
@@ -41,4 +42,8 @@ export function createCoreRoutes(ctx) {
 
 export function createExtensionRoutes(ctx) {
   return [...createMomentsExtensionRoutes(ctx)];
+}
+
+export function createReservedRoutes() {
+  return [...createReservedUgcRoutes()];
 }

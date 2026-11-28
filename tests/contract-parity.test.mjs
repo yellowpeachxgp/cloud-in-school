@@ -86,7 +86,7 @@ test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI oper
   assert.equal(inventory.length, 168, "endpoint-inventory.yaml must declare exactly 168 active core operations");
   assert.equal(openApiOperations.length, 168, "OpenAPI must declare exactly 168 active core operations");
   assert.equal(coreRegistered.length, 168, "CampusCloudApp must expose exactly 168 active core operations");
-  assert.equal(allRegistered.length, 180, "CampusCloudApp must expose 168 core + 12 explicit extension operations");
+  assert.equal(allRegistered.length, 192, "CampusCloudApp must expose 168 active core + 12 explicit extension + 12 reserved operations");
 
   const coreByKey = byRouteKey(coreRegistered);
   const inventoryByKey = byRouteKey(inventory);
@@ -977,6 +977,7 @@ const EXPECTED_CT_PLANNED_ROUTE_COUNT = 0;
 test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in runtime, CT-05 stays reserved, and CT-06 is active in runtime", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
+  const reservedRegistered = app.getRegisteredReservedRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
   const openApiPartitions = partitionByStatus(parseOpenApiOperations(loadOpenApiText()));
   assert.deepEqual(inventoryPartitions.unknown, [], "endpoint inventory must use only active/planned/reserved statuses");
@@ -999,6 +1000,8 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
   assertUniqueOperationIds(reservedOpenApi, "reserved OpenAPI");
   assertUniqueRouteKeys(reservedInventory, "reserved endpoint inventory");
   assertUniqueRouteKeys(reservedOpenApi, "reserved OpenAPI");
+  assertUniqueOperationIds(reservedRegistered, "reserved runtime");
+  assertUniqueRouteKeys(reservedRegistered, "reserved runtime");
   assert.equal(reservedInventory.length, EXPECTED_CT05_RESERVED_ROUTES.length, "endpoint-inventory.yaml must declare exactly the 12 CT-05 reserved operations");
   assert.equal(reservedOpenApi.length, EXPECTED_CT05_RESERVED_ROUTES.length, "OpenAPI must declare exactly the 12 CT-05 reserved operations");
 
@@ -1046,6 +1049,7 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
   );
 
   const coreByKey = byRouteKey(coreRegistered);
+  const reservedRegisteredByKey = byRouteKey(reservedRegistered);
   const activeInventoryByKey = byRouteKey(inventoryPartitions.active);
   const activeOpenApiByKey = byRouteKey(openApiPartitions.active);
   const ct01RouteKeys = new Set(EXPECTED_CT01_GROUP_ROUTES.map((entry) => routeKey(entry)));
@@ -1129,6 +1133,11 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
   const reservedInventoryByKey = byRouteKey(reservedInventory);
   const reservedOpenApiByKey = byRouteKey(reservedOpenApi);
   assert.deepEqual(sortedOperationIds(reservedInventory), sortedOperationIds(reservedOpenApi), "reserved inventory/OpenAPI operationId sets must be identical");
+  assert.deepEqual(
+    reservedRegistered,
+    EXPECTED_CT05_RESERVED_ROUTES,
+    "reserved runtime registration must exactly match the CT-05 reserved contract slice without flipping it active"
+  );
   for (const reserved of reservedInventory) {
     const key = routeKey(reserved);
     const openApi = reservedOpenApiByKey.get(key);
@@ -1137,7 +1146,11 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
     assert.equal(reserved.status, "reserved", "reserved inventory entry must carry machine-readable status: " + key);
     assert.equal(reserved.contractCard, "CT-05", "reserved inventory entry must carry contract_card CT-05: " + key);
     assert.equal(reserved.auth, "public", "reserved inventory entry must declare uniform-501 public auth semantics (no authentication gate before the uniform 501): " + key);
-    assert.ok(!coreByKey.has(key), "reserved contract-only endpoint must not silently exist in runtime before a future enabling implementation: " + key);
+    assert.ok(!coreByKey.has(key), "reserved endpoint must stay out of the active core route registry and must not flip active: " + key);
+    const reservedRuntime = reservedRegisteredByKey.get(key);
+    assert.ok(reservedRuntime, "reserved endpoint must be explicitly registered in the separate reserved runtime registry: " + key);
+    assert.equal(reservedRuntime.operationId, reserved.operationId, "reserved runtime operationId mismatch on " + key);
+    assert.equal(reservedRuntime.auth, reserved.auth, "reserved runtime auth mismatch on " + key);
   }
   for (const reserved of reservedOpenApi) {
     const key = routeKey(reserved);
@@ -1147,7 +1160,8 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
 
   console.log(
     "[CONTRACT-PARITY] active=168 planned=" + plannedOpenApi.length +
-      " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length + " moments_extension=12"
+      " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length +
+      " reserved_runtime=" + reservedRegistered.length + " moments_extension=12"
   );
 });
 

@@ -123,7 +123,7 @@ function escapeClaimHtml(raw) {
     .replace(/'/g, "&#39;");
 }
 
-export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], extensionRoutes: extensionRouteTable = [] } = {}) {
+export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], extensionRoutes: extensionRouteTable = [], reservedRoutes: reservedRouteTable = [] } = {}) {
   const {
     store,
     financeBridge,
@@ -137,6 +137,8 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
   } = ctx;
   const routes = compileRouteTable(coreRouteTable, "core");
   const extensionRoutes = compileRouteTable(extensionRouteTable, "extension");
+  const reservedRoutes = compileRouteTable(reservedRouteTable, "reserved");
+  const reservedRouteSet = new Set(reservedRoutes);
 
   const SECURITY_HEADERS = {
     "strict-transport-security": "max-age=31536000; includeSubDomains",
@@ -675,7 +677,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
 
       let matchedRoute = null;
       let params = {};
-      const allRoutes = [...routes, ...extensionRoutes];
+      const allRoutes = [...routes, ...extensionRoutes, ...reservedRoutes];
       for (const route of allRoutes) {
         if (route.method !== upperMethod) continue;
         const m = pathname.match(route.regex);
@@ -697,7 +699,10 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
       }
 
       const hasProtocolBodyError = Boolean(bodyParseError) || bodyTooLarge === true;
-      if (hasProtocolBodyError && matchedRoute.operationId !== "putSyncBlob") {
+      // CT-05 reserved stubs are side-effect free and contractually uniform: even malformed,
+      // oversized, or otherwise arbitrary request bodies must receive the same 501 envelope.
+      // They still stay behind the HTTP parser byte cap and the global draining fence.
+      if (!reservedRouteSet.has(matchedRoute) && hasProtocolBodyError && matchedRoute.operationId !== "putSyncBlob") {
         return bodyTooLarge
           ? protocolBodyErrorResponse(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the " + (Math.round((bodyTooLargeLimitBytes / 1048576) * 10) / 10) + " MiB protocol limit", requestId)
           : protocolBodyErrorResponse(400, "BAD_REQUEST", "Malformed JSON request body", requestId);
@@ -922,8 +927,12 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     return extensionRoutes.map(publicRoute);
   }
 
+  function getRegisteredReservedRoutes() {
+    return reservedRoutes.map(publicRoute);
+  }
+
   function getRegisteredRoutes() {
-    return [...getRegisteredCoreRoutes(), ...getRegisteredExtensionRoutes()];
+    return [...getRegisteredCoreRoutes(), ...getRegisteredExtensionRoutes(), ...getRegisteredReservedRoutes()];
   }
 
   function getRouteBehaviorFingerprint(operationIds) {
@@ -951,6 +960,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     getRegisteredRoutes,
     getRegisteredCoreRoutes,
     getRegisteredExtensionRoutes,
+    getRegisteredReservedRoutes,
     getRouteBehaviorFingerprint,
     setDraining,
     isDraining,

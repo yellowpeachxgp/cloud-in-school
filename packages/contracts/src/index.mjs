@@ -119,6 +119,7 @@ export const ERROR_CODES = Object.freeze({
   PLACE_REPORT_FLAG_INVALID: { status: 400, retryable: false, userAction: "FIX_PLACE_REPORT_FLAG" },
   PLACE_REPORT_FLAG_NOT_FOUND: { status: 404, retryable: false, userAction: "CHECK_PLACE_REPORT_FLAG" },
   PLACE_REPORT_REVIEW_INVALID: { status: 409, retryable: false, userAction: "REFRESH_PLACE_REPORT_FLAG" },
+  FEATURE_NOT_ENABLED: { status: 501, retryable: false, userAction: "NONE" },
   CONTENT_PACK_INVALID: { status: 400, retryable: false, userAction: "FIX_CONTENT_PACK_METADATA" },
   CONTENT_PACK_SIGNATURE_INVALID: { status: 400, retryable: false, userAction: "VERIFY_CONTENT_PACK_SIGNATURE" },
   CONTENT_PACK_NOT_FOUND: { status: 404, retryable: false, userAction: "CHECK_CONTENT_PACK_ID" },
