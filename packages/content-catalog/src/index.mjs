@@ -729,7 +729,7 @@ export class ContentPackCatalogService {
     if (replay) return replay;
     this._countRateLimitAttempt(auth.cloudUserId, "SUBMIT", nowMs);
     const prepared = this._validateSubmissionCreate(body);
-    return this._commitWithReceipt(() => {
+    return this._commitWithReceipt((undo) => {
       this.store.writeContentPackArtifactDurable(prepared.artifactSha256, prepared.artifactBytes);
       const ts = iso(nowMs);
       const submissionId = crypto.randomUUID();
