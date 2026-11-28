@@ -55,6 +55,7 @@ test("CT-05 reserved forum/private-message operations return one uniform 501 env
       method: entry.method,
       url: entry.url,
       headers: {
+        authorization: "Bearer <cloud_access_token>",
         "x-requested-with": "reserved-contract-probe"
       },
       body: entry.method === "GET" ? undefined : { arbitrary: "input is ignored", nested: { retry: true } }
