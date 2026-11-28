@@ -315,8 +315,13 @@ test("W4-11 sync blobs: fixed buckets, ciphertext-only storage, strict vector CA
   assert.equal(first.body.data.ciphertext_size_bytes, 1024);
 
   const current = app.store.syncBlobs.get(fixture.user.id + ":" + blobId);
-  assert.ok(current.ciphertext_base64.length > 0, "current row must retain exact ciphertext bytes only");
+  assert.equal(Object.hasOwn(current, "ciphertext_base64"), false, "current row must never inline ciphertext bytes");
+  assert.equal(Object.hasOwn(current, "ciphertext"), false);
   assert.equal(current.ciphertext_size_bytes, 1024);
+  assert.ok(
+    app.store.syncCiphertextMemory.has(current.ciphertext_sha256),
+    "ciphertext bytes live in the content-addressed sidecar, keyed by their digest"
+  );
   const mutation = app.store.syncMutations.get(fixture.user.id + ":1");
   assert.ok(mutation, "metadata mutation row must exist");
   assert.equal(Object.hasOwn(mutation, "ciphertext_base64"), false);
@@ -732,12 +737,21 @@ test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas
     bytes: 536870912,
     occurred_at: new Date(BASE_NOW).toISOString()
   });
-  const beforeIngressRows = Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS").length;
+  const ingressRowsNow = () => Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+  const ingressBytesNow = () => ingressRowsNow().reduce((sum, row) => sum + Number(row.bytes || 0), 0);
+  const beforeIngressRows = ingressRowsNow().length;
+  const beforeIngressBytes = ingressBytesNow();
   const ingressBlocked = await putBlob(app, fixture, deviceId, crypto.randomUUID());
   assert.equal(ingressBlocked.status, 429);
   assert.equal(ingressBlocked.body.error.code, "SYNC_BANDWIDTH_QUOTA_EXCEEDED");
-  const afterIngressRows = Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS").length;
-  assert.equal(afterIngressRows, beforeIngressRows + 1, "even bandwidth-rejected authenticated PUT attempts count ingress once");
+  assert.ok(
+    ingressBytesNow() > beforeIngressBytes,
+    "even bandwidth-rejected authenticated PUT attempts count their ingress bytes exactly"
+  );
+  assert.ok(
+    ingressRowsNow().length <= beforeIngressRows + 1,
+    "rejected attempts aggregate into the bounded hour bucket instead of one durable row per attempt"
+  );
 });
 
 test("W4-11 review regression: paginated cursorless resync keeps FULL scan mode and never returns obsolete mutations", async () => {
@@ -1158,12 +1172,12 @@ test("W4-11 review regression: missing or corrupted sidecar ciphertext fails clo
   const sidecarPath = path.join(snapshotPath + ".ciphertext", digest.slice(0, 2), digest + ".bin");
   fs.writeFileSync(sidecarPath, Buffer.alloc(1024, 255));
   const corrupted = await downloadBlob(app, fixture, deviceId, blobId);
-  assert.equal(corrupted.status, 500, JSON.stringify(corrupted.body));
+  assert.equal(corrupted.status, 503, JSON.stringify(corrupted.body));
   assert.equal(corrupted.body.error.code, "STORAGE_PERSISTENCE_FAILED");
 
   fs.unlinkSync(sidecarPath);
   const missing = await downloadBlob(app, fixture, deviceId, blobId);
-  assert.equal(missing.status, 500, JSON.stringify(missing.body));
+  assert.equal(missing.status, 503, JSON.stringify(missing.body));
   assert.equal(missing.body.error.code, "STORAGE_PERSISTENCE_FAILED");
 
   assert.throws(
