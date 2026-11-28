@@ -522,6 +522,10 @@ export class SyncService {
     }, undo);
   }
 
+  settleConsentLifecycle(userId, nowMs = Date.now()) {
+    this._settleConsentLifecycle(userId, nowMs);
+  }
+
   handleConsentWithdrawn(userId, consent, nowMs = Date.now()) {
     if (!consentHasE2eeScope(consent)) return null;
     if (this._hasActiveE2eeConsent(userId, nowMs)) return null;

@@ -292,7 +292,8 @@ export function createMeRoutes(ctx) {
     }
   ),
 
-  route("POST", "/api/v1/me/data-export", "requestMyDataExport", "bearer", async ({ auth }) => {
+  route("POST", "/api/v1/me/data-export", "requestMyDataExport", "bearer", async ({ auth, nowMs }) => {
+    syncE2ee?.settleConsentLifecycle?.(auth.cloudUserId, nowMs);
     const user = store.users.get(auth.cloudUserId);
     const bindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
     const plans = store.recordsForUser("reservationPlans", auth.cloudUserId);

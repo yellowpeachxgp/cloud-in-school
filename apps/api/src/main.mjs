@@ -101,6 +101,39 @@ const financeWorkerTimer = setInterval(async () => {
 }, 5_000);
 financeWorkerTimer.unref?.();
 
+// E2EE sync consent-retention worker.  Withdrawal cleanup is privacy lifecycle
+// work, not an on-read convenience: ciphertext, vectors, tombstone propagation
+// metadata, cursors, and acknowledgement watermarks must actually disappear after
+// the 30-day grace period even if no sync endpoint is called meanwhile.
+let isSyncLifecycleWorkerRunning = false;
+let syncLifecycleWorkerStopped = false;
+const syncLifecycleTimer = setInterval(async () => {
+  if (syncLifecycleWorkerStopped || isSyncLifecycleWorkerRunning) return;
+  if (typeof app.isDraining === "function" && app.isDraining()) return;
+  isSyncLifecycleWorkerRunning = true;
+  const task = app.registerLifecycleTask("sync-lifecycle");
+  try {
+    const nowMs = Date.now();
+    for (const cloudUserId of Array.from(app.store.syncUserStates.keys())) {
+      try {
+        app.syncE2ee.settleConsentLifecycle(cloudUserId, nowMs);
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            service: "sync-consent-lifecycle-worker",
+            timestamp: new Date(nowMs).toISOString(),
+            error: err?.message || String(err)
+          })
+        );
+      }
+    }
+  } finally {
+    isSyncLifecycleWorkerRunning = false;
+    app.unregisterLifecycleTask(task);
+  }
+}, 5_000);
+syncLifecycleTimer.unref?.();
+
 // Unified graceful shutdown — shared controller (apps/api/src/shutdown.mjs):
 // one idempotent promise, single absolute deadline covering drain AND socket
 // close, honest exit status.
@@ -109,6 +142,8 @@ const shutdownController = createShutdownController({
   server,
   stopBackgroundTasks: () => {
     financeWorkerStopped = true;
+    syncLifecycleWorkerStopped = true;
+    clearInterval(syncLifecycleTimer);
     clearInterval(financeWorkerTimer);
     clearInterval(scannerTimer);
   },

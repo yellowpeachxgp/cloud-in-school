@@ -542,13 +542,17 @@ test("W4-11 sync consent lifecycle: withdrawal disables blobs, cursorless reauth
   });
   assert.equal(secondWithdrawn.status, 200);
   const expiryMs = BASE_NOW + 3 * HOUR + 30 * DAY + 1;
-  const cleanupTrigger = await app.inject({
-    method: "GET",
-    url: "/api/v1/sync/devices",
+  const postExpiryExport = await app.inject({
+    method: "POST",
+    url: "/api/v1/me/data-export",
     headers: fixture.authAt(expiryMs),
     nowMs: expiryMs
   });
-  assert.equal(cleanupTrigger.status, 200, JSON.stringify(cleanupTrigger.body));
+  assert.equal(postExpiryExport.status, 200, JSON.stringify(postExpiryExport.body));
+  assert.equal(postExpiryExport.body.data.sync_blobs.length, 0, "post-expiry export must not disclose ciphertext scheduled for deletion");
+  assert.equal(postExpiryExport.body.data.sync_blob_mutations.length, 0);
+  assert.equal(postExpiryExport.body.data.sync_devices[0].status, "REVOKED");
+  assert.equal(postExpiryExport.body.data.sync_devices[0].revocation_reason, "CONSENT_WITHDRAWN");
   const deviceRow = Array.from(app.store.syncDevices.values()).find((row) => row.device_id === deviceId);
   assert.equal(deviceRow.status, "REVOKED");
   assert.equal(deviceRow.revocation_reason, "CONSENT_WITHDRAWN");
