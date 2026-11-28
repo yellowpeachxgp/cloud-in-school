@@ -151,6 +151,20 @@ test("W5-01 merged CT-06 schema keeps the mirrored root shape and fixed enum set
   }
 });
 
+
+test("W5-01 CT-06 contract example artifact passes exact-byte schema decoding", () => {
+  const examples = fs.readFileSync("contracts/examples/cloud-api-examples.http", "utf8");
+  const match = examples.match(/"artifact_base64":\s*"([A-Za-z0-9+/=]+)"/);
+  assert.ok(match, "CT-06 example must carry a base64 datapack artifact");
+  const artifact = Buffer.from(match[1], "base64");
+  assert.equal(crypto.createHash("sha256").update(artifact).digest("hex"), "2af33a7f0e4574c501a6cb0513e68e191fd9757e2efb325d584d2d9daffcbca5");
+  const decoded = decodeDataPackArtifact(artifact);
+  assert.equal(decoded.pack.format, "dis-datapack/v1");
+  assert.equal(decoded.pack.packId, "haut.procedures");
+  assert.equal(decoded.pack.version, "2026.11.1");
+  assert.equal(decoded.pack.verificationLevel, "UNVERIFIED");
+});
+
 test("W5-01 exact-byte chain rejects whitespace key-order escape and number variants", () => {
   const pretty = JSON.stringify(fixtureObject(), null, 2);
   expectDataPackError("CONTENT_PACK_INVALID", () => decodeDataPackArtifact(Buffer.from(pretty, "utf8")), "EXACT_CANONICAL_BYTES_REQUIRED");
