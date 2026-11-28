@@ -188,6 +188,16 @@ function validCalendarDate(value) {
 
 function validateHttpsUrl(value, field, max = 2048) {
   const clean = requireString(value, field, { min: 8, max, error: submissionInvalid });
+  const asciiUri = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$/;
+  const hex = "0123456789abcdefABCDEF";
+  if (!asciiUri.test(clean)) throw submissionInvalid(field + " must be an RFC3986 HTTPS URI without raw spaces, controls, or non-ASCII characters");
+  for (let index = 0; index < clean.length; index += 1) {
+    if (clean[index] !== "%") continue;
+    if (index + 2 >= clean.length || !hex.includes(clean[index + 1]) || !hex.includes(clean[index + 2])) {
+      throw submissionInvalid(field + " contains an invalid percent escape");
+    }
+    index += 2;
+  }
   let parsed;
   try {
     parsed = new URL(clean);
@@ -377,6 +387,17 @@ export class ContentPackCatalogService {
         deleteMapCommitted(this.store.contentPackRateWindows, oldKey, undo);
       }
     }
+  }
+
+  _countRateLimitAttempt(cloudUserId, kind, nowMs) {
+    // Every non-idempotent submission/download attempt is counted before expensive
+    // artifact parsing or byte serving. Validation failures therefore cannot be
+    // used as an unbounded amplification oracle; the small rate row is durable
+    // independently of the larger domain mutation.
+    this._commitWithReceipt((undo) => {
+      this._consumeRateLimitInPlace(cloudUserId, kind, nowMs, undo);
+      return { status: 200, code: "CONTENT_PACK_RATE_COUNTED", data: null };
+    }, null, nowMs);
   }
 
   _requireOperationsGrant(auth, schoolId, permission) {
@@ -590,8 +611,16 @@ export class ContentPackCatalogService {
   _keysForValidation(validation) {
     if (validation?.format === LEGACY_PLUGIN_FORMAT) {
       const publisher = validation.legacy?.manifest?.publisher;
-      const publisherKeys = publisher ? this.legacyPublisherKeys?.[publisher] : null;
-      if (publisherKeys) return publisherKeys;
+      const configuredPublishers = Object.keys(this.legacyPublisherKeys || {});
+      if (configuredPublishers.length > 0) {
+        const publisherKeys = publisher ? this.legacyPublisherKeys?.[publisher] : null;
+        if (!publisherKeys) {
+          throw contentError("CONTENT_PACK_SIGNATURE_INVALID", "legacy package publisher is not present in the pinned publisher trust root", {
+            reason: "UNTRUSTED_PUBLISHER"
+          });
+        }
+        return publisherKeys;
+      }
     }
     return this.trustedKeys;
   }
@@ -674,35 +703,33 @@ export class ContentPackCatalogService {
   }
 
   downloadContentPackArtifact(auth, params, nowMs = Date.now()) {
+    this._countRateLimitAttempt(auth.cloudUserId, "DOWNLOAD", nowMs);
     const row = this._versionRowOrThrow(params.packId, params.version);
     if (row.lifecycle_status === "RETIRED") {
       throw contentError("CONTENT_PACK_VERSION_RETIRED", "content pack version has been retired; new downloads are refused");
     }
     const artifact = this.store.readContentPackArtifactVerified(row.artifact_sha256, row.artifact_size_bytes);
-    return this._commitWithReceipt((undo) => {
-      this._consumeRateLimitInPlace(auth.cloudUserId, "DOWNLOAD", nowMs, undo);
-      return {
-        status: 200,
-        code: "CONTENT_PACK_ARTIFACT_DOWNLOADED",
-        data: this._versionView(row),
-        headers: {
-          "content-type": "application/octet-stream",
-          "cache-control": "no-store",
-          "x-content-pack-artifact-sha256": row.artifact_sha256,
-          "x-content-pack-format": row.artifact_format,
-          "x-content-pack-version": row.version
-        },
-        rawBody: artifact
-      };
-    }, null, nowMs);
+    return {
+      status: 200,
+      code: "CONTENT_PACK_ARTIFACT_DOWNLOADED",
+      data: this._versionView(row),
+      headers: {
+        "content-type": "application/octet-stream",
+        "cache-control": "no-store",
+        "x-content-pack-artifact-sha256": row.artifact_sha256,
+        "x-content-pack-format": row.artifact_format,
+        "x-content-pack-version": row.version
+      },
+      rawBody: artifact
+    };
   }
 
   createContentPackSubmission(auth, body, headers, nowMs = Date.now()) {
     const { replay, receipt } = this._idempotency("createContentPackSubmission", auth, headers, body);
     if (replay) return replay;
+    this._countRateLimitAttempt(auth.cloudUserId, "SUBMIT", nowMs);
     const prepared = this._validateSubmissionCreate(body);
-    return this._commitWithReceipt((undo) => {
-      this._consumeRateLimitInPlace(auth.cloudUserId, "SUBMIT", nowMs, undo);
+    return this._commitWithReceipt(() => {
       this.store.writeContentPackArtifactDurable(prepared.artifactSha256, prepared.artifactBytes);
       const ts = iso(nowMs);
       const submissionId = crypto.randomUUID();

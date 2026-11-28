@@ -417,6 +417,38 @@ test("W5-02 legacy school package strict zip validation and detached manifest/fi
   assert.ok(download.rawBody.equals(artifact));
 });
 
+test("W5-02 rate limits count validation attempts and every artifact download", async () => {
+  const limited = createSignedDatapackContext({ contentPackSubmitRateLimitPerHour: 1, contentPackDownloadRateLimitPerHour: 1 });
+  const submitter = setupUser(limited.app, "rate_submitter");
+  const reviewer = setupUser(limited.app, "rate_reviewer", { operations: ["content_pack.review"] });
+  const publisher = setupUser(limited.app, "rate_publisher", { operations: ["content_pack.publish"] });
+
+  const pretty = Buffer.from(JSON.stringify(JSON.parse(limited.artifact.toString("utf8")), null, 2), "utf8");
+  const invalid = await submitDatapack(limited.app, submitter, {
+    key: "rate-invalid-submit-0001",
+    body: datapackSubmissionBody({ artifactBytes: pretty })
+  });
+  assert.equal(invalid.status, 400, "the first invalid submission should still reach artifact validation");
+  const throttled = await submitDatapack(limited.app, submitter, { key: "rate-valid-submit-0001" });
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.body.error.code, "CONTENT_PACK_RATE_LIMITED");
+
+  const unlimited = createSignedDatapackContext({ contentPackDownloadRateLimitPerHour: 1 });
+  const user2 = setupUser(unlimited.app, "rate2_submitter");
+  const reviewer2 = setupUser(unlimited.app, "rate2_reviewer", { operations: ["content_pack.review"] });
+  const publisher2 = setupUser(unlimited.app, "rate2_publisher", { operations: ["content_pack.publish"] });
+  const created = await submitDatapack(unlimited.app, user2, { key: "rate2-submit-0001" });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const submissionId = created.body.data.submission_id;
+  assert.equal((await approveSubmission(unlimited.app, reviewer2, submissionId, "rate2-approve-0001")).status, 200);
+  assert.equal((await publishSubmission(unlimited.app, publisher2, submissionId, unlimited.signature, "rate2-publish-0001")).status, 201);
+  const firstDownload = await unlimited.app.inject({ method: "GET", url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/download", headers: reviewer2.auth, nowMs: BASE_NOW });
+  assert.equal(firstDownload.status, 200);
+  const secondDownload = await unlimited.app.inject({ method: "GET", url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/download", headers: reviewer2.auth, nowMs: BASE_NOW });
+  assert.equal(secondDownload.status, 429);
+  assert.equal(secondDownload.body.error.code, "CONTENT_PACK_RATE_LIMITED");
+});
+
 test("W5-02 artifact metadata and sidecar bytes survive snapshot restart before review and publish", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-content-catalog-"));
   const snapshotPath = path.join(tmpDir, "cloud-state.json");
