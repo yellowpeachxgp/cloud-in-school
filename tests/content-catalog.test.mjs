@@ -399,6 +399,14 @@ test("W5-02 legacy school package strict zip validation and detached manifest/fi
   assert.equal(undeclared.status, 400);
   assert.equal(undeclared.body.error.code, "CONTENT_PACK_INVALID");
 
+  const executable = legacyPackageArtifact({ payloadPath: "assets/evil.js", payloadBytes: Buffer.from("throw new Error('code')", "utf8") });
+  const executableRejected = await submitDatapack(app, submitter, {
+    key: "legacy-executable-0001",
+    body: legacySubmissionBody(executable)
+  });
+  assert.equal(executableRejected.status, 400);
+  assert.equal(executableRejected.body.error.code, "CONTENT_PACK_INVALID");
+
   const created = await submitDatapack(app, submitter, {
     key: "legacy-submit-0001",
     body: legacySubmissionBody(artifact)

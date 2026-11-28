@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { ContractError } from "../../contracts/src/index.mjs";
+import { normalizeTrustedKeyring } from "../../datapack/src/index.mjs";
 import {
   CONTENT_PACK_MAX_ARTIFACT_BYTES,
   CONTENT_PACK_VERSION_RE,
@@ -279,8 +280,21 @@ export class ContentPackCatalogService {
     for (const field of ["contentPackSubmissions", "contentPackReviews", "contentPackVersions", "contentPackRateWindows"]) {
       if (!this.store[field]) this.store[field] = new Map();
     }
-    this.trustedKeys = options.trustedKeys || options.contentPackTrustedKeys || {};
-    this.legacyPublisherKeys = options.legacyPublisherKeys || options.contentPackLegacyPublisherKeys || {};
+    const validateConfiguredKeyring = (value, label) => {
+      const entries = value && typeof value === "object" && !Array.isArray(value) ? Object.entries(value) : [];
+      if (!entries.length) return {};
+      // Fail fast at process composition time: key ids must be exact raw-key
+      // fingerprints and values must be decodable raw/SPKI Ed25519 public keys.
+      // Empty means "no publication trust configured" and remains publish-fail-closed.
+      normalizeTrustedKeyring(value);
+      return Object.fromEntries(entries);
+    };
+    this.trustedKeys = validateConfiguredKeyring(options.trustedKeys || options.contentPackTrustedKeys || {}, "contentPackTrustedKeys");
+    const legacyInput = options.legacyPublisherKeys || options.contentPackLegacyPublisherKeys || {};
+    this.legacyPublisherKeys = {};
+    for (const [publisher, keyring] of Object.entries(legacyInput)) {
+      this.legacyPublisherKeys[publisher] = validateConfiguredKeyring(keyring, "contentPackLegacyPublisherKeys." + publisher);
+    }
     this.submitRateLimitPerHour = Number.isInteger(options.submitRateLimitPerHour) ? options.submitRateLimitPerHour : 12;
     this.downloadRateLimitPerHour = Number.isInteger(options.downloadRateLimitPerHour) ? options.downloadRateLimitPerHour : 120;
   }

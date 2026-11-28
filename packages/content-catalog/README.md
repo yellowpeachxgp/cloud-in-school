@@ -17,6 +17,8 @@ createCampusCloudApp 可注入：
 - contentPackTrustedKeys：{ [rawEd25519PublicKeySha256Hex]: spkiOrRawPublicKeyBase64 }，用于 dis-datapack/v1，也可作为 legacy fallback。
 - contentPackLegacyPublisherKeys：{ [manifest.publisher]: { [fingerprint]: publicKeyBase64 } }，用于按 legacy manifest publisher 进一步限定信任根。
 
+生产/开发机也可用环境变量 CONTENT_PACK_TRUST_ROOT_JSON 注入同一结构：{ "trusted_keys": { fingerprint: publicKeyBase64 }, "legacy_publisher_keys": { publisher: { fingerprint: publicKeyBase64 } } }。启动时会校验 fingerprint 与 raw public key 一致；一旦配置 legacy publisher 映射，未列名 publisher 不得回退到全局密钥。
+
 密钥材料只能是**公钥**；私钥不得进入云端配置、日志、快照或仓库。没有配置匹配信任根时发布失败，这是故意 fail-closed，不是隐式信任 artifact、catalog 或提交者提供的数据。
 
 ## 签名载荷
