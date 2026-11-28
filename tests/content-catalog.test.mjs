@@ -15,6 +15,7 @@ import {
   unpackAndValidateLegacySchoolPackage
 } from "../packages/content-catalog/src/artifact-validation.mjs";
 import { writePluginPackageZip } from "../packages/plugin-sdk/src/package-zip.mjs";
+import { parseOperationsSchoolGrantSpecs } from "../apps/api/src/operations-grants.mjs";
 
 const BASE_NOW = Date.parse("2026-11-28T10:00:00.000Z");
 const DATAPACK_FIXTURE = "tests/fixtures/datapack/valid-procedure.json";
@@ -136,6 +137,15 @@ async function publishSubmission(app, publisher, submissionId, signature, key = 
     nowMs: BASE_NOW
   });
 }
+
+test("W5-02 operations grant bootstrap accepts independent content pack duties", () => {
+  const specs = parseOperationsSchoolGrantSpecs(JSON.stringify([
+    { cloud_user_id: "11111111-1111-4111-8111-111111111111", school_id: "haut", permission: "content_pack.review" },
+    { cloud_user_id: "22222222-2222-4222-8222-222222222222", school_id: "haut", permission: "content_pack.publish" },
+    { cloud_user_id: "33333333-3333-4333-8333-333333333333", school_id: "haut", permission: "content_pack.retire" }
+  ]));
+  assert.deepEqual(specs.map((spec) => spec.permission), ["content_pack.review", "content_pack.publish", "content_pack.retire"]);
+});
 
 test("W5-02 dis-datapack lifecycle: submit/review/publish/catalog/download/retire closes exactly once with event and idempotent replay", async () => {
   const { app, artifact, signature } = createSignedDatapackContext();
@@ -455,6 +465,29 @@ test("W5-02 rate limits count validation attempts and every artifact download", 
   const secondDownload = await unlimited.app.inject({ method: "GET", url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/download", headers: reviewer2.auth, nowMs: BASE_NOW });
   assert.equal(secondDownload.status, 429);
   assert.equal(secondDownload.body.error.code, "CONTENT_PACK_RATE_LIMITED");
+});
+
+test("W5-02 rejected submission drops artifact media while keeping digest-only audit metadata", async () => {
+  const { app, artifact } = createSignedDatapackContext();
+  const submitter = setupUser(app, "negative_submitter");
+  const reviewer = setupUser(app, "negative_reviewer", { operations: ["content_pack.review"] });
+  const created = await submitDatapack(app, submitter, { key: "negative-submit-0001" });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const submissionId = created.body.data.submission_id;
+  assert.equal(app.store.contentPackArtifactMemory.size, 1);
+  const rejected = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/content-pack-submissions/" + submissionId + "/review",
+    headers: writeHeaders(reviewer, "negative-review-0001"),
+    body: { action: "REJECT", review_note: "来源不足，需重新提交" },
+    nowMs: BASE_NOW
+  });
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
+  assert.equal(rejected.body.data.status, "REJECTED");
+  const row = app.store.contentPackSubmissions.get(submissionId);
+  assert.equal(row.artifact_retain, false);
+  assert.equal(row.artifact_sha256, sha256Hex(artifact), "digest metadata remains auditable");
+  assert.equal(app.store.contentPackArtifactMemory.size, 0, "terminal negative review must not retain artifact bytes");
 });
 
 test("W5-02 artifact metadata and sidecar bytes survive snapshot restart before review and publish", async () => {

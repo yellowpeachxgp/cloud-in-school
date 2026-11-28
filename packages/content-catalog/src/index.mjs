@@ -757,6 +757,7 @@ export class ContentPackCatalogService {
         version: prepared.version,
         artifact_sha256: prepared.artifactSha256,
         artifact_size_bytes: prepared.artifactSizeBytes,
+        artifact_retain: true,
         contribution_reference: prepared.contributionReference,
         provenance: clone(prepared.provenance),
         submission_note: prepared.submissionNote,
@@ -857,6 +858,7 @@ export class ContentPackCatalogService {
       setMapCommitted(this.store.contentPackReviews, submissionId, review, undo);
       mutateObject(submission, {
         status: action === "APPROVE" ? "APPROVED" : action === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "REJECTED",
+        artifact_retain: action === "APPROVE",
         updated_at: ts
       }, undo);
       pushArrayCommitted(this.store.auditEvents, {
@@ -944,7 +946,7 @@ export class ContentPackCatalogService {
         retired_by_cloud_user_id: null
       };
       setMapCommitted(this.store.contentPackVersions, key, row, undo);
-      mutateObject(submission, { status: "PUBLISHED", updated_at: ts }, undo);
+      mutateObject(submission, { status: "PUBLISHED", artifact_retain: false, updated_at: ts }, undo);
       pushArrayCommitted(this.store.auditEvents, {
         id: auditId,
         actor_kind: "USER",

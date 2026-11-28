@@ -1772,9 +1772,19 @@ export class CloudDatabaseStore {
       finally { io.closeSync(dirFd); }
     } catch (err) {
       if (err instanceof ContractError) throw err;
+      // D16 applies to client-visible storage errors too: Node filesystem errors
+      // often embed the configured snapshot/artifact path, so keep syscall detail
+      // but redact store-controlled path prefixes.
+      let message = String(err?.message || "unknown");
+      for (const [token, label] of [
+        [this.contentPackArtifactDir, "<content-artifact-dir>"],
+        [this.snapshotPath, "<snapshot-path>"]
+      ]) {
+        if (typeof token === "string" && token.length > 1) message = message.split(token).join(label);
+      }
       throw new ContractError(
         "STORAGE_PERSISTENCE_FAILED",
-        "内容包 artifact 侧车写入失败：" + (err?.message || "unknown"),
+        "内容包 artifact 侧车写入失败：" + message,
         { retry_same_key: true }
       );
     }
@@ -1817,7 +1827,9 @@ export class CloudDatabaseStore {
     const add = (value) => {
       if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) digests.add(value);
     };
-    for (const row of source.contentPackSubmissions?.values?.() || []) add(row?.artifact_sha256);
+    for (const row of source.contentPackSubmissions?.values?.() || []) {
+      if (row?.artifact_retain !== false) add(row?.artifact_sha256);
+    }
     for (const row of source.contentPackVersions?.values?.() || []) add(row?.artifact_sha256);
     return digests;
   }
@@ -2527,6 +2539,10 @@ export class CloudDatabaseStore {
       if (Object.hasOwn(row, "artifact") || Object.hasOwn(row, "artifact_base64")) {
         throw new Error("内容包提交快照不得内联 artifact 字节");
       }
+      const expectsRetainedArtifact = row.status === "PENDING_REVIEW" || row.status === "APPROVED";
+      if (row.artifact_retain !== expectsRetainedArtifact) {
+        throw new Error("内容包提交快照 artifact 保留状态与审核生命周期不一致");
+      }
       if (typeof row.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.artifact_sha256) ||
           !Number.isSafeInteger(row.artifact_size_bytes) || row.artifact_size_bytes < 1 || row.artifact_size_bytes > 16777216) {
         throw new Error("内容包提交快照 artifact 摘要或尺寸无效");
@@ -2627,6 +2643,13 @@ export class CloudDatabaseStore {
         }
         for (const j of source.reservationJobs.values()) {
           if (j?._stopPersistencePending) delete j._stopPersistencePending;
+        }
+        try {
+          // Ephemeral mode has no durability barrier, but unreferenced in-memory
+          // artifact media can still be dropped immediately after the same commit.
+          this.sweepContentPackArtifactOrphans?.(source);
+        } catch {
+          // Ephemeral cleanup is best-effort and never invalidates the committed state.
         }
       }
       return;

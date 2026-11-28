@@ -6,7 +6,7 @@ CT-06 内容包目录运行时。覆盖 10 个 active 端点：目录、版本�
 
 - 提交 artifact 是**未签名候选**；服务端只做严格解包/Schema/provenance/digest/体积校验并接受进入审核队列。接受提交不代表发布、验证或学校认可。
 - 发布时必须由独立 content_pack.publish 授权主体提交 detached Ed25519 signature；服务端重新读取 artifact、重新做 exact-byte/Schema/格式/kind/provenance/版本顺序校验，再用宿主固定信任根验签。信任根为空或签名者不在根内一律 fail-closed。
-- reviewer 必须持有匹配 school_id 的 content_pack.review operations grant，且不可审核自己提交的包；publish/retire 分别是独立 operations grant。
+- reviewer 必须持有匹配 school_id 的 content_pack.review operations grant，且不可审核自己提交的包；publish/retire 分别是独立 operations grant。三项运营权限均可由 CLOUD_OPERATIONS_SCHOOL_GRANTS bootstrap 按 user+school+permission 显式下发。
 - artifact bytes 不进入 JSON snapshot，也不由 submission/read/export API 返回；运行时写入 content-addressed sidecar，下载和发布前都做 digest+size 读取校验。
 - RETIRED 只追加生命周期元数据；版本详情仍可审计，下载 fail-closed 为 410，catalog 默认不再选择该版本。
 

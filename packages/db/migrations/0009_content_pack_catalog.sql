@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS content_pack_submissions (
   version TEXT NOT NULL CHECK (version ~ '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$'),
   artifact_sha256 TEXT NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
   artifact_size_bytes INTEGER NOT NULL CHECK (artifact_size_bytes BETWEEN 1 AND 16777216),
-  artifact BYTEA NOT NULL,
+  artifact BYTEA,
   contribution_reference TEXT NOT NULL CHECK (contribution_reference ~ '^https://' AND char_length(contribution_reference) <= 2048),
   provenance_json JSONB NOT NULL CHECK (jsonb_typeof(provenance_json) = 'object'),
   submission_note TEXT CHECK (submission_note IS NULL OR char_length(submission_note) <= 2000),
@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS content_pack_submissions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT content_pack_submissions_artifact_size_shape_check
-    CHECK (octet_length(artifact) = artifact_size_bytes),
+    CHECK (artifact IS NULL OR octet_length(artifact) = artifact_size_bytes),
+  CONSTRAINT content_pack_submissions_artifact_lifecycle_shape_check CHECK (
+    (status IN ('PENDING_REVIEW','APPROVED') AND artifact IS NOT NULL) OR
+    (status IN ('CHANGES_REQUESTED','REJECTED','PUBLISHED') AND artifact IS NULL)
+  ),
   CONSTRAINT content_pack_submissions_format_kind_shape_check CHECK (
     (artifact_format = 'dis-campus-plugin/v1' AND kind IN ('school-profile','campus-guide')) OR
     (artifact_format = 'dis-datapack/v1' AND kind IN ('procedure-guide','opportunity-catalog','facility-catalog','indoor-graph','period-preset','pharmacy-catalog'))

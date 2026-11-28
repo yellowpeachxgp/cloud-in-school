@@ -5,7 +5,12 @@ const MAX_GRANTED_BY_REF_LENGTH = 120;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const PERMISSION_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
-const SUPPORTED_OPERATIONS_PERMISSIONS = new Set(["place.status.moderate"]);
+const SUPPORTED_OPERATIONS_PERMISSIONS = new Set([
+  "place.status.moderate",
+  "content_pack.review",
+  "content_pack.publish",
+  "content_pack.retire"
+]);
 
 function configError(message) {
   return new Error(OPERATIONS_GRANT_ENV_VAR + " " + message);

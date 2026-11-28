@@ -122,6 +122,28 @@ if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "INSERT INTO content_pack_vers
   echo "FAIL: format/kind mismatch accepted"; exit 1;
 fi
 
+# Terminal negative review states must not retain submission artifact bytes.
+psql -h /tmp -U postgres -v ON_ERROR_STOP=1 >/dev/null <<'EOSQL'
+INSERT INTO content_pack_submissions (
+  submission_id, status, artifact_format, kind, school_id, pack_id, version,
+  artifact_sha256, artifact_size_bytes, artifact, contribution_reference,
+  provenance_json, submitter_cloud_user_id
+) VALUES (
+  'adadadad-adad-4dad-8dad-adadadadadad', 'PENDING_REVIEW', 'dis-datapack/v1', 'procedure-guide',
+  'haut', 'haut.rejected', '2026.11.1',
+  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 3, decode('7b7d0a', 'hex'),
+  'https://example.com/pr3', '{}'::jsonb, '11111111-1111-4111-8111-111111111111'
+);
+EOSQL
+if psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -c "UPDATE content_pack_submissions SET status='REJECTED', updated_at=now() WHERE submission_id='adadadad-adad-4dad-8dad-adadadadadad';" >/dev/null 2>&1; then
+  echo "FAIL: rejected submission retained artifact bytes"; exit 1;
+fi
+psql -h /tmp -U postgres -v ON_ERROR_STOP=1 >/dev/null <<'EOSQL'
+UPDATE content_pack_submissions
+   SET status='REJECTED', artifact=NULL, updated_at=now()
+ WHERE submission_id='adadadad-adad-4dad-8dad-adadadadadad';
+EOSQL
+
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0009_content_pack_catalog.down.sql >/dev/null
 # Repeating DOWN is safe.
 psql -h /tmp -U postgres -v ON_ERROR_STOP=1 -f /migrations/0009_content_pack_catalog.down.sql >/dev/null
