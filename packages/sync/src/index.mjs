@@ -463,6 +463,21 @@ export class SyncService {
   }
 
   _settleConsentLifecycle(userId, nowMs) {
+    const prior = this._stateFor(userId);
+    if (
+      prior?.expired_cleanup_at &&
+      !prior.consent_withdrawn_at &&
+      this._hasActiveE2eeConsent(userId, nowMs)
+    ) {
+      // A cleanup cycle is complete once it has run.  Clearing only the completion
+      // marker here lets a later, independent withdrawal start a fresh 30-day
+      // lifecycle; it never restores the ciphertext/devices already erased or revoked.
+      this._commitMutation((undo) => {
+        const state = this._ensureUserState(userId, nowMs, undo);
+        mutateObject(state, { expired_cleanup_at: null, reauthorized_at: iso(nowMs), updated_at: iso(nowMs) }, undo);
+        return { settled: "post_cleanup_reauthorized" };
+      }, nowMs);
+    }
     const intent = this._lifecycleIntent(userId, nowMs);
     if (!intent) return;
     this._commitMutation((undo) => {
