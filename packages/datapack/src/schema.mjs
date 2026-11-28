@@ -261,7 +261,6 @@ function validateProcedureGuideItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "steps"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "procedure-guide",
     ...base,
     steps: expectArray(object.steps, child(path, "steps"), 1).map((item, index) => validateProcedureStep(item, child(path, "steps") + "[" + index + "]")),
     questions: object.questions === undefined ? [] : expectArray(object.questions, child(path, "questions")).map((item, index) => validateProcedureQuestion(item, child(path, "questions") + "[" + index + "]")),
@@ -287,7 +286,6 @@ function validateOpportunityCatalogItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "category", "requirements", "materials"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "opportunity-catalog",
     ...base,
     category: expectEnum(object.category, child(path, "category"), ["certification", "competition", "grant", "scholarship", "program"]),
     organizer: object.organizer === undefined ? null : expectNullableString(object.organizer, child(path, "organizer"), { max: 200 }),
@@ -303,7 +301,6 @@ function validateFacilityCatalogItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "facilityType", "placeRef"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "facility-catalog",
     ...base,
     facilityType: expectString(object.facilityType, child(path, "facilityType"), { min: 1, max: 80 }),
     placeRef: expectString(object.placeRef, child(path, "placeRef"), { min: 3, max: 240 }),
@@ -318,7 +315,6 @@ function validateIndoorGraphItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "itemType"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "indoor-graph",
     ...base,
     itemType: expectEnum(object.itemType, child(path, "itemType"), ["node", "edge", "level"]),
     placeRef: object.placeRef === undefined ? null : expectNullableString(object.placeRef, child(path, "placeRef"), { max: 240 }),
@@ -347,7 +343,6 @@ function validatePeriodPresetItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "periods"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "period-preset",
     ...base,
     periods: expectArray(object.periods, child(path, "periods"), 1).map((item, index) => validatePeriod(item, child(path, "periods") + "[" + index + "]"))
   };
@@ -358,7 +353,6 @@ function validatePharmacyCatalogItem(value, path) {
   const object = expectObject(value, path, allowed, ["id", "title", "category"]);
   const base = validateBaseItem(object, path);
   return {
-    type: "pharmacy-catalog",
     ...base,
     category: expectString(object.category, child(path, "category"), { min: 1, max: 120 }),
     specification: object.specification === undefined ? null : expectNullableString(object.specification, child(path, "specification"), { max: 160 }),

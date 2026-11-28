@@ -160,7 +160,7 @@ test("W5-01 schema validator covers all six CT-06 kinds and applies documented d
     facilityType: "service-desk",
     placeRef: "haut/lianhuajie/building/administration"
   }]);
-  assert.equal(facility.items[0].type, "facility-catalog");
+  assert.equal(facility.items[0].facilityType, "service-desk");
 
   const indoor = make("indoor-graph", [{
     id: "node-1",
