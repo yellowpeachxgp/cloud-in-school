@@ -3,7 +3,7 @@ info:
   title: Day in School Campus Cloud Event & Outbox Contracts
   version: 1.0.0
   description: |
-    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, repair workflow events, Campus Graph place status events, reserved UGC moderation events, and content catalog publication events.
+    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, repair workflow events, Campus Graph place status events, reserved UGC moderation events, content catalog publication events, and ciphertext-only E2EE synchronization lifecycle events.
 defaultContentType: application/json
 channels:
   reservation.schedule.precheck:
@@ -162,6 +162,18 @@ channels:
       operationId: publishContentPackPublishedEvent
       message:
         $ref: '#/components/messages/ContentPackPublishedEvent'
+  sync.device.registered:
+    description: A client-generated sync device identity was first registered for ciphertext-only E2EE synchronization. The payload is security metadata only and carries no session identifier, hardware identifier, plaintext, ciphertext, or key material.
+    publish:
+      operationId: publishSyncDeviceRegisteredEvent
+      message:
+        $ref: '#/components/messages/SyncDeviceLifecycleEvent'
+  sync.device.revoked:
+    description: A sync device identity was permanently revoked and its internally bound cloud session family was invalidated. Existing ciphertext history is not deleted by this event.
+    publish:
+      operationId: publishSyncDeviceRevokedEvent
+      message:
+        $ref: '#/components/messages/SyncDeviceLifecycleEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -982,3 +994,35 @@ components:
           occurred_at:
             type: string
             format: date-time
+    SyncDeviceLifecycleEvent:
+      name: SyncDeviceLifecycleEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, cloud_user_id, device_id, status, revocation_reason]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:sync:device:[0-9a-fA-F-]{36}:(registered|revoked):v1$'
+            description: Exactly-once consumer dedupe key for the first registration or first durable revocation of this immutable device identity.
+          event_type:
+            type: string
+            enum: [registered, revoked]
+          occurred_at:
+            type: string
+            format: date-time
+          cloud_user_id:
+            type: string
+            format: uuid
+          device_id:
+            type: string
+            format: uuid
+          status:
+            type: string
+            enum: [ACTIVE, REVOKED]
+          revocation_reason:
+            type: [string, 'null']
+            enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY, null]
+            description: Null for registration; no free-text reason is emitted because free text can contain personal data.

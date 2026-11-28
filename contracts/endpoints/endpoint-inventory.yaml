@@ -1000,3 +1000,24 @@ endpoints:
     owner: content-catalog
     status: planned
     contract_card: CT-06
+  - method: GET
+    path: /api/v1/sync/devices
+    operationId: listSyncDevices
+    auth: bearer
+    owner: sync
+    status: planned
+    contract_card: CT-07
+  - method: PUT
+    path: /api/v1/sync/devices/{deviceId}
+    operationId: registerSyncDevice
+    auth: bearer
+    owner: sync
+    status: planned
+    contract_card: CT-07
+  - method: DELETE
+    path: /api/v1/sync/devices/{deviceId}
+    operationId: revokeSyncDevice
+    auth: bearer
+    owner: sync
+    status: planned
+    contract_card: CT-07

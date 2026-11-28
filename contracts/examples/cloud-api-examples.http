@@ -801,3 +801,34 @@ Idempotency-Key: content_pack_retire_demo_0001
   "reason": "OUTDATED",
   "detail": "新版 2026.11.2 已发布，旧版停止新安装和新下载"
 }
+
+### 87. CT-07 List E2EE Sync Devices (planned)
+# Runtime truth: account-security metadata only; no ciphertext, plaintext, key material, session tokens, hardware serials, or push tokens are returned.
+GET http://127.0.0.1:4100/api/v1/sync/devices
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 88. CT-07 Register E2EE Sync Device (planned)
+# Runtime truth: consent_id must reference an active E2EE_CLOUD_SYNC consent. device_id is a fresh installation UUID, never a hardware identifier.
+PUT http://127.0.0.1:4100/api/v1/sync/devices/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: sync_device_register_demo_0001
+
+{
+  "consent_id": "99999999-9999-4999-8999-999999999999",
+  "device_label": "示例 Android 设备",
+  "platform": "ANDROID",
+  "sync_protocol_version": 1
+}
+
+### 89. CT-07 Revoke E2EE Sync Device Without Deleting Ciphertext History (planned)
+# Runtime truth: revocation is permanent, invalidates the internally bound session family, and never deletes previously accepted encrypted blocks.
+DELETE http://127.0.0.1:4100/api/v1/sync/devices/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: sync_device_revoke_demo_0001
+
+{
+  "reason": "LOST_OR_STOLEN"
+}

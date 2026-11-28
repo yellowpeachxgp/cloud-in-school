@@ -4867,6 +4867,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/sync/devices:
+    get:
+      operationId: listSyncDevices
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.read]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SYNC_PERMISSION_DENIED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: List E2EE sync device registrations for the current user
+      description: |
+        Returns active and revoked sync device registrations owned by the authenticated cloud user. The response is account-security metadata only: it never contains ciphertext, plaintext, encryption keys, key encryption keys, session tokens, hardware serials, IMEI/SSAID, push tokens, or linked refresh-session identifiers. Device management remains available after E2EE sync consent is withdrawn so a user can still inspect and revoke a lost device. Example 87.
+      responses:
+        '200':
+          description: Sync device registration list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/sync/devices/{deviceId}:
+    put:
+      operationId: registerSyncDevice
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.register]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_INVALID, SYNC_DEVICE_CONFLICT, SYNC_DEVICE_REVOKED, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.device.registered]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Register one client-generated sync device identity for E2EE block synchronization
+      description: |
+        Creates an immutable sync device registration for the authenticated cloud user. device_id is a fresh client-generated UUID for this installation, never a hardware serial, IMEI, SSAID, push token, or stable operating-system identifier. The device_id is permanently bound server-side to the authenticated user and the cloud session family present at registration; the binding is internal authorization metadata and is never returned. Registration requires an active E2EE_CLOUD_SYNC consent id whose document explicitly discloses ciphertext-only storage. No plaintext, encryption key, key encryption key, private key, password, or key derivation secret is accepted or stored in any field. Replaying the same Idempotency-Key with the same request returns the original registration. Reusing an active device_id from another session family or with different immutable metadata is SYNC_DEVICE_CONFLICT; a revoked device_id is permanently closed and returns SYNC_DEVICE_REVOKED rather than being resurrected. Example 88.
+      parameters:
+        - $ref: '#/components/parameters/SyncDeviceIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterSyncDeviceRequest'
+      responses:
+        '201':
+          description: Device registration created and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '200':
+          description: Durable idempotent replay of the original registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Device id was previously revoked and is permanently closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: revokeSyncDevice
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.device.revoke]
+      x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.device.revoked]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Permanently revoke one E2EE sync device without deleting user ciphertext history
+      description: |
+        Revocation is a permanent tombstone for the device identity and is linearized with blob writes: every write durably committed before revocation remains part of the user's encrypted history, while every read, write, or incremental pull using the revoked device after the revocation commit fails closed with SYNC_DEVICE_REVOKED. The same device_id can never be registered again. The server atomically invalidates the internally bound cloud session family; when the caller revokes its own current device, this response is still completed but subsequent use of that session family is rejected. Revocation never deletes ciphertext blobs or version-vector authorship entries, because silently dropping the user's only copy would violate data preservation; other still-active devices retain access. Delete individual blobs or invoke account data deletion when erasure is intended. Repeating revocation for an already revoked device returns the current tombstone without emitting a second event. Example 89.
+      parameters:
+        - $ref: '#/components/parameters/SyncDeviceIdParam'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeSyncDeviceRequest'
+      responses:
+        '200':
+          description: Device revoked, already revoked, or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDeviceEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 components:
   securitySchemes:
     bearerAuth:
@@ -5086,6 +5206,13 @@ components:
       required: true
       schema:
         type: string
+    SyncDeviceIdParam:
+      name: deviceId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncDeviceIdValue'
+      description: Client-generated sync device UUID percent-encoded as one path segment.
   responses:
     BadRequest:
       description: Invalid request parameters or schema validation failure
@@ -5481,6 +5608,7 @@ components:
             - SERVICE_FEE_TERMS
             - PARCEL_CLOUD_BACKUP
             - PARCEL_AI_ASSISTANT
+            - E2EE_CLOUD_SYNC
         document_version:
           type: string
         document_sha256:
@@ -9576,5 +9704,109 @@ components:
           type: array
           items:
             type: object
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SyncDeviceIdValue:
+      type: string
+      format: uuid
+      description: Fresh client-generated installation UUID. It is not a hardware serial, IMEI, SSAID, push token, or stable operating-system identifier.
+    SyncDevicePlatform:
+      type: string
+      enum: [ANDROID]
+      description: v1 has an Android implementation only. Additional platforms require a backwards-compatible contract revision rather than informal free text.
+    SyncDeviceStatus:
+      type: string
+      enum: [ACTIVE, REVOKED]
+    SyncDeviceRevocationReason:
+      type: string
+      enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY]
+    RegisterSyncDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [consent_id, platform, sync_protocol_version]
+      properties:
+        consent_id:
+          type: string
+          format: uuid
+          description: Active consent record whose purpose is E2EE_CLOUD_SYNC. The linked consent document must disclose ciphertext-only server storage and cross-device sync processing.
+        device_label:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Optional user-chosen management label. Clients must not auto-populate precise hardware serials, phone numbers, student numbers, or device-location text.
+        platform:
+          $ref: '#/components/schemas/SyncDevicePlatform'
+        sync_protocol_version:
+          type: integer
+          const: 1
+      description: Immutable registration metadata. No encryption key, private key, password, session token, hardware identifier, or plaintext sync payload field is permitted.
+    RevokeSyncDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          $ref: '#/components/schemas/SyncDeviceRevocationReason'
+    SyncDevice:
+      type: object
+      additionalProperties: false
+      required: [device_id, status, device_label, platform, sync_protocol_version, registered_at, revoked_at, revocation_reason, last_seen_at]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        status:
+          $ref: '#/components/schemas/SyncDeviceStatus'
+        device_label:
+          type: [string, 'null']
+          maxLength: 80
+        platform:
+          $ref: '#/components/schemas/SyncDevicePlatform'
+        sync_protocol_version:
+          type: integer
+          const: 1
+        registered_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+        revocation_reason:
+          anyOf:
+            - $ref: '#/components/schemas/SyncDeviceRevocationReason'
+            - type: 'null'
+        last_seen_at:
+          type: [string, 'null']
+          format: date-time
+          description: Last time this device was accepted for a sync read or write. It is operational metadata only and is never derived from plaintext payload inspection.
+    SyncDeviceEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncDevice'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SyncDeviceListEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncDevice'
         meta:
           $ref: '#/components/schemas/ResponseMeta'

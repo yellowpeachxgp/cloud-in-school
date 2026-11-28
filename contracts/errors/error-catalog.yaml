@@ -505,3 +505,33 @@ errors:
     retryable: false
     user_action: REDUCE_CONTENT_PACK_ARTIFACT
     description: Content package artifact exceeds the v1 16 MiB ceiling or the base64 review submission body limit.
+  - code: SYNC_CONSENT_REQUIRED
+    http_status: 403
+    retryable: false
+    user_action: REVIEW_E2EE_SYNC_CONSENT
+    description: E2EE cloud sync requires an active explicit E2EE_CLOUD_SYNC consent; missing, withdrawn, expired, or mismatched consent fails closed before ciphertext upload, download, deletion, or incremental pull.
+  - code: SYNC_DEVICE_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_SYNC_DEVICE_REGISTRATION
+    description: Sync device registration metadata, protocol version, platform, device id, or user-visible label failed validation; hardware identifiers, secrets, keys, and plaintext payload fields are forbidden.
+  - code: SYNC_DEVICE_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: REGISTER_SYNC_DEVICE
+    description: Sync device id is not registered for the authenticated cloud user or is not visible in the caller scope.
+  - code: SYNC_DEVICE_CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: USE_NEW_SYNC_DEVICE_ID
+    description: Sync device id is already bound to a different session family or immutable registration metadata; create a fresh installation UUID instead of reusing or rewriting it.
+  - code: SYNC_DEVICE_REVOKED
+    http_status: 410
+    retryable: false
+    user_action: REGISTER_NEW_SYNC_DEVICE_ID
+    description: Sync device id was permanently revoked; it cannot be resurrected and cannot read, write, delete, or pull encrypted sync blocks.
+  - code: SYNC_PERMISSION_DENIED
+    http_status: 403
+    retryable: false
+    user_action: CHECK_SYNC_AUTHORIZATION
+    description: Caller lacks the required user-scoped encrypted synchronization device or blob permission.
