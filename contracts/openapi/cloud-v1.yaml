@@ -3233,9 +3233,9 @@ paths:
   /api/v1/content-packs:
     get:
       operationId: listContentPacks
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_PERMISSION_DENIED]
       tags: [content-packs]
@@ -3286,9 +3286,9 @@ paths:
   /api/v1/content-packs/{packId}/versions:
     get:
       operationId: listContentPackVersions
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
       tags: [content-packs]
@@ -3325,9 +3325,9 @@ paths:
   /api/v1/content-packs/{packId}/versions/{version}:
     get:
       operationId: getContentPackVersion
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
       tags: [content-packs]
@@ -3357,9 +3357,9 @@ paths:
   /api/v1/content-packs/{packId}/versions/{version}/download:
     get:
       operationId: downloadContentPackArtifact
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.download]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONTENT_PACK_VERSION_RETIRED, CONTENT_PACK_PERMISSION_DENIED, CONTENT_PACK_RATE_LIMITED]
       tags: [content-packs]
@@ -3412,9 +3412,9 @@ paths:
   /api/v1/content-pack-submissions:
     post:
       operationId: createContentPackSubmission
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.submit]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, CONTENT_PACK_SUBMISSION_INVALID, CONTENT_PACK_INVALID, CONTENT_PACK_SIGNATURE_INVALID, CONTENT_PACK_ARTIFACT_TOO_LARGE, CONTENT_PACK_PERMISSION_DENIED, CONTENT_PACK_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3466,9 +3466,9 @@ paths:
   /api/v1/content-pack-submissions/{submissionId}:
     get:
       operationId: getContentPackSubmission
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.submit]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_PERMISSION_DENIED]
       tags: [content-packs]
@@ -3495,9 +3495,9 @@ paths:
   /api/v1/admin/content-pack-submissions:
     get:
       operationId: listContentPackSubmissionReviews
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.review]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_PERMISSION_DENIED]
       tags: [content-packs, admin]
@@ -3541,9 +3541,9 @@ paths:
   /api/v1/admin/content-pack-submissions/{submissionId}/review:
     post:
       operationId: reviewContentPackSubmission
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.review]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_SUBMITTER_CANNOT_REVIEW, CONTENT_PACK_REVIEW_INVALID, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3584,9 +3584,9 @@ paths:
   /api/v1/admin/content-packs:
     post:
       operationId: publishContentPackVersion
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.publish]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_REVIEW_REQUIRED, CONTENT_PACK_INVALID, CONTENT_PACK_SIGNATURE_INVALID, CONTENT_PACK_VERSION_CONFLICT, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -3633,9 +3633,9 @@ paths:
   /api/v1/admin/content-packs/{packId}/versions/{version}/retire:
     post:
       operationId: retireContentPackVersion
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: Active CT-06 content catalog surface. The W5-02 implementation atomically wired the runtime route and flipped this operation from planned to active.
       x-dis-permissions: [content_pack.retire]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONFLICT, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required

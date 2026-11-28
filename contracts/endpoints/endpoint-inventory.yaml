@@ -935,70 +935,70 @@ endpoints:
     operationId: listContentPacks
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/content-packs/{packId}/versions
     operationId: listContentPackVersions
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/content-packs/{packId}/versions/{version}
     operationId: getContentPackVersion
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/content-packs/{packId}/versions/{version}/download
     operationId: downloadContentPackArtifact
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: POST
     path: /api/v1/content-pack-submissions
     operationId: createContentPackSubmission
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/content-pack-submissions/{submissionId}
     operationId: getContentPackSubmission
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/admin/content-pack-submissions
     operationId: listContentPackSubmissionReviews
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: POST
     path: /api/v1/admin/content-pack-submissions/{submissionId}/review
     operationId: reviewContentPackSubmission
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: POST
     path: /api/v1/admin/content-packs
     operationId: publishContentPackVersion
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: POST
     path: /api/v1/admin/content-packs/{packId}/versions/{version}/retire
     operationId: retireContentPackVersion
     auth: bearer
     owner: content-catalog
-    status: planned
+    status: active
     contract_card: CT-06
   - method: GET
     path: /api/v1/sync/devices

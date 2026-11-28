@@ -25,6 +25,7 @@ import { AvailabilityService } from "../../../packages/availability/src/index.mj
 import { PlaceStatusService } from "../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../packages/ledger/src/index.mjs";
 import { SyncService } from "../../../packages/sync/src/index.mjs";
+import { ContentPackCatalogService } from "../../../packages/content-catalog/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -195,6 +196,12 @@ export function createCampusCloudApp(options = {}) {
   const placeStatus = options.placeStatus || new PlaceStatusService(store);
   const ledger = options.ledger || new LedgerService(store);
   const syncE2ee = options.syncE2ee || new SyncService(store);
+  const contentCatalog = options.contentCatalog || new ContentPackCatalogService(store, {
+    trustedKeys: options.contentPackTrustedKeys,
+    legacyPublisherKeys: options.contentPackLegacyPublisherKeys,
+    submitRateLimitPerHour: options.contentPackSubmitRateLimitPerHour,
+    downloadRateLimitPerHour: options.contentPackDownloadRateLimitPerHour
+  });
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -509,6 +516,7 @@ export function createCampusCloudApp(options = {}) {
     placeStatus,
     ledger,
     syncE2ee,
+    contentCatalog,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -542,6 +550,7 @@ export function createCampusCloudApp(options = {}) {
     placeStatus,
     ledger,
     syncE2ee,
+    contentCatalog,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,

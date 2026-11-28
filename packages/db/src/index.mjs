@@ -603,7 +603,8 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "notifications", "priceQuotes", "idempotencyRecords", "campusGraphPlaces", "placeReports",
   "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates",
   "syncUserStates", "syncDevices", "syncBlobs", "syncMutations", "syncBlobAntiResurrection",
-  "syncCursors", "syncTransferUsage", "syncRateWindows"
+  "syncCursors", "syncTransferUsage", "syncRateWindows", "contentPackSubmissions",
+  "contentPackReviews", "contentPackVersions", "contentPackRateWindows"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -961,6 +962,13 @@ export class CloudDatabaseStore {
     this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
     this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
 
+    // Content package catalog (W5-02): immutable review/version metadata. Artifact
+    // bytes are content-addressed sidecar media, never inline JSON snapshot strings.
+    this.contentPackSubmissions = new Map(); // submissionId -> immutable candidate metadata + review lifecycle
+    this.contentPackReviews = new Map(); // submissionId -> exactly one review decision row
+    this.contentPackVersions = new Map(); // `${packId}@${version}` -> immutable published/retired version metadata
+    this.contentPackRateWindows = new Map(); // `${cloudUserId}:${kind}:${windowStart}` -> fixed-window request count
+
     // E2EE sync (W4-11): ciphertext-only current blobs, metadata-only mutation
     // history, device-bound cursors, consent lifecycle state, quotas, and minimal
     // anti-resurrection markers.  No plaintext or key material is representable here.
@@ -982,6 +990,12 @@ export class CloudDatabaseStore {
     this.syncCiphertextMemory = new Map(); // digest -> Buffer (ephemeral mode only)
     this.syncCiphertextDir = snapshotPath ? `${snapshotPath}.ciphertext` : null;
     this._syncCiphertextTmpSeq = 0;
+
+    // W5-02 artifact bytes follow the same boundary as ciphertext: content-addressed
+    // sidecar files in durable mode and memory-only media in ephemeral tests.
+    this.contentPackArtifactMemory = new Map(); // digest -> Buffer (ephemeral mode only)
+    this.contentPackArtifactDir = snapshotPath ? `${snapshotPath}.content-artifacts` : null;
+    this._contentPackArtifactTmpSeq = 0;
     // Directory entries of deleted sidecar files are durable only after the
     // shard-directory fsync succeeds. If that fsync reports failure, the volatile
     // name may already be gone; remembering the shard is the only way a retry can
@@ -1299,6 +1313,10 @@ export class CloudDatabaseStore {
       loadMap(this.syncCursors, raw.syncCursors);
       loadMap(this.syncTransferUsage, raw.syncTransferUsage);
       loadMap(this.syncRateWindows, raw.syncRateWindows);
+      loadMap(this.contentPackSubmissions, raw.contentPackSubmissions);
+      loadMap(this.contentPackReviews, raw.contentPackReviews);
+      loadMap(this.contentPackVersions, raw.contentPackVersions);
+      loadMap(this.contentPackRateWindows, raw.contentPackRateWindows);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1325,8 +1343,10 @@ export class CloudDatabaseStore {
       // next publish.
       this._migrateLegacyInlineSyncCiphertext();
       this._verifySyncCiphertextReferencesDurable();
+      this._verifyContentPackArtifactReferencesDurable();
       try {
         this.sweepSyncCiphertextOrphans(this, { trigger: "startup" });
+        this.sweepContentPackArtifactOrphans(this);
       } catch {
         // The sweep itself has already emitted metrics/logs and scheduled retry;
         // startup remains available while reclamation continues out-of-band.
@@ -1689,6 +1709,170 @@ export class CloudDatabaseStore {
         throw new Error("E2EE 同步密文侧车尺寸不符: " + row.ciphertext_sha256);
       }
     }
+  }
+
+  // ---- W5-02 content package artifact sidecar (content-addressed, crash-safe) ----
+
+  _contentPackArtifactFilePath(digest) {
+    return path.join(this.contentPackArtifactDir, digest.slice(0, 2), digest + ".bin");
+  }
+
+  // Persist immutable artifact bytes outside the JSON snapshot.  The write is
+  // content-addressed, fsynced, and atomically renamed before the referencing
+  // metadata commit is allowed to publish; orphans from a rolled-back commit are
+  // harmless and reclaimed by sweepContentPackArtifactOrphans.
+  writeContentPackArtifactDurable(digest, bytes) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "content pack artifact digest is not lowercase sha256 hex");
+    }
+    const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    if (crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "content pack artifact bytes do not match their content digest");
+    }
+    if (!this.contentPackArtifactDir) {
+      if (!this.contentPackArtifactMemory.has(digest)) this.contentPackArtifactMemory.set(digest, Buffer.from(content));
+      return;
+    }
+    const io = this.snapshotFs;
+    const finalPath = this._contentPackArtifactFilePath(digest);
+    try {
+      const existing = io.statSync(finalPath, { throwIfNoEntry: false });
+      if (existing) {
+        if (existing.size !== content.length) throw new Error("内容包 artifact 侧车尺寸与内容寻址冲突");
+        const existingBytes = io.readFileSync(finalPath);
+        if (crypto.createHash("sha256").update(existingBytes).digest("hex") !== digest) {
+          throw new Error("内容包 artifact 侧车摘要与内容寻址冲突");
+        }
+        return;
+      }
+      const shardDir = path.dirname(finalPath);
+      if (!io.existsSync(shardDir)) {
+        const missing = [];
+        for (let cursor = shardDir; !io.existsSync(cursor); cursor = path.dirname(cursor)) {
+          missing.push(cursor);
+          if (path.dirname(cursor) === cursor) throw new Error("内容包 artifact 侧车存储根目录不可用");
+        }
+        io.mkdirSync(shardDir, { recursive: true });
+        for (const created of missing.reverse()) {
+          const parentFd = io.openSync(path.dirname(created), "r");
+          try { io.fsyncSync(parentFd); }
+          finally { io.closeSync(parentFd); }
+        }
+      }
+      this._contentPackArtifactTmpSeq = (this._contentPackArtifactTmpSeq || 0) + 1;
+      const tmpPath = finalPath + ".tmp." + process.pid + "." + this._contentPackArtifactTmpSeq;
+      const fd = io.openSync(tmpPath, "wx", 0o600);
+      try {
+        io.writeFileSync(fd, content);
+        io.fsyncSync(fd);
+      } finally { io.closeSync(fd); }
+      io.renameSync(tmpPath, finalPath);
+      const dirFd = io.openSync(shardDir, "r");
+      try { io.fsyncSync(dirFd); }
+      finally { io.closeSync(dirFd); }
+    } catch (err) {
+      if (err instanceof ContractError) throw err;
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "内容包 artifact 侧车写入失败：" + (err?.message || "unknown"),
+        { retry_same_key: true }
+      );
+    }
+  }
+
+  readContentPackArtifactVerified(digest, expectedSizeBytes = null) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "content pack artifact digest is not lowercase sha256 hex");
+    }
+    let content = null;
+    if (!this.contentPackArtifactDir) {
+      content = this.contentPackArtifactMemory.get(digest) || null;
+    } else {
+      try {
+        content = this.snapshotFs.readFileSync(this._contentPackArtifactFilePath(digest));
+      } catch {
+        content = null;
+      }
+    }
+    if (!content) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "内容包 artifact 侧车内容缺失，耐久状态须隔离核验",
+        { artifact_sha256: digest }
+      );
+    }
+    const sizeOk = expectedSizeBytes == null ? true : content.length === expectedSizeBytes;
+    if (!sizeOk || crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "内容包 artifact 侧车内容摘要或尺寸不符，耐久状态须隔离核验",
+        { artifact_sha256: digest }
+      );
+    }
+    return content;
+  }
+
+  _contentPackArtifactDigestReferences(source = this) {
+    const digests = new Set();
+    const add = (value) => {
+      if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) digests.add(value);
+    };
+    for (const row of source.contentPackSubmissions?.values?.() || []) add(row?.artifact_sha256);
+    for (const row of source.contentPackVersions?.values?.() || []) add(row?.artifact_sha256);
+    return digests;
+  }
+
+  _verifyContentPackArtifactReferencesDurable() {
+    if (!this.contentPackArtifactDir) return;
+    const io = this.snapshotFs;
+    const seen = new Set();
+    for (const row of [...this.contentPackSubmissions.values(), ...this.contentPackVersions.values()]) {
+      const digest = row?.artifact_sha256;
+      if (!digest || seen.has(digest)) continue;
+      seen.add(digest);
+      const stat = io.statSync(this._contentPackArtifactFilePath(digest), { throwIfNoEntry: false });
+      if (!stat) throw new Error("内容包 artifact 侧车文件缺失: " + digest);
+      if (stat.size !== row.artifact_size_bytes) throw new Error("内容包 artifact 侧车尺寸不符: " + digest);
+    }
+  }
+
+  // Reclaim artifact media no live submission/version row references.  This only
+  // runs after metadata removal is durable (startup recovery or an explicit sweep),
+  // so deletion can never strand a committed download reference.
+  sweepContentPackArtifactOrphans(source = this) {
+    const referenced = this._contentPackArtifactDigestReferences(source);
+    let removed = 0;
+    if (!this.contentPackArtifactDir) {
+      for (const digest of Array.from(this.contentPackArtifactMemory.keys())) {
+        if (!referenced.has(digest)) {
+          this.contentPackArtifactMemory.delete(digest);
+          removed += 1;
+        }
+      }
+      return removed;
+    }
+    const io = this.snapshotFs;
+    if (!io.existsSync(this.contentPackArtifactDir)) return 0;
+    for (const shard of io.readdirSync(this.contentPackArtifactDir)) {
+      if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+      const shardDir = path.join(this.contentPackArtifactDir, shard);
+      let mutated = false;
+      for (const name of io.readdirSync(shardDir)) {
+        const match = /^([0-9a-f]{64})\.bin$/.exec(name);
+        const isOrphan = match && !referenced.has(match[1]);
+        const isTmp = !match && name.includes(".tmp.");
+        if (!isOrphan && !isTmp) continue;
+        io.unlinkSync(path.join(shardDir, name));
+        mutated = true;
+        if (isOrphan) removed += 1;
+      }
+      if (mutated) {
+        const fd = io.openSync(shardDir, "r");
+        try { io.fsyncSync(fd); }
+        finally { io.closeSync(fd); }
+      }
+    }
+    return removed;
   }
 
   _createDataDeleteReplica() {
@@ -2331,6 +2515,62 @@ export class CloudDatabaseStore {
         throw new Error("地点状态订阅快照引用了缺失的 Campus Graph 实体");
       }
     }
+
+    // W5-02 content catalog snapshot invariants. Artifact bytes are sidecar-only;
+    // metadata rows must never re-inline them into the monolithic JSON commit unit.
+    const packSubmissions = new Map(raw.contentPackSubmissions || []);
+    const packStatuses = new Set(["PENDING_REVIEW", "CHANGES_REQUESTED", "APPROVED", "REJECTED", "PUBLISHED"]);
+    for (const [key, row] of packSubmissions) {
+      if (!row?.submission_id || key !== row.submission_id || !packStatuses.has(row.status)) {
+        throw new Error("内容包提交快照键或状态不一致");
+      }
+      if (Object.hasOwn(row, "artifact") || Object.hasOwn(row, "artifact_base64")) {
+        throw new Error("内容包提交快照不得内联 artifact 字节");
+      }
+      if (typeof row.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.artifact_sha256) ||
+          !Number.isSafeInteger(row.artifact_size_bytes) || row.artifact_size_bytes < 1 || row.artifact_size_bytes > 16777216) {
+        throw new Error("内容包提交快照 artifact 摘要或尺寸无效");
+      }
+    }
+    for (const [key, review] of raw.contentPackReviews || []) {
+      const submission = packSubmissions.get(key);
+      if (!submission || review?.submission_id !== key) {
+        throw new Error("内容包审核快照与提交作用域不一致");
+      }
+      if (!["APPROVE", "REQUEST_CHANGES", "REJECT"].includes(review.action) ||
+          review.reviewer_cloud_user_id === submission.submitter_cloud_user_id) {
+        throw new Error("内容包审核快照违反动作或分权约束");
+      }
+      if ((review.action === "REQUEST_CHANGES" || review.action === "REJECT") && !review.review_note) {
+        throw new Error("内容包审核快照缺少公开安全审核说明");
+      }
+    }
+    for (const [key, version] of raw.contentPackVersions || []) {
+      const expectedKey = String(version?.pack_id || "") + "@" + String(version?.version || "");
+      if (!version?.pack_id || !version.version || key !== expectedKey) {
+        throw new Error("内容包版本快照键不一致");
+      }
+      const submission = packSubmissions.get(version.submission_id);
+      if (!submission || submission.status !== "PUBLISHED" ||
+          submission.pack_id !== version.pack_id || submission.version !== version.version ||
+          submission.artifact_sha256 !== version.artifact_sha256) {
+        throw new Error("内容包版本快照与已发布提交不一致");
+      }
+      if (Object.hasOwn(version, "artifact") || Object.hasOwn(version, "artifact_base64")) {
+        throw new Error("内容包版本快照不得内联 artifact 字节");
+      }
+      const lifecycleShape =
+        (version.lifecycle_status === "PUBLISHED" && version.retired_at == null && version.retirement_reason == null) ||
+        (version.lifecycle_status === "RETIRED" && finiteTime(version.retired_at) && typeof version.retirement_reason === "string");
+      if (!lifecycleShape) throw new Error("内容包版本生命周期快照形状不一致");
+    }
+    for (const [key, row] of raw.contentPackRateWindows || []) {
+      if (!row?.cloud_user_id || !["SUBMIT", "DOWNLOAD"].includes(row.operation_kind) ||
+          key !== row.cloud_user_id + ":" + row.operation_kind + ":" + String(row.window_started_ms) ||
+          !Number.isSafeInteger(row.request_count) || row.request_count < 0) {
+        throw new Error("内容包速率窗口快照无效");
+      }
+    }
   }
 
   recoverDurabilitySync({ startup = false } = {}) {
@@ -2486,6 +2726,10 @@ export class CloudDatabaseStore {
         syncCursors: Array.from(source.syncCursors.entries()),
         syncTransferUsage: Array.from(source.syncTransferUsage.entries()),
         syncRateWindows: Array.from(source.syncRateWindows.entries()),
+        contentPackSubmissions: Array.from(source.contentPackSubmissions.entries()),
+        contentPackReviews: Array.from(source.contentPackReviews.entries()),
+        contentPackVersions: Array.from(source.contentPackVersions.entries()),
+        contentPackRateWindows: Array.from(source.contentPackRateWindows.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
@@ -2542,6 +2786,7 @@ export class CloudDatabaseStore {
       // leftover orphans are retried after the next publish or at startup.
       try {
         this.sweepSyncCiphertextOrphans(source, { trigger: "post_publish" });
+        this.sweepContentPackArtifactOrphans(source);
       } catch {
         // The committed snapshot stays valid; the sweep failure is visible in
         // metrics/logs and its backoff retry flushes pending delete fsyncs.

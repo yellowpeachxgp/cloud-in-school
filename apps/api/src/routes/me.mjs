@@ -6,6 +6,7 @@ import { AvailabilityService } from "../../../../packages/availability/src/index
 import { PlaceStatusService } from "../../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../../packages/ledger/src/index.mjs";
 import { SyncService } from "../../../../packages/sync/src/index.mjs";
+import { ContentPackCatalogService } from "../../../../packages/content-catalog/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -111,6 +112,7 @@ export function createMeRoutes(ctx) {
     placeStatus,
     ledger,
     syncE2ee,
+    contentCatalog,
     syncUserToSso
   } = ctx;
 
@@ -450,6 +452,11 @@ export function createMeRoutes(ctx) {
       repair_ticket_revisions: [],
       repair_reviews: []
     };
+    const contentPackExport = contentCatalog?.exportUserData?.(auth.cloudUserId) || {
+      content_pack_submissions: [],
+      content_pack_reviews: [],
+      content_pack_versions: []
+    };
     const redactedNonSyncData = redactSensitiveFields({
       user,
       school_bindings: bindings,
@@ -461,7 +468,8 @@ export function createMeRoutes(ctx) {
       ...communityExport,
       ...availabilityExport,
       ...placeStatusExport,
-      ...ledgerExport
+      ...ledgerExport,
+      ...contentPackExport
     });
     return {
       status: 200,
@@ -483,6 +491,7 @@ export function createMeRoutes(ctx) {
       const stagingPlaceStatus = new PlaceStatusService(staging);
       const stagingLedger = new LedgerService(staging);
       const stagingSync = new SyncService(staging);
+      const stagingContentCatalog = new ContentPackCatalogService(staging);
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       // Availability erasure must run before membership rows are removed: its
@@ -496,6 +505,7 @@ export function createMeRoutes(ctx) {
       const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
       const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
       const syncPurged = stagingSync.purgeUserSyncData?.(auth.cloudUserId, nowMs) || null;
+      const contentPackPurged = stagingContentCatalog.purgeUserContentPackData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
       revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
@@ -505,7 +515,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged, syncPurged };
+      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged, syncPurged, contentPackPurged };
     });
     return {
       status: 202,
@@ -520,7 +530,8 @@ export function createMeRoutes(ctx) {
         ledger_purged: outcome.ledgerPurged,
         plugin_purged: outcome.pluginPurged,
         place_status_purged: outcome.placeStatusPurged,
-        sync_purged: outcome.syncPurged
+        sync_purged: outcome.syncPurged,
+        content_pack_purged: outcome.contentPackPurged
       }
     };
   })

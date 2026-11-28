@@ -242,6 +242,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     bodyBytes = null,
     bodyParseError = null,
     bodyTooLarge = false,
+    bodyTooLargeLimitBytes = MAX_HTTP_BODY_BYTES,
     nowMs = Date.now(),
     remoteAddr = null
   }) {
@@ -698,7 +699,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
       const hasProtocolBodyError = Boolean(bodyParseError) || bodyTooLarge === true;
       if (hasProtocolBodyError && matchedRoute.operationId !== "putSyncBlob") {
         return bodyTooLarge
-          ? protocolBodyErrorResponse(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the 1.5 MiB protocol limit", requestId)
+          ? protocolBodyErrorResponse(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the " + (Math.round((bodyTooLargeLimitBytes / 1048576) * 10) / 10) + " MiB protocol limit", requestId)
           : protocolBodyErrorResponse(400, "BAD_REQUEST", "Malformed JSON request body", requestId);
       }
 
@@ -819,6 +820,19 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
   // than 1 MiB after canonical base64 and vector/envelope JSON overhead.  Keep a
   // tight protocol-sized cap instead of an unbounded body parser.
   const MAX_HTTP_BODY_BYTES = 1536 * 1024;
+  const CONTENT_PACK_SUBMISSION_MAX_HTTP_BODY_BYTES = 24 * 1024 * 1024;
+
+  function maxHttpBodyBytesForRequest(method, rawUrl) {
+    try {
+      const parsed = new URL(rawUrl || "/", "http://localhost");
+      if (String(method || "").toUpperCase() === "POST" && parsed.pathname === "/api/v1/content-pack-submissions") {
+        return CONTENT_PACK_SUBMISSION_MAX_HTTP_BODY_BYTES;
+      }
+    } catch {
+      // Malformed URLs keep the default tight protocol cap.
+    }
+    return MAX_HTTP_BODY_BYTES;
+  }
 
   function sanitizeParsedJson(val) {
     if (!val || typeof val !== "object") return val;
@@ -839,6 +853,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     return http.createServer(async (req, res) => {
       try {
         const chunks = [];
+        const maxBodyBytes = maxHttpBodyBytesForRequest(req.method, req.url);
         let totalBytes = 0;
         let bodyTooLarge = false;
         // destroyOnReturn:false is load-bearing: breaking the default request
@@ -850,7 +865,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         const requestChunks = typeof req.iterator === "function" ? req.iterator({ destroyOnReturn: false }) : req;
         for await (const chunk of requestChunks) {
           totalBytes += chunk.length;
-          if (totalBytes > MAX_HTTP_BODY_BYTES) {
+          if (totalBytes > maxBodyBytes) {
             bodyTooLarge = true;
             chunks.length = 0;
             break;
@@ -877,6 +892,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
           bodyBytes: rawBodyByteLength,
           bodyParseError,
           bodyTooLarge,
+          bodyTooLargeLimitBytes: maxBodyBytes,
           remoteAddr: req.socket?.remoteAddress || null
         });
         res.writeHead(response.status, {

@@ -83,10 +83,10 @@ test("Contract Parity: active core runtime, endpoint inventory, and OpenAPI oper
   const inventory = partitionByStatus(loadInventoryOperations()).active;
   const openApiOperations = partitionByStatus(parseOpenApiOperations(loadOpenApiText())).active;
 
-  assert.equal(inventory.length, 158, "endpoint-inventory.yaml must declare exactly 158 active core operations");
-  assert.equal(openApiOperations.length, 158, "OpenAPI must declare exactly 158 active core operations");
-  assert.equal(coreRegistered.length, 158, "CampusCloudApp must expose exactly 158 active core operations");
-  assert.equal(allRegistered.length, 170, "CampusCloudApp must expose 158 core + 12 explicit extension operations");
+  assert.equal(inventory.length, 168, "endpoint-inventory.yaml must declare exactly 168 active core operations");
+  assert.equal(openApiOperations.length, 168, "OpenAPI must declare exactly 168 active core operations");
+  assert.equal(coreRegistered.length, 168, "CampusCloudApp must expose exactly 168 active core operations");
+  assert.equal(allRegistered.length, 180, "CampusCloudApp must expose 168 core + 12 explicit extension operations");
 
   const coreByKey = byRouteKey(coreRegistered);
   const inventoryByKey = byRouteKey(inventory);
@@ -948,7 +948,7 @@ const EXPECTED_CT05_RESERVED_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/media/uploads/{uploadId}/complete", operationId: "completeMediaUpload", auth: "public" }
 ]);
 
-const EXPECTED_CT06_PLANNED_ROUTES = Object.freeze([
+const EXPECTED_CT06_ACTIVE_ROUTES = Object.freeze([
   { method: "GET", path: "/api/v1/content-packs", operationId: "listContentPacks", auth: "bearer" },
   { method: "GET", path: "/api/v1/content-packs/{packId}/versions", operationId: "listContentPackVersions", auth: "bearer" },
   { method: "GET", path: "/api/v1/content-packs/{packId}/versions/{version}", operationId: "getContentPackVersion", auth: "bearer" },
@@ -972,9 +972,9 @@ const EXPECTED_CT07_PLANNED_ROUTES = Object.freeze([
   { method: "GET", path: "/api/v1/sync/changes", operationId: "listSyncChanges", auth: "bearer" }
 ]);
 
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT06_PLANNED_ROUTES.length;
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = 0;
 
-test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in runtime, CT-05 stays reserved, and CT-06 stays planned/runtime-inert", () => {
+test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in runtime, CT-05 stays reserved, and CT-06 is active in runtime", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -986,8 +986,8 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 10 CT-06 planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 10 CT-06 planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare no leftover planned operations after CT-06 activation");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare no leftover planned operations after CT-06 activation");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -1027,12 +1027,12 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
     "CT-05 reserved inventory must exactly match the approved forum/private-messaging reserved route slice"
   );
 
-  const ct06Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-06");
-  assert.equal(ct06Inventory.length, EXPECTED_CT06_PLANNED_ROUTES.length, "CT-06 planned inventory entries must be explicitly countable");
+  const ct06Inventory = inventoryPartitions.active.filter((entry) => entry.contractCard === "CT-06");
+  assert.equal(ct06Inventory.length, EXPECTED_CT06_ACTIVE_ROUTES.length, "CT-06 active inventory entries must be explicitly countable");
   assert.deepEqual(
     ct06Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
-    EXPECTED_CT06_PLANNED_ROUTES,
-    "CT-06 planned inventory must exactly match the approved content-pack catalog/review route slice"
+    EXPECTED_CT06_ACTIVE_ROUTES,
+    "CT-06 active inventory must exactly match the approved content-pack catalog/review route slice"
   );
 
   const ct07PlannedLeftover = plannedInventory.filter((entry) => entry.contractCard === "CT-07");
@@ -1067,7 +1067,7 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
     "CT-04 active inventory must exactly match the approved place status route slice"
   );
 
-  for (const expected of [...EXPECTED_CT01_GROUP_ROUTES, ...EXPECTED_CT03_PLANNED_ROUTES, ...EXPECTED_CT04_ACTIVE_ROUTES, ...EXPECTED_CT07_PLANNED_ROUTES]) {
+  for (const expected of [...EXPECTED_CT01_GROUP_ROUTES, ...EXPECTED_CT03_PLANNED_ROUTES, ...EXPECTED_CT04_ACTIVE_ROUTES, ...EXPECTED_CT06_ACTIVE_ROUTES, ...EXPECTED_CT07_PLANNED_ROUTES]) {
     const key = routeKey(expected);
     const inventory = activeInventoryByKey.get(key);
     const openApi = activeOpenApiByKey.get(key);
@@ -1146,7 +1146,7 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04/CT-07 contracts are active in run
   }
 
   console.log(
-    "[CONTRACT-PARITY] active=158 planned=" + plannedOpenApi.length +
+    "[CONTRACT-PARITY] active=168 planned=" + plannedOpenApi.length +
       " reserved=" + reservedOpenApi.length + " reserved_inventory=" + reservedInventory.length + " moments_extension=12"
   );
 });
