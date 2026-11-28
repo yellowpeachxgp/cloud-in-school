@@ -832,3 +832,49 @@ Idempotency-Key: sync_device_revoke_demo_0001
 {
   "reason": "LOST_OR_STOLEN"
 }
+
+### 90. CT-07 Upload First Encrypted Sync Blob Version (planned)
+# Runtime truth: ciphertext_base64 is a 32-byte synthetic ciphertext+tag shape example, not plaintext and not a real user payload. Decoded ciphertext limit is 1,048,576 bytes including AEAD tag.
+PUT http://127.0.0.1:4100/api/v1/sync/blobs/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+X-Dis-Sync-Device-Id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+Idempotency-Key: sync_blob_put_demo_0001
+
+{
+  "encryption": {
+    "format": "dis-sync-e2ee/v1",
+    "cipher_suite": "AES-256-GCM",
+    "key_id": "demo-key-0001",
+    "nonce_base64": "YMeL9qr7MabYnhal"
+  },
+  "ciphertext_base64": "pOPi0gWw0pJJ5yXsSR6HPZzzVi9X9zqmHFGdoPWsEg0=",
+  "ciphertext_sha256": "b4d19a3765dc373a5810d40256123bc9b7b97ca2926df97edb9bcda1fb7278c1",
+  "base_vector": [],
+  "writer_counter": 1
+}
+
+### 91. CT-07 Download Current Encrypted Sync Blob (planned)
+# Runtime truth: response contains exact ciphertext bytes as base64 plus non-secret encryption/version metadata; the server never decrypts or inspects plaintext.
+GET http://127.0.0.1:4100/api/v1/sync/blobs/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+X-Dis-Sync-Device-Id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+
+### 92. CT-07 Tombstone Encrypted Sync Blob With Fast-Forward Vector (planned)
+# Runtime truth: delete is a causal write; stale/concurrent vectors fail with SYNC_VECTOR_CONFLICT instead of erasing unseen updates.
+DELETE http://127.0.0.1:4100/api/v1/sync/blobs/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+X-Dis-Sync-Device-Id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+Idempotency-Key: sync_blob_delete_demo_0001
+
+{
+  "base_vector": [
+    {
+      "device_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "counter": 1
+    }
+  ],
+  "writer_counter": 2
+}

@@ -535,3 +535,38 @@ errors:
     retryable: false
     user_action: CHECK_SYNC_AUTHORIZATION
     description: Caller lacks the required user-scoped encrypted synchronization device or blob permission.
+  - code: SYNC_ENVELOPE_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_SYNC_ENCRYPTION_METADATA
+    description: Encrypted sync envelope format, cipher suite, opaque key id, nonce encoding, ciphertext encoding, or ciphertext digest failed validation; plaintext fields and key material are forbidden.
+  - code: SYNC_BLOB_TOO_LARGE
+    http_status: 413
+    retryable: false
+    user_action: SPLIT_SYNC_PLAINTEXT_INTO_SMALLER_BLOCKS
+    description: Decoded encrypted sync block exceeds the 1,048,576-byte ceiling including the AEAD authentication tag; clients must chunk larger logical objects client-side before encryption.
+  - code: SYNC_VECTOR_INVALID
+    http_status: 400
+    retryable: false
+    user_action: FIX_SYNC_VERSION_VECTOR
+    description: Version vector entries, per-device counters, writer counter progression, uniqueness, or shape failed validation.
+  - code: SYNC_VECTOR_CONFLICT
+    http_status: 409
+    retryable: false
+    user_action: MERGE_OR_CHOOSE_VERSION_THEN_FAST_FORWARD
+    description: Base version vector is stale, advanced, or concurrent with the current server vector; the server never silently overwrites or merges and the client must download, present both versions, resolve locally, and retry fast-forward.
+  - code: SYNC_BLOB_NOT_FOUND
+    http_status: 404
+    retryable: false
+    user_action: CHECK_SYNC_BLOB_ID
+    description: Encrypted sync blob does not exist and has no visible tombstone for the authenticated user.
+  - code: SYNC_BLOB_DELETED
+    http_status: 410
+    retryable: false
+    user_action: REMOVE_LOCAL_COPY_AFTER_TOMBSTONE
+    description: Encrypted sync blob was tombstoned; ciphertext is unavailable and only deletion propagation metadata remains.
+  - code: SYNC_RATE_LIMITED
+    http_status: 429
+    retryable: true
+    user_action: WAIT_FOR_SYNC_RATE_LIMIT_WINDOW
+    description: Encrypted synchronization read or write rate limit reached; clients must back off rather than amplify retries.

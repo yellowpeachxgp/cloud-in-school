@@ -208,6 +208,18 @@ permissions:
     scope: user_scope
     description: Permanently revoke one of the authenticated user's sync devices and invalidate its internally bound cloud session family without deleting previously accepted ciphertext history.
     default_granted: true
+  - id: sync.blob.read
+    scope: user_scope
+    description: Read ciphertext-only sync blobs, non-secret encryption metadata, version vectors, tombstones, and incremental change metadata for the authenticated user after explicit E2EE_CLOUD_SYNC consent; never implies plaintext or key access.
+    default_granted: true
+  - id: sync.blob.write
+    scope: user_scope
+    description: Upload ciphertext-only encrypted sync blob versions from an active registered device using strict version-vector compare-and-set; server-side plaintext, plaintext hashes, keys, and hidden conflict siblings are forbidden.
+    default_granted: true
+  - id: sync.blob.delete
+    scope: user_scope
+    description: Tombstone ciphertext-only sync blobs from an active registered device using strict version-vector compare-and-set so deletion propagates without silently overwriting unseen concurrent updates.
+    default_granted: true
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

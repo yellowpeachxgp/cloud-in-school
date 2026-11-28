@@ -174,6 +174,18 @@ channels:
       operationId: publishSyncDeviceRevokedEvent
       message:
         $ref: '#/components/messages/SyncDeviceLifecycleEvent'
+  sync.blob.written:
+    description: An encrypted sync blob version was accepted by strict version-vector compare-and-set. The payload carries causal and ciphertext metadata only—never ciphertext bytes, plaintext, plaintext hashes, keys, or key derivation secrets.
+    publish:
+      operationId: publishSyncBlobWrittenEvent
+      message:
+        $ref: '#/components/messages/SyncBlobWrittenEvent'
+  sync.blob.deleted:
+    description: An encrypted sync blob was tombstoned by strict version-vector compare-and-set. The payload carries tombstone metadata only; ciphertext bytes are not emitted.
+    publish:
+      operationId: publishSyncBlobDeletedEvent
+      message:
+        $ref: '#/components/messages/SyncBlobDeletedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -1026,3 +1038,121 @@ components:
             type: [string, 'null']
             enum: [USER_REMOVED, LOST_OR_STOLEN, SECURITY_REKEY, null]
             description: Null for registration; no free-text reason is emitted because free text can contain personal data.
+    SyncBlobWrittenEvent:
+      name: SyncBlobWrittenEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, cloud_user_id, blob_id, author_device_id, change_sequence, version_vector, encryption_format, cipher_suite, key_id, nonce_base64, ciphertext_sha256, ciphertext_size_bytes]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:sync:blob:[0-9a-fA-F-]{36}:change:[0-9]+:written:v1$'
+            description: Exactly-once consumer dedupe key derived from the accepting per-user change sequence.
+          event_type:
+            type: string
+            enum: [written]
+          occurred_at:
+            type: string
+            format: date-time
+          cloud_user_id:
+            type: string
+            format: uuid
+          blob_id:
+            type: string
+            format: uuid
+          author_device_id:
+            type: string
+            format: uuid
+          change_sequence:
+            type: integer
+            minimum: 1
+          version_vector:
+            type: array
+            maxItems: 512
+            items:
+              type: object
+              required: [device_id, counter]
+              properties:
+                device_id:
+                  type: string
+                  format: uuid
+                counter:
+                  type: integer
+                  minimum: 1
+                  maximum: 2147483647
+            description: Logical device-id/counter set serialized in ascending lexical device UUID order; comparison uses map semantics, not array position.
+          encryption_format:
+            type: string
+            const: dis-sync-e2ee/v1
+          cipher_suite:
+            type: string
+            const: AES-256-GCM
+          key_id:
+            type: string
+            minLength: 8
+            maxLength: 128
+            description: Opaque non-secret client key identifier; never key material or a plaintext/password hash.
+          nonce_base64:
+            type: string
+            pattern: '^[A-Za-z0-9+/]{16}$'
+          ciphertext_sha256:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+            description: Digest of exact ciphertext bytes only; plaintext hashes are forbidden.
+          ciphertext_size_bytes:
+            type: integer
+            minimum: 16
+            maximum: 1048576
+    SyncBlobDeletedEvent:
+      name: SyncBlobDeletedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, cloud_user_id, blob_id, author_device_id, change_sequence, version_vector]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:sync:blob:[0-9a-fA-F-]{36}:change:[0-9]+:deleted:v1$'
+            description: Exactly-once consumer dedupe key derived from the accepting per-user tombstone sequence.
+          event_type:
+            type: string
+            enum: [deleted]
+          occurred_at:
+            type: string
+            format: date-time
+          cloud_user_id:
+            type: string
+            format: uuid
+          blob_id:
+            type: string
+            format: uuid
+          author_device_id:
+            type: string
+            format: uuid
+          change_sequence:
+            type: integer
+            minimum: 1
+          version_vector:
+            type: array
+            maxItems: 512
+            items:
+              type: object
+              required: [device_id, counter]
+              properties:
+                device_id:
+                  type: string
+                  format: uuid
+                counter:
+                  type: integer
+                  minimum: 1
+                  maximum: 2147483647
+            description: Logical device-id/counter set serialized in ascending lexical device UUID order; comparison uses map semantics, not array position.
+          tombstone_reason:
+            type: [string, 'null']
+            enum: [USER_DELETE, ACCOUNT_DATA_DELETE, null]
+            description: Null or machine enum only; no free-text deletion note is emitted because free text can contain personal data.

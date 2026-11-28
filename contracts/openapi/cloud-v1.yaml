@@ -4987,6 +4987,161 @@ paths:
           $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/sync/blobs/{blobId}:
+    put:
+      operationId: putSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.write]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_ENVELOPE_INVALID, SYNC_VECTOR_INVALID, SYNC_VECTOR_CONFLICT, SYNC_BLOB_TOO_LARGE, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.blob.written]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Upload one encrypted sync blob version with strict version-vector compare-and-set semantics
+      description: |
+        Accepts one ciphertext-only replacement for a caller-scoped blob. The server stores at most one current version per blob_id and never sees plaintext, plaintext hashes, content titles, content types, encryption keys, key encryption keys, private keys, passwords, or key derivation secrets. ciphertext_base64 is the exact AES-256-GCM ciphertext plus authentication tag; the decoded ciphertext ceiling is 1,048,576 bytes including the tag. Clients must split larger logical objects into independently encrypted blocks before upload rather than asking the server to inspect or reassemble plaintext. The server validates only transport shape, base64 exactness, decoded size, ciphertext_sha256, non-secret encryption metadata, consent, device state, digest, durability, and version-vector causal ordering.
+        Version-vector acceptance is strict compare-and-set. base_vector must equal the current server vector as a logical device-id/counter map (empty when the blob does not exist), and writer_counter must be exactly the base counter for the uploading device plus one. The accepted vector is base_vector with only that writer entry advanced. If the base is stale, advanced, or concurrent with the server vector, the server rejects with 409 SYNC_VECTOR_CONFLICT; it never silently overwrites, merges, picks a winner, or stores a hidden sibling. The rejected writer keeps its local ciphertext, downloads the current remote version, presents both versions for user choice or merge, and retries with a fast-forward vector. The 409 detail may carry current vector, sequence, and ciphertext digest metadata but never ciphertext. Replaying the same Idempotency-Key with the same canonical request returns the original accepted result even if the blob later advanced. Examples 90 and 91.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncBlobPutRequest'
+      responses:
+        '201':
+          description: First encrypted blob version accepted and durably committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '200':
+          description: Subsequent encrypted blob version accepted or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Sync device was permanently revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: Decoded ciphertext exceeds the 1,048,576-byte sync block ceiling
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: downloadSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.read]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_BLOB_DELETED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Download the current ciphertext and sync metadata for one encrypted blob
+      description: |
+        Returns the exact current ciphertext bytes as base64 together with the non-secret encryption envelope and causal metadata needed to verify and decrypt client-side. The server never decrypts, validates plaintext semantics, or derives searchable content metadata. Clients must authenticate the ciphertext before use, treat authentication failure as corruption or attack rather than partially applying plaintext, and compare blob_id/key_id/nonce binding as specified by SyncEncryptionEnvelope. A tombstoned blob returns 410 SYNC_BLOB_DELETED without ciphertext. Example 91.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+      responses:
+        '200':
+          description: Current encrypted blob payload and metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobDownloadEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Blob is tombstoned or sync device was permanently revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      operationId: deleteSyncBlob
+      x-dis-status: planned
+      x-dis-api-version: v1
+      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-permissions: [sync.blob.delete]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_VECTOR_INVALID, SYNC_VECTOR_CONFLICT, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-idempotency: required
+      x-dis-events: [sync.blob.deleted]
+      tags: [sync]
+      security:
+        - bearerAuth: []
+      summary: Tombstone one encrypted blob with the same strict version-vector compare-and-set rules
+      description: |
+        Deletes are causal writes, not silent local erasure. The request uses the same base_vector and writer_counter rules as PUT; a stale or concurrent delete is rejected with SYNC_VECTOR_CONFLICT so deletion cannot erase an unseen concurrent update. On the first accepted tombstone the ciphertext becomes unavailable and is removed from primary durable storage in the same atomic commit; asynchronous backups, if any, remain ciphertext-only and age out under the deployment backup rotation while never becoming readable plaintext. The server retains only blob_id, vector, author, sequence, and timestamp tombstone metadata needed to propagate deletion. Tombstone metadata is retained for at least 30 days and until every still-active registered device has acknowledged a changes cursor beyond the tombstone sequence or has been revoked; account data deletion supersedes this retention and erases the user's sync metadata and ciphertext history. Deleting an already tombstoned blob with the current vector returns the existing tombstone without a second mutation or event. Deleting a never-existing blob returns 404 SYNC_BLOB_NOT_FOUND. Example 92.
+      parameters:
+        - $ref: '#/components/parameters/SyncBlobIdParam'
+        - $ref: '#/components/parameters/XDisSyncDeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncBlobDeleteRequest'
+      responses:
+        '200':
+          description: Tombstone accepted, existing tombstone returned, or durable idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBlobMutationEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Sync device was permanently revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 components:
   securitySchemes:
     bearerAuth:
@@ -5213,6 +5368,20 @@ components:
       schema:
         $ref: '#/components/schemas/SyncDeviceIdValue'
       description: Client-generated sync device UUID percent-encoded as one path segment.
+    SyncBlobIdParam:
+      name: blobId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncBlobIdValue'
+      description: Client-generated opaque blob UUID percent-encoded as one path segment.
+    XDisSyncDeviceIdHeader:
+      name: X-Dis-Sync-Device-Id
+      in: header
+      required: true
+      schema:
+        $ref: '#/components/schemas/SyncDeviceIdValue'
+      description: Registered active sync device making this ciphertext read or write. The server compares it with the authenticated user and internal registration binding.
   responses:
     BadRequest:
       description: Invalid request parameters or schema validation failure
@@ -9808,5 +9977,164 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SyncDevice'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SyncBlobIdValue:
+      type: string
+      format: uuid
+      description: Fresh client-generated opaque blob identifier. It must be random or otherwise non-semantics-bearing; clients must not encode plaintext titles, entity types, school ids, student numbers, or timestamps in it.
+    SyncVersionVectorEntry:
+      type: object
+      additionalProperties: false
+      required: [device_id, counter]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Monotone per-(blob_id,device_id) logical write counter. It is not a wall-clock timestamp and is not global across unrelated blobs.
+    SyncVersionVector:
+      type: array
+      maxItems: 512
+      items:
+        $ref: '#/components/schemas/SyncVersionVectorEntry'
+      description: Logical set of device-id/counter entries. device_id values must be unique and are serialized in ascending lexical UUID order for deterministic comparison and display. Vector comparison is always performed after conversion to a map, never by array position. A vector dominates another when every counter is greater than or equal and at least one is strictly greater; equal vectors are the same causal position; otherwise the versions are concurrent. Historical entries for revoked devices remain valid authorship evidence.
+    SyncEncryptionEnvelope:
+      type: object
+      additionalProperties: false
+      required: [format, cipher_suite, key_id, nonce_base64]
+      properties:
+        format:
+          type: string
+          const: dis-sync-e2ee/v1
+        cipher_suite:
+          type: string
+          const: AES-256-GCM
+        key_id:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9._:-]+$
+          description: Opaque non-secret client key identifier used to select the correct user-controlled key. It must not be a password, key, key encryption key, private key, plaintext hash, or unkeyed password hash. Cross-device key provisioning remains a client-side backup/recovery concern outside this server contract.
+        nonce_base64:
+          type: string
+          pattern: ^[A-Za-z0-9+/]{16}$
+          description: Base64-encoded 12-byte AES-GCM nonce without padding. Clients must never reuse a nonce under the same key. The nonce is non-secret metadata and is safe for the server to store.
+      description: Non-secret encryption metadata. Clients must use UTF-8 text "dis-sync-e2ee/v1\n<lowercase blob_id>\n<key_id>\n" as AEAD associated data so ciphertext cannot be transplanted across blobs or key generations. The server stores these fields but must not attempt decryption or plaintext inference.
+    SyncBlobPutRequest:
+      type: object
+      additionalProperties: false
+      required: [encryption, ciphertext_base64, ciphertext_sha256, base_vector, writer_counter]
+      properties:
+        encryption:
+          $ref: '#/components/schemas/SyncEncryptionEnvelope'
+        ciphertext_base64:
+          type: string
+          minLength: 24
+          maxLength: 1398104
+          pattern: ^[A-Za-z0-9+/]+={0,2}$
+          description: Base64 of exact ciphertext bytes with the 16-byte AES-GCM authentication tag appended. The maximum base64 length corresponds to the 1,048,576-byte decoded ciphertext ceiling; implementations must also verify canonical padding and decoded length rather than relying on characters alone.
+        ciphertext_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          description: Lowercase SHA-256 of the exact decoded ciphertext bytes. This is never a plaintext hash.
+        base_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        writer_counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Next per-(blob_id,device_id) counter for the device named by X-Dis-Sync-Device-Id; it must be exactly the base vector entry for that device plus one.
+    SyncBlobDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [base_vector, writer_counter]
+      properties:
+        base_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        writer_counter:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+    SyncBlobChangeKind:
+      type: string
+      enum: [UPSERT, TOMBSTONE]
+    SyncBlobMetadata:
+      type: object
+      additionalProperties: false
+      required: [blob_id, change_kind, version_vector, author_device_id, change_sequence, encryption, ciphertext_sha256, ciphertext_size_bytes, committed_at]
+      properties:
+        blob_id:
+          $ref: '#/components/schemas/SyncBlobIdValue'
+        change_kind:
+          $ref: '#/components/schemas/SyncBlobChangeKind'
+        version_vector:
+          $ref: '#/components/schemas/SyncVersionVector'
+        author_device_id:
+          $ref: '#/components/schemas/SyncDeviceIdValue'
+        change_sequence:
+          type: integer
+          minimum: 1
+          description: Server-assigned per-user monotone mutation sequence used only for incremental ordering; it does not replace causal version-vector comparison.
+        encryption:
+          anyOf:
+            - $ref: '#/components/schemas/SyncEncryptionEnvelope'
+            - type: 'null'
+          description: Present for UPSERT, null for TOMBSTONE.
+        ciphertext_sha256:
+          type: [string, 'null']
+          pattern: ^[0-9a-f]{64}$
+          description: Present for UPSERT, null for TOMBSTONE; always a ciphertext digest, never a plaintext digest.
+        ciphertext_size_bytes:
+          type: [integer, 'null']
+          minimum: 16
+          maximum: 1048576
+          description: Exact decoded ciphertext byte count including the authentication tag; null for TOMBSTONE.
+        committed_at:
+          type: string
+          format: date-time
+    SyncBlobMutationEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncBlobMetadata'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    SyncBlobDownload:
+      type: object
+      additionalProperties: false
+      required: [metadata, ciphertext_base64]
+      properties:
+        metadata:
+          $ref: '#/components/schemas/SyncBlobMetadata'
+        ciphertext_base64:
+          type: string
+          minLength: 24
+          maxLength: 1398104
+          pattern: ^[A-Za-z0-9+/]+={0,2}$
+          description: Exact current ciphertext bytes as base64. Clients must compare ciphertext_sha256 before decryption and must fail closed on authentication failure.
+    SyncBlobDownloadEnvelope:
+      type: object
+      required: [ok, code, request_id, data, meta]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/SyncBlobDownload'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
