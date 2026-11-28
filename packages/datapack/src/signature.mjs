@@ -8,6 +8,7 @@ export const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex"
 
 const LOWER_SHA256 = /^[0-9a-f]{64}$/;
 const SIGNATURE_BASE64 = /^[A-Za-z0-9+/]{86}==$/;
+const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function fail(message, detail = undefined) {
   throw dataPackSignatureInvalid(message, detail);
@@ -46,12 +47,10 @@ export function fingerprintRawEd25519PublicKey(rawKey) {
 }
 
 function normalizeTrustedPublicKey(publicKeyBase64) {
-  let der;
-  try {
-    der = Buffer.from(publicKeyBase64, "base64");
-  } catch {
-    fail("trusted Ed25519 public key is not valid base64", { reason: "PUBLIC_KEY_INVALID" });
+  if (typeof publicKeyBase64 !== "string" || !STRICT_BASE64.test(publicKeyBase64)) {
+    fail("trusted Ed25519 public key is not valid strict base64", { reason: "PUBLIC_KEY_INVALID" });
   }
+  const der = Buffer.from(publicKeyBase64, "base64");
   let raw;
   if (der.length === 32) {
     raw = der;
@@ -126,6 +125,10 @@ export function signCanonicalDataPackBytes(canonicalBytes, privateKeyBase64, pub
     format: "der",
     type: "pkcs8"
   });
+  const derivedPublicDer = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
+  if (!Buffer.from(derivedPublicDer).equals(normalizedPublic.der)) {
+    fail("Ed25519 private key does not match the declared public key", { reason: "PUBLIC_KEY_PAIR_MISMATCH" });
+  }
   const payload = dataPackSignaturePayload(canonicalBytes);
   const value = crypto.sign(null, payload, privateKey);
   if (value.length !== 64) fail("Ed25519 signing did not produce a 64-byte signature", { reason: "SIGNATURE_VALUE_INVALID" });

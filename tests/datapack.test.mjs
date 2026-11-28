@@ -235,6 +235,7 @@ test("W5-01 signature verification rejects semantic tampering wrong payload hash
 
   const attacker = keyPair();
   expectDataPackError("CONTENT_PACK_SIGNATURE_INVALID", () => verifyDataPackArtifact(bytes, signature, [attacker.publicKeyBase64]), "UNTRUSTED_SIGNER");
+  assert.throws(() => signDataPackArtifact(bytes, attacker.privateKeyBase64, keys.publicKeyBase64), (error) => error.detail?.reason === "PUBLIC_KEY_PAIR_MISMATCH");
 
   expectDataPackError("CONTENT_PACK_SIGNATURE_INVALID", () => verifyDataPackArtifact(bytes, { ...signature, value: signature.value.slice(0, -4) }, [keys.publicKeyBase64]), "SIGNATURE_VALUE_INVALID");
 });
