@@ -3399,7 +3399,7 @@ paths:
         - bearerAuth: []
       summary: Submit one signed-pack candidate artifact for maintainer review
       description: |
-        Accepts one complete artifact plus catalog provenance for review. The submitter supplies the unsigned dis-datapack/v1 canonical JSON document or the legacy school-package zip, its contribution reference, and explicit provenance. For dis-datapack/v1 the provenance must exactly duplicate the signature-covered embedded sources/verifiedAt/reviewBy/maintainers/verificationLevel metadata (an absent embedded verificationLevel counts as UNVERIFIED); for dis-campus-plugin/v1 it is maintainer-reviewed catalog metadata because the legacy manifest cannot carry those fields and is not represented as artifact-signed provenance. The server validates shape, artifact hash, size ceiling, format/kind compatibility, package id/school target consistency, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
+        Accepts one complete artifact plus catalog provenance for review. The submitter supplies the unsigned dis-datapack/v1 canonical JSON document or the legacy school-package zip, its contribution reference, and explicit provenance. For dis-datapack/v1 the provenance must field-by-field duplicate the signature-covered embedded sources/verifiedAt/reviewBy/maintainers/verificationLevel metadata after the API snake_case mapping (an absent embedded verificationLevel counts as UNVERIFIED); for dis-campus-plugin/v1 it is maintainer-reviewed catalog metadata because the legacy manifest cannot carry those fields and is not represented as artifact-signed provenance. The server validates shape, artifact hash, size ceiling, format/kind compatibility, package id/school target consistency, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
@@ -8316,7 +8316,7 @@ components:
     ContentPackArtifactFormat:
       type: string
       enum: [dis-campus-plugin/v1, dis-datapack/v1]
-      description: Signed artifact family. dis-campus-plugin/v1 is the existing zipped school package format; dis-datapack/v1 is the canonical JSON data pack format whose schema lives at contracts/schemas/dis-datapack-v1.schema.json.
+      description: Signed artifact family. For CT-06 transport, dis-campus-plugin/v1 is a ZIP containing root manifest.json plus exactly the payload files declared by the legacy manifest under the existing profile/, assets/, or rules/ path policy; the detached signature is never a ZIP entry. Implementations reject extra, duplicate, encrypted, zip-slip, absolute, backslash, NUL, ZIP64, or multi-disk entries and enforce the legacy 512-entry, 4 MiB-per-file, and 16 MiB-uncompressed-total ceilings. dis-datapack/v1 is the canonical JSON data pack format whose schema lives at contracts/schemas/dis-datapack-v1.schema.json.
     ContentPackKind:
       type: string
       enum: [school-profile, campus-guide, procedure-guide, opportunity-catalog, facility-catalog, indoor-graph, period-preset, pharmacy-catalog]
@@ -8427,7 +8427,7 @@ components:
     ContentPackVersion:
       type: object
       additionalProperties: false
-      required: [pack_id, school_id, kind, artifact_format, version, lifecycle_status, artifact_sha256, artifact_size_bytes, signature, verification_level, verified_at, review_by, sources, maintainers, published_at, published_by_alias, submission_id, download_path, min_host_api, min_app_version_code, retired_at, retirement_reason, retirement_detail]
+      required: [pack_id, school_id, kind, artifact_format, version, lifecycle_status, artifact_sha256, artifact_size_bytes, signature, verification_level, verified_at, review_by, sources, maintainers, published_at, published_by_alias, submission_id, download_path, min_host_api, min_app_version_code, release_note, retired_at, retirement_reason, retirement_detail]
       properties:
         pack_id:
           $ref: '#/components/schemas/ContentPackIdValue'
@@ -8502,6 +8502,12 @@ components:
             - 'null'
           minimum: 1
           maximum: 2147483647
+        release_note:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: Immutable public-safe catalog release note supplied at publication; null when omitted. It never alters the signed artifact or provenance.
         retired_at:
           type:
             - string
@@ -8803,7 +8809,7 @@ components:
         release_note:
           type: string
           maxLength: 1000
-          description: Optional public-safe catalog release note. It must not alter the signed artifact or its provenance.
+          description: Optional public-safe catalog release note persisted immutably in the published version metadata (null when omitted). It must not alter the signed artifact or its provenance.
     RetireContentPackVersionRequest:
       type: object
       additionalProperties: false
