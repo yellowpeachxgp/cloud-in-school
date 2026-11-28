@@ -74,12 +74,12 @@ POST http://127.0.0.1:4100/api/v1/admin/refund-requests/44444444-4444-4444-8444-
 Authorization: Bearer <finance_admin_access_token>
 
 
-### 9. CT-01 List Groups In School Scope (active)
+### 9. CT-01 List Groups In School Scope (planned)
 GET http://127.0.0.1:4100/api/v1/groups?school_id=haut&type=study&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 10. CT-01 Create Study Group (active)
+### 10. CT-01 Create Study Group (planned)
 POST http://127.0.0.1:4100/api/v1/groups
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -92,12 +92,12 @@ Idempotency-Key: group_create_demo_0001
   "description": "只共享 30 分钟粒度忙闲块的学习小组"
 }
 
-### 11. CT-01 Get Group Detail (active)
+### 11. CT-01 Get Group Detail (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 12. CT-01 Update Group Display Metadata (active)
+### 12. CT-01 Update Group Display Metadata (planned)
 PATCH http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -108,12 +108,12 @@ Idempotency-Key: group_patch_demo_0001
   "description": "考试周复习与空闲时间协调"
 }
 
-### 13. CT-01 Archive Group (active)
+### 13. CT-01 Archive Group (planned)
 DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: group_delete_demo_0001
 
-### 14. CT-01 Create Expiring Use-Limited Group Invite (active)
+### 14. CT-01 Create Expiring Use-Limited Group Invite (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/invites
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -125,22 +125,22 @@ Idempotency-Key: group_invite_create_demo_0001
   "label": "期末互助组邀请"
 }
 
-### 15. CT-01 Accept Group Invite Code Or QR Payload (active)
+### 15. CT-01 Accept Group Invite Code Or QR Payload (planned)
 POST http://127.0.0.1:4100/api/v1/group-invites/AbC123xy/accept
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: group_invite_accept_demo_0001
 
-### 16. CT-01 Revoke Group Invite (active)
+### 16. CT-01 Revoke Group Invite (planned)
 DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/invites/66666666-6666-4666-8666-666666666666
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: group_invite_revoke_demo_0001
 
-### 17. CT-01 List Group Members (active)
+### 17. CT-01 List Group Members (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members?limit=50
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 18. CT-01 Update Group Member Role Or Sharing Level (active)
+### 18. CT-01 Update Group Member Role Or Sharing Level (planned)
 PATCH http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members/77777777-7777-4777-8777-777777777777
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -151,12 +151,12 @@ Idempotency-Key: group_member_patch_demo_0001
   "sharing_level": "BUSY_BLOCKS_30MIN"
 }
 
-### 19. CT-01 Remove Member Or Leave Group (active)
+### 19. CT-01 Remove Member Or Leave Group (planned)
 DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/members/77777777-7777-4777-8777-777777777777
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: group_member_delete_demo_0001
 
-### 20. CT-02 Replace My Quantized Busy Blocks With TTL (active)
+### 20. CT-02 Replace My Quantized Busy Blocks With TTL (planned)
 PUT http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/availability/me
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -176,12 +176,12 @@ Idempotency-Key: availability_put_demo_0001
   ]
 }
 
-### 21. CT-02 Withdraw My Busy-Block Sharing Immediately (active)
+### 21. CT-02 Withdraw My Busy-Block Sharing Immediately (planned)
 DELETE http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/availability/me
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: availability_delete_demo_0001
 
-### 22. CT-02 Query Group Availability Intersection (active)
+### 22. CT-02 Query Group Availability Intersection (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/availability/query
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -199,7 +199,7 @@ Idempotency-Key: availability_query_demo_0001
   ]
 }
 
-### 23. CT-02 Create Deadline-Bound Time Poll (active)
+### 23. CT-02 Create Deadline-Bound Time Poll (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/polls
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -220,12 +220,12 @@ Idempotency-Key: poll_create_demo_0001
   ]
 }
 
-### 24. CT-02 Get Poll Options Deadline And Results (active)
+### 24. CT-02 Get Poll Options Deadline And Results (planned)
 GET http://127.0.0.1:4100/api/v1/polls/99999999-9999-4999-8999-999999999999
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 25. CT-02 Cast Or Change My Poll Vote (active)
+### 25. CT-02 Cast Or Change My Poll Vote (planned)
 POST http://127.0.0.1:4100/api/v1/polls/99999999-9999-4999-8999-999999999999/votes
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -235,7 +235,7 @@ Idempotency-Key: poll_vote_demo_0001
   "option_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 }
 
-### 26. CT-02 Confirm Poll Option As Group Event (active)
+### 26. CT-02 Confirm Poll Option As Group Event (planned)
 POST http://127.0.0.1:4100/api/v1/polls/99999999-9999-4999-8999-999999999999/confirm
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -246,7 +246,7 @@ Idempotency-Key: poll_confirm_demo_0001
 }
 
 
-### 27. CT-03 Append Shared Expense With Deterministic Split (active)
+### 27. CT-03 Append Shared Expense With Deterministic Split (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -268,12 +268,12 @@ Idempotency-Key: ledger_entry_create_demo_0001
   }
 }
 
-### 28. CT-03 List Ledger Entries And Append-Only Corrections (active)
+### 28. CT-03 List Ledger Entries And Append-Only Corrections (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries?limit=50
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 29. CT-03 Append Signed Ledger Correction (active)
+### 29. CT-03 Append Signed Ledger Correction (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/amend
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -294,12 +294,12 @@ Idempotency-Key: ledger_entry_amend_demo_0001
   }
 }
 
-### 30. CT-03 Get Member Balances And Balance Revision (active)
+### 30. CT-03 Get Member Balances And Balance Revision (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/balances
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 31. CT-03 Propose Two-Party Settlement Record (active)
+### 31. CT-03 Propose Two-Party Settlement Record (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -313,17 +313,17 @@ Idempotency-Key: settlement_create_demo_0001
   "note": "线下已自行结清，等待双方确认"
 }
 
-### 32. CT-03 List Settlement History (active)
+### 32. CT-03 List Settlement History (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements?status=PENDING_BOTH_CONFIRMATIONS&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 33. CT-03 Get Settlement Detail (active)
+### 33. CT-03 Get Settlement Detail (planned)
 GET http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 34. CT-03 Confirm One Side Of Settlement (active)
+### 34. CT-03 Confirm One Side Of Settlement (planned)
 POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/confirm
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -333,7 +333,7 @@ Idempotency-Key: settlement_confirm_demo_0001
   "basis_balance_revision": 3
 }
 
-### 35. CT-03 Cancel Unconfirmed Settlement (active)
+### 35. CT-03 Cancel Unconfirmed Settlement (planned)
 POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/cancel
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -343,7 +343,7 @@ Idempotency-Key: settlement_cancel_demo_0001
   "reason": "账本更正后金额已变化，重新结算"
 }
 
-### 36. CT-03 Create Weekly Duty Rotation (active)
+### 36. CT-03 Create Weekly Duty Rotation (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -364,17 +364,17 @@ Idempotency-Key: duty_rota_create_demo_0001
   "generate_weeks_ahead": 2
 }
 
-### 37. CT-03 List Duty Rotations (active)
+### 37. CT-03 List Duty Rotations (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas?status=ACTIVE&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 38. CT-03 Get Duty Rotation Detail (active)
+### 38. CT-03 Get Duty Rotation Detail (planned)
 GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 39. CT-03 Update Future Duty Rotation Schedule (active)
+### 39. CT-03 Update Future Duty Rotation Schedule (planned)
 PATCH http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -385,12 +385,12 @@ Idempotency-Key: duty_rota_patch_demo_0001
   "generate_weeks_ahead": 3
 }
 
-### 40. CT-03 List Duty Tasks (active)
+### 40. CT-03 List Duty Tasks (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/duty-tasks?status=PENDING&from_date=2026-12-01&to_date=2026-12-14
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 41. CT-03 Mark Assigned Duty Task Completed (active)
+### 41. CT-03 Mark Assigned Duty Task Completed (planned)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/complete
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -400,7 +400,7 @@ Idempotency-Key: duty_task_complete_demo_0001
   "completion_note": "垃圾已倒，地面已扫"
 }
 
-### 42. CT-03 Confirm Another Member Duty Completion (active)
+### 42. CT-03 Confirm Another Member Duty Completion (planned)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/confirm
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -410,7 +410,7 @@ Idempotency-Key: duty_task_confirm_demo_0001
   "confirmation_note": "现场检查完成"
 }
 
-### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (active)
+### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (planned)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/skip
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -420,7 +420,7 @@ Idempotency-Key: duty_task_skip_demo_0001
   "skip_reason": "请假且无人接受代值，宿舍管理员确认本次跳过"
 }
 
-### 44. CT-03 Request Duty Cover Or Swap (active)
+### 44. CT-03 Request Duty Cover Or Swap (planned)
 POST http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -433,17 +433,17 @@ Idempotency-Key: duty_swap_request_demo_0001
   "reason": "当晚有实验课"
 }
 
-### 45. CT-03 List Duty Swap Audit Records (active)
+### 45. CT-03 List Duty Swap Audit Records (planned)
 GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps?status=ACCEPTED&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 46. CT-03 Get Duty Swap Audit Record (active)
+### 46. CT-03 Get Duty Swap Audit Record (planned)
 GET http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 47. CT-03 Resolve Duty Swap Request (active)
+### 47. CT-03 Resolve Duty Swap Request (planned)
 POST http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff/resolve
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -454,7 +454,7 @@ Idempotency-Key: duty_swap_resolve_demo_0001
   "resolution_note": "本次由我代值"
 }
 
-### 48. CT-03 Submit Dorm Repair Record (active)
+### 48. CT-03 Submit Dorm Repair Record (planned)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -467,17 +467,17 @@ Idempotency-Key: repair_create_demo_0001
   "description": "夜间滴水，地面有积水。此记录仅用于宿舍协作，不代表已向校方正式报修。"
 }
 
-### 49. CT-03 List Repair Records (active)
+### 49. CT-03 List Repair Records (planned)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs?status=OPEN&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 50. CT-03 Get Repair Detail (active)
+### 50. CT-03 Get Repair Detail (planned)
 GET http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 51. CT-03 Update Editable Repair Metadata (active)
+### 51. CT-03 Update Editable Repair Metadata (planned)
 PATCH http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -487,7 +487,7 @@ Idempotency-Key: repair_patch_demo_0001
   "description": "夜间滴水加快，已用盆接水。此记录仅用于宿舍协作，不代表校方受理状态。"
 }
 
-### 52. CT-03 Transition Repair Status (active)
+### 52. CT-03 Transition Repair Status (planned)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/status
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -499,7 +499,7 @@ Idempotency-Key: repair_status_demo_0001
   "note": "先检查是否能临时紧固"
 }
 
-### 53. CT-03 Submit One-Time Repair Review (active)
+### 53. CT-03 Submit One-Time Repair Review (planned)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/review
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -510,7 +510,7 @@ Idempotency-Key: repair_review_demo_0001
   "comment": "处理及时，后续继续观察是否复漏"
 }
 
-### 54. CT-04 Report Place Occupancy Status (active)
+### 54. CT-04 Report Place Occupancy Status (planned)
 POST http://127.0.0.1:4100/api/v1/places/haut%2Flianhuajie%2Froom%2F5-111/reports
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -524,22 +524,22 @@ Idempotency-Key: place_report_create_demo_0001
   "note": "自习座位基本坐满"
 }
 
-### 55. CT-04 List Place Report And Correction History (active)
+### 55. CT-04 List Place Report And Correction History (planned)
 GET http://127.0.0.1:4100/api/v1/places/haut%2Flianhuajie%2Froom%2F5-111/reports?metric=OCCUPANCY&include_expired=true&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 56. CT-04 Query Aggregated Place Status By References (active)
+### 56. CT-04 Query Aggregated Place Status By References (planned)
 GET http://127.0.0.1:4100/api/v1/places/status?school_id=haut&place_refs=haut%2Flianhuajie%2Froom%2F5-111&metrics=OCCUPANCY,ACCESS
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 57. CT-04 Query Aggregated Place Status By Coarse BBox (active)
+### 57. CT-04 Query Aggregated Place Status By Coarse BBox (planned)
 GET http://127.0.0.1:4100/api/v1/places/status?school_id=haut&bbox=34.820,113.540,34.850,113.570&place_types=room,facility&metrics=OCCUPANCY,OPERATION
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 58. CT-04 Create Place Status Subscription (active)
+### 58. CT-04 Create Place Status Subscription (planned)
 POST http://127.0.0.1:4100/api/v1/places/status/subscriptions
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -554,17 +554,17 @@ Idempotency-Key: place_subscription_create_demo_0001
   "metrics": ["OCCUPANCY", "ACCESS"]
 }
 
-### 59. CT-04 List Place Status Subscriptions (active)
+### 59. CT-04 List Place Status Subscriptions (planned)
 GET http://127.0.0.1:4100/api/v1/places/status/subscriptions?school_id=haut&status=ACTIVE&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 60. CT-04 Cancel Place Status Subscription (active)
+### 60. CT-04 Cancel Place Status Subscription (planned)
 DELETE http://127.0.0.1:4100/api/v1/places/status/subscriptions/abababab-abab-4bab-8bab-abababababab
 Authorization: Bearer <cloud_access_token>
 Idempotency-Key: place_subscription_delete_demo_0001
 
-### 61. CT-04 Flag Incorrect Place Report (active)
+### 61. CT-04 Flag Incorrect Place Report (planned)
 POST http://127.0.0.1:4100/api/v1/place-reports/cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd/flag
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -575,12 +575,12 @@ Idempotency-Key: place_report_flag_demo_0001
   "detail": "20:10 现场门口仍开放，原上报已过期"
 }
 
-### 62. CT-04 List Place Report Flag Review Queue (active)
+### 62. CT-04 List Place Report Flag Review Queue (planned)
 GET http://127.0.0.1:4100/api/v1/admin/place-report-flags?school_id=haut&status=OPEN&limit=20
 Authorization: Bearer <operations_admin_access_token>
 Accept: application/json
 
-### 63. CT-04 Review Place Report Flag And Recompute Aggregate (active)
+### 63. CT-04 Review Place Report Flag And Recompute Aggregate (planned)
 POST http://127.0.0.1:4100/api/v1/admin/place-report-flags/efefefef-efef-4fef-8fef-efefefefefef/review
 Authorization: Bearer <operations_admin_access_token>
 Content-Type: application/json
@@ -690,33 +690,33 @@ POST http://127.0.0.1:4100/api/v1/media/uploads/dddddddd-dddd-4ddd-8ddd-dddddddd
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 76. CT-06 List Content Pack Catalog (active)
+### 76. CT-06 List Content Pack Catalog (planned)
 GET http://127.0.0.1:4100/api/v1/content-packs?school_id=haut&kind=procedure-guide&artifact_format=dis-datapack/v1&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 77. CT-06 List Content Pack Catalog Including Fully Retired Rows (active)
+### 77. CT-06 List Content Pack Catalog Including Fully Retired Rows (planned)
 GET http://127.0.0.1:4100/api/v1/content-packs?school_id=haut&include_retired=true&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 78. CT-06 List Content Pack Versions (active)
+### 78. CT-06 List Content Pack Versions (planned)
 GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions?include_retired=true&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 79. CT-06 Get Content Pack Version Metadata And Detached Signature Facts (active)
+### 79. CT-06 Get Content Pack Version Metadata And Detached Signature Facts (planned)
 GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions/2026.11.1
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 80. CT-06 Download Exact Non-Retired Content Pack Artifact Bytes (active)
+### 80. CT-06 Download Exact Non-Retired Content Pack Artifact Bytes (planned)
 # Runtime truth: response body is application/octet-stream; clients compare X-Content-Pack-Artifact-Sha256 with metadata before verification/install.
 GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions/2026.11.1/download
 Authorization: Bearer <cloud_access_token>
 Accept: application/octet-stream
 
-### 81. CT-06 Submit Data Pack Candidate For Maintainer Review (active)
+### 81. CT-06 Submit Data Pack Candidate For Maintainer Review (planned)
 # artifact_base64 is the canonical UTF-8 dis-datapack/v1 example document; artifact_sha256 is its exact SHA-256. The example is UNVERIFIED public-source-shaped data, not real school data.
 POST http://127.0.0.1:4100/api/v1/content-pack-submissions
 Authorization: Bearer <cloud_access_token>
@@ -749,17 +749,17 @@ Idempotency-Key: content_pack_submission_demo_0001
   "submission_note": "示例提交流程；不是真实学校数据"
 }
 
-### 82. CT-06 Get My Content Pack Submission Status (active)
+### 82. CT-06 Get My Content Pack Submission Status (planned)
 GET http://127.0.0.1:4100/api/v1/content-pack-submissions/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 83. CT-06 List Content Pack Submission Review Queue (active)
+### 83. CT-06 List Content Pack Submission Review Queue (planned)
 GET http://127.0.0.1:4100/api/v1/admin/content-pack-submissions?school_id=haut&status=PENDING_REVIEW&kind=procedure-guide&limit=20
 Authorization: Bearer <operations_reviewer_access_token>
 Accept: application/json
 
-### 84. CT-06 Approve Content Pack Submission After Review (active)
+### 84. CT-06 Approve Content Pack Submission After Review (planned)
 # Runtime truth: the reviewer is the authenticated principal and must differ from the immutable submitter principal; self-review fails with 403 CONTENT_PACK_SUBMITTER_CANNOT_REVIEW.
 POST http://127.0.0.1:4100/api/v1/admin/content-pack-submissions/12121212-1212-4212-8212-121212121212/review
 Authorization: Bearer <operations_reviewer_access_token>
@@ -771,7 +771,7 @@ Idempotency-Key: content_pack_review_demo_0001
   "review_note": "公开来源、Schema、摘要与体积检查通过；不代表学校已验证"
 }
 
-### 85. CT-06 Publish Approved Maintainer-Signed Content Pack Version (active)
+### 85. CT-06 Publish Approved Maintainer-Signed Content Pack Version (planned)
 # Signature fields are shape examples only: a real maintainer must sign the exact artifact payload offline with a pinned trusted key before publishing.
 # Publish is an independent operations duty; content_pack.submit/review never imply content_pack.publish, and deployment must not rely on one principal to complete submit+review+publish.
 POST http://127.0.0.1:4100/api/v1/admin/content-packs
@@ -791,7 +791,7 @@ Idempotency-Key: content_pack_publish_demo_0001
   "release_note": "首个公开来源办事流程数据包；仍标 UNVERIFIED"
 }
 
-### 86. CT-06 Retire Published Content Pack Version Without Rewriting History (active)
+### 86. CT-06 Retire Published Content Pack Version Without Rewriting History (planned)
 POST http://127.0.0.1:4100/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire
 Authorization: Bearer <operations_retirement_access_token>
 Content-Type: application/json
