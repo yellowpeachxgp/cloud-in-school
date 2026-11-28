@@ -26,6 +26,12 @@ const WRITE_RATE_LIMIT_PER_MINUTE = 120;
 const READ_RATE_LIMIT_PER_MINUTE = 240;
 const RATE_WINDOW_MS = 60_000;
 const TRANSFER_WINDOW_MS = 24 * 60 * 60 * 1000;
+// W4-11 review fix: transfer usage is aggregated into aligned one-hour buckets
+// instead of one durable row per attempt.  Rejected authenticated uploads still
+// count their bytes exactly (contract), but row cardinality stays bounded at
+// ~25 rows per user-direction-day no matter how hard a client retries, and a
+// bucket overlapping the rolling 24h window counts in full until it ages out.
+const TRANSFER_BUCKET_MS = 60 * 60 * 1000;
 const WEB_COOKIE_FAMILY_ID = "web_cookie_family";
 const WEB_COOKIE_SESSION_ID = "web_cookie_session";
 const SYNC_CURSOR_SCAN_MODES = new Set(["FULL", "INCREMENTAL"]);
@@ -750,12 +756,22 @@ export class SyncService {
     }
   }
 
+  _transferRowOverlapsWindow(row, cutoff) {
+    const occurredMs = Date.parse(row?.occurred_at || "");
+    if (!Number.isFinite(occurredMs)) return false;
+    // Bucket rows cover [bucket_start, bucket_start + 1h) and count while that
+    // interval still overlaps the rolling window; legacy per-attempt rows keep
+    // their exact timestamps until they age out.
+    const coverageEnd = occurredMs + (Number.isSafeInteger(row?.bucket_start_ms) ? TRANSFER_BUCKET_MS : 0);
+    return coverageEnd >= cutoff;
+  }
+
   _transferRows(userId, direction, nowMs) {
     const cutoff = nowMs - TRANSFER_WINDOW_MS;
     return Array.from(this.store.syncTransferUsage.values()).filter((row) => (
       row?.cloud_user_id === userId &&
       row.direction === direction &&
-      Date.parse(row.occurred_at) >= cutoff
+      this._transferRowOverlapsWindow(row, cutoff)
     ));
   }
 
@@ -766,7 +782,7 @@ export class SyncService {
   _pruneTransferUsageInPlace(userId, direction, nowMs, undo) {
     const cutoff = nowMs - TRANSFER_WINDOW_MS;
     for (const [usageId, row] of Array.from(this.store.syncTransferUsage.entries())) {
-      if (row?.cloud_user_id === userId && row.direction === direction && Date.parse(row.occurred_at) < cutoff) {
+      if (row?.cloud_user_id === userId && row.direction === direction && !this._transferRowOverlapsWindow(row, cutoff)) {
         deleteMapCommitted(this.store.syncTransferUsage, usageId, undo);
       }
     }
@@ -774,20 +790,61 @@ export class SyncService {
 
   _appendTransferUsageInPlace(userId, direction, bytes, nowMs, undo) {
     this._pruneTransferUsageInPlace(userId, direction, nowMs, undo);
-    const usageId = crypto.randomUUID();
-    setMapCommitted(this.store.syncTransferUsage, usageId, {
-      id: usageId,
-      cloud_user_id: userId,
-      direction,
-      bytes,
-      occurred_at: iso(nowMs)
-    }, undo);
+    const bucketStartMs = Math.floor(nowMs / TRANSFER_BUCKET_MS) * TRANSFER_BUCKET_MS;
+    let bucketRow = null;
+    let bucketKey = null;
+    for (const [usageId, row] of this.store.syncTransferUsage.entries()) {
+      if (
+        row?.cloud_user_id === userId &&
+        row.direction === direction &&
+        row.bucket_start_ms === bucketStartMs
+      ) {
+        bucketRow = row;
+        bucketKey = usageId;
+        break;
+      }
+    }
+    if (bucketRow) {
+      mutateObject(bucketRow, { bytes: Number(bucketRow.bytes || 0) + bytes }, undo);
+    } else {
+      const usageId = crypto.randomUUID();
+      setMapCommitted(this.store.syncTransferUsage, usageId, {
+        id: usageId,
+        cloud_user_id: userId,
+        direction,
+        bytes,
+        occurred_at: iso(bucketStartMs),
+        bucket_start_ms: bucketStartMs
+      }, undo);
+    }
     return this._transferTotal(userId, direction, nowMs);
   }
 
   _recordIngressAttempt(userId, bytes, nowMs) {
+    const metered = Math.max(1, bytes);
+    // Once the rolling quota is already exhausted the rejection outcome cannot
+    // change, so a synchronous durable write per rejected attempt would be pure
+    // write amplification.  The contract still counts every attempt's bytes
+    // exactly — in memory, inside the bounded hourly aggregate — and persistence
+    // degrades to the debounced snapshot flush, which keeps durable writes
+    // bounded no matter how hard a rejected client retries.
+    const currentTotal = this._transferTotal(userId, "INGRESS", nowMs);
+    if (currentTotal >= SYNC_QUOTAS.ingressBytesPer24h) {
+      const undo = [];
+      this._appendTransferUsageInPlace(userId, "INGRESS", metered, nowMs, undo);
+      try {
+        this.store.saveSnapshot?.();
+      } catch {
+        // over-quota accounting durability is best-effort; the rejection is deterministic
+      }
+      throw syncError("SYNC_BANDWIDTH_QUOTA_EXCEEDED", "rolling 24-hour sync ingress quota exceeded", {
+        dimension: "INGRESS",
+        limit_bytes: SYNC_QUOTAS.ingressBytesPer24h,
+        used_bytes: this._transferTotal(userId, "INGRESS", nowMs)
+      });
+    }
     const result = this._commitMutation((undo) => {
-      const total = this._appendTransferUsageInPlace(userId, "INGRESS", Math.max(1, bytes), nowMs, undo);
+      const total = this._appendTransferUsageInPlace(userId, "INGRESS", metered, nowMs, undo);
       return { total };
     }, nowMs);
     if (result.total > SYNC_QUOTAS.ingressBytesPer24h) {
@@ -1141,6 +1198,15 @@ export class SyncService {
       this._checkLiveBlobQuota(auth.cloudUserId, blobId, ciphertext.length, undo);
       const sequence = this._nextChangeSequenceInPlace(auth.cloudUserId, nowMs, undo);
       const committedAt = iso(nowMs);
+      // W4-11 review fix: ciphertext bytes are committed to the content-addressed
+      // sidecar BEFORE the referencing metadata rows publish.  Rows never carry
+      // ciphertext, so the monolithic JSON snapshot stays bounded by metadata only
+      // and every account can actually reach its quota.  A failure here aborts the
+      // commit before any durable reference can exist; an orphaned sidecar file is
+      // harmless and reclaimed by the post-publish sweep.
+      if (typeof this.store.writeSyncCiphertextDurable === "function") {
+        this.store.writeSyncCiphertextDurable(digest, ciphertext);
+      }
       const row = {
         cloud_user_id: auth.cloudUserId,
         blob_id: blobId,
@@ -1149,13 +1215,11 @@ export class SyncService {
         author_device_id: device.device_id,
         change_sequence: sequence,
         encryption,
-        ciphertext_base64: ciphertextBase64,
         ciphertext_sha256: digest,
         ciphertext_size_bytes: ciphertext.length,
         committed_at: committedAt
       };
       const mutation = { ...row };
-      delete mutation.ciphertext_base64;
       setMapCommitted(this.store.syncBlobs, key, row, undo);
       setMapCommitted(this.store.syncMutations, mutationKey(auth.cloudUserId, sequence), mutation, undo);
       this._appendBlobEvent(row, "written", nowMs, undo);
@@ -1176,9 +1240,13 @@ export class SyncService {
       throw syncError("SYNC_BLOB_NOT_FOUND", "encrypted sync blob does not exist");
     }
     if (existing.change_kind === "TOMBSTONE") throw syncError("SYNC_BLOB_DELETED", "blob is tombstoned and ciphertext is unavailable");
+    // Ciphertext bytes live outside the metadata rows in the content-addressed
+    // sidecar.  The read is integrity-verified and happens before any metering
+    // mutation, so degraded durable media fails closed without charging egress.
+    const ciphertext = this.store.readSyncCiphertextVerified(existing.ciphertext_sha256, existing.ciphertext_size_bytes);
     const data = {
       metadata: metadataView(existing),
-      ciphertext_base64: existing.ciphertext_base64
+      ciphertext_base64: ciphertext.toString("base64")
     };
     const responseBytes = byteLengthJson(responseBodyForEstimate("SYNC_BLOB_DOWNLOADED", data, requestId || "req_estimate"));
     return this._commitMutation((undo) => {
@@ -1355,7 +1423,12 @@ export class SyncService {
       .sort((a, b) => a.change_sequence - b.change_sequence)
       .map((row) => ({
         ...metadataView(row),
-        ...(row.change_kind === "UPSERT" ? { ciphertext_base64: row.ciphertext_base64 } : {})
+        // Export rehydrates ciphertext from the sidecar on demand; rows never
+        // carry it.  Integrity verification is part of the read, so a corrupt
+        // or missing blob fails the export closed instead of exporting wrong bytes.
+        ...(row.change_kind === "UPSERT"
+          ? { ciphertext_base64: this.store.readSyncCiphertextVerified(row.ciphertext_sha256, row.ciphertext_size_bytes).toString("base64") }
+          : {})
       }));
     const mutations = this._mutationsForUser(cloudUserId).map(metadataView);
     return {

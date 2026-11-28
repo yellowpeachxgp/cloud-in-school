@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
@@ -141,11 +142,12 @@ async function putBlob(app, fixture, deviceId, blobId, {
   counter = 1,
   baseVector = [],
   seed = 1,
+  size = 1024,
   key = nextKey("sync-blob-put"),
   nowMs = BASE_NOW,
   mutateBody = null
 } = {}) {
-  const cipher = cipherBlob(1024, seed);
+  const cipher = cipherBlob(size, seed);
   const body = {
     encryption: encryption(),
     ciphertext_base64: cipher.ciphertext_base64,
@@ -633,6 +635,9 @@ test("W4-11 sync durability: device, ciphertext metadata, cursor state, and idem
 test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas, and rolling bandwidth quotas never enter causality", async () => {
   const app = createTestApp();
   const { fixture, deviceId } = await setupDeviceUser(app, "sync_quota_user");
+  // Directly seeded rows below carry metadata only, matching the post-split row
+  // shape: their shared ciphertext bytes live in the content-addressed sidecar.
+  app.store.writeSyncCiphertextDurable(cipherBlob().ciphertext_sha256, Buffer.from(cipherBlob().ciphertext_base64, "base64"));
 
   const overflowBlob = crypto.randomUUID();
   const manyEntries = [];
@@ -649,7 +654,6 @@ test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas
     author_device_id: deviceId,
     change_sequence: 1,
     encryption: encryption(),
-    ciphertext_base64: cipherBlob().ciphertext_base64,
     ciphertext_sha256: cipherBlob().ciphertext_sha256,
     ciphertext_size_bytes: 1024,
     committed_at: new Date(BASE_NOW).toISOString()
@@ -677,7 +681,6 @@ test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas
     author_device_id: deviceId,
     change_sequence: 2,
     encryption: encryption(),
-    ciphertext_base64: cipherBlob().ciphertext_base64,
     ciphertext_sha256: cipherBlob().ciphertext_sha256,
     ciphertext_size_bytes: 1024,
     committed_at: new Date(BASE_NOW).toISOString()
@@ -699,7 +702,6 @@ test("W4-11 sync quota fail-closed matrix: vector overflow, live resource quotas
       author_device_id: deviceId,
       change_sequence: 100 + index,
       encryption: encryption(),
-      ciphertext_base64: cipherBlob().ciphertext_base64,
       ciphertext_sha256: cipherBlob().ciphertext_sha256,
       ciphertext_size_bytes: 1024,
       committed_at: new Date(BASE_NOW).toISOString()
@@ -976,31 +978,299 @@ test("W4-11 review regression: authenticated malformed, over-limit, and wrong-sh
     return { status: response.status, body: json, rawText: text };
   }
   const ingressRows = () => Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+  const ingressBytes = () => ingressRows().reduce((sum, row) => sum + Number(row.bytes || 0), 0);
 
-  const beforeMalformed = ingressRows().length;
+  const beforeMalformed = ingressBytes();
   const malformedRaw = '{"encryption":';
   const malformed = await rawPut(malformedRaw, "sync-http-malformed");
   assert.equal(malformed.status, 400, malformed.rawText);
   assert.equal(malformed.body.error.code, "BAD_REQUEST");
-  const afterMalformed = ingressRows();
-  assert.equal(afterMalformed.length, beforeMalformed + 1, "malformed JSON must still meter exactly one authenticated ingress attempt");
-  assert.equal(afterMalformed.at(-1).bytes, Buffer.byteLength(malformedRaw));
+  assert.equal(ingressBytes(), beforeMalformed + Buffer.byteLength(malformedRaw), "malformed JSON must still meter exactly one authenticated ingress attempt");
 
   const wrongShapeRaw = JSON.stringify([]);
-  const beforeShape = ingressRows().length;
+  const beforeShape = ingressBytes();
   const wrongShape = await rawPut(wrongShapeRaw, "sync-http-wrong-shape");
   assert.equal(wrongShape.status, 400, wrongShape.rawText);
   assert.equal(wrongShape.body.error.code, "BAD_REQUEST");
-  const afterShape = ingressRows();
-  assert.equal(afterShape.length, beforeShape + 1, "syntactically valid but wrong-shape JSON must meter exactly one ingress attempt");
-  assert.equal(afterShape.at(-1).bytes, Buffer.byteLength(wrongShapeRaw));
+  assert.equal(ingressBytes(), beforeShape + Buffer.byteLength(wrongShapeRaw), "syntactically valid but wrong-shape JSON must meter exactly one ingress attempt");
 
   const oversizedRaw = '{"padding":"' + "x".repeat(1536 * 1024) + '"}';
-  const beforeOversized = ingressRows().length;
+  const beforeOversized = ingressBytes();
   const oversized = await rawPut(oversizedRaw, "sync-http-oversized");
   assert.equal(oversized.status, 413, oversized.rawText);
   assert.equal(oversized.body.error.code, "PAYLOAD_TOO_LARGE");
-  const afterOversized = ingressRows();
-  assert.equal(afterOversized.length, beforeOversized + 1, "over-limit authenticated PUT must meter exactly one ingress attempt");
-  assert.ok(afterOversized.at(-1).bytes > 1536 * 1024, "over-limit metering uses actual boundary bytes already read");
+  const oversizedMetered = ingressBytes() - beforeOversized;
+  assert.ok(oversizedMetered > 1536 * 1024, "over-limit metering uses actual boundary bytes already read, got " + oversizedMetered);
+  assert.ok(oversizedMetered < Buffer.byteLength(oversizedRaw) + 65536, "over-limit metering must not exceed the bytes actually transferred");
+
+  // Aggregation invariant: same-hour attempts share one bounded bucket row per
+  // direction instead of one durable row per attempt, however hard clients retry.
+  const bucketRows = ingressRows().filter((row) => Number.isSafeInteger(row.bucket_start_ms));
+  assert.ok(bucketRows.length <= 1, "same-bucket attempts must aggregate into at most one ingress row, got " + bucketRows.length);
 });
+
+
+function listSidecarFiles(dir) {
+  const root = dir + ".ciphertext";
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  for (const shard of fs.readdirSync(root)) {
+    const shardDir = path.join(root, shard);
+    if (!fs.statSync(shardDir).isDirectory()) continue;
+    for (const name of fs.readdirSync(shardDir)) {
+      out.push({ shard, name, filePath: path.join(shardDir, name), size: fs.statSync(path.join(shardDir, name)).size });
+    }
+  }
+  return out;
+}
+
+test("W4-11 review regression: ciphertext persists in sidecar files while the JSON snapshot stays metadata-only", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-e2ee-sidecar-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const snapshotPath = path.join(dir, "state.json");
+  const app = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(app.store._snapshotFlushTimer));
+
+  const oneMiB = 1048576;
+  const uploads = [];
+  for (const [userIndex, label] of [[0, "sync_sidecar_a"], [1, "sync_sidecar_b"]]) {
+    const setup = await setupDeviceUser(app, label);
+    for (let index = 0; index < 4; index += 1) {
+      const seed = userIndex * 10 + index + 1;
+      const blobId = crypto.randomUUID();
+      const put = await putBlob(app, setup.fixture, setup.deviceId, blobId, { size: oneMiB, seed });
+      assert.equal(put.status, 201, JSON.stringify(put.body));
+      uploads.push({ ...setup, blobId, seed });
+    }
+  }
+
+  // Structural proof of the fix: 8 MiB of ciphertext is durable, yet the
+  // monolithic JSON snapshot carries metadata only — no inline ciphertext key,
+  // and its size is bounded by metadata volume rather than by quota volume.
+  const snapshotBytes = fs.readFileSync(snapshotPath);
+  const snapshotText = snapshotBytes.toString("utf8");
+  assert.equal(snapshotText.includes("ciphertext_base64"), false, "JSON snapshot must never inline ciphertext");
+  assert.equal(snapshotText.includes("ciphertext\u0000"), false);
+  const sidecarFiles = listSidecarFiles(snapshotPath);
+  assert.equal(sidecarFiles.length, 8, "every distinct ciphertext digest must be one sidecar file");
+  const sidecarTotal = sidecarFiles.reduce((sum, row) => sum + row.size, 0);
+  assert.equal(sidecarTotal, 8 * oneMiB, "sidecar must hold exactly the uploaded ciphertext bytes");
+  assert.ok(
+    snapshotBytes.length < sidecarTotal / 16,
+    `snapshot (${snapshotBytes.length}) must stay metadata-bounded far below ciphertext volume (${sidecarTotal})`
+  );
+  for (const row of sidecarFiles) {
+    assert.match(row.name, /^[0-9a-f]{64}\.bin$/, "sidecar files are content-addressed");
+    assert.equal(row.shard, row.name.slice(0, 2), "sidecar files shard by digest prefix");
+  }
+
+  // Reopen the store: downloads and export rehydrate byte-exact ciphertext.
+  const restarted = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
+  for (const entry of uploads) {
+    const restartedFixture = {
+      user: restarted.store.users.get(entry.fixture.user.id),
+      familyId: entry.fixture.familyId,
+      authAt(ms = BASE_NOW) {
+        return signAuth(restarted, this.user, entry.fixture.familyId, ms);
+      },
+      get auth() {
+        return this.authAt(BASE_NOW);
+      }
+    };
+    const download = await downloadBlob(restarted, restartedFixture, entry.deviceId, entry.blobId);
+    assert.equal(download.status, 200, JSON.stringify(download.body));
+    assert.equal(download.body.data.ciphertext_base64, cipherBlob(oneMiB, entry.seed).ciphertext_base64);
+  }
+  const first = uploads[0];
+  const exportAuth = {
+    user: restarted.store.users.get(first.fixture.user.id),
+    familyId: first.fixture.familyId,
+    authAt(ms = BASE_NOW) {
+      return signAuth(restarted, this.user, first.fixture.familyId, ms);
+    },
+    get auth() {
+      return this.authAt(BASE_NOW);
+    }
+  };
+  const exported = await restarted.inject({ method: "POST", url: "/api/v1/me/data-export", headers: exportAuth.auth });
+  assert.equal(exported.status, 200, JSON.stringify(exported.body));
+  const exportedBlob = exported.body.data.sync_blobs.find((row) => row.blob_id === first.blobId);
+  assert.equal(exportedBlob.ciphertext_base64, cipherBlob(oneMiB, first.seed).ciphertext_base64);
+});
+
+test("W4-11 review regression: tombstone, account erasure, and orphan sweep physically erase sidecar ciphertext", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-e2ee-erasure-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const snapshotPath = path.join(dir, "state.json");
+  const app = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(app.store._snapshotFlushTimer));
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_erasure_user");
+
+  // Tombstone erasure: deleting the blob unpublishes the reference and the
+  // post-publish sweep physically removes the content-addressed bytes.
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId);
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+  const digest = cipherBlob().ciphertext_sha256;
+  const sidecarPath = path.join(snapshotPath + ".ciphertext", digest.slice(0, 2), digest + ".bin");
+  assert.equal(fs.existsSync(sidecarPath), true, "uploaded ciphertext must be durable in the sidecar");
+  const del = await deleteBlob(app, fixture, deviceId, blobId, vector(deviceId, 1), 2);
+  assert.equal(del.status, 200, JSON.stringify(del.body));
+  assert.equal(fs.existsSync(sidecarPath), false, "tombstone must physically erase ciphertext after publish");
+
+  // Orphan reclamation: bytes that never became referenced (crash/rollback
+  // residue simulated by direct placement) disappear at the next publish sweep.
+  const orphanDigest = "0".repeat(64);
+  const orphanDir = path.join(snapshotPath + ".ciphertext", "00");
+  fs.mkdirSync(orphanDir, { recursive: true });
+  const orphanPath = path.join(orphanDir, orphanDigest + ".bin");
+  fs.writeFileSync(orphanPath, Buffer.alloc(1024, 7));
+  const strayTmpPath = path.join(orphanDir, "abcd".repeat(16) + ".bin.tmp.1.1");
+  fs.writeFileSync(strayTmpPath, Buffer.alloc(16, 9));
+  const blobId2 = crypto.randomUUID();
+  const put2 = await putBlob(app, fixture, deviceId, blobId2, { seed: 5 });
+  assert.equal(put2.status, 201, JSON.stringify(put2.body));
+  assert.equal(fs.existsSync(orphanPath), false, "unreferenced orphan ciphertext must be swept after publish");
+  assert.equal(fs.existsSync(strayTmpPath), false, "temporary write residue must be swept after publish");
+
+  // Account erasure: data-delete republishes without the user's rows and the
+  // sweep erases every remaining ciphertext byte of that account.
+  const remainingBefore = listSidecarFiles(snapshotPath);
+  assert.ok(remainingBefore.length >= 1, "second upload must be durable before erasure");
+  const deleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: fixture.auth });
+  assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
+  assert.equal(listSidecarFiles(snapshotPath).length, 0, "account erasure must physically erase all sidecar ciphertext");
+});
+
+test("W4-11 review regression: missing or corrupted sidecar ciphertext fails closed", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-e2ee-corrupt-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const snapshotPath = path.join(dir, "state.json");
+  const app = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(app.store._snapshotFlushTimer));
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_corrupt_user");
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId);
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+
+  const digest = cipherBlob().ciphertext_sha256;
+  const sidecarPath = path.join(snapshotPath + ".ciphertext", digest.slice(0, 2), digest + ".bin");
+  fs.writeFileSync(sidecarPath, Buffer.alloc(1024, 255));
+  const corrupted = await downloadBlob(app, fixture, deviceId, blobId);
+  assert.equal(corrupted.status, 500, JSON.stringify(corrupted.body));
+  assert.equal(corrupted.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+
+  fs.unlinkSync(sidecarPath);
+  const missing = await downloadBlob(app, fixture, deviceId, blobId);
+  assert.equal(missing.status, 500, JSON.stringify(missing.body));
+  assert.equal(missing.body.error.code, "STORAGE_PERSISTENCE_FAILED");
+
+  assert.throws(
+    () => createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } }),
+    (err) => err?.code === "STORAGE_PERSISTENCE_FAILED" || err?.code === "STORAGE_COMMIT_UNKNOWN",
+    "restart over missing referenced ciphertext must fail closed"
+  );
+});
+
+test("W4-11 review regression: post-exhaustion rejected uploads count exactly but stay in bounded aggregate rows", async () => {
+  const app = createTestApp();
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_throttle_user");
+  const legacyUsageId = crypto.randomUUID();
+  app.store.syncTransferUsage.set(legacyUsageId, {
+    id: legacyUsageId,
+    cloud_user_id: fixture.user.id,
+    direction: "INGRESS",
+    bytes: 536870912,
+    occurred_at: new Date(BASE_NOW).toISOString()
+  });
+  const ingressRows = () => Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+  const ingressBytes = () => ingressRows().reduce((sum, row) => sum + Number(row.bytes || 0), 0);
+
+  const deltas = [];
+  for (let index = 0; index < 6; index += 1) {
+    const before = ingressBytes();
+    const blocked = await putBlob(app, fixture, deviceId, crypto.randomUUID());
+    assert.equal(blocked.status, 429, JSON.stringify(blocked.body));
+    assert.equal(blocked.body.error.code, "SYNC_BANDWIDTH_QUOTA_EXCEEDED");
+    deltas.push(ingressBytes() - before);
+  }
+  for (const delta of deltas) {
+    assert.ok(delta > 0, "every rejected authenticated attempt must still count its ingress bytes exactly");
+    assert.equal(delta, deltas[0], "identical over-quota attempts meter identical bytes");
+  }
+  assert.ok(
+    ingressRows().length <= 2,
+    "post-exhaustion retries must aggregate into bounded rows instead of one durable row per attempt, got " + ingressRows().length
+  );
+  const bucketRows = ingressRows().filter((row) => Number.isSafeInteger(row.bucket_start_ms));
+  assert.equal(bucketRows.length, 1, "post-exhaustion counting lands in the single aligned hour bucket");
+  assert.equal(bucketRows[0].bytes, deltas.reduce((sum, row) => sum + row, 0), "bucket accumulates exactly the rejected bytes");
+});
+
+test("W4-11 review regression: streaming past the body cap yields HTTP 413 instead of a connection reset", async (t) => {
+  const app = createTestApp();
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_stream_user");
+  const server = app.createHttpServer();
+  t.after(() => {
+    try { server.closeAllConnections?.(); } catch {}
+    server.close();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = server.address().port;
+
+  const responseText = await new Promise((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1");
+    const chunks = [];
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("timed out waiting for the 413 response"));
+    }, 10000);
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => {
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("latin1"));
+    });
+    socket.on("error", (err) => {
+      clearTimeout(timer);
+      if (chunks.length > 0) resolve(Buffer.concat(chunks).toString("latin1"));
+      else reject(err);
+    });
+    socket.on("connect", async () => {
+      const total = 2 * 1024 * 1024;
+      const head =
+        "PUT /api/v1/sync/blobs/" + crypto.randomUUID() + " HTTP/1.1\r\n" +
+        "host: 127.0.0.1\r\n" +
+        "authorization: " + fixture.auth.authorization + "\r\n" +
+        "content-type: application/json\r\n" +
+        "x-dis-sync-device-id: " + deviceId + "\r\n" +
+        "idempotency-key: " + nextKey("sync-stream-oversize") + "\r\n" +
+        "content-length: " + total + "\r\n" +
+        "\r\n";
+      socket.write(head);
+      // Stream 2 MiB in 256 KiB slices with breathing room: the server crosses
+      // the 1.5 MiB cap while bytes are still in flight — the exact shape that
+      // used to reset the connection before any response could be written.
+      const slice = Buffer.alloc(256 * 1024, 120);
+      for (let sent = 0; sent < total; sent += slice.length) {
+        await new Promise((resolveWrite) => setTimeout(resolveWrite, 15));
+        if (socket.destroyed) break;
+        try {
+          socket.write(slice);
+        } catch {
+          break;
+        }
+      }
+    });
+  });
+
+  assert.ok(
+    responseText.startsWith("HTTP/1.1 413"),
+    "over-limit streaming upload must receive an HTTP 413 response head, never a bare reset; got: " + responseText.slice(0, 120)
+  );
+  assert.ok(responseText.includes("PAYLOAD_TOO_LARGE"), "413 response must carry the JSON error envelope");
+});
+

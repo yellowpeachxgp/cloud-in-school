@@ -969,6 +969,16 @@ export class CloudDatabaseStore {
     this.syncTransferUsage = new Map(); // usageId -> rolling ingress/egress byte accounting row
     this.syncRateWindows = new Map(); // `${cloudUserId}:${kind}:${windowStart}` -> fixed-window rate counter
 
+    // W4-11 review fix: ciphertext NEVER enters the monolithic JSON snapshot.
+    // Content-addressed sidecar files (${snapshotPath}.ciphertext/<shard>/<sha256>.bin)
+    // carry the bytes with their own write-fsync-rename-dirsync publish protocol, so
+    // the V8 single-string ceiling of one JSON document can never cap sync below the
+    // per-account quota.  In ephemeral mode (no snapshotPath) ciphertext stays in a
+    // memory-sidecar map instead of the rows, keeping one code path in the service.
+    this.syncCiphertextMemory = new Map(); // digest -> Buffer (ephemeral mode only)
+    this.syncCiphertextDir = snapshotPath ? `${snapshotPath}.ciphertext` : null;
+    this._syncCiphertextTmpSeq = 0;
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -1280,12 +1290,226 @@ export class CloudDatabaseStore {
       if (Array.isArray(raw.auditEvents)) {
         this.auditEvents = raw.auditEvents.slice(-500);
       }
+      // W4-11 sidecar split: move any pre-split inline ciphertext out of the
+      // JSON world, then fail closed if committed references are not durable.
+      // Orphaned sidecar bytes (crashed/rolled-back uploads) are reclaimed
+      // best-effort; a sweep failure never blocks startup and retries at the
+      // next publish.
+      this._migrateLegacyInlineSyncCiphertext();
+      this._verifySyncCiphertextReferencesDurable();
+      try {
+        this.sweepSyncCiphertextOrphans(this);
+      } catch {
+        // best-effort startup reclamation; retried after the next successful publish
+      }
     } catch (err) {
       if (this.requireDurableSnapshot) {
         throw new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
           `Failed to load durable snapshot at ${this.snapshotPath}: ${err?.message || "corrupt snapshot"}`
         );
+      }
+    }
+  }
+
+  // ---- W4-11 E2EE ciphertext sidecar (content-addressed, crash-safe) ----
+
+  _syncCiphertextFilePath(digest) {
+    return path.join(this.syncCiphertextDir, digest.slice(0, 2), digest + ".bin");
+  }
+
+  // Persist one immutable ciphertext blob outside the JSON snapshot.  Content
+  // addressing makes the write idempotent: the final name only ever appears
+  // through an atomic rename of a fully fsynced temporary file, so a correct-size
+  // file already present is by construction the same bytes.  Orphaned files
+  // (written before a rolled-back or crashed commit) are harmless and reclaimed
+  // by sweepSyncCiphertextOrphans; the reverse ordering hazard never exists
+  // because this write always completes before the referencing snapshot publish.
+  writeSyncCiphertextDurable(digest, bytes) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext digest is not a lowercase sha256 hex");
+    }
+    const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    if (crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext bytes do not match their content digest");
+    }
+    if (!this.syncCiphertextDir) {
+      if (!this.syncCiphertextMemory.has(digest)) this.syncCiphertextMemory.set(digest, Buffer.from(content));
+      return;
+    }
+    const io = this.snapshotFs;
+    const finalPath = this._syncCiphertextFilePath(digest);
+    try {
+      const existing = io.statSync(finalPath, { throwIfNoEntry: false });
+      if (existing) {
+        if (existing.size === content.length) return; // content-addressed: already durable
+        throw new Error("侧车密文尺寸与内容寻址冲突");
+      }
+      const shardDir = path.dirname(finalPath);
+      if (!io.existsSync(shardDir)) {
+        const missing = [];
+        for (let cursor = shardDir; !io.existsSync(cursor); cursor = path.dirname(cursor)) {
+          missing.push(cursor);
+          if (path.dirname(cursor) === cursor) throw new Error("密文侧车存储根目录不可用");
+        }
+        io.mkdirSync(shardDir, { recursive: true });
+        for (const created of missing.reverse()) {
+          const parentFd = io.openSync(path.dirname(created), "r");
+          try { io.fsyncSync(parentFd); }
+          finally { io.closeSync(parentFd); }
+        }
+      }
+      this._syncCiphertextTmpSeq = (this._syncCiphertextTmpSeq || 0) + 1;
+      const tmpPath = finalPath + ".tmp." + process.pid + "." + this._syncCiphertextTmpSeq;
+      const fd = io.openSync(tmpPath, "wx", 0o600);
+      try {
+        io.writeFileSync(fd, content);
+        io.fsyncSync(fd);
+      } finally { io.closeSync(fd); }
+      io.renameSync(tmpPath, finalPath);
+      const dirFd = io.openSync(shardDir, "r");
+      try { io.fsyncSync(dirFd); }
+      finally { io.closeSync(dirFd); }
+    } catch (err) {
+      if (err instanceof ContractError) throw err;
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        `E2EE 同步密文侧车写入失败：${err?.message || "unknown"}`,
+        { retry_same_key: true }
+      );
+    }
+  }
+
+  // Read one ciphertext blob back, verifying integrity end-to-end.  Any missing
+  // or corrupted sidecar content is a durability fault and fails closed — the
+  // server must never silently substitute or truncate user ciphertext.
+  readSyncCiphertextVerified(digest, expectedSizeBytes = null) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext digest is not a lowercase sha256 hex");
+    }
+    let content = null;
+    if (!this.syncCiphertextDir) {
+      content = this.syncCiphertextMemory.get(digest) || null;
+    } else {
+      try {
+        content = this.snapshotFs.readFileSync(this._syncCiphertextFilePath(digest));
+      } catch {
+        content = null;
+      }
+    }
+    if (!content) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "E2EE 同步密文侧车内容缺失，耐久状态须隔离核验",
+        { ciphertext_sha256: digest }
+      );
+    }
+    const sizeOk = expectedSizeBytes == null ? true : content.length === expectedSizeBytes;
+    if (!sizeOk || crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "E2EE 同步密文侧车内容摘要或尺寸不符，耐久状态须隔离核验",
+        { ciphertext_sha256: digest }
+      );
+    }
+    return content;
+  }
+
+  _syncCiphertextDigestReferences(source = this) {
+    const digests = new Set();
+    for (const row of source.syncBlobs?.values?.() || []) {
+      if (
+        row?.change_kind === "UPSERT" &&
+        typeof row.ciphertext_sha256 === "string" &&
+        /^[0-9a-f]{64}$/.test(row.ciphertext_sha256)
+      ) {
+        digests.add(row.ciphertext_sha256);
+      }
+    }
+    return digests;
+  }
+
+  // Reclaim ciphertext bytes no live UPSERT row references anymore — tombstoned,
+  // expired, purged, or orphaned by a rolled-back/crashed upload.  Deletion only
+  // ever runs after the referencing-removal snapshot is already published (or at
+  // startup recovery), so a sweep can never strand a durable reference; leftover
+  // orphans are retried at the next publish or restart.
+  sweepSyncCiphertextOrphans(source = this) {
+    const referenced = this._syncCiphertextDigestReferences(source);
+    let removed = 0;
+    if (!this.syncCiphertextDir) {
+      for (const digest of Array.from(this.syncCiphertextMemory.keys())) {
+        if (!referenced.has(digest)) {
+          this.syncCiphertextMemory.delete(digest);
+          removed += 1;
+        }
+      }
+      return removed;
+    }
+    const io = this.snapshotFs;
+    if (!io.existsSync(this.syncCiphertextDir)) return 0;
+    for (const shard of io.readdirSync(this.syncCiphertextDir)) {
+      if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+      const shardDir = path.join(this.syncCiphertextDir, shard);
+      let names = [];
+      try {
+        names = io.readdirSync(shardDir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        const match = /^([0-9a-f]{64})\.bin$/.exec(name);
+        const isOrphanBlob = match && !referenced.has(match[1]);
+        const isTmpResidue = !match && name.includes(".tmp.");
+        if (!isOrphanBlob && !isTmpResidue) continue;
+        try {
+          io.unlinkSync(path.join(shardDir, name));
+          removed += 1;
+        } catch (err) {
+          if (err?.code !== "ENOENT") throw err;
+        }
+      }
+    }
+    return removed;
+  }
+
+  // Load-time upgrade path: snapshots written before the sidecar split still
+  // carry ciphertext_base64 on current UPSERT rows.  Move those bytes into the
+  // sidecar (verified) and strip them from memory so the next publish is clean.
+  _migrateLegacyInlineSyncCiphertext() {
+    for (const row of this.syncBlobs.values()) {
+      if (!row || !Object.hasOwn(row, "ciphertext_base64")) continue;
+      if (row.change_kind === "UPSERT" && typeof row.ciphertext_base64 === "string") {
+        const bytes = Buffer.from(row.ciphertext_base64, "base64");
+        const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+        if (digest !== row.ciphertext_sha256 || bytes.length !== row.ciphertext_size_bytes) {
+          throw new Error("E2EE 同步遗留内联密文摘要或尺寸不一致");
+        }
+        this.writeSyncCiphertextDurable(row.ciphertext_sha256, bytes);
+      }
+      delete row.ciphertext_base64;
+    }
+    for (const row of this.syncMutations.values()) {
+      if (row && Object.hasOwn(row, "ciphertext_base64")) delete row.ciphertext_base64;
+      if (row && Object.hasOwn(row, "ciphertext")) delete row.ciphertext;
+    }
+  }
+
+  // Fail-closed durability verification at load: every live UPSERT reference
+  // must resolve to a sidecar file of exactly the committed size.  Content
+  // hashing stays lazy at read time; existence+size here catches lost or
+  // truncated media before the server starts accepting traffic again.
+  _verifySyncCiphertextReferencesDurable() {
+    if (!this.syncCiphertextDir) return;
+    const io = this.snapshotFs;
+    for (const row of this.syncBlobs.values()) {
+      if (row?.change_kind !== "UPSERT") continue;
+      const stat = io.statSync(this._syncCiphertextFilePath(row.ciphertext_sha256), { throwIfNoEntry: false });
+      if (!stat) {
+        throw new Error("E2EE 同步密文侧车文件缺失: " + row.ciphertext_sha256);
+      }
+      if (stat.size !== row.ciphertext_size_bytes) {
+        throw new Error("E2EE 同步密文侧车尺寸不符: " + row.ciphertext_sha256);
       }
     }
   }
@@ -1459,7 +1683,7 @@ export class CloudDatabaseStore {
     } finally { io.closeSync(fd); }
   }
 
-  _validateCommitUnit(raw) {
+  _validateCommitUnit(raw, { allowLegacyInlineCiphertext = false } = {}) {
     const plans = new Map(raw.reservationPlans || []);
     const jobs = new Map(raw.reservationJobs || []);
     const events = new Map(raw.scheduleEvents || []);
@@ -1836,7 +2060,11 @@ export class CloudDatabaseStore {
         throw new Error("E2EE 同步设备快照 cursor 确认水位无效");
       }
     }
-    const validateSyncMutationShape = (row, requireCurrentCiphertext) => {
+    // Post-split invariant: ciphertext bytes live only in the content-addressed
+    // sidecar, never in the JSON commit unit.  Inline ciphertext is tolerated
+    // exclusively while validating a pre-split snapshot during recovery
+    // (allowLegacyInlineCiphertext); anything published by this build is strict.
+    const validateSyncMutationShape = (row, isCurrentBlob) => {
       if (!row?.cloud_user_id || !row.blob_id || !syncVectorValid(row.version_vector)) return false;
       if (!Number.isSafeInteger(row.change_sequence) || row.change_sequence < 1) return false;
       if (!finiteTime(row.committed_at)) return false;
@@ -1846,13 +2074,12 @@ export class CloudDatabaseStore {
         if (!row.encryption || row.encryption.format !== "dis-sync-e2ee/v1" || row.encryption.cipher_suite !== "AES-256-GCM" || row.encryption.padding_scheme !== "DIS_SYNC_SIZE_BUCKETS_POW4_V1") return false;
         if (typeof row.ciphertext_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.ciphertext_sha256)) return false;
         if (!syncBucketSizes.has(row.ciphertext_size_bytes)) return false;
-        if (requireCurrentCiphertext) {
-          if (typeof row.ciphertext_base64 !== "string") return false;
+        if (Object.hasOwn(row, "ciphertext")) return false;
+        if (Object.hasOwn(row, "ciphertext_base64")) {
+          if (!isCurrentBlob || !allowLegacyInlineCiphertext || typeof row.ciphertext_base64 !== "string") return false;
           const decodedCiphertext = Buffer.from(row.ciphertext_base64, "base64");
           if (decodedCiphertext.length !== row.ciphertext_size_bytes) return false;
           if (crypto.createHash("sha256").update(decodedCiphertext).digest("hex") !== row.ciphertext_sha256) return false;
-        } else if (Object.hasOwn(row, "ciphertext_base64") || Object.hasOwn(row, "ciphertext")) {
-          return false;
         }
         return true;
       }
@@ -1946,7 +2173,7 @@ export class CloudDatabaseStore {
         throw new Error("快照与提交意图摘要不符，必须隔离并人工核验");
       }
       if (bytes) {
-        this._validateCommitUnit(JSON.parse(bytes.toString("utf8")));
+        this._validateCommitUnit(JSON.parse(bytes.toString("utf8")), { allowLegacyInlineCiphertext: true });
         const fd = io.openSync(this.snapshotPath, "r");
         try { this._persistStage("recovery_file_fsync"); io.fsyncSync(fd); }
         finally { io.closeSync(fd); }
@@ -2131,6 +2358,16 @@ export class CloudDatabaseStore {
         stage = "intent_clear_fsync"; this._syncSnapshotDirectory(stage);
       } catch (err) { err.persistStage = err.persistStage || stage; throw err; }
       this._unknownSnapshotHash = undefined;
+      // W4-11 sidecar garbage collection: ciphertext bytes whose references this
+      // commit removed (tombstone, expiry cleanup, erasure) or that a rolled-back
+      // upload orphaned are reclaimed only now, after the publish is durable.
+      // Best-effort — a sweep failure never invalidates the committed snapshot;
+      // leftover orphans are retried after the next publish or at startup.
+      try {
+        this.sweepSyncCiphertextOrphans(source);
+      } catch {
+        // orphan reclamation retries at the next publish or startup recovery
+      }
       for (const p of source.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;
       }

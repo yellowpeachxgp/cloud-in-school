@@ -841,13 +841,16 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         const chunks = [];
         let totalBytes = 0;
         let bodyTooLarge = false;
-        for await (const chunk of req) {
+        // destroyOnReturn:false is load-bearing: breaking the default request
+        // iterator would destroy the incoming stream AND its socket, resetting
+        // the connection before the 413 response can be written.  With the
+        // socket preserved, the over-limit rejection reaches the client as a
+        // proper HTTP response; Connection: close then drops the unread body
+        // bytes without turning the parser into an unbounded memory sink.
+        const requestChunks = typeof req.iterator === "function" ? req.iterator({ destroyOnReturn: false }) : req;
+        for await (const chunk of requestChunks) {
           totalBytes += chunk.length;
           if (totalBytes > MAX_HTTP_BODY_BYTES) {
-            // Do not buffer the rest of an over-limit upload.  The byte count
-            // already read is still authenticated ingress and is metered below;
-            // breaking the async iterator closes the incoming stream instead of
-            // turning the parser into an unbounded memory sink.
             bodyTooLarge = true;
             chunks.length = 0;
             break;
@@ -878,6 +881,9 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         });
         res.writeHead(response.status, {
           ...SECURITY_HEADERS,
+          // Over-limit uploads stop being consumed at the cap, so keep-alive
+          // framing can no longer be trusted; close is the only honest answer.
+          ...(bodyTooLarge ? { connection: "close" } : {}),
           ...(response.headers || {})
         });
         if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
