@@ -14,8 +14,8 @@ Usage: cis-gate <repository> <branch> <gate> [arguments]
 Repositories: day-in-school, cloud-in-school (aliases: android/day, cloud)
 Gates:
   quick <module> [...]   run module test (pure JVM) or testDebugUnitTest (Android)
-  android                run Android unit tests, pure JVM tests, debug lint, debug assemble
-  android-full           run android plus release lint/assemble
+  android                run Android unit tests, pure JVM tests, all-module debug lint, debug assemble
+  android-full           run android plus all-module release lint and release assemble
   cloud                  run npm ci, npm test, npm run contract:check
   contracts              run local contract validation and compare contracts/ with other repository main
   secrets                run tools/secret-scan when INF-01 has provided it
@@ -283,18 +283,25 @@ run_android() {
   # The first pass keeps the normal build cache for compilation, Android unit
   # tests, lint, and assembly. testClasses materializes pure-JVM test compile
   # outputs without executing the tests themselves.
+  # Lint task names stay intentionally unqualified so every registered
+  # Android module (the app and all library modules) runs lint, matching the
+  # hosted CI invocation 'gradlew lintDebug lintRelease'. App-qualified
+  # ':app:lintDebug'/':app:lintRelease' never execute library module lint
+  # report tasks, which let library lint errors pass this gate and only fail
+  # later on hosted CI (AUTO-039).
   local main_tasks=(
     "${android_test_tasks[@]}"
     "${jvm_compile_tasks[@]}"
-    :app:lintDebug
+    lintDebug
     :app:assembleDebug
   )
   if grep -RIl --include='build.gradle.kts' -e roborazzi . >/dev/null 2>&1; then
     main_tasks+=(verifyRoborazziDebug)
   fi
   if [ "$gate" = android-full ]; then
-    main_tasks+=(:app:lintRelease :app:assembleRelease)
+    main_tasks+=(lintRelease :app:assembleRelease)
   fi
+  printf 'CIS_ANDROID_LINT_SCOPE=all-android-modules-unqualified\n'
   printf 'CIS_ANDROID_PRIMARY_TASK_COUNT=%s\n' "${#main_tasks[@]}"
   "$SCRIPT_DIR/cis-gradle" "${main_tasks[@]}"
 
