@@ -239,7 +239,7 @@ test("W5-02 dis-datapack lifecycle: submit/review/publish/catalog/download/retir
 
   const retireDenied = await app.inject({
     method: "POST",
-    url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/retire",
+    url: "/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire",
     headers: writeHeaders(publisher, "content-retire-denied-0001"),
     body: { reason: "OUTDATED", detail: "测试下架" },
     nowMs: BASE_NOW
@@ -247,7 +247,7 @@ test("W5-02 dis-datapack lifecycle: submit/review/publish/catalog/download/retir
   assert.equal(retireDenied.status, 403);
   const retired = await app.inject({
     method: "POST",
-    url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/retire",
+    url: "/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire",
     headers: writeHeaders(retirer, "content-retire-0001"),
     body: { reason: "OUTDATED", detail: "测试下架" },
     nowMs: BASE_NOW
@@ -264,7 +264,7 @@ test("W5-02 dis-datapack lifecycle: submit/review/publish/catalog/download/retir
   assert.equal(auditCatalog.body.data[0].latest_version, null);
   const secondRetire = await app.inject({
     method: "POST",
-    url: "/api/v1/content-packs/haut.procedures/versions/2026.11.1/retire",
+    url: "/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire",
     headers: writeHeaders(retirer, "content-retire-again-0001"),
     body: { reason: "OUTDATED", detail: "重复下架" },
     nowMs: BASE_NOW
