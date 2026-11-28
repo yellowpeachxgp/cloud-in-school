@@ -25,6 +25,7 @@ import { AvailabilityService } from "../../../packages/availability/src/index.mj
 import { PlaceStatusService } from "../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../packages/ledger/src/index.mjs";
 import { SyncService } from "../../../packages/sync/src/index.mjs";
+import { ContentPackCatalogService } from "../../../packages/content-catalog/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -83,6 +84,29 @@ function trustRootWithReferenceEntries(optionValue) {
     "BAD_REQUEST",
     "pluginTrustedPublisherKeys must be a publisher-to-public-key mapping"
   );
+}
+
+function parseContentPackTrustRootConfig(rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === "") return {};
+  let parsed = rawValue;
+  if (typeof rawValue === "string") {
+    try {
+      parsed = JSON.parse(rawValue);
+    } catch (error) {
+      throw new Error("CONTENT_PACK_TRUST_ROOT_JSON is not valid JSON: " + (error?.message || String(error)));
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("content pack trust root config must be an object");
+  }
+  const unknown = Object.keys(parsed).filter((key) => !["trusted_keys", "legacy_publisher_keys"].includes(key));
+  if (unknown.length) {
+    throw new Error("content pack trust root config has unsupported key(s): " + unknown.join(","));
+  }
+  return {
+    trustedKeys: parsed.trusted_keys || {},
+    legacyPublisherKeys: parsed.legacy_publisher_keys || {}
+  };
 }
 
 function sanitizeReferencePluginError(error) {
@@ -195,6 +219,15 @@ export function createCampusCloudApp(options = {}) {
   const placeStatus = options.placeStatus || new PlaceStatusService(store);
   const ledger = options.ledger || new LedgerService(store);
   const syncE2ee = options.syncE2ee || new SyncService(store);
+  const contentPackTrustRoot = parseContentPackTrustRootConfig(
+    options.contentPackTrustRootConfig ?? process.env.CONTENT_PACK_TRUST_ROOT_JSON
+  );
+  const contentCatalog = options.contentCatalog || new ContentPackCatalogService(store, {
+    trustedKeys: options.contentPackTrustedKeys || contentPackTrustRoot.trustedKeys,
+    legacyPublisherKeys: options.contentPackLegacyPublisherKeys || contentPackTrustRoot.legacyPublisherKeys,
+    submitRateLimitPerHour: options.contentPackSubmitRateLimitPerHour,
+    downloadRateLimitPerHour: options.contentPackDownloadRateLimitPerHour
+  });
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -509,6 +542,7 @@ export function createCampusCloudApp(options = {}) {
     placeStatus,
     ledger,
     syncE2ee,
+    contentCatalog,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -542,6 +576,7 @@ export function createCampusCloudApp(options = {}) {
     placeStatus,
     ledger,
     syncE2ee,
+    contentCatalog,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,

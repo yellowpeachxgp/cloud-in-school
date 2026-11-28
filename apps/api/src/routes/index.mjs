@@ -15,6 +15,7 @@ import { createAvailabilityRoutes } from "./availability.mjs";
 import { createPlaceStatusRoutes } from "./place-status.mjs";
 import { createLedgerRoutes } from "./ledger.mjs";
 import { createE2eeSyncRoutes } from "./sync-e2ee.mjs";
+import { createContentCatalogRoutes } from "./content-catalog.mjs";
 
 export function createCoreRoutes(ctx) {
   return [
@@ -33,7 +34,8 @@ export function createCoreRoutes(ctx) {
     ...createAvailabilityRoutes(ctx),
     ...createLedgerRoutes(ctx),
     ...createPlaceStatusRoutes(ctx),
-    ...createE2eeSyncRoutes(ctx)
+    ...createE2eeSyncRoutes(ctx),
+    ...createContentCatalogRoutes(ctx)
   ];
 }
 
