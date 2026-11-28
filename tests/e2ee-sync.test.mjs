@@ -350,6 +350,8 @@ test("W4-11 sync blobs: fixed buckets, ciphertext-only storage, strict vector CA
       writer_counter: 2
     };
   })();
+  const ingressRowsBefore = Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+  const ingressBytesBefore = ingressRowsBefore.reduce((sum, row) => sum + Number(row.bytes || 0), 0);
   const invalidSize = await app.inject({
     method: "PUT",
     url: "/api/v1/sync/blobs/" + crypto.randomUUID(),
@@ -358,7 +360,13 @@ test("W4-11 sync blobs: fixed buckets, ciphertext-only storage, strict vector CA
   });
   assert.equal(invalidSize.status, 400);
   assert.equal(invalidSize.body.error.code, "SYNC_ENVELOPE_INVALID");
-  assert.ok(Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS").length >= 2, "every authenticated PUT attempt must count ingress even when validation rejects");
+  const ingressRowsAfter = Array.from(app.store.syncTransferUsage.values()).filter((row) => row.direction === "INGRESS");
+  const ingressBytesAfter = ingressRowsAfter.reduce((sum, row) => sum + Number(row.bytes || 0), 0);
+  assert.ok(ingressBytesAfter > ingressBytesBefore, "every authenticated PUT attempt must count ingress even when validation rejects");
+  assert.ok(
+    ingressRowsAfter.length <= ingressRowsBefore.length + 1 && ingressRowsAfter.filter((row) => Number.isSafeInteger(row.bucket_start_ms)).length <= 1,
+    "rejected attempts must aggregate into the bounded hour bucket rather than one row per attempt"
+  );
 
   const stale = await putBlob(app, fixture, deviceId, blobId, { baseVector: [], counter: 1, seed: 9 });
   assert.equal(stale.status, 409);
