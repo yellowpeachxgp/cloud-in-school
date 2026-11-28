@@ -1230,6 +1230,86 @@ test("W4-11 review regression: post-exhaustion rejected uploads count exactly bu
   assert.equal(bucketRows[0].bytes, deltas.reduce((sum, row) => sum + row, 0), "bucket accumulates exactly the rejected bytes");
 });
 
+test("W4-11 review regression: multiple accounts reach their exact live-byte quotas and reopen the store", async (t) => {
+  // Reviewer verification: the storage layer must not cap sync below the
+  // contract quota.  Rows are metadata-only after the sidecar split, so 255
+  // seeded one-MiB live rows per account cost metadata volume only; the final
+  // real one-MiB upload then reaches exactly 256 MiB of live padded ciphertext
+  // and must succeed, the next one must fail with SYNC_QUOTA_EXCEEDED, and a
+  // reopened store must still serve the ciphertext.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-e2ee-quota-reach-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const snapshotPath = path.join(dir, "state.json");
+  const app = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(app.store._snapshotFlushTimer));
+
+  const oneMiB = 1048576;
+  const accounts = [];
+  for (const label of ["sync_quota_reach_a", "sync_quota_reach_b"]) {
+    const setup = await setupDeviceUser(app, label);
+    const shared = cipherBlob(oneMiB, 42);
+    app.store.writeSyncCiphertextDurable(shared.ciphertext_sha256, Buffer.from(shared.ciphertext_base64, "base64"));
+    for (let index = 0; index < 255; index += 1) {
+      const seededBlob = crypto.randomUUID();
+      app.store.syncBlobs.set(setup.fixture.user.id + ":" + seededBlob, {
+        cloud_user_id: setup.fixture.user.id,
+        blob_id: seededBlob,
+        change_kind: "UPSERT",
+        version_vector: vector(setup.deviceId, 1),
+        author_device_id: setup.deviceId,
+        change_sequence: index + 1,
+        encryption: encryption(),
+        ciphertext_sha256: shared.ciphertext_sha256,
+        ciphertext_size_bytes: oneMiB,
+        committed_at: new Date(BASE_NOW).toISOString()
+      });
+    }
+    app.store.syncUserStates.set(setup.fixture.user.id, {
+      cloud_user_id: setup.fixture.user.id,
+      latest_change_sequence: 255,
+      compaction_epoch: 0,
+      consent_withdrawn_at: null,
+      retention_expires_at: null,
+      reauthorized_at: null,
+      expired_cleanup_at: null,
+      updated_at: new Date(BASE_NOW).toISOString()
+    });
+    accounts.push(setup);
+  }
+
+  for (const setup of accounts) {
+    const reachingBlob = crypto.randomUUID();
+    const reaching = await putBlob(app, setup.fixture, setup.deviceId, reachingBlob, { size: oneMiB, seed: 77 });
+    assert.equal(reaching.status, 201, "the upload reaching exactly 256 MiB live padded bytes must succeed: " + JSON.stringify(reaching.body));
+    const overflow = await putBlob(app, setup.fixture, setup.deviceId, crypto.randomUUID(), { seed: 78 });
+    assert.equal(overflow.status, 403);
+    assert.equal(overflow.body.error.code, "SYNC_QUOTA_EXCEEDED");
+    assert.equal(overflow.body.error.detail.dimension, "LIVE_PADDED_CIPHERTEXT_BYTES");
+    setup.reachingBlob = reachingBlob;
+  }
+
+  const snapshotBytes = fs.readFileSync(snapshotPath).length;
+  assert.ok(snapshotBytes < 4 * 1024 * 1024, "metadata-only snapshot for 512 live blobs stays small, got " + snapshotBytes);
+
+  const restarted = createTestApp({ storeOptions: { snapshotPath, requireDurableSnapshot: true } });
+  t.after(() => clearTimeout(restarted.store._snapshotFlushTimer));
+  for (const setup of accounts) {
+    const restartedFixture = {
+      user: restarted.store.users.get(setup.fixture.user.id),
+      familyId: setup.fixture.familyId,
+      authAt(ms = BASE_NOW) {
+        return signAuth(restarted, this.user, setup.fixture.familyId, ms);
+      },
+      get auth() {
+        return this.authAt(BASE_NOW);
+      }
+    };
+    const download = await downloadBlob(restarted, restartedFixture, setup.deviceId, setup.reachingBlob);
+    assert.equal(download.status, 200, JSON.stringify(download.body));
+    assert.equal(download.body.data.ciphertext_base64, cipherBlob(oneMiB, 77).ciphertext_base64);
+  }
+});
+
 test("W4-11 review regression: streaming past the body cap yields HTTP 413 instead of a connection reset", async (t) => {
   const app = createTestApp();
   const { fixture, deviceId } = await setupDeviceUser(app, "sync_stream_user");
