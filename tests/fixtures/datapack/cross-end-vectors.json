@@ -147,6 +147,30 @@
       "target": "source.url",
       "value": "https://example.org:65536/apply",
       "valid": false
+    },
+    {
+      "name": "reg-name-underscore-accepted",
+      "target": "source.url",
+      "value": "https://exa_mple.org/source",
+      "valid": true
+    },
+    {
+      "name": "userinfo-colon-accepted",
+      "target": "source.url",
+      "value": "https://user:pass@example.org/source",
+      "valid": true
+    },
+    {
+      "name": "multiple-raw-at-rejected",
+      "target": "source.url",
+      "value": "https://user@ignored@example.org/source",
+      "valid": false
+    },
+    {
+      "name": "ipvfuture-literal-rejected-conservatively",
+      "target": "source.url",
+      "value": "https://[v1.fe80::1]/apply",
+      "valid": false
     }
   ]
 }

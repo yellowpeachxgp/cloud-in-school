@@ -168,6 +168,53 @@ function validPortComponent(port) {
   return Number(port) <= 65535;
 }
 
+function validIpv4Address(value) {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^[0-9]{1,3}$/.test(part)) return false;
+    if (part.length > 1 && part.startsWith("0")) return false;
+    return Number(part) <= 255;
+  });
+}
+
+function ipv6PieceGroupCount(pieces) {
+  let count = 0;
+  for (let index = 0; index < pieces.length; index += 1) {
+    const piece = pieces[index];
+    if (/^[0-9A-Fa-f]{1,4}$/.test(piece)) {
+      count += 1;
+    } else if (index === pieces.length - 1 && validIpv4Address(piece)) {
+      count += 2;
+    } else {
+      return -1;
+    }
+  }
+  return count;
+}
+
+/** RFC 3986 IPv6address grammar; IPvFuture is intentionally not accepted for HTTPS datapack links. */
+function isValidIpv6Literal(value) {
+  if (!value || !/^[0-9A-Fa-f:.]+$/.test(value)) return false;
+  const compressed = value.split("::");
+  if (compressed.length > 2) return false;
+  const parseSide = (side) => {
+    if (side === "") return [];
+    const pieces = side.split(":");
+    if (pieces.some((piece) => piece === "")) return null;
+    return pieces;
+  };
+  if (compressed.length === 1) {
+    const pieces = parseSide(value);
+    return pieces !== null && ipv6PieceGroupCount(pieces) === 8;
+  }
+  const left = parseSide(compressed[0]);
+  const right = parseSide(compressed[1]);
+  if (left === null || right === null) return false;
+  const groups = ipv6PieceGroupCount(left) + ipv6PieceGroupCount(right);
+  return groups >= 0 && groups < 8;
+}
+
 /**
  * Validate the authority component and the only legal positions of raw square brackets.
  * RFC 3986 brackets delimit an IP-literal host; they are not valid raw query/path/fragment
@@ -186,9 +233,10 @@ function validateHttpsAuthorityAndBracketPlacement(value, path) {
   const authority = value.slice(authorityStart, authorityEnd);
   if (!authority) fail(path, "must include a non-empty URI authority");
 
-  const hostStart = authority.lastIndexOf("@") + 1;
+  const hostStart = authority.indexOf("@") >= 0 ? authority.indexOf("@") + 1 : 0;
   const hostAndPort = authority.slice(hostStart);
   if (!hostAndPort) fail(path, "must include a non-empty URI host");
+  if (hostAndPort.includes("@")) fail(path, "must percent-encode additional @ characters in URI userinfo");
 
   const allowedOpenBracket = authorityStart + hostStart;
   let allowedCloseBracket = -1;
@@ -197,6 +245,7 @@ function validateHttpsAuthorityAndBracketPlacement(value, path) {
     if (close <= 1) fail(path, "must contain a closed non-empty IP-literal host");
     const literal = hostAndPort.slice(1, close);
     if (literal.includes("[") || literal.includes("]")) fail(path, "must not nest raw brackets in an IP-literal host");
+    if (!isValidIpv6Literal(literal)) fail(path, "must use an RFC 3986 IPv6 literal host");
     const rest = hostAndPort.slice(close + 1);
     if (rest) {
       if (!rest.startsWith(":")) fail(path, "must not append non-port text to an IP-literal host");
@@ -225,12 +274,6 @@ function expectHttpsUri(value, path) {
   expectString(value, path, { pattern: /^https:\/\// });
   if (!isRfc3986UriCharactersValid(value)) fail(path, "must be an RFC 3986 URI without raw non-ASCII/control characters or invalid percent escapes");
   validateHttpsAuthorityAndBracketPlacement(value, path);
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || !url.hostname) fail(path, "must be an absolute HTTPS URI");
-  } catch {
-    fail(path, "must be an absolute HTTPS URI");
-  }
   return value;
 }
 
