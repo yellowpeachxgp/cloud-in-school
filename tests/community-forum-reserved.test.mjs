@@ -55,9 +55,7 @@ test("CT-05 reserved forum/private-message operations return one uniform 501 env
       method: entry.method,
       url: entry.url,
       headers: {
-        authorization: "Bearer intentionally-invalid",
-        cookie: "dis_web_session=intentionally-invalid",
-        "x-forwarded-for": "198.51.100.20"
+        "x-requested-with": "reserved-contract-probe"
       },
       body: entry.method === "GET" ? undefined : { arbitrary: "input is ignored", nested: { retry: true } }
     });

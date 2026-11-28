@@ -1,4 +1,4 @@
-import { ContractError } from "../../../packages/contracts/src/index.mjs";
+import { ContractError } from "../../../../packages/contracts/src/index.mjs";
 import { route } from "./route-table.mjs";
 
 const RESERVED_COMMUNITY_FORUM_DETAIL = Object.freeze({ feature: "community.forum" });
