@@ -24,7 +24,7 @@ const VERSION_PATTERN = /^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9
 const MAINTAINER_PATTERN = /^[a-z0-9-]+:[^\s]+$/;
 const ITEM_ID_PATTERN = /^[a-z0-9][a-z0-9._/-]{0,119}$/;
 const DATE_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
-const DATE_TIME_PATTERN = /^([0-9]{4}-[0-9]{2}-[0-9]{2})T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$/;
+const DATE_TIME_PATTERN = /^([0-9]{4}-[0-9]{2}-[0-9]{2})[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$/;
 const TIME_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 
 function fail(path, message) {
@@ -126,8 +126,10 @@ function validCalendarDate(value) {
   const year = Number(value.slice(0, 4));
   const month = Number(value.slice(5, 7));
   const day = Number(value.slice(8, 10));
-  const probe = new Date(Date.UTC(year, month - 1, day));
-  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day <= daysInMonth;
 }
 
 function expectDate(value, path) {
@@ -139,7 +141,7 @@ function expectDate(value, path) {
 function expectDateTime(value, path) {
   expectString(value, path);
   const match = DATE_TIME_PATTERN.exec(value);
-  if (!match || !validCalendarDate(match[1]) || Number.isNaN(Date.parse(value))) {
+  if (!match || !validCalendarDate(match[1])) {
     fail(path, "must be a valid RFC 3339 date-time");
   }
   return value;
@@ -160,9 +162,69 @@ function isRfc3986UriCharactersValid(value) {
   return true;
 }
 
+function validPortComponent(port) {
+  if (port === "") return true;
+  if (!/^[0-9]+$/.test(port)) return false;
+  return Number(port) <= 65535;
+}
+
+/**
+ * Validate the authority component and the only legal positions of raw square brackets.
+ * RFC 3986 brackets delimit an IP-literal host; they are not valid raw query/path/fragment
+ * characters, so native array spellings such as program[]=x must be percent-encoded.
+ */
+function validateHttpsAuthorityAndBracketPlacement(value, path) {
+  const authorityStart = "https://".length;
+  let authorityEnd = value.length;
+  for (let index = authorityStart; index < value.length; index += 1) {
+    const ch = value[index];
+    if (ch === "/" || ch === "?" || ch === "#") {
+      authorityEnd = index;
+      break;
+    }
+  }
+  const authority = value.slice(authorityStart, authorityEnd);
+  if (!authority) fail(path, "must include a non-empty URI authority");
+
+  const hostStart = authority.lastIndexOf("@") + 1;
+  const hostAndPort = authority.slice(hostStart);
+  if (!hostAndPort) fail(path, "must include a non-empty URI host");
+
+  const allowedOpenBracket = authorityStart + hostStart;
+  let allowedCloseBracket = -1;
+  if (hostAndPort.startsWith("[")) {
+    const close = hostAndPort.indexOf("]");
+    if (close <= 1) fail(path, "must contain a closed non-empty IP-literal host");
+    const literal = hostAndPort.slice(1, close);
+    if (literal.includes("[") || literal.includes("]")) fail(path, "must not nest raw brackets in an IP-literal host");
+    const rest = hostAndPort.slice(close + 1);
+    if (rest) {
+      if (!rest.startsWith(":")) fail(path, "must not append non-port text to an IP-literal host");
+      if (!validPortComponent(rest.slice(1))) fail(path, "must use a decimal port in the supported URI range");
+    }
+    allowedCloseBracket = allowedOpenBracket + close;
+  } else {
+    if (hostAndPort.includes("[") || hostAndPort.includes("]")) fail(path, "must wrap an IP-literal host in exactly one bracket pair");
+    if (hostAndPort.indexOf(":") !== hostAndPort.lastIndexOf(":")) fail(path, "must bracket an IPv6 literal host");
+    const colon = hostAndPort.lastIndexOf(":");
+    if (colon >= 0) {
+      if (!validPortComponent(hostAndPort.slice(colon + 1))) fail(path, "must use a decimal port in the supported URI range");
+      if (colon === 0) fail(path, "must include a non-empty URI host");
+    }
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const ch = value[index];
+    if (ch !== "[" && ch !== "]") continue;
+    if (hostAndPort.startsWith("[") && (index === allowedOpenBracket || index === allowedCloseBracket)) continue;
+    fail(path, "must percent-encode square brackets outside an IP-literal host");
+  }
+}
+
 function expectHttpsUri(value, path) {
   expectString(value, path, { pattern: /^https:\/\// });
   if (!isRfc3986UriCharactersValid(value)) fail(path, "must be an RFC 3986 URI without raw non-ASCII/control characters or invalid percent escapes");
+  validateHttpsAuthorityAndBracketPlacement(value, path);
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || !url.hostname) fail(path, "must be an absolute HTTPS URI");

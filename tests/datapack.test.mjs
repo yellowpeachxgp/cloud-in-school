@@ -11,6 +11,7 @@ import {
   dataPackSignaturePayloadSha256,
   decodeDataPackArtifact,
   signDataPackArtifact,
+  spkiDerFromRawEd25519,
   validateDisDatapack,
   verifyDataPackArtifact
 } from "../packages/datapack/src/index.mjs";
@@ -287,4 +288,100 @@ test("W5-01 signature verification rejects semantic tampering wrong payload hash
   assert.throws(() => signDataPackArtifact(bytes, attacker.privateKeyBase64, keys.publicKeyBase64), (error) => error.detail?.reason === "PUBLIC_KEY_PAIR_MISMATCH");
 
   expectDataPackError("CONTENT_PACK_SIGNATURE_INVALID", () => verifyDataPackArtifact(bytes, { ...signature, value: signature.value.slice(0, -4) }, [keys.publicKeyBase64]), "SIGNATURE_VALUE_INVALID");
+});
+
+const CROSS_END_VECTOR_PATH = "tests/fixtures/datapack/cross-end-vectors.json";
+const CROSS_END_VECTOR_SHA256 = "1884e0f8a9bd68abcc37dfa94a56210e44a3be4e0d3bbdaf0ce795caef2cb117";
+
+function crossEndVectors() {
+  const bytes = fs.readFileSync(CROSS_END_VECTOR_PATH);
+  assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), CROSS_END_VECTOR_SHA256);
+  return JSON.parse(bytes.toString("utf8"));
+}
+
+function vectorOpportunityRoot() {
+  const root = fixtureObject();
+  root.kind = "opportunity-catalog";
+  root.items = [{
+    id: "certification-example",
+    title: "示例证书",
+    category: "certification",
+    requirements: [{ id: "eligible", text: "在校学生" }],
+    materials: []
+  }];
+  return root;
+}
+
+function applySchemaVector(root, vectorCase) {
+  const copy = structuredClone(root);
+  if (vectorCase.target === "root.verifiedAt") {
+    copy.verifiedAt = vectorCase.value;
+  } else if (vectorCase.target === "source.url") {
+    copy.sources[0].url = vectorCase.value;
+  } else if (vectorCase.target === "opportunity.deadlineAt") {
+    copy.items[0].deadlineAt = vectorCase.value;
+  } else if (vectorCase.target === "opportunity.applicationUrl") {
+    copy.items[0].applicationUrl = vectorCase.value;
+  } else {
+    throw new Error("unknown shared vector target: " + vectorCase.target);
+  }
+  return copy;
+}
+
+test("W5-01 byte-identical cross-end schema vectors keep RFC3339 and URI mirror semantics aligned", () => {
+  const vectors = crossEndVectors();
+  assert.ok(vectors.schema_cases.length >= 20);
+  for (const vectorCase of vectors.schema_cases) {
+    const usesOpportunity = vectorCase.target.startsWith("opportunity.");
+    const base = usesOpportunity ? vectorOpportunityRoot() : fixtureObject();
+    const candidate = applySchemaVector(base, vectorCase);
+    let validated = null;
+    let failure = null;
+    try {
+      validated = validateDisDatapack(candidate);
+    } catch (error) {
+      failure = error;
+    }
+    assert.equal(failure === null, vectorCase.valid, vectorCase.name + ": " + (failure?.message || "unexpected acceptance"));
+    if (vectorCase.valid) {
+      if (vectorCase.target === "root.verifiedAt") assert.equal(validated.verifiedAt, vectorCase.value);
+      if (vectorCase.target === "source.url") assert.equal(validated.sources[0].url, vectorCase.value);
+      if (vectorCase.target === "opportunity.deadlineAt") assert.equal(validated.items[0].deadlineAt, vectorCase.value);
+      if (vectorCase.target === "opportunity.applicationUrl") assert.equal(validated.items[0].applicationUrl, vectorCase.value);
+    } else {
+      assert.equal(failure.code, "CONTENT_PACK_INVALID", vectorCase.name);
+    }
+  }
+});
+
+test("W5-01 raw 32-byte Ed25519 public key signs and verifies through the pinned trust root", () => {
+  const keys = keyPair();
+  const spkiDer = Buffer.from(keys.publicKeyBase64, "base64");
+  const rawPublicKeyBase64 = spkiDer.subarray(spkiDer.length - 32).toString("base64");
+  const bytes = fixtureBytes();
+  const signature = signDataPackArtifact(bytes, keys.privateKeyBase64, rawPublicKeyBase64);
+
+  const verifiedRaw = verifyDataPackArtifact(bytes, signature, [rawPublicKeyBase64]);
+  assert.equal(verifiedRaw.verificationStatus, "SIGNATURE_VERIFIED");
+  const verifiedSpki = verifyDataPackArtifact(bytes, signature, [keys.publicKeyBase64]);
+  assert.equal(verifiedSpki.signatureVerification.publicKeyFingerprint, verifiedRaw.signatureVerification.publicKeyFingerprint);
+});
+
+test("W5-01 byte-identical RFC8032 signature vector verifies with raw and SPKI trust roots", () => {
+  const vector = crossEndVectors().ed25519_signature;
+  const bytes = fixtureBytes();
+  assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), vector.artifact_sha256);
+  const detached = {
+    algorithm: "Ed25519",
+    scheme: "DIS_DATAPACK_CANONICAL_JSON_SHA256_V1",
+    public_key_fingerprint: vector.public_key_fingerprint,
+    value: vector.signature_base64,
+    signed_payload_sha256: vector.payload_sha256
+  };
+  const rawVerified = verifyDataPackArtifact(bytes, detached, [vector.raw_public_key_base64]);
+  assert.equal(rawVerified.signatureVerification.payloadSha256, vector.payload_sha256);
+
+  const spkiBase64 = spkiDerFromRawEd25519(Buffer.from(vector.raw_public_key_base64, "base64")).toString("base64");
+  const spkiVerified = verifyDataPackArtifact(bytes, detached, [spkiBase64]);
+  assert.equal(spkiVerified.signatureVerification.publicKeyFingerprint, vector.public_key_fingerprint);
 });

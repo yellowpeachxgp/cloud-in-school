@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "purpose": "Byte-identical cross-end dis-datapack/v1 regression facts for the Android and Cloud hand-written schema mirrors. The Ed25519 key is the public RFC 8032 test public key; no private key material is stored here.",
+  "ed25519_signature": {
+    "artifact": "valid-procedure.json",
+    "artifact_sha256": "8a10ddfd1cc74d5b3f50b8208becef0ad8014b7702878bc16e7ee7446224bf47",
+    "payload_sha256": "8a7b6bb837654d944d64bd0b67134a70abbc331ba56064f889d124c5e09d4aad",
+    "raw_public_key_base64": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+    "public_key_fingerprint": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+    "signature_base64": "bHf3iZ5HwdurBX+1VyaN2R2ER8XWvRKvGpzbHq9IRJyZD8YCMXteXLFytO2Irt1Gy8uyDgKHLLgNn7mEtsEgBg=="
+  },
+  "schema_cases": [
+    {
+      "name": "datetime-lowercase-t-z",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20t17:00:00z",
+      "valid": true
+    },
+    {
+      "name": "datetime-lowercase-t-offset-fraction-9",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20t17:00:00.123456789+08:00",
+      "valid": true
+    },
+    {
+      "name": "datetime-uppercase-fraction-9",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20T17:00:00.123456789Z",
+      "valid": true
+    },
+    {
+      "name": "datetime-fraction-10-rejected",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20T17:00:00.1234567891Z",
+      "valid": false
+    },
+    {
+      "name": "datetime-empty-fraction-rejected",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20T17:00:00.Z",
+      "valid": false
+    },
+    {
+      "name": "datetime-invalid-calendar-day-rejected",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-02-29T17:00:00Z",
+      "valid": false
+    },
+    {
+      "name": "date-year-0000-leap-day",
+      "target": "root.verifiedAt",
+      "value": "0000-02-29",
+      "valid": true
+    },
+    {
+      "name": "date-year-0099-last-day",
+      "target": "root.verifiedAt",
+      "value": "0099-12-31",
+      "valid": true
+    },
+    {
+      "name": "date-year-0000-invalid-day-rejected",
+      "target": "root.verifiedAt",
+      "value": "0000-02-30",
+      "valid": false
+    },
+    {
+      "name": "date-year-0001-nonleap-rejected",
+      "target": "root.verifiedAt",
+      "value": "0001-02-29",
+      "valid": false
+    },
+    {
+      "name": "application-query-native-array-brackets-rejected",
+      "target": "opportunity.applicationUrl",
+      "value": "https://example.org/apply?program[]=science",
+      "valid": false
+    },
+    {
+      "name": "application-query-encoded-array-brackets",
+      "target": "opportunity.applicationUrl",
+      "value": "https://example.org/apply?program%5B%5D=science",
+      "valid": true
+    },
+    {
+      "name": "source-query-native-array-brackets-rejected",
+      "target": "source.url",
+      "value": "https://example.org/source?tag[]=public",
+      "valid": false
+    },
+    {
+      "name": "source-query-encoded-array-brackets",
+      "target": "source.url",
+      "value": "https://example.org/source?tag%5B%5D=public",
+      "valid": true
+    },
+    {
+      "name": "path-raw-bracket-rejected",
+      "target": "source.url",
+      "value": "https://example.org/files[1]",
+      "valid": false
+    },
+    {
+      "name": "fragment-raw-bracket-rejected",
+      "target": "source.url",
+      "value": "https://example.org/files#section[1]",
+      "valid": false
+    },
+    {
+      "name": "ipv6-literal-host",
+      "target": "source.url",
+      "value": "https://[2001:db8::1]/apply",
+      "valid": true
+    },
+    {
+      "name": "ipv6-literal-host-port-encoded-query",
+      "target": "source.url",
+      "value": "https://[2001:db8::1]:443/apply?program%5B%5D=science",
+      "valid": true
+    },
+    {
+      "name": "unclosed-ipv6-literal-rejected",
+      "target": "source.url",
+      "value": "https://[2001:db8::1/apply",
+      "valid": false
+    },
+    {
+      "name": "unbracketed-ipv6-host-rejected",
+      "target": "source.url",
+      "value": "https://2001:db8::1/apply",
+      "valid": false
+    },
+    {
+      "name": "decimal-port-accepted",
+      "target": "source.url",
+      "value": "https://example.org:443/apply",
+      "valid": true
+    },
+    {
+      "name": "nondecimal-port-rejected",
+      "target": "source.url",
+      "value": "https://example.org:abc/apply",
+      "valid": false
+    },
+    {
+      "name": "port-overflow-rejected",
+      "target": "source.url",
+      "value": "https://example.org:65536/apply",
+      "valid": false
+    }
+  ]
+}

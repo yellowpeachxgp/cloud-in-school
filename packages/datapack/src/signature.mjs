@@ -50,7 +50,7 @@ function normalizeTrustedPublicKey(publicKeyBase64) {
   if (typeof publicKeyBase64 !== "string" || !STRICT_BASE64.test(publicKeyBase64)) {
     fail("trusted Ed25519 public key is not valid strict base64", { reason: "PUBLIC_KEY_INVALID" });
   }
-  const der = Buffer.from(publicKeyBase64, "base64");
+  let der = Buffer.from(publicKeyBase64, "base64");
   let raw;
   if (der.length === 32) {
     raw = der;
