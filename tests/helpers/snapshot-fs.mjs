@@ -34,6 +34,29 @@ export class SnapshotFs {
   closeSync(fd) { this.fds.delete(fd); }
   renameSync(from, to) { this.names.set(to, this.names.get(from)); this.names.delete(from); }
   unlinkSync(p) { this.names.delete(p); }
+  statSync(p, options = {}) {
+    const inode = this.inodes.get(this.names.get(p));
+    if (!inode) {
+      if (options.throwIfNoEntry === false) return undefined;
+      throw Object.assign(new Error('文件不存在'), { code: 'ENOENT' });
+    }
+    return { size: inode.bytes.length };
+  }
+  readdirSync(p) {
+    const prefix = p === '/' ? '/' : p + '/';
+    const out = new Set();
+    for (const name of this.names.keys()) {
+      if (!name.startsWith(prefix)) continue;
+      const rest = name.slice(prefix.length);
+      if (rest.length > 0 && !rest.includes('/')) out.add(rest);
+    }
+    for (const dir of this.dirs) {
+      if (!dir.startsWith(prefix) || dir === p) continue;
+      const rest = dir.slice(prefix.length);
+      if (rest.length > 0 && !rest.includes('/')) out.add(rest);
+    }
+    return Array.from(out);
+  }
   crash() {
     this.names = new Map(this.durableNames); this.fds.clear();
     for (const inode of this.inodes.values()) inode.bytes = Buffer.from(inode.durable);

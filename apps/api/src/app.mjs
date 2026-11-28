@@ -24,6 +24,7 @@ import { CommunityService } from "../../../packages/community/src/index.mjs";
 import { AvailabilityService } from "../../../packages/availability/src/index.mjs";
 import { PlaceStatusService } from "../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../packages/ledger/src/index.mjs";
+import { SyncService } from "../../../packages/sync/src/index.mjs";
 import {
   PluginRegistryAndBroker,
   loadPluginDirectory
@@ -193,6 +194,7 @@ export function createCampusCloudApp(options = {}) {
   const availability = options.availability || new AvailabilityService(store);
   const placeStatus = options.placeStatus || new PlaceStatusService(store);
   const ledger = options.ledger || new LedgerService(store);
+  const syncE2ee = options.syncE2ee || new SyncService(store);
   // Production fail-closed gate: dangerous combinations must abort startup —
   // a mock/sandbox write path, missing durable snapshot or absent KMS material
   // can never be "test leftovers" in production.
@@ -281,7 +283,7 @@ export function createCampusCloudApp(options = {}) {
         if (!u || u.status !== "ACTIVE") {
           throw new ContractError("CLOUD_AUTH_REQUIRED", "Cloud user account is inactive or deleted");
         }
-        return verified;
+        return { ...verified, auth_kind: "DEVICE_BEARER" };
       } catch (err) {
         bearerErr = err;
       }
@@ -329,7 +331,8 @@ export function createCampusCloudApp(options = {}) {
         sessionId: "web_cookie_session",
         ssoIssuer: cookieAuth.user.issuer,
         ssoSubject: cookieAuth.user.subject,
-        roles: cookieAuth.roles
+        roles: cookieAuth.roles,
+        auth_kind: "WEB_COOKIE"
       };
     }
     if (bearerErr) throw bearerErr;
@@ -505,6 +508,7 @@ export function createCampusCloudApp(options = {}) {
     availability,
     placeStatus,
     ledger,
+    syncE2ee,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,
@@ -537,6 +541,7 @@ export function createCampusCloudApp(options = {}) {
     availability,
     placeStatus,
     ledger,
+    syncE2ee,
     pluginBroker,
     referencePluginLoadStatus,
     redisBuffer,

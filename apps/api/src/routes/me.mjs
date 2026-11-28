@@ -5,11 +5,100 @@ import { CommunityService } from "../../../../packages/community/src/index.mjs";
 import { AvailabilityService } from "../../../../packages/availability/src/index.mjs";
 import { PlaceStatusService } from "../../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../../packages/ledger/src/index.mjs";
+import { SyncService } from "../../../../packages/sync/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
   redactSensitiveFields
 } from "../../../../packages/contracts/src/index.mjs";
+
+function allowlistedSyncEncryption(encryption) {
+  if (!encryption) return null;
+  // CT-07 protocol metadata is validated, non-secret, and byte-for-byte part of
+  // AEAD associated data.  In particular key_id may legitimately contain the
+  // opaque prefix "token:" and must never pass through generic secret redaction.
+  return {
+    format: encryption.format,
+    cipher_suite: encryption.cipher_suite,
+    padding_scheme: encryption.padding_scheme,
+    key_id: encryption.key_id,
+    nonce_base64: encryption.nonce_base64
+  };
+}
+
+function allowlistedSyncMutation(row, { includeCiphertext = false } = {}) {
+  const out = {
+    blob_id: row.blob_id,
+    change_kind: row.change_kind,
+    version_vector: Array.isArray(row.version_vector)
+      ? row.version_vector.map((entry) => ({ device_id: entry.device_id, counter: entry.counter }))
+      : [],
+    author_device_id: row.author_device_id,
+    change_sequence: row.change_sequence,
+    encryption: allowlistedSyncEncryption(row.encryption),
+    ciphertext_sha256: row.ciphertext_sha256 ?? null,
+    ciphertext_size_bytes: row.ciphertext_size_bytes ?? null,
+    committed_at: row.committed_at
+  };
+  if (includeCiphertext && row.change_kind === "UPSERT") out.ciphertext_base64 = row.ciphertext_base64;
+  return out;
+}
+
+function allowlistedSyncExport(syncExport) {
+  const state = syncExport?.sync_user_state || null;
+  return {
+    sync_user_state: state
+      ? {
+          cloud_user_id: state.cloud_user_id,
+          latest_change_sequence: state.latest_change_sequence,
+          compaction_epoch: state.compaction_epoch,
+          consent_withdrawn_at: state.consent_withdrawn_at ?? null,
+          retention_expires_at: state.retention_expires_at ?? null,
+          reauthorized_at: state.reauthorized_at ?? null,
+          expired_cleanup_at: state.expired_cleanup_at ?? null,
+          updated_at: state.updated_at
+        }
+      : null,
+    sync_devices: (syncExport?.sync_devices || []).map((device) => ({
+      device_id: device.device_id,
+      status: device.status,
+      // device_label is the only free-form sync field in the export and remains
+      // subject to generic redaction; all protocol fields below are fixed-shape.
+      device_label: device.device_label == null ? null : redactSensitiveFields(device.device_label),
+      platform: device.platform,
+      sync_protocol_version: device.sync_protocol_version,
+      registered_at: device.registered_at,
+      revoked_at: device.revoked_at ?? null,
+      revocation_reason: device.revocation_reason ?? null,
+      last_seen_at: device.last_seen_at ?? null
+    })),
+    sync_blobs: (syncExport?.sync_blobs || []).map((row) => allowlistedSyncMutation(row, { includeCiphertext: true })),
+    sync_blob_mutations: (syncExport?.sync_blob_mutations || []).map((row) => allowlistedSyncMutation(row)),
+    sync_blob_anti_resurrection: (syncExport?.sync_blob_anti_resurrection || []).map((row) => ({
+      cloud_user_id: row.cloud_user_id,
+      blob_id: row.blob_id,
+      first_tombstone_change_sequence: row.first_tombstone_change_sequence,
+      tombstoned_at: row.tombstoned_at
+    })),
+    sync_cursors: (syncExport?.sync_cursors || []).map((row) => ({
+      device_id: row.device_id,
+      position: row.position,
+      scan_epoch: row.scan_epoch,
+      scan_mode: row.scan_mode,
+      terminal: row.terminal,
+      created_at: row.created_at,
+      last_used_at: row.last_used_at,
+      invalidated_at: row.invalidated_at
+    })),
+    sync_transfer_usage: (syncExport?.sync_transfer_usage || []).map((row) => ({
+      id: row.id,
+      cloud_user_id: row.cloud_user_id,
+      direction: row.direction,
+      bytes: row.bytes,
+      occurred_at: row.occurred_at
+    }))
+  };
+}
 
 export function createMeRoutes(ctx) {
   const {
@@ -21,6 +110,7 @@ export function createMeRoutes(ctx) {
     availability,
     placeStatus,
     ledger,
+    syncE2ee,
     syncUserToSso
   } = ctx;
 
@@ -145,6 +235,80 @@ export function createMeRoutes(ctx) {
       Array.isArray(body?.scope_list) && body.scope_list.length > 0
         ? body.scope_list
         : ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"];
+    const requestedPurpose = typeof body?.purpose === "string" ? body.purpose.trim() : null;
+    if (requestedPurpose) {
+      const allowedPurposes = new Set([
+        "SCHOOL_CREDENTIAL_ESCROW",
+        "CLOUD_AUTO_BOOKING",
+        "SERVICE_FEE_TERMS",
+        "PARCEL_CLOUD_BACKUP",
+        "PARCEL_AI_ASSISTANT",
+        "E2EE_CLOUD_SYNC"
+      ]);
+      if (!allowedPurposes.has(requestedPurpose)) {
+        throw new ContractError("BAD_REQUEST", "purpose is not a supported consent purpose");
+      }
+      const documentVersion = String(body?.document_version || "").trim();
+      const documentSha256 = String(body?.document_sha256 || "").trim().toLowerCase();
+      if (!documentVersion || documentVersion.length > 128) {
+        throw new ContractError("BAD_REQUEST", "document_version is required for purpose-scoped consent");
+      }
+      if (!/^[0-9a-f]{64}$/.test(documentSha256)) {
+        throw new ContractError("BAD_REQUEST", "document_sha256 must be a lowercase SHA-256 hex digest");
+      }
+      const purposeSchoolId = requestedPurpose === "E2EE_CLOUD_SYNC" ? (body?.school_id || "user") : schoolId;
+      if (requestedPurpose === "E2EE_CLOUD_SYNC") {
+        // Consent renewal and retention lifecycle settlement are one durable
+        // commit.  The service decides timely-vs-expired from the effective
+        // grant time, never from a later worker/request clock.
+        const granted = syncE2ee.grantE2eeConsent({
+          cloudUserId: auth.cloudUserId,
+          schoolId: purposeSchoolId,
+          documentVersion,
+          documentSha256,
+          authVersion: authVer,
+          schoolBindingId: body?.school_binding_id || null
+        }, nowMs);
+        return { status: 201, code: "CONSENT_GRANTED", data: granted.record };
+      }
+      const activeSamePurpose = store.recordsForUser("consents", auth.cloudUserId).filter((c) => (
+        c &&
+        (c.school_id || DEFAULT_SCHOOL_ID) === purposeSchoolId &&
+        !c.withdrawn_at &&
+        Number(c.auth_version || 1) === authVer &&
+        c.purpose === requestedPurpose
+      ));
+      const exact = activeSamePurpose.find((c) => (
+        c.document_version === documentVersion && String(c.document_sha256 || "").toLowerCase() === documentSha256
+      ));
+      if (exact) {
+        store.saveSnapshot?.();
+        return { status: 201, code: "CONSENT_GRANTED", data: exact };
+      }
+      const id = crypto.randomUUID();
+      const record = {
+        id,
+        cloud_user_id: auth.cloudUserId,
+        school_id: purposeSchoolId,
+        purpose: requestedPurpose,
+        document_version: documentVersion,
+        document_sha256: documentSha256,
+        school_binding_id: body?.school_binding_id || null,
+        scope_list: [requestedPurpose],
+        policy_version: documentVersion,
+        auth_version: authVer,
+        granted_at: new Date(nowMs).toISOString(),
+        withdrawn_at: null
+      };
+      for (const prior of activeSamePurpose) {
+        prior.withdrawn_at = record.granted_at;
+        prior.superseded_by_consent_id = id;
+      }
+      store.consents.set(id, record);
+      store.indexUserScoped?.("consents", id, record.cloud_user_id);
+      store.saveSnapshot?.();
+      return { status: 201, code: "CONSENT_GRANTED", data: record };
+    }
     const existingActive = store.getLatestActiveConsent(auth.cloudUserId, schoolId, authVer);
     if (existingActive) {
       const mergedScopes = Array.from(
@@ -201,6 +365,25 @@ export function createMeRoutes(ctx) {
       if (!c || c.cloud_user_id !== auth.cloudUserId) {
         throw new ContractError("NOT_FOUND", "Consent record not found");
       }
+      const e2eeOnlyConsent =
+        c.purpose === "E2EE_CLOUD_SYNC" ||
+        (Array.isArray(c.scope_list) && c.scope_list.length === 1 && c.scope_list[0] === "E2EE_CLOUD_SYNC");
+      if (e2eeOnlyConsent) {
+        // E2EE cloud sync is an independent user-scope consent. Its withdrawal,
+        // cursor invalidation, acknowledgement reset, and 30-day retention clock
+        // are one durable commit and never cascade into school delegation.
+        const withdrawn = syncE2ee.withdrawE2eeConsent(auth.cloudUserId, c.id, nowMs);
+        return {
+          status: 200,
+          code: "CONSENT_WITHDRAWN_OK",
+          data: {
+            consent_id: c.id,
+            withdrawn_at: withdrawn.consent.withdrawn_at,
+            sync_withdrawal: withdrawn.syncWithdrawal,
+            cancelled_job_ids: []
+          }
+        };
+      }
       c.withdrawn_at = new Date(nowMs).toISOString();
       const cascade = store.haltAllUserPlansAndBindings(
         auth.cloudUserId,
@@ -213,13 +396,15 @@ export function createMeRoutes(ctx) {
         data: {
           consent_id: c.id,
           withdrawn_at: c.withdrawn_at,
+          sync_withdrawal: null,
           cancelled_job_ids: cascade.cancelledJobIds
         }
       };
     }
   ),
 
-  route("POST", "/api/v1/me/data-export", "requestMyDataExport", "bearer", async ({ auth }) => {
+  route("POST", "/api/v1/me/data-export", "requestMyDataExport", "bearer", async ({ auth, nowMs }) => {
+    syncE2ee?.settleConsentLifecycle?.(auth.cloudUserId, nowMs);
     const user = store.users.get(auth.cloudUserId);
     const bindings = store.recordsForUser("schoolBindings", auth.cloudUserId);
     const plans = store.recordsForUser("reservationPlans", auth.cloudUserId);
@@ -246,6 +431,15 @@ export function createMeRoutes(ctx) {
       place_status_report_flags: [],
       place_status_subscriptions: []
     };
+    const syncExport = syncE2ee?.exportUserData?.(auth.cloudUserId) || {
+      sync_user_state: null,
+      sync_devices: [],
+      sync_blobs: [],
+      sync_blob_mutations: [],
+      sync_blob_anti_resurrection: [],
+      sync_cursors: [],
+      sync_transfer_usage: []
+    };
     const ledgerExport = ledger?.exportUserData?.(auth.cloudUserId) || {
       ledger_entries: [],
       ledger_settlements: [],
@@ -256,22 +450,26 @@ export function createMeRoutes(ctx) {
       repair_ticket_revisions: [],
       repair_reviews: []
     };
+    const redactedNonSyncData = redactSensitiveFields({
+      user,
+      school_bindings: bindings,
+      reservation_plans: plans,
+      parcels,
+      moments_posts: momentsPosts,
+      moments_books: momentsBooks,
+      moments_anti_lost_tags: momentsTags,
+      ...communityExport,
+      ...availabilityExport,
+      ...placeStatusExport,
+      ...ledgerExport
+    });
     return {
       status: 200,
       code: "DATA_EXPORT_READY",
-      data: redactSensitiveFields({
-        user,
-        school_bindings: bindings,
-        reservation_plans: plans,
-        parcels,
-        moments_posts: momentsPosts,
-        moments_books: momentsBooks,
-        moments_anti_lost_tags: momentsTags,
-        ...communityExport,
-        ...availabilityExport,
-        ...placeStatusExport,
-        ...ledgerExport
-      })
+      data: {
+        ...redactedNonSyncData,
+        ...allowlistedSyncExport(syncExport)
+      }
     };
   }),
 
@@ -284,6 +482,7 @@ export function createMeRoutes(ctx) {
       const stagingAvailability = new AvailabilityService(staging);
       const stagingPlaceStatus = new PlaceStatusService(staging);
       const stagingLedger = new LedgerService(staging);
+      const stagingSync = new SyncService(staging);
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       // Availability erasure must run before membership rows are removed: its
@@ -296,6 +495,7 @@ export function createMeRoutes(ctx) {
       const ledgerPurged = stagingLedger.purgeUserLedgerData?.(auth.cloudUserId, nowMs) || null;
       const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
       const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
+      const syncPurged = stagingSync.purgeUserSyncData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
       revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
@@ -305,7 +505,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged };
+      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged, syncPurged };
     });
     return {
       status: 202,
@@ -319,7 +519,8 @@ export function createMeRoutes(ctx) {
         community_purged: outcome.communityPurged,
         ledger_purged: outcome.ledgerPurged,
         plugin_purged: outcome.pluginPurged,
-        place_status_purged: outcome.placeStatusPurged
+        place_status_purged: outcome.placeStatusPurged,
+        sync_purged: outcome.syncPurged
       }
     };
   })

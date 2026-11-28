@@ -601,7 +601,9 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "pollVotes", "confirmedGroupEvents", "ledgerEntries", "ledgerBalanceRevisions", "settlements",
   "dutyRotas", "dutyTasks", "dutySwaps", "repairTickets", "repairTicketRevisions", "repairReviews",
   "notifications", "priceQuotes", "idempotencyRecords", "campusGraphPlaces", "placeReports",
-  "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates"
+  "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates",
+  "syncUserStates", "syncDevices", "syncBlobs", "syncMutations", "syncBlobAntiResurrection",
+  "syncCursors", "syncTransferUsage", "syncRateWindows"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -858,11 +860,15 @@ export class CloudDatabaseStore {
     pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
     adminSsoSubjects = null,
     snapshotFs = fs,
-    onPersistStage = null
+    onPersistStage = null,
+    onSyncCiphertextSweepEvent = null,
+    syncCiphertextSweepRetryBaseMs = 500
   } = {}) {
     this.snapshotPath = snapshotPath;
     this.snapshotFs = snapshotFs;
     this.onPersistStage = onPersistStage;
+    this.onSyncCiphertextSweepEvent = onSyncCiphertextSweepEvent;
+    this.syncCiphertextSweepRetryBaseMs = Math.max(25, Number(syncCiphertextSweepRetryBaseMs) || 500);
     this.storageCommitUnknown = false;
     this.requireDurableSnapshot = Boolean(requireDurableSnapshot);
     this.pricingMicropeach = pricingMicropeach;
@@ -955,6 +961,52 @@ export class CloudDatabaseStore {
     this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
     this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
 
+    // E2EE sync (W4-11): ciphertext-only current blobs, metadata-only mutation
+    // history, device-bound cursors, consent lifecycle state, quotas, and minimal
+    // anti-resurrection markers.  No plaintext or key material is representable here.
+    this.syncUserStates = new Map(); // cloudUserId -> per-user sequence/compaction/consent state
+    this.syncDevices = new Map(); // `${cloudUserId}:${deviceId}` -> immutable device registration/revocation
+    this.syncBlobs = new Map(); // `${cloudUserId}:${blobId}` -> current ciphertext or tombstone metadata
+    this.syncMutations = new Map(); // `${cloudUserId}:${changeSequence}` -> metadata-only causal mutation row
+    this.syncBlobAntiResurrection = new Map(); // `${cloudUserId}:${blobId}` -> permanent closed-id marker
+    this.syncCursors = new Map(); // cursorId -> hashed opaque device-bound cursor
+    this.syncTransferUsage = new Map(); // usageId -> rolling ingress/egress byte accounting row
+    this.syncRateWindows = new Map(); // `${cloudUserId}:${kind}:${windowStart}` -> fixed-window rate counter
+
+    // W4-11 review fix: ciphertext NEVER enters the monolithic JSON snapshot.
+    // Content-addressed sidecar files (${snapshotPath}.ciphertext/<shard>/<sha256>.bin)
+    // carry the bytes with their own write-fsync-rename-dirsync publish protocol, so
+    // the V8 single-string ceiling of one JSON document can never cap sync below the
+    // per-account quota.  In ephemeral mode (no snapshotPath) ciphertext stays in a
+    // memory-sidecar map instead of the rows, keeping one code path in the service.
+    this.syncCiphertextMemory = new Map(); // digest -> Buffer (ephemeral mode only)
+    this.syncCiphertextDir = snapshotPath ? `${snapshotPath}.ciphertext` : null;
+    this._syncCiphertextTmpSeq = 0;
+    // Directory entries of deleted sidecar files are durable only after the
+    // shard-directory fsync succeeds. If that fsync reports failure, the volatile
+    // name may already be gone; remembering the shard is the only way a retry can
+    // still flush the deletion instead of mistaking volatile absence for durable
+    // erasure. The counters are operator-visible health, never payload data.
+    this.syncCiphertextPendingDeleteFsync = new Set(); // shardDir -> deletion durability uncertain
+    this.syncCiphertextSweepMetrics = {
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      consecutive_failures: 0,
+      removed_total: 0,
+      last_removed: 0,
+      last_trigger: null,
+      last_success_at: null,
+      last_failure_at: null,
+      last_failure_code: null,
+      last_failure_message: null,
+      retry_pending: false,
+      retry_scheduled: false,
+      next_retry_delay_ms: null,
+      pending_delete_fsync_shards: 0
+    };
+    this._syncCiphertextSweepRetryTimer = null;
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -994,7 +1046,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions", "syncDevices"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -1239,6 +1291,14 @@ export class CloudDatabaseStore {
       loadMap(this.placeReportFlags, raw.placeReportFlags);
       loadMap(this.placeStatusSubscriptions, raw.placeStatusSubscriptions);
       loadMap(this.placeStatusAggregates, raw.placeStatusAggregates);
+      loadMap(this.syncUserStates, raw.syncUserStates);
+      loadMap(this.syncDevices, raw.syncDevices);
+      loadMap(this.syncBlobs, raw.syncBlobs);
+      loadMap(this.syncMutations, raw.syncMutations);
+      loadMap(this.syncBlobAntiResurrection, raw.syncBlobAntiResurrection);
+      loadMap(this.syncCursors, raw.syncCursors);
+      loadMap(this.syncTransferUsage, raw.syncTransferUsage);
+      loadMap(this.syncRateWindows, raw.syncRateWindows);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1258,12 +1318,375 @@ export class CloudDatabaseStore {
       if (Array.isArray(raw.auditEvents)) {
         this.auditEvents = raw.auditEvents.slice(-500);
       }
+      // W4-11 sidecar split: move any pre-split inline ciphertext out of the
+      // JSON world, then fail closed if committed references are not durable.
+      // Orphaned sidecar bytes (crashed/rolled-back uploads) are reclaimed
+      // best-effort; a sweep failure never blocks startup and retries at the
+      // next publish.
+      this._migrateLegacyInlineSyncCiphertext();
+      this._verifySyncCiphertextReferencesDurable();
+      try {
+        this.sweepSyncCiphertextOrphans(this, { trigger: "startup" });
+      } catch {
+        // The sweep itself has already emitted metrics/logs and scheduled retry;
+        // startup remains available while reclamation continues out-of-band.
+      }
     } catch (err) {
       if (this.requireDurableSnapshot) {
         throw new ContractError(
           "STORAGE_PERSISTENCE_FAILED",
           `Failed to load durable snapshot at ${this.snapshotPath}: ${err?.message || "corrupt snapshot"}`
         );
+      }
+    }
+  }
+
+  // ---- W4-11 E2EE ciphertext sidecar (content-addressed, crash-safe) ----
+
+  _syncCiphertextFilePath(digest) {
+    return path.join(this.syncCiphertextDir, digest.slice(0, 2), digest + ".bin");
+  }
+
+  // Persist one immutable ciphertext blob outside the JSON snapshot.  Content
+  // addressing makes the write idempotent: the final name only ever appears
+  // through an atomic rename of a fully fsynced temporary file, so a correct-size
+  // file already present is by construction the same bytes.  Orphaned files
+  // (written before a rolled-back or crashed commit) are harmless and reclaimed
+  // by sweepSyncCiphertextOrphans; the reverse ordering hazard never exists
+  // because this write always completes before the referencing snapshot publish.
+  writeSyncCiphertextDurable(digest, bytes) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext digest is not a lowercase sha256 hex");
+    }
+    const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    if (crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext bytes do not match their content digest");
+    }
+    if (!this.syncCiphertextDir) {
+      if (!this.syncCiphertextMemory.has(digest)) this.syncCiphertextMemory.set(digest, Buffer.from(content));
+      return;
+    }
+    const io = this.snapshotFs;
+    const finalPath = this._syncCiphertextFilePath(digest);
+    try {
+      const existing = io.statSync(finalPath, { throwIfNoEntry: false });
+      if (existing) {
+        if (existing.size === content.length) return; // content-addressed: already durable
+        throw new Error("侧车密文尺寸与内容寻址冲突");
+      }
+      const shardDir = path.dirname(finalPath);
+      if (!io.existsSync(shardDir)) {
+        const missing = [];
+        for (let cursor = shardDir; !io.existsSync(cursor); cursor = path.dirname(cursor)) {
+          missing.push(cursor);
+          if (path.dirname(cursor) === cursor) throw new Error("密文侧车存储根目录不可用");
+        }
+        io.mkdirSync(shardDir, { recursive: true });
+        for (const created of missing.reverse()) {
+          const parentFd = io.openSync(path.dirname(created), "r");
+          try { io.fsyncSync(parentFd); }
+          finally { io.closeSync(parentFd); }
+        }
+      }
+      this._syncCiphertextTmpSeq = (this._syncCiphertextTmpSeq || 0) + 1;
+      const tmpPath = finalPath + ".tmp." + process.pid + "." + this._syncCiphertextTmpSeq;
+      const fd = io.openSync(tmpPath, "wx", 0o600);
+      try {
+        io.writeFileSync(fd, content);
+        io.fsyncSync(fd);
+      } finally { io.closeSync(fd); }
+      io.renameSync(tmpPath, finalPath);
+      this._fsyncSyncCiphertextShardDir(shardDir);
+      // A successful shard directory fsync also makes any earlier deletion in
+      // the same directory durable, even when that deletion had been waiting
+      // for a sweep retry.
+      this.syncCiphertextPendingDeleteFsync?.delete(shardDir);
+    } catch (err) {
+      if (err instanceof ContractError) throw err;
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        `E2EE 同步密文侧车写入失败：${err?.message || "unknown"}`,
+        { retry_same_key: true }
+      );
+    }
+  }
+
+  // Read one ciphertext blob back, verifying integrity end-to-end.  Any missing
+  // or corrupted sidecar content is a durability fault and fails closed — the
+  // server must never silently substitute or truncate user ciphertext.
+  readSyncCiphertextVerified(digest, expectedSizeBytes = null) {
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ContractError("STORAGE_PERSISTENCE_FAILED", "sync ciphertext digest is not a lowercase sha256 hex");
+    }
+    let content = null;
+    if (!this.syncCiphertextDir) {
+      content = this.syncCiphertextMemory.get(digest) || null;
+    } else {
+      try {
+        content = this.snapshotFs.readFileSync(this._syncCiphertextFilePath(digest));
+      } catch {
+        content = null;
+      }
+    }
+    if (!content) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "E2EE 同步密文侧车内容缺失，耐久状态须隔离核验",
+        { ciphertext_sha256: digest }
+      );
+    }
+    const sizeOk = expectedSizeBytes == null ? true : content.length === expectedSizeBytes;
+    if (!sizeOk || crypto.createHash("sha256").update(content).digest("hex") !== digest) {
+      throw new ContractError(
+        "STORAGE_PERSISTENCE_FAILED",
+        "E2EE 同步密文侧车内容摘要或尺寸不符，耐久状态须隔离核验",
+        { ciphertext_sha256: digest }
+      );
+    }
+    return content;
+  }
+
+  _syncCiphertextDigestReferences(source = this) {
+    const digests = new Set();
+    for (const row of source.syncBlobs?.values?.() || []) {
+      if (
+        row?.change_kind === "UPSERT" &&
+        typeof row.ciphertext_sha256 === "string" &&
+        /^[0-9a-f]{64}$/.test(row.ciphertext_sha256)
+      ) {
+        digests.add(row.ciphertext_sha256);
+      }
+    }
+    return digests;
+  }
+
+  _fsyncSyncCiphertextShardDir(shardDir) {
+    const io = this.snapshotFs;
+    const fd = io.openSync(shardDir, "r");
+    try { io.fsyncSync(fd); }
+    finally { io.closeSync(fd); }
+  }
+
+  _scheduleSyncCiphertextSweepRetry() {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!this.syncCiphertextDir || !metrics) return 0;
+    if (this._syncCiphertextSweepRetryTimer) return metrics.next_retry_delay_ms || 0;
+    const exponent = Math.min(Math.max(metrics.consecutive_failures - 1, 0), 5);
+    const delayMs = Math.min(this.syncCiphertextSweepRetryBaseMs * (2 ** exponent), 30_000);
+    metrics.retry_scheduled = true;
+    metrics.next_retry_delay_ms = delayMs;
+    this._syncCiphertextSweepRetryTimer = setTimeout(() => {
+      this._syncCiphertextSweepRetryTimer = null;
+      try {
+        this.sweepSyncCiphertextOrphans(this, { trigger: "retry" });
+      } catch {
+        // The failure path has already emitted the structured event, updated
+        // metrics, and scheduled the next backoff retry; the timer callback must
+        // never turn that observable failure into an unhandled exception.
+      }
+    }, delayMs);
+    this._syncCiphertextSweepRetryTimer.unref?.();
+    return delayMs;
+  }
+
+  _recordSyncCiphertextSweepSuccess(trigger, removed) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!metrics) return;
+    if (this._syncCiphertextSweepRetryTimer) {
+      clearTimeout(this._syncCiphertextSweepRetryTimer);
+      this._syncCiphertextSweepRetryTimer = null;
+    }
+    metrics.successes += 1;
+    metrics.consecutive_failures = 0;
+    metrics.removed_total += removed;
+    metrics.last_removed = removed;
+    metrics.last_success_at = new Date().toISOString();
+    metrics.retry_pending = false;
+    metrics.retry_scheduled = false;
+    metrics.next_retry_delay_ms = null;
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+  }
+
+  _recordSyncCiphertextSweepFailure(err, trigger, removed) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!metrics) return;
+    const nowIso = new Date().toISOString();
+    // D16 applies to operational logs too: Node filesystem errors often embed
+    // the configured snapshot path. Keep the actionable syscall/code but redact
+    // all store-controlled path prefixes before recording or emitting anything.
+    let message = String(err?.message || err || "unknown");
+    const pathRedactions = [this.syncCiphertextDir, this.snapshotPath]
+      .filter((value) => typeof value === "string" && value.length > 1)
+      .sort((a, b) => b.length - a.length);
+    for (const token of pathRedactions) {
+      const label = token === this.syncCiphertextDir ? "<sync-ciphertext-dir>" : "<snapshot-path>";
+      message = message.split(token).join(label);
+    }
+    message = message.slice(0, 240);
+    metrics.failures += 1;
+    metrics.consecutive_failures += 1;
+    metrics.last_removed = removed;
+    metrics.last_failure_at = nowIso;
+    metrics.last_failure_code = err?.code || "SYNC_CIPHERTEXT_SWEEP_FAILED";
+    metrics.last_failure_message = message;
+    metrics.retry_pending = true;
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+    const retryDelayMs = this._scheduleSyncCiphertextSweepRetry();
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+    const event = {
+      service: "sync-ciphertext-sweep",
+      level: "error",
+      timestamp: nowIso,
+      trigger,
+      error_code: metrics.last_failure_code,
+      error_message: message,
+      removed_before_failure: removed,
+      pending_delete_fsync_shards: metrics.pending_delete_fsync_shards,
+      metrics: {
+        attempts: metrics.attempts,
+        successes: metrics.successes,
+        failures: metrics.failures,
+        consecutive_failures: metrics.consecutive_failures,
+        removed_total: metrics.removed_total
+      },
+      retry_pending: true,
+      retry_scheduled: retryDelayMs > 0,
+      retry_delay_ms: retryDelayMs || null
+    };
+    const sink = this.onSyncCiphertextSweepEvent;
+    if (typeof sink === "function") {
+      try {
+        sink({ ...event });
+        return;
+      } catch (sinkErr) {
+        event.event_sink_error = "event sink failed";
+      }
+    }
+    console.error(JSON.stringify(event));
+  }
+
+  // Reclaim ciphertext bytes no live UPSERT row references anymore — tombstoned,
+  // expired, purged, or orphaned by a rolled-back/crashed upload. Deletion only
+  // ever runs after the referencing-removal snapshot is already published (or at
+  // startup recovery), so a sweep can never strand a durable reference. Every
+  // unlink is followed by a shard-directory fsync; failures are metered, emitted
+  // as structured logs, and retried instead of being silently swallowed.
+  sweepSyncCiphertextOrphans(source = this, { trigger = "manual" } = {}) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (metrics) {
+      metrics.attempts += 1;
+      metrics.last_trigger = trigger;
+    }
+    const referenced = this._syncCiphertextDigestReferences(source);
+    let removed = 0;
+    try {
+      if (!this.syncCiphertextDir) {
+        for (const digest of Array.from(this.syncCiphertextMemory.keys())) {
+          if (!referenced.has(digest)) {
+            this.syncCiphertextMemory.delete(digest);
+            removed += 1;
+          }
+        }
+        this._recordSyncCiphertextSweepSuccess(trigger, removed);
+        return removed;
+      }
+      const io = this.snapshotFs;
+      if (!io.existsSync(this.syncCiphertextDir)) {
+        this._recordSyncCiphertextSweepSuccess(trigger, removed);
+        return removed;
+      }
+
+      // A previous unlink may have succeeded only in the volatile directory
+      // view before its fsync failed. Flush those shards first even when the
+      // file is already invisible here; volatile absence is not durable erasure.
+      for (const shardDir of Array.from(this.syncCiphertextPendingDeleteFsync || [])) {
+        this._fsyncSyncCiphertextShardDir(shardDir);
+        this.syncCiphertextPendingDeleteFsync.delete(shardDir);
+      }
+
+      for (const shard of io.readdirSync(this.syncCiphertextDir)) {
+        if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+        const shardDir = path.join(this.syncCiphertextDir, shard);
+        // A shard read failure is a sweep failure and must surface through the
+        // outer failure path; skipping it would silently strand ciphertext.
+        const names = io.readdirSync(shardDir);
+        for (const name of names) {
+          const match = /^([0-9a-f]{64})\.bin$/.exec(name);
+          const isOrphanBlob = match && !referenced.has(match[1]);
+          const isTmpResidue = !match && name.includes(".tmp.");
+          if (!isOrphanBlob && !isTmpResidue) continue;
+          const filePath = path.join(shardDir, name);
+          let unlinked = false;
+          try {
+            io.unlinkSync(filePath);
+            unlinked = true;
+          } catch (err) {
+            if (err?.code !== "ENOENT") {
+              // An unlink error can leave the entry state unknown. Remember the
+              // shard for a directory-fsync retry instead of assuming either success
+              // or failure; the next scan also retries the unlink if it still exists.
+              this.syncCiphertextPendingDeleteFsync.add(shardDir);
+              throw err;
+            }
+            // ENOENT still needs the same directory durability barrier: another
+            // actor may have removed the volatile entry without making that removal
+            // power-loss durable.
+          }
+          try {
+            this._fsyncSyncCiphertextShardDir(shardDir);
+            this.syncCiphertextPendingDeleteFsync.delete(shardDir);
+          } catch (err) {
+            this.syncCiphertextPendingDeleteFsync.add(shardDir);
+            throw err;
+          }
+          if (unlinked) removed += 1;
+        }
+      }
+      this._recordSyncCiphertextSweepSuccess(trigger, removed);
+      return removed;
+    } catch (err) {
+      this._recordSyncCiphertextSweepFailure(err, trigger, removed);
+      throw err;
+    }
+  }
+
+  // Load-time upgrade path: snapshots written before the sidecar split still
+  // carry ciphertext_base64 on current UPSERT rows.  Move those bytes into the
+  // sidecar (verified) and strip them from memory so the next publish is clean.
+  _migrateLegacyInlineSyncCiphertext() {
+    for (const row of this.syncBlobs.values()) {
+      if (!row || !Object.hasOwn(row, "ciphertext_base64")) continue;
+      if (row.change_kind === "UPSERT" && typeof row.ciphertext_base64 === "string") {
+        const bytes = Buffer.from(row.ciphertext_base64, "base64");
+        const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+        if (digest !== row.ciphertext_sha256 || bytes.length !== row.ciphertext_size_bytes) {
+          throw new Error("E2EE 同步遗留内联密文摘要或尺寸不一致");
+        }
+        this.writeSyncCiphertextDurable(row.ciphertext_sha256, bytes);
+      }
+      delete row.ciphertext_base64;
+    }
+    for (const row of this.syncMutations.values()) {
+      if (row && Object.hasOwn(row, "ciphertext_base64")) delete row.ciphertext_base64;
+      if (row && Object.hasOwn(row, "ciphertext")) delete row.ciphertext;
+    }
+  }
+
+  // Fail-closed durability verification at load: every live UPSERT reference
+  // must resolve to a sidecar file of exactly the committed size.  Content
+  // hashing stays lazy at read time; existence+size here catches lost or
+  // truncated media before the server starts accepting traffic again.
+  _verifySyncCiphertextReferencesDurable() {
+    if (!this.syncCiphertextDir) return;
+    const io = this.snapshotFs;
+    for (const row of this.syncBlobs.values()) {
+      if (row?.change_kind !== "UPSERT") continue;
+      const stat = io.statSync(this._syncCiphertextFilePath(row.ciphertext_sha256), { throwIfNoEntry: false });
+      if (!stat) {
+        throw new Error("E2EE 同步密文侧车文件缺失: " + row.ciphertext_sha256);
+      }
+      if (stat.size !== row.ciphertext_size_bytes) {
+        throw new Error("E2EE 同步密文侧车尺寸不符: " + row.ciphertext_sha256);
       }
     }
   }
@@ -1437,7 +1860,7 @@ export class CloudDatabaseStore {
     } finally { io.closeSync(fd); }
   }
 
-  _validateCommitUnit(raw) {
+  _validateCommitUnit(raw, { allowLegacyInlineCiphertext = false } = {}) {
     const plans = new Map(raw.reservationPlans || []);
     const jobs = new Map(raw.reservationJobs || []);
     const events = new Map(raw.scheduleEvents || []);
@@ -1781,6 +2204,114 @@ export class CloudDatabaseStore {
       }
     }
 
+    // W4-11 E2EE sync snapshot invariants: ciphertext may exist only on the
+    // current UPSERT row; mutation history, cursors, devices, and anti-resurrection
+    // markers are metadata-only.  These checks intentionally mirror SQL 0010's
+    // shape constraints without ever attempting decryption or plaintext inference.
+    const syncDevices = new Map(raw.syncDevices || []);
+    const syncBlobs = new Map(raw.syncBlobs || []);
+    const syncMutations = new Map(raw.syncMutations || []);
+    const syncVectorValid = (vector) => {
+      if (!Array.isArray(vector) || vector.length > 512) return false;
+      const seen = new Set();
+      for (const entry of vector) {
+        if (!entry || typeof entry.device_id !== "string" || seen.has(entry.device_id)) return false;
+        if (!Number.isSafeInteger(entry.counter) || entry.counter < 1 || entry.counter > 2147483647) return false;
+        seen.add(entry.device_id);
+      }
+      return true;
+    };
+    const syncBucketSizes = new Set([1024, 4096, 16384, 65536, 262144, 1048576]);
+    for (const [key, device] of syncDevices) {
+      if (!device?.cloud_user_id || !device.device_id || key !== device.cloud_user_id + ":" + device.device_id) {
+        throw new Error("E2EE 同步设备快照键或用户作用域不一致");
+      }
+      if (device.platform !== "ANDROID" || device.sync_protocol_version !== 1) {
+        throw new Error("E2EE 同步设备快照协议形状无效");
+      }
+      const deviceShape =
+        (device.status === "ACTIVE" && device.revoked_at == null && device.revocation_reason == null) ||
+        (device.status === "REVOKED" && finiteTime(device.revoked_at) && typeof device.revocation_reason === "string");
+      if (!deviceShape) throw new Error("E2EE 同步设备快照撤销状态形状不一致");
+      if (!Number.isSafeInteger(device.acknowledged_cursor_position) || device.acknowledged_cursor_position < 0) {
+        throw new Error("E2EE 同步设备快照 cursor 确认水位无效");
+      }
+    }
+    // Post-split invariant: ciphertext bytes live only in the content-addressed
+    // sidecar, never in the JSON commit unit.  Inline ciphertext is tolerated
+    // exclusively while validating a pre-split snapshot during recovery
+    // (allowLegacyInlineCiphertext); anything published by this build is strict.
+    const validateSyncMutationShape = (row, isCurrentBlob) => {
+      if (!row?.cloud_user_id || !row.blob_id || !syncVectorValid(row.version_vector)) return false;
+      if (!Number.isSafeInteger(row.change_sequence) || row.change_sequence < 1) return false;
+      if (!finiteTime(row.committed_at)) return false;
+      const device = syncDevices.get(row.cloud_user_id + ":" + row.author_device_id);
+      if (!device) return false;
+      if (row.change_kind === "UPSERT") {
+        if (!row.encryption || row.encryption.format !== "dis-sync-e2ee/v1" || row.encryption.cipher_suite !== "AES-256-GCM" || row.encryption.padding_scheme !== "DIS_SYNC_SIZE_BUCKETS_POW4_V1") return false;
+        if (typeof row.ciphertext_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.ciphertext_sha256)) return false;
+        if (!syncBucketSizes.has(row.ciphertext_size_bytes)) return false;
+        if (Object.hasOwn(row, "ciphertext")) return false;
+        if (Object.hasOwn(row, "ciphertext_base64")) {
+          if (!isCurrentBlob || !allowLegacyInlineCiphertext || typeof row.ciphertext_base64 !== "string") return false;
+          const decodedCiphertext = Buffer.from(row.ciphertext_base64, "base64");
+          if (decodedCiphertext.length !== row.ciphertext_size_bytes) return false;
+          if (crypto.createHash("sha256").update(decodedCiphertext).digest("hex") !== row.ciphertext_sha256) return false;
+        }
+        return true;
+      }
+      if (row.change_kind !== "TOMBSTONE") return false;
+      return row.encryption === null && row.ciphertext_sha256 === null && row.ciphertext_size_bytes === null &&
+        !Object.hasOwn(row, "ciphertext_base64") && !Object.hasOwn(row, "ciphertext");
+    };
+    const currentSequenceOwners = new Set();
+    const mutationSequenceOwners = new Set();
+    for (const [key, blob] of syncBlobs) {
+      if (!blob?.cloud_user_id || !blob.blob_id || key !== blob.cloud_user_id + ":" + blob.blob_id) {
+        throw new Error("E2EE 同步当前块快照键或用户作用域不一致");
+      }
+      if (!validateSyncMutationShape(blob, true)) throw new Error("E2EE 同步当前块快照不是合法密文桶或 tombstone");
+      const seqOwner = blob.cloud_user_id + ":" + blob.change_sequence;
+      if (currentSequenceOwners.has(seqOwner)) throw new Error("E2EE 同步当前块 change_sequence 快照重复");
+      currentSequenceOwners.add(seqOwner);
+    }
+    for (const [key, mutation] of syncMutations) {
+      if (!mutation?.cloud_user_id || key !== mutation.cloud_user_id + ":" + mutation.change_sequence) {
+        throw new Error("E2EE 同步变更史快照键或序列不一致");
+      }
+      if (!validateSyncMutationShape(mutation, false)) throw new Error("E2EE 同步变更史快照含密文或元数据形状无效");
+      const seqOwner = mutation.cloud_user_id + ":" + mutation.change_sequence;
+      if (mutationSequenceOwners.has(seqOwner)) throw new Error("E2EE 同步变更史 change_sequence 快照重复");
+      mutationSequenceOwners.add(seqOwner);
+    }
+    for (const [key, marker] of raw.syncBlobAntiResurrection || []) {
+      if (!marker?.cloud_user_id || !marker.blob_id || key !== marker.cloud_user_id + ":" + marker.blob_id) {
+        throw new Error("E2EE 防复活标记快照作用域不一致");
+      }
+      if (Object.hasOwn(marker, "ciphertext_base64") || Object.hasOwn(marker, "version_vector") || Object.hasOwn(marker, "encryption")) {
+        throw new Error("E2EE 防复活标记快照不是最小元数据");
+      }
+    }
+    for (const [, cursor] of raw.syncCursors || []) {
+      if (!cursor?.cloud_user_id || !cursor.device_id || !syncDevices.has(cursor.cloud_user_id + ":" + cursor.device_id)) {
+        throw new Error("E2EE cursor 快照未绑定已登记设备");
+      }
+      if (Object.hasOwn(cursor, "token") || Object.hasOwn(cursor, "token_base64") || typeof cursor.token_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(cursor.token_sha256)) {
+        throw new Error("E2EE cursor 快照必须只保存 opaque token 摘要");
+      }
+      if (!Number.isSafeInteger(cursor.position) || !Number.isSafeInteger(cursor.scan_epoch) || cursor.position < 0 || cursor.position > cursor.scan_epoch) {
+        throw new Error("E2EE cursor 快照位置越界");
+      }
+      if (!["FULL", "INCREMENTAL"].includes(cursor.scan_mode)) {
+        throw new Error("E2EE cursor 快照缺少显式 scan mode");
+      }
+    }
+    for (const [, usage] of raw.syncTransferUsage || []) {
+      if (!usage?.cloud_user_id || !["INGRESS", "EGRESS"].includes(usage.direction) || !Number.isSafeInteger(usage.bytes) || usage.bytes <= 0 || !finiteTime(usage.occurred_at)) {
+        throw new Error("E2EE 同步传输配额快照无效");
+      }
+    }
+
     const graphPlaces = new Map(raw.campusGraphPlaces || []);
     const placeReports = new Map(raw.placeReports || []);
     for (const [, report] of placeReports) {
@@ -1819,7 +2350,7 @@ export class CloudDatabaseStore {
         throw new Error("快照与提交意图摘要不符，必须隔离并人工核验");
       }
       if (bytes) {
-        this._validateCommitUnit(JSON.parse(bytes.toString("utf8")));
+        this._validateCommitUnit(JSON.parse(bytes.toString("utf8")), { allowLegacyInlineCiphertext: true });
         const fd = io.openSync(this.snapshotPath, "r");
         try { this._persistStage("recovery_file_fsync"); io.fsyncSync(fd); }
         finally { io.closeSync(fd); }
@@ -1947,6 +2478,14 @@ export class CloudDatabaseStore {
         placeReportFlags: Array.from(source.placeReportFlags.entries()),
         placeStatusSubscriptions: Array.from(source.placeStatusSubscriptions.entries()),
         placeStatusAggregates: Array.from(source.placeStatusAggregates.entries()),
+        syncUserStates: Array.from(source.syncUserStates.entries()),
+        syncDevices: Array.from(source.syncDevices.entries()),
+        syncBlobs: Array.from(source.syncBlobs.entries()),
+        syncMutations: Array.from(source.syncMutations.entries()),
+        syncBlobAntiResurrection: Array.from(source.syncBlobAntiResurrection.entries()),
+        syncCursors: Array.from(source.syncCursors.entries()),
+        syncTransferUsage: Array.from(source.syncTransferUsage.entries()),
+        syncRateWindows: Array.from(source.syncRateWindows.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
@@ -1996,6 +2535,17 @@ export class CloudDatabaseStore {
         stage = "intent_clear_fsync"; this._syncSnapshotDirectory(stage);
       } catch (err) { err.persistStage = err.persistStage || stage; throw err; }
       this._unknownSnapshotHash = undefined;
+      // W4-11 sidecar garbage collection: ciphertext bytes whose references this
+      // commit removed (tombstone, expiry cleanup, erasure) or that a rolled-back
+      // upload orphaned are reclaimed only now, after the publish is durable.
+      // Best-effort — a sweep failure never invalidates the committed snapshot;
+      // leftover orphans are retried after the next publish or at startup.
+      try {
+        this.sweepSyncCiphertextOrphans(source, { trigger: "post_publish" });
+      } catch {
+        // The committed snapshot stays valid; the sweep failure is visible in
+        // metrics/logs and its backoff retry flushes pending delete fsyncs.
+      }
       for (const p of source.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;
       }
@@ -3350,9 +3900,54 @@ export class CloudDatabaseStore {
       }
     }
 
+    const hasIndependentE2eeScope = (consent) => Boolean(
+      consent?.purpose === "E2EE_CLOUD_SYNC" ||
+      (Array.isArray(consent?.scope_list) && consent.scope_list.includes("E2EE_CLOUD_SYNC"))
+    );
+    // School delegation cascades must not sweep the independent user-scoped
+    // E2EE consent domain into withdrawal.  Only genuinely account-global stop
+    // flows may include it, and those flows start the sync retention lifecycle
+    // in the same durable halt commit rather than stranding ciphertext.
+    const includeIndependentE2ee = reason === "XPEACH_UNLINKED" || reason === "USER_DATA_DELETE";
+    let withdrewE2eeConsent = false;
     for (const c of this.consents.values()) {
-      if (c.cloud_user_id === cloudUserId && !c.withdrawn_at) {
-        c.withdrawn_at = ts;
+      if (c.cloud_user_id !== cloudUserId || c.withdrawn_at) continue;
+      const e2eeConsent = hasIndependentE2eeScope(c);
+      if (e2eeConsent && !includeIndependentE2ee) continue;
+      c.withdrawn_at = ts;
+      if (e2eeConsent) withdrewE2eeConsent = true;
+    }
+
+    if (includeIndependentE2ee && withdrewE2eeConsent) {
+      const stillActiveE2ee = Array.from(this.consents.values()).some((c) => (
+        c?.cloud_user_id === cloudUserId && !c.withdrawn_at && hasIndependentE2eeScope(c)
+      ));
+      if (!stillActiveE2ee) {
+        let syncState = this.syncUserStates.get(cloudUserId);
+        if (!syncState) {
+          syncState = {
+            cloud_user_id: cloudUserId,
+            latest_change_sequence: 0,
+            compaction_epoch: 0,
+            consent_withdrawn_at: null,
+            retention_expires_at: null,
+            reauthorized_at: null,
+            expired_cleanup_at: null,
+            updated_at: ts
+          };
+          this.syncUserStates.set(cloudUserId, syncState);
+        }
+        if (!syncState.consent_withdrawn_at) {
+          syncState.consent_withdrawn_at = ts;
+          syncState.retention_expires_at = new Date(nowMs + 30 * 24 * 60 * 60 * 1000).toISOString();
+          syncState.updated_at = ts;
+        }
+        for (const cursor of this.syncCursors.values()) {
+          if (cursor.cloud_user_id === cloudUserId && !cursor.invalidated_at) cursor.invalidated_at = ts;
+        }
+        for (const device of this.syncDevices.values()) {
+          if (device.cloud_user_id === cloudUserId) device.acknowledged_cursor_position = 0;
+        }
       }
     }
 

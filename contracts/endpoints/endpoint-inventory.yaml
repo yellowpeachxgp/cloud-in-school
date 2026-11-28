@@ -1005,47 +1005,47 @@ endpoints:
     operationId: listSyncDevices
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: PUT
     path: /api/v1/sync/devices/{deviceId}
     operationId: registerSyncDevice
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: DELETE
     path: /api/v1/sync/devices/{deviceId}
     operationId: revokeSyncDevice
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: PUT
     path: /api/v1/sync/blobs/{blobId}
     operationId: putSyncBlob
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: GET
     path: /api/v1/sync/blobs/{blobId}
     operationId: downloadSyncBlob
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: DELETE
     path: /api/v1/sync/blobs/{blobId}
     operationId: deleteSyncBlob
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07
   - method: GET
     path: /api/v1/sync/changes
     operationId: listSyncChanges
     auth: bearer
     owner: sync
-    status: planned
+    status: active
     contract_card: CT-07

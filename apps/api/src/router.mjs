@@ -132,7 +132,8 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     redisBuffer,
     trustProxyHeaders,
     extractBearer,
-    isAdminOrOperatorAuth
+    isAdminOrOperatorAuth,
+    syncE2ee
   } = ctx;
   const routes = compileRouteTable(coreRouteTable, "core");
   const extensionRoutes = compileRouteTable(extensionRouteTable, "extension");
@@ -207,14 +208,46 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     return counts;
   }
 
+  function estimateInjectBodyBytes(value) {
+    if (value === undefined || value === null) return 0;
+    try {
+      return Buffer.byteLength(JSON.stringify(value), "utf8");
+    } catch {
+      return 1;
+    }
+  }
+
+  function protocolBodyErrorResponse(status, code, message, requestId) {
+    return {
+      status,
+      headers: {
+        ...SECURITY_HEADERS,
+        "content-type": "application/json; charset=utf-8",
+        "x-request-id": requestId
+      },
+      body: {
+        ok: false,
+        code,
+        request_id: requestId,
+        error: { code, message }
+      }
+    };
+  }
+
   async function inject({
     method = "GET",
     url = "/healthz",
     headers = {},
     body = undefined,
+    bodyBytes = null,
+    bodyParseError = null,
+    bodyTooLarge = false,
     nowMs = Date.now(),
     remoteAddr = null
   }) {
+    const effectiveBodyBytes = Number.isSafeInteger(bodyBytes) && bodyBytes >= 0
+      ? bodyBytes
+      : estimateInjectBodyBytes(body);
     const requestId = generateRequestId(headers["x-request-id"] || headers["X-Request-Id"]);
     const upperMethodEarly = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
     // Graceful shutdown fence: once draining, refuse new mutating work with a
@@ -662,6 +695,13 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         throw new ContractError("NOT_FOUND", `Route not found: ${upperMethod} ${pathname}`);
       }
 
+      const hasProtocolBodyError = Boolean(bodyParseError) || bodyTooLarge === true;
+      if (hasProtocolBodyError && matchedRoute.operationId !== "putSyncBlob") {
+        return bodyTooLarge
+          ? protocolBodyErrorResponse(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the 1.5 MiB protocol limit", requestId)
+          : protocolBodyErrorResponse(400, "BAD_REQUEST", "Malformed JSON request body", requestId);
+      }
+
       let auth = null;
       if (
         matchedRoute.auth === "anonymous_rate_limited" ||
@@ -699,6 +739,18 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         }
       }
 
+      if (matchedRoute.operationId === "putSyncBlob") {
+        // CT-07 bandwidth accounting is an HTTP-boundary property: every
+        // authenticated PUT attempt is measured exactly once before malformed-JSON,
+        // size-cap, envelope, consent, device, or vector validation can reject it.
+        syncE2ee.recordIngressAttempt(auth.cloudUserId, Math.max(1, effectiveBodyBytes), nowMs);
+        if (hasProtocolBodyError) {
+          return bodyTooLarge
+            ? protocolBodyErrorResponse(413, "PAYLOAD_TOO_LARGE", "Request body exceeds the 1.5 MiB protocol limit", requestId)
+            : protocolBodyErrorResponse(400, "BAD_REQUEST", "Malformed JSON request body", requestId);
+        }
+      }
+
       store.assertStorageWritable?.();
       const result = await matchedRoute.handler({
         method: upperMethod,
@@ -707,6 +759,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         params,
         headers,
         body,
+        bodyBytes: effectiveBodyBytes,
         auth,
         nowMs,
         requestId
@@ -714,6 +767,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
 
       const status = result.status || 200;
       const envelope = okEnvelope(result.code || "OK", result.data, requestId, result.nextCursor || null);
+      if (result.meta && typeof result.meta === "object") Object.assign(envelope.meta, result.meta);
       return {
         status,
         headers: {
@@ -761,7 +815,10 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     }
   }
 
-  const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+  // CT-07 fixed-bucket ciphertext is at most 1 MiB decoded, which is larger
+  // than 1 MiB after canonical base64 and vector/envelope JSON overhead.  Keep a
+  // tight protocol-sized cap instead of an unbounded body parser.
+  const MAX_HTTP_BODY_BYTES = 1536 * 1024;
 
   function sanitizeParsedJson(val) {
     if (!val || typeof val !== "object") return val;
@@ -783,48 +840,33 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
       try {
         const chunks = [];
         let totalBytes = 0;
-        for await (const chunk of req) {
+        let bodyTooLarge = false;
+        // destroyOnReturn:false is load-bearing: breaking the default request
+        // iterator would destroy the incoming stream AND its socket, resetting
+        // the connection before the 413 response can be written.  With the
+        // socket preserved, the over-limit rejection reaches the client as a
+        // proper HTTP response; Connection: close then drops the unread body
+        // bytes without turning the parser into an unbounded memory sink.
+        const requestChunks = typeof req.iterator === "function" ? req.iterator({ destroyOnReturn: false }) : req;
+        for await (const chunk of requestChunks) {
           totalBytes += chunk.length;
           if (totalBytes > MAX_HTTP_BODY_BYTES) {
-            res.writeHead(413, {
-              ...SECURITY_HEADERS,
-              "content-type": "application/json; charset=utf-8"
-            });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: {
-                  code: "PAYLOAD_TOO_LARGE",
-                  message: "Request body exceeds 1 MB limit"
-                }
-              })
-            );
-            req.destroy();
-            return;
+            bodyTooLarge = true;
+            chunks.length = 0;
+            break;
           }
           chunks.push(chunk);
         }
-        const rawBody = Buffer.concat(chunks).toString("utf8");
+        const rawBodyBuffer = Buffer.concat(chunks);
+        const rawBodyByteLength = bodyTooLarge ? totalBytes : rawBodyBuffer.length;
+        const rawBody = bodyTooLarge ? "" : rawBodyBuffer.toString("utf8");
         let parsedBody = undefined;
+        let bodyParseError = null;
         if (rawBody && rawBody.trim().length > 0) {
           try {
             parsedBody = sanitizeParsedJson(parseJsonWithNumberLiterals(rawBody));
-          } catch {
-            res.writeHead(400, {
-              ...SECURITY_HEADERS,
-              "content-type": "application/json; charset=utf-8"
-            });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                code: "BAD_REQUEST",
-                error: {
-                  code: "BAD_REQUEST",
-                  message: "Malformed JSON request body"
-                }
-              })
-            );
-            return;
+          } catch (err) {
+            bodyParseError = err;
           }
         }
         const response = await inject({
@@ -832,10 +874,16 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
           url: req.url,
           headers: req.headers,
           body: parsedBody,
+          bodyBytes: rawBodyByteLength,
+          bodyParseError,
+          bodyTooLarge,
           remoteAddr: req.socket?.remoteAddress || null
         });
         res.writeHead(response.status, {
           ...SECURITY_HEADERS,
+          // Over-limit uploads stop being consumed at the cap, so keep-alive
+          // framing can no longer be trusted; close is the only honest answer.
+          ...(bodyTooLarge ? { connection: "close" } : {}),
           ...(response.headers || {})
         });
         if (typeof response.rawBody === "string" || Buffer.isBuffer(response.rawBody)) {
