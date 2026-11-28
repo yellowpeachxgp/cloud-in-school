@@ -1860,15 +1860,16 @@ export class CloudDatabaseStore {
       return row.encryption === null && row.ciphertext_sha256 === null && row.ciphertext_size_bytes === null &&
         !Object.hasOwn(row, "ciphertext_base64") && !Object.hasOwn(row, "ciphertext");
     };
-    const sequenceOwners = new Set();
+    const currentSequenceOwners = new Set();
+    const mutationSequenceOwners = new Set();
     for (const [key, blob] of syncBlobs) {
       if (!blob?.cloud_user_id || !blob.blob_id || key !== blob.cloud_user_id + ":" + blob.blob_id) {
         throw new Error("E2EE 同步当前块快照键或用户作用域不一致");
       }
       if (!validateSyncMutationShape(blob, true)) throw new Error("E2EE 同步当前块快照不是合法密文桶或 tombstone");
       const seqOwner = blob.cloud_user_id + ":" + blob.change_sequence;
-      if (sequenceOwners.has(seqOwner)) throw new Error("E2EE 同步 change_sequence 快照重复");
-      sequenceOwners.add(seqOwner);
+      if (currentSequenceOwners.has(seqOwner)) throw new Error("E2EE 同步当前块 change_sequence 快照重复");
+      currentSequenceOwners.add(seqOwner);
     }
     for (const [key, mutation] of syncMutations) {
       if (!mutation?.cloud_user_id || key !== mutation.cloud_user_id + ":" + mutation.change_sequence) {
@@ -1876,8 +1877,8 @@ export class CloudDatabaseStore {
       }
       if (!validateSyncMutationShape(mutation, false)) throw new Error("E2EE 同步变更史快照含密文或元数据形状无效");
       const seqOwner = mutation.cloud_user_id + ":" + mutation.change_sequence;
-      if (sequenceOwners.has(seqOwner)) throw new Error("E2EE 同步 change_sequence 快照重复");
-      sequenceOwners.add(seqOwner);
+      if (mutationSequenceOwners.has(seqOwner)) throw new Error("E2EE 同步变更史 change_sequence 快照重复");
+      mutationSequenceOwners.add(seqOwner);
     }
     for (const [key, marker] of raw.syncBlobAntiResurrection || []) {
       if (!marker?.cloud_user_id || !marker.blob_id || key !== marker.cloud_user_id + ":" + marker.blob_id) {
