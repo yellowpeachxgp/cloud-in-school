@@ -5,6 +5,7 @@ import { CommunityService } from "../../../../packages/community/src/index.mjs";
 import { AvailabilityService } from "../../../../packages/availability/src/index.mjs";
 import { PlaceStatusService } from "../../../../packages/place-status/src/index.mjs";
 import { LedgerService } from "../../../../packages/ledger/src/index.mjs";
+import { SyncService } from "../../../../packages/sync/src/index.mjs";
 import {
   ContractError,
   DEFAULT_SCHOOL_ID,
@@ -21,6 +22,7 @@ export function createMeRoutes(ctx) {
     availability,
     placeStatus,
     ledger,
+    syncE2ee,
     syncUserToSso
   } = ctx;
 
@@ -145,6 +147,66 @@ export function createMeRoutes(ctx) {
       Array.isArray(body?.scope_list) && body.scope_list.length > 0
         ? body.scope_list
         : ["LIBRARY_SEAT_RESERVATION", "CREDENTIAL_ESCROW"];
+    const requestedPurpose = typeof body?.purpose === "string" ? body.purpose.trim() : null;
+    if (requestedPurpose) {
+      const allowedPurposes = new Set([
+        "SCHOOL_CREDENTIAL_ESCROW",
+        "CLOUD_AUTO_BOOKING",
+        "SERVICE_FEE_TERMS",
+        "PARCEL_CLOUD_BACKUP",
+        "PARCEL_AI_ASSISTANT",
+        "E2EE_CLOUD_SYNC"
+      ]);
+      if (!allowedPurposes.has(requestedPurpose)) {
+        throw new ContractError("BAD_REQUEST", "purpose is not a supported consent purpose");
+      }
+      const documentVersion = String(body?.document_version || "").trim();
+      const documentSha256 = String(body?.document_sha256 || "").trim().toLowerCase();
+      if (!documentVersion || documentVersion.length > 128) {
+        throw new ContractError("BAD_REQUEST", "document_version is required for purpose-scoped consent");
+      }
+      if (!/^[0-9a-f]{64}$/.test(documentSha256)) {
+        throw new ContractError("BAD_REQUEST", "document_sha256 must be a lowercase SHA-256 hex digest");
+      }
+      const purposeSchoolId = requestedPurpose === "E2EE_CLOUD_SYNC" ? (body?.school_id || "user") : schoolId;
+      const activeSamePurpose = store.recordsForUser("consents", auth.cloudUserId).filter((c) => (
+        c &&
+        (c.school_id || DEFAULT_SCHOOL_ID) === purposeSchoolId &&
+        !c.withdrawn_at &&
+        Number(c.auth_version || 1) === authVer &&
+        c.purpose === requestedPurpose
+      ));
+      const exact = activeSamePurpose.find((c) => (
+        c.document_version === documentVersion && String(c.document_sha256 || "").toLowerCase() === documentSha256
+      ));
+      if (exact) {
+        store.saveSnapshot?.();
+        return { status: 201, code: "CONSENT_GRANTED", data: exact };
+      }
+      const id = crypto.randomUUID();
+      const record = {
+        id,
+        cloud_user_id: auth.cloudUserId,
+        school_id: purposeSchoolId,
+        purpose: requestedPurpose,
+        document_version: documentVersion,
+        document_sha256: documentSha256,
+        school_binding_id: body?.school_binding_id || null,
+        scope_list: [requestedPurpose],
+        policy_version: documentVersion,
+        auth_version: authVer,
+        granted_at: new Date(nowMs).toISOString(),
+        withdrawn_at: null
+      };
+      for (const prior of activeSamePurpose) {
+        prior.withdrawn_at = record.granted_at;
+        prior.superseded_by_consent_id = id;
+      }
+      store.consents.set(id, record);
+      store.indexUserScoped?.("consents", id, record.cloud_user_id);
+      store.saveSnapshot?.();
+      return { status: 201, code: "CONSENT_GRANTED", data: record };
+    }
     const existingActive = store.getLatestActiveConsent(auth.cloudUserId, schoolId, authVer);
     if (existingActive) {
       const mergedScopes = Array.from(
@@ -202,6 +264,7 @@ export function createMeRoutes(ctx) {
         throw new ContractError("NOT_FOUND", "Consent record not found");
       }
       c.withdrawn_at = new Date(nowMs).toISOString();
+      const syncWithdrawal = syncE2ee?.handleConsentWithdrawn?.(auth.cloudUserId, c, nowMs) || null;
       const cascade = store.haltAllUserPlansAndBindings(
         auth.cloudUserId,
         "CONSENT_WITHDRAWN",
@@ -213,6 +276,7 @@ export function createMeRoutes(ctx) {
         data: {
           consent_id: c.id,
           withdrawn_at: c.withdrawn_at,
+          sync_withdrawal: syncWithdrawal,
           cancelled_job_ids: cascade.cancelledJobIds
         }
       };
@@ -246,6 +310,15 @@ export function createMeRoutes(ctx) {
       place_status_report_flags: [],
       place_status_subscriptions: []
     };
+    const syncExport = syncE2ee?.exportUserData?.(auth.cloudUserId) || {
+      sync_user_state: null,
+      sync_devices: [],
+      sync_blobs: [],
+      sync_blob_mutations: [],
+      sync_blob_anti_resurrection: [],
+      sync_cursors: [],
+      sync_transfer_usage: []
+    };
     const ledgerExport = ledger?.exportUserData?.(auth.cloudUserId) || {
       ledger_entries: [],
       ledger_settlements: [],
@@ -270,7 +343,8 @@ export function createMeRoutes(ctx) {
         ...communityExport,
         ...availabilityExport,
         ...placeStatusExport,
-        ...ledgerExport
+        ...ledgerExport,
+        ...syncExport
       })
     };
   }),
@@ -284,6 +358,7 @@ export function createMeRoutes(ctx) {
       const stagingAvailability = new AvailabilityService(staging);
       const stagingPlaceStatus = new PlaceStatusService(staging);
       const stagingLedger = new LedgerService(staging);
+      const stagingSync = new SyncService(staging);
       const cascade = staging.haltAllUserPlansAndBindings(auth.cloudUserId, "USER_DATA_DELETE", nowMs);
       const momentsPurged = staging.purgeUserMomentsData?.(auth.cloudUserId, nowMs) || null;
       // Availability erasure must run before membership rows are removed: its
@@ -296,6 +371,7 @@ export function createMeRoutes(ctx) {
       const ledgerPurged = stagingLedger.purgeUserLedgerData?.(auth.cloudUserId, nowMs) || null;
       const pluginPurged = staging.purgeUserPluginData?.(auth.cloudUserId) || null;
       const placeStatusPurged = stagingPlaceStatus.purgeUserPlaceStatusData?.(auth.cloudUserId, nowMs) || null;
+      const syncPurged = stagingSync.purgeUserSyncData?.(auth.cloudUserId, nowMs) || null;
       // Plans/bindings were already halted above with the USER_DATA_DELETE audit
       // reason; only revoke sessions here (unlinkXpeach stays false).
       revokeAllUserSessionsInStore(staging, auth.cloudUserId, {
@@ -305,7 +381,7 @@ export function createMeRoutes(ctx) {
       });
       const user = staging.users.get(auth.cloudUserId);
       if (user) user.status = "DELETED";
-      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged };
+      return { cascade, momentsPurged, availabilityPurged, communityPurged, ledgerPurged, pluginPurged, placeStatusPurged, syncPurged };
     });
     return {
       status: 202,
@@ -319,7 +395,8 @@ export function createMeRoutes(ctx) {
         community_purged: outcome.communityPurged,
         ledger_purged: outcome.ledgerPurged,
         plugin_purged: outcome.pluginPurged,
-        place_status_purged: outcome.placeStatusPurged
+        place_status_purged: outcome.placeStatusPurged,
+        sync_purged: outcome.syncPurged
       }
     };
   })

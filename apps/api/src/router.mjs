@@ -212,6 +212,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     url = "/healthz",
     headers = {},
     body = undefined,
+    bodyBytes = null,
     nowMs = Date.now(),
     remoteAddr = null
   }) {
@@ -707,6 +708,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
         params,
         headers,
         body,
+        bodyBytes,
         auth,
         nowMs,
         requestId
@@ -714,6 +716,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
 
       const status = result.status || 200;
       const envelope = okEnvelope(result.code || "OK", result.data, requestId, result.nextCursor || null);
+      if (result.meta && typeof result.meta === "object") Object.assign(envelope.meta, result.meta);
       return {
         status,
         headers: {
@@ -761,7 +764,10 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
     }
   }
 
-  const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+  // CT-07 fixed-bucket ciphertext is at most 1 MiB decoded, which is larger
+  // than 1 MiB after canonical base64 and vector/envelope JSON overhead.  Keep a
+  // tight protocol-sized cap instead of an unbounded body parser.
+  const MAX_HTTP_BODY_BYTES = 1536 * 1024;
 
   function sanitizeParsedJson(val) {
     if (!val || typeof val !== "object") return val;
@@ -795,7 +801,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
                 ok: false,
                 error: {
                   code: "PAYLOAD_TOO_LARGE",
-                  message: "Request body exceeds 1 MB limit"
+                  message: "Request body exceeds the 1.5 MiB protocol limit"
                 }
               })
             );
@@ -804,7 +810,9 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
           }
           chunks.push(chunk);
         }
-        const rawBody = Buffer.concat(chunks).toString("utf8");
+        const rawBodyBuffer = Buffer.concat(chunks);
+        const rawBodyByteLength = rawBodyBuffer.length;
+        const rawBody = rawBodyBuffer.toString("utf8");
         let parsedBody = undefined;
         if (rawBody && rawBody.trim().length > 0) {
           try {
@@ -832,6 +840,7 @@ export function createCampusRouter(ctx, { coreRoutes: coreRouteTable = [], exten
           url: req.url,
           headers: req.headers,
           body: parsedBody,
+          bodyBytes: rawBodyByteLength,
           remoteAddr: req.socket?.remoteAddress || null
         });
         res.writeHead(response.status, {

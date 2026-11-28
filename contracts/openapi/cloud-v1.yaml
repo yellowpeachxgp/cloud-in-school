@@ -4896,9 +4896,9 @@ paths:
   /api/v1/sync/devices:
     get:
       operationId: listSyncDevices
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync device surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.device.read]
       x-dis-error-codes: [CLOUD_AUTH_REQUIRED, SYNC_PERMISSION_DENIED]
       tags: [sync]
@@ -4921,9 +4921,9 @@ paths:
   /api/v1/sync/devices/{deviceId}:
     put:
       operationId: registerSyncDevice
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync device surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.device.register]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_INVALID, SYNC_DEVICE_CONFLICT, SYNC_DEVICE_REVOKED, SYNC_PERMISSION_DENIED, SYNC_QUOTA_EXCEEDED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -4977,9 +4977,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     delete:
       operationId: revokeSyncDevice
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync device surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync device surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.device.revoke]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -5019,9 +5019,9 @@ paths:
   /api/v1/sync/blobs/{blobId}:
     put:
       operationId: putSyncBlob
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync blob surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.blob.write]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_ENVELOPE_INVALID, SYNC_VECTOR_INVALID, SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT, SYNC_BLOB_TOO_LARGE, SYNC_BLOB_DELETED, SYNC_QUOTA_EXCEEDED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -5089,9 +5089,9 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
     get:
       operationId: downloadSyncBlob
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync blob surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.blob.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_BLOB_DELETED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
       tags: [sync]
@@ -5128,9 +5128,9 @@ paths:
           $ref: '#/components/responses/RateLimited'
     delete:
       operationId: deleteSyncBlob
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE sync blob surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE sync blob surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.blob.delete]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_BLOB_NOT_FOUND, SYNC_VECTOR_INVALID, SYNC_VECTOR_OVERFLOW, SYNC_VECTOR_CONFLICT, SYNC_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
@@ -5181,9 +5181,9 @@ paths:
   /api/v1/sync/changes:
     get:
       operationId: listSyncChanges
-      x-dis-status: planned
+      x-dis-status: active
       x-dis-api-version: v1
-      x-dis-compatibility: Contract-first planned CT-07 E2EE incremental sync surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
+      x-dis-compatibility: CT-07 E2EE incremental sync surface is active. The W4-11 implementation atomically wires the route and this active contract status.
       x-dis-permissions: [sync.blob.read]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SYNC_CONSENT_REQUIRED, SYNC_DEVICE_NOT_FOUND, SYNC_DEVICE_REVOKED, SYNC_CURSOR_INVALID, SYNC_CURSOR_EXPIRED, SYNC_BANDWIDTH_QUOTA_EXCEEDED, SYNC_PERMISSION_DENIED, SYNC_RATE_LIMITED]
       tags: [sync]

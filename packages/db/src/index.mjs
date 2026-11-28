@@ -601,7 +601,9 @@ const DATA_DELETE_MAP_FIELDS = Object.freeze([
   "pollVotes", "confirmedGroupEvents", "ledgerEntries", "ledgerBalanceRevisions", "settlements",
   "dutyRotas", "dutyTasks", "dutySwaps", "repairTickets", "repairTicketRevisions", "repairReviews",
   "notifications", "priceQuotes", "idempotencyRecords", "campusGraphPlaces", "placeReports",
-  "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates"
+  "placeReportFlags", "placeStatusSubscriptions", "placeStatusAggregates",
+  "syncUserStates", "syncDevices", "syncBlobs", "syncMutations", "syncBlobAntiResurrection",
+  "syncCursors", "syncTransferUsage", "syncRateWindows"
 ]);
 const DATA_DELETE_ARRAY_FIELDS = Object.freeze(["outboxEvents", "auditEvents"]);
 
@@ -955,6 +957,18 @@ export class CloudDatabaseStore {
     this.placeStatusSubscriptions = new Map(); // subscriptionId -> caller-owned subscription
     this.placeStatusAggregates = new Map(); // school|placeRef|metric -> revision/state
 
+    // E2EE sync (W4-11): ciphertext-only current blobs, metadata-only mutation
+    // history, device-bound cursors, consent lifecycle state, quotas, and minimal
+    // anti-resurrection markers.  No plaintext or key material is representable here.
+    this.syncUserStates = new Map(); // cloudUserId -> per-user sequence/compaction/consent state
+    this.syncDevices = new Map(); // `${cloudUserId}:${deviceId}` -> immutable device registration/revocation
+    this.syncBlobs = new Map(); // `${cloudUserId}:${blobId}` -> current ciphertext or tombstone metadata
+    this.syncMutations = new Map(); // `${cloudUserId}:${changeSequence}` -> metadata-only causal mutation row
+    this.syncBlobAntiResurrection = new Map(); // `${cloudUserId}:${blobId}` -> permanent closed-id marker
+    this.syncCursors = new Map(); // cursorId -> hashed opaque device-bound cursor
+    this.syncTransferUsage = new Map(); // usageId -> rolling ingress/egress byte accounting row
+    this.syncRateWindows = new Map(); // `${cloudUserId}:${kind}:${windowStart}` -> fixed-window rate counter
+
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
     this.auditEvents = [];
@@ -994,7 +1008,7 @@ export class CloudDatabaseStore {
     for (const [id, att] of this.reservationAttempts) {
       this.indexReservationAttempt(id, att);
     }
-    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions"]) {
+    for (const name of ["schoolBindings", "reservationPlans", "reservationJobs", "reservationOrders", "consents", "notifications", "reservationAttempts", "refundRequests", "groupMembers", "placeStatusSubscriptions", "syncDevices"]) {
       const byUser = new Map();
       for (const [id, rec] of this[name]) {
         const uid = rec.cloud_user_id;
@@ -1239,6 +1253,14 @@ export class CloudDatabaseStore {
       loadMap(this.placeReportFlags, raw.placeReportFlags);
       loadMap(this.placeStatusSubscriptions, raw.placeStatusSubscriptions);
       loadMap(this.placeStatusAggregates, raw.placeStatusAggregates);
+      loadMap(this.syncUserStates, raw.syncUserStates);
+      loadMap(this.syncDevices, raw.syncDevices);
+      loadMap(this.syncBlobs, raw.syncBlobs);
+      loadMap(this.syncMutations, raw.syncMutations);
+      loadMap(this.syncBlobAntiResurrection, raw.syncBlobAntiResurrection);
+      loadMap(this.syncCursors, raw.syncCursors);
+      loadMap(this.syncTransferUsage, raw.syncTransferUsage);
+      loadMap(this.syncRateWindows, raw.syncRateWindows);
       if (!this.campusContent.has("haut")) {
         this.campusContent.set("haut", createDefaultHautCampusContent());
       }
@@ -1947,6 +1969,14 @@ export class CloudDatabaseStore {
         placeReportFlags: Array.from(source.placeReportFlags.entries()),
         placeStatusSubscriptions: Array.from(source.placeStatusSubscriptions.entries()),
         placeStatusAggregates: Array.from(source.placeStatusAggregates.entries()),
+        syncUserStates: Array.from(source.syncUserStates.entries()),
+        syncDevices: Array.from(source.syncDevices.entries()),
+        syncBlobs: Array.from(source.syncBlobs.entries()),
+        syncMutations: Array.from(source.syncMutations.entries()),
+        syncBlobAntiResurrection: Array.from(source.syncBlobAntiResurrection.entries()),
+        syncCursors: Array.from(source.syncCursors.entries()),
+        syncTransferUsage: Array.from(source.syncTransferUsage.entries()),
+        syncRateWindows: Array.from(source.syncRateWindows.entries()),
         momentsState: source.momentsState,
         notifications: Array.from(source.notifications.entries()),
         // Durable idempotency receipts (R5-C2): a created plan must replay its
