@@ -1838,14 +1838,21 @@ export class CloudDatabaseStore {
     if (!this.contentPackArtifactDir) return;
     const io = this.snapshotFs;
     const seen = new Set();
-    for (const row of [...this.contentPackSubmissions.values(), ...this.contentPackVersions.values()]) {
+    const verifyRow = (row) => {
       const digest = row?.artifact_sha256;
-      if (!digest || seen.has(digest)) continue;
+      if (!digest || seen.has(digest)) return;
       seen.add(digest);
       const stat = io.statSync(this._contentPackArtifactFilePath(digest), { throwIfNoEntry: false });
       if (!stat) throw new Error("内容包 artifact 侧车文件缺失: " + digest);
       if (stat.size !== row.artifact_size_bytes) throw new Error("内容包 artifact 侧车尺寸不符: " + digest);
+    };
+    // Terminal negative/published submissions intentionally no longer retain candidate
+    // bytes. Their digest remains audit metadata, not a sidecar reference; published
+    // versions below are still fully verified as downloadable artifact references.
+    for (const row of this.contentPackSubmissions.values()) {
+      if (row?.artifact_retain !== false) verifyRow(row);
     }
+    for (const row of this.contentPackVersions.values()) verifyRow(row);
   }
 
   // Reclaim artifact media no live submission/version row references.  This only

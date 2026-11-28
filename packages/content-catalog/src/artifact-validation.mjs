@@ -56,7 +56,7 @@ const CAPABILITY_KINDS = new Set([
 ]);
 const EXECUTABLE_EXTENSIONS = new Set([
   ".exe", ".dll", ".so", ".dylib", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1",
-  ".jar", ".class", ".apk", ".dex", ".js", ".mjs", ".cjs", ".wasm", ".com", ".scr"
+  ".jar", ".class", ".apk", ".dex", ".js", ".mjs", ".cjs", ".py", ".rb", ".pl", ".pm", ".wasm", ".com", ".scr"
 ]);
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 
@@ -147,6 +147,17 @@ function executableArtifactReason(path, bytes) {
   if (EXECUTABLE_EXTENSIONS.has(extension)) return "executable file extension " + extension;
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) return "MZ executable magic";
   if (bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46) return "ELF executable magic";
+  const machoMagics = [
+    [0xfe, 0xed, 0xfa, 0xce],
+    [0xce, 0xfa, 0xed, 0xfe],
+    [0xfe, 0xed, 0xfa, 0xcf],
+    [0xcf, 0xfa, 0xed, 0xfe],
+    [0xca, 0xfe, 0xba, 0xbe],
+    [0xbe, 0xba, 0xfe, 0xca],
+    [0xca, 0xfe, 0xba, 0xbf],
+    [0xbf, 0xba, 0xfe, 0xca]
+  ];
+  if (bytes.length >= 4 && machoMagics.some((magic) => magic.every((byte, index) => bytes[index] === byte))) return "Mach-O executable magic";
   if (bytes.length >= 2 && bytes[0] === 0x23 && bytes[1] === 0x21) return "script shebang";
   return null;
 }

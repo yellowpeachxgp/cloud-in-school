@@ -417,6 +417,22 @@ test("W5-02 legacy school package strict zip validation and detached manifest/fi
   assert.equal(executableRejected.status, 400);
   assert.equal(executableRejected.body.error.code, "CONTENT_PACK_INVALID");
 
+  const pythonExecutable = legacyPackageArtifact({ payloadPath: "assets/evil.py", payloadBytes: Buffer.from("print('code')", "utf8") });
+  const pythonRejected = await submitDatapack(app, submitter, {
+    key: "legacy-executable-py-0001",
+    body: legacySubmissionBody(pythonExecutable)
+  });
+  assert.equal(pythonRejected.status, 400);
+  assert.equal(pythonRejected.body.error.code, "CONTENT_PACK_INVALID");
+
+  const machoExecutable = legacyPackageArtifact({ payloadPath: "assets/blob.bin", payloadBytes: Buffer.from("feedface", "hex") });
+  const machoRejected = await submitDatapack(app, submitter, {
+    key: "legacy-executable-macho-0001",
+    body: legacySubmissionBody(machoExecutable)
+  });
+  assert.equal(machoRejected.status, 400);
+  assert.equal(machoRejected.body.error.code, "CONTENT_PACK_INVALID");
+
   const created = await submitDatapack(app, submitter, {
     key: "legacy-submit-0001",
     body: legacySubmissionBody(artifact)
@@ -488,6 +504,45 @@ test("W5-02 rejected submission drops artifact media while keeping digest-only a
   assert.equal(row.artifact_retain, false);
   assert.equal(row.artifact_sha256, sha256Hex(artifact), "digest metadata remains auditable");
   assert.equal(app.store.contentPackArtifactMemory.size, 0, "terminal negative review must not retain artifact bytes");
+});
+
+test("W5-02 rejected or changes-requested submissions remain restart-safe after artifact purge", async () => {
+  for (const [action, expectedStatus, label] of [
+    ["REJECT", "REJECTED", "reject"],
+    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "changes"]
+  ]) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dis-content-catalog-negative-restart-"));
+    const snapshotPath = path.join(tmpDir, "cloud-state.json");
+    try {
+      const first = createSignedDatapackContext({ storeOptions: { snapshotPath } });
+      const submitter = setupUser(first.app, label + "_submitter");
+      const reviewer = setupUser(first.app, label + "_reviewer", { operations: ["content_pack.review"] });
+      const created = await submitDatapack(first.app, submitter, { key: label + "-submit-0001" });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const submissionId = created.body.data.submission_id;
+      const digest = created.body.data.artifact_sha256;
+      const artifactPath = path.join(snapshotPath + ".content-artifacts", digest.slice(0, 2), digest + ".bin");
+      assert.equal(fs.existsSync(artifactPath), true, "accepted candidate artifact must exist before review");
+      const reviewed = await first.app.inject({
+        method: "POST",
+        url: "/api/v1/admin/content-pack-submissions/" + submissionId + "/review",
+        headers: writeHeaders(reviewer, label + "-review-0001"),
+        body: { action, review_note: "需要更正后重新提交" },
+        nowMs: BASE_NOW
+      });
+      assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+      assert.equal(reviewed.body.data.status, expectedStatus);
+      assert.equal(fs.existsSync(artifactPath), false, action + " must purge candidate artifact bytes after the durable review commit");
+
+      const restarted = createSignedDatapackContext({ storeOptions: { snapshotPath } });
+      const row = restarted.app.store.contentPackSubmissions.get(submissionId);
+      assert.equal(row.status, expectedStatus);
+      assert.equal(row.artifact_retain, false);
+      assert.equal(row.artifact_sha256, digest, "digest-only audit metadata must survive restart");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("W5-02 artifact metadata and sidecar bytes survive snapshot restart before review and publish", async () => {
