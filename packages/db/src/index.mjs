@@ -1511,7 +1511,18 @@ export class CloudDatabaseStore {
     const metrics = this.syncCiphertextSweepMetrics;
     if (!metrics) return;
     const nowIso = new Date().toISOString();
-    const message = String(err?.message || err || "unknown").slice(0, 240);
+    // D16 applies to operational logs too: Node filesystem errors often embed
+    // the configured snapshot path. Keep the actionable syscall/code but redact
+    // all store-controlled path prefixes before recording or emitting anything.
+    let message = String(err?.message || err || "unknown");
+    const pathRedactions = [this.syncCiphertextDir, this.snapshotPath]
+      .filter((value) => typeof value === "string" && value.length > 1)
+      .sort((a, b) => b.length - a.length);
+    for (const token of pathRedactions) {
+      const label = token === this.syncCiphertextDir ? "<sync-ciphertext-dir>" : "<snapshot-path>";
+      message = message.split(token).join(label);
+    }
+    message = message.slice(0, 240);
     metrics.failures += 1;
     metrics.consecutive_failures += 1;
     metrics.last_removed = removed;
@@ -1548,7 +1559,7 @@ export class CloudDatabaseStore {
         sink({ ...event });
         return;
       } catch (sinkErr) {
-        event.event_sink_error = String(sinkErr?.message || sinkErr || "unknown").slice(0, 120);
+        event.event_sink_error = "event sink failed";
       }
     }
     console.error(JSON.stringify(event));
