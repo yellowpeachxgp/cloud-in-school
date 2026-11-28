@@ -196,20 +196,21 @@ function ipv6PieceGroupCount(pieces) {
 /** RFC 3986 IPv6address grammar; IPvFuture is intentionally not accepted for HTTPS datapack links. */
 function isValidIpv6Literal(value) {
   if (!value || !/^[0-9A-Fa-f:.]+$/.test(value)) return false;
-  const compressed = value.split("::");
-  if (compressed.length > 2) return false;
+  const firstCompression = value.indexOf("::");
+  const hasCompression = firstCompression >= 0;
+  if (hasCompression && firstCompression !== value.lastIndexOf("::")) return false;
   const parseSide = (side) => {
     if (side === "") return [];
     const pieces = side.split(":");
     if (pieces.some((piece) => piece === "")) return null;
     return pieces;
   };
-  if (compressed.length === 1) {
+  if (!hasCompression) {
     const pieces = parseSide(value);
     return pieces !== null && ipv6PieceGroupCount(pieces) === 8;
   }
-  const left = parseSide(compressed[0]);
-  const right = parseSide(compressed[1]);
+  const left = parseSide(value.slice(0, firstCompression));
+  const right = parseSide(value.slice(firstCompression + 2));
   if (left === null || right === null) return false;
   const groups = ipv6PieceGroupCount(left) + ipv6PieceGroupCount(right);
   return groups >= 0 && groups < 8;
