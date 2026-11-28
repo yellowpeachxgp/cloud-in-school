@@ -190,7 +190,11 @@ permissions:
     default_granted: false
   - id: content_pack.publish
     scope: operations_school_scope
-    description: Publish approved maintainer-signed immutable content pack versions and retire published versions without deleting history; requires explicit operations authorization in the matching school scope.
+    description: Publish approved maintainer-signed immutable content pack versions; requires explicit operations authorization in the matching school scope and never implies school verification.
+    default_granted: false
+  - id: content_pack.retire
+    scope: operations_school_scope
+    description: Retire published content pack versions without deleting history, causing new downloads/installs to fail closed while preserving audit metadata; requires explicit operations authorization in the matching school scope independent of publish authorization.
     default_granted: false
 roles:
   - role: PLATFORM_OWNER

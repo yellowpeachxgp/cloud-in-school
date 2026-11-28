@@ -3399,7 +3399,7 @@ paths:
         - bearerAuth: []
       summary: Submit one signed-pack candidate artifact for maintainer review
       description: |
-        Accepts one complete artifact for review. The submitter supplies the unsigned dis-datapack/v1 JSON document or the legacy school-package zip plus its contribution reference; the maintainer signing/publication step later produces the detached signature recorded in catalog metadata. The server validates shape, artifact hash, size ceiling, format/kind compatibility, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
+        Accepts one complete artifact plus catalog provenance for review. The submitter supplies the unsigned dis-datapack/v1 canonical JSON document or the legacy school-package zip, its contribution reference, and explicit provenance. For dis-datapack/v1 the provenance must exactly duplicate the signature-covered embedded sources/verifiedAt/reviewBy/maintainers/verificationLevel metadata (an absent embedded verificationLevel counts as UNVERIFIED); for dis-campus-plugin/v1 it is maintainer-reviewed catalog metadata because the legacy manifest cannot carry those fields and is not represented as artifact-signed provenance. The server validates shape, artifact hash, size ceiling, format/kind compatibility, package id/school target consistency, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
@@ -3530,7 +3530,7 @@ paths:
         - bearerAuth: []
       summary: Approve, request changes on, or reject one content pack submission
       description: |
-        Applies exactly one review decision. APPROVE means the artifact may be published once after the maintainer signing step; it does not itself create a catalog version and does not imply school verification. REQUEST_CHANGES and REJECT require a public-safe review_note. A submission in PUBLISHED or REJECTED state cannot be reviewed again. The decision is written to the tamper-evident audit trail; the response exposes only pseudonymous aliases. Example 84.
+        Applies exactly one review decision while status=PENDING_REVIEW. APPROVE means the artifact may be published once after the maintainer signing step; it does not itself create a catalog version and does not imply school verification. REQUEST_CHANGES and REJECT require a public-safe review_note. APPROVED, CHANGES_REQUESTED, REJECTED, and PUBLISHED submissions cannot be reviewed again; a corrected artifact requires a new immutable submission rather than rewriting this one. The decision is written to the tamper-evident audit trail; the response exposes only pseudonymous aliases. Example 84.
       parameters:
         - $ref: '#/components/parameters/ContentPackSubmissionIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -3574,7 +3574,7 @@ paths:
         - bearerAuth: []
       summary: Publish one approved and maintainer-signed content pack submission
       description: |
-        Publishes exactly one immutable version derived from an APPROVED submission. The publisher must first complete the maintainer signing step for the matching artifact bytes: detached Ed25519 over the existing dis-campus-plugin/v1 manifest+files payload or over the CT-06 dis-datapack/v1 canonical JSON payload. The server revalidates schema, format/kind compatibility, provenance, review state, trust-root eligibility, artifact digest, signature payload, size ceiling, and package version ordering. Publishing the same pack_id/version with different bytes or metadata is CONTENT_PACK_VERSION_CONFLICT; replays require the same Idempotency-Key. On first durable commit exactly one content-pack.published event is emitted. Example 85.
+        Publishes exactly one immutable version derived from an APPROVED submission. The publisher obtains the identical artifact bytes through the public contribution reference or its own review workspace, signs them offline, and supplies the detached Ed25519 signature in this request; the API never re-serves submission artifact bytes. The signature scheme must match the artifact format: the existing dis-campus-plugin/v1 manifest+files payload or the CT-06 dis-datapack/v1 canonical JSON payload. The server revalidates schema, format/kind compatibility, provenance, review state, trust-root eligibility, artifact digest, signature payload, size ceiling, and package version ordering. Publishing the same pack_id/version with different bytes or metadata is CONTENT_PACK_VERSION_CONFLICT; replays require the same Idempotency-Key. On first durable commit the submission atomically becomes PUBLISHED and exactly one content-pack.published event is emitted. Example 85.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
@@ -3614,7 +3614,7 @@ paths:
       x-dis-status: planned
       x-dis-api-version: v1
       x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
-      x-dis-permissions: [content_pack.publish]
+      x-dis-permissions: [content_pack.retire]
       x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_NOT_FOUND, CONTENT_PACK_VERSION_NOT_FOUND, CONFLICT, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
       tags: [content-packs, admin]
@@ -8576,10 +8576,40 @@ components:
           $ref: '#/components/schemas/ContentPackVersion'
         meta:
           $ref: '#/components/schemas/ResponseMeta'
+    ContentPackSubmissionProvenance:
+      type: object
+      additionalProperties: false
+      required: [sources, verified_at, review_by, maintainers, verification_level]
+      properties:
+        sources:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ContentPackSource'
+        verified_at:
+          type: string
+          format: date
+        review_by:
+          type: string
+          format: date
+          description: Date after which clients must display the content as needing re-verification.
+        maintainers:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 120
+            pattern: ^[a-z0-9-]+:[^\s]+$
+          description: Maintainer provenance identifiers such as github:name; they are not write-authorization proof.
+        verification_level:
+          $ref: '#/components/schemas/ContentPackVerificationLevel'
+      description: Catalog provenance reviewed before publication. For dis-datapack/v1 it must match the signature-covered embedded metadata exactly; for dis-campus-plugin/v1 it is maintainer-attested catalog metadata outside the legacy artifact signature and clients must not present it as school verification.
     ContentPackSubmissionCreateRequest:
       type: object
       additionalProperties: false
-      required: [artifact_format, kind, school_id, pack_id, version, artifact_encoding, artifact_sha256, artifact_base64, contribution_reference]
+      required: [artifact_format, kind, school_id, pack_id, version, artifact_encoding, artifact_sha256, artifact_base64, contribution_reference, provenance]
       properties:
         artifact_format:
           $ref: '#/components/schemas/ContentPackArtifactFormat'
@@ -8610,10 +8640,31 @@ components:
           pattern: ^https://
           maxLength: 2048
           description: Public contribution PR or equivalent reviewable source link; school intranet and credentialed URLs are forbidden.
+        provenance:
+          $ref: '#/components/schemas/ContentPackSubmissionProvenance'
         submission_note:
           type: string
           maxLength: 2000
           description: Public-safe reviewer note without credentials, cookies, student numbers, private contact data, or unpublished vulnerability details.
+      allOf:
+        - if:
+            properties:
+              artifact_format:
+                const: dis-campus-plugin/v1
+            required: [artifact_format]
+          then:
+            properties:
+              kind:
+                enum: [school-profile, campus-guide]
+        - if:
+            properties:
+              artifact_format:
+                const: dis-datapack/v1
+            required: [artifact_format]
+          then:
+            properties:
+              kind:
+                enum: [procedure-guide, opportunity-catalog, facility-catalog, indoor-graph, period-preset, pharmacy-catalog]
     ContentPackSubmissionReview:
       type: object
       additionalProperties: false
@@ -8636,7 +8687,7 @@ components:
     ContentPackSubmission:
       type: object
       additionalProperties: false
-      required: [submission_id, status, artifact_format, kind, school_id, pack_id, version, artifact_sha256, artifact_size_bytes, contribution_reference, submission_note, submitter_alias, created_at, updated_at, review]
+      required: [submission_id, status, artifact_format, kind, school_id, pack_id, version, artifact_sha256, artifact_size_bytes, contribution_reference, provenance, submission_note, submitter_alias, created_at, updated_at, review]
       properties:
         submission_id:
           type: string
@@ -8665,6 +8716,8 @@ components:
         contribution_reference:
           type: string
           format: uri
+        provenance:
+          $ref: '#/components/schemas/ContentPackSubmissionProvenance'
         submission_note:
           type:
             - string
@@ -8729,14 +8782,24 @@ components:
           type: string
           maxLength: 2000
           description: Required when action is REQUEST_CHANGES or REJECT; optional for APPROVE. Public-safe text only.
+      allOf:
+        - if:
+            properties:
+              action:
+                enum: [REQUEST_CHANGES, REJECT]
+            required: [action]
+          then:
+            required: [review_note]
     PublishContentPackRequest:
       type: object
       additionalProperties: false
-      required: [submission_id]
+      required: [submission_id, signature]
       properties:
         submission_id:
           type: string
           format: uuid
+        signature:
+          $ref: '#/components/schemas/ContentPackSignature'
         release_note:
           type: string
           maxLength: 1000
@@ -8752,6 +8815,14 @@ components:
           type: string
           maxLength: 1000
           description: Public-safe explanation shown to users; required when reason=OTHER and never includes private identities, credentials, or unmitigated exploit instructions.
+      allOf:
+        - if:
+            properties:
+              reason:
+                const: OTHER
+            required: [reason]
+          then:
+            required: [detail]
     ParcelListEnvelope:
       type: object
       required: [ok, code, request_id, data, meta]
