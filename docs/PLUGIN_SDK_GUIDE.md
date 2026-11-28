@@ -186,8 +186,8 @@ CT-06 contract-first planned 权限（内容包目录用户态/运营审核态�
 | `content_pack.read` | CT-06 planned 语义：读取同 school catalog 作用域内学校包/数据包元数据、版本、来源、生命周期与 detached signature facts；目录存在不代表学校验证 |
 | `content_pack.download` | CT-06 planned 语义：下载未下架版本的精确 artifact bytes；仍需摘要比对、签名验真、Schema/既有学校包验证与限速 |
 | `content_pack.submit` | CT-06 planned 语义：提交公开来源 artifact 与显式 provenance 供维护者审核；受理不代表发布、验证或校方认可 |
-| `content_pack.review` | CT-06 planned 语义：持该校显式 operations 授权审核提交队列并批准/要求修改/拒绝；artifact bytes 不经读取 API 再暴露 |
-| `content_pack.publish` | CT-06 planned 语义：发布已批准且维护者离线签名的不可变版本；签名信任根、摘要、Schema 与版本顺序仍强制复核 |
+| `content_pack.review` | CT-06 planned 语义：持该校显式 operations 授权审核提交队列并批准/要求修改/拒绝；artifact bytes 不经读取 API 再暴露；审核 principal 必须不同于提交 principal，自审以 `CONTENT_PACK_SUBMITTER_CANNOT_REVIEW` fail-closed |
+| `content_pack.publish` | CT-06 planned 语义：发布已批准且维护者离线签名的不可变版本；签名信任根、摘要、Schema 与版本顺序仍强制复核；publish 是独立运营授权，submit/review 不隐含 publish，部署不得依赖同一 principal 完成 submit+review+publish |
 | `content_pack.retire` | CT-06 planned 语义：独立的高危下架授权；只追加 retirement 元数据、拒绝新下载/安装且不删除历史 |
 
 CT-06 上述端点在契约中均为 `planned`；登记授权语义不表示 content-catalog 运行时已经存在。签名数据包可以是插件产物或独立内容包，但携带/安装数据包本身**不授予任何 `content_pack.*` 宿主权限**。这些条目是领域用户态/运营审核态权限，**没有新增任何插件可声明权限**；插件清单声明它们同样会被 `runtime_permission_unknown` 拒绝。

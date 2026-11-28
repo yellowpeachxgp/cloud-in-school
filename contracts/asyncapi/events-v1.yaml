@@ -822,6 +822,8 @@ components:
             type: string
             minLength: 2
             maxLength: 64
+            pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
+            description: Dot-free school catalog scope aligned with the content-pack OpenAPI schema; for dis-datapack/v1 it matches the artifact embedded schoolId.
           pack_id:
             type: string
             minLength: 3

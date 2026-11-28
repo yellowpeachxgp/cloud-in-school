@@ -186,11 +186,11 @@ permissions:
     default_granted: true
   - id: content_pack.review
     scope: operations_school_scope
-    description: Review content pack submissions in an explicit school-scoped maintainer queue and approve, request changes, or reject with audit evidence; approval never rewrites artifact provenance or implies school authorization.
+    description: Review content pack submissions in an explicit school-scoped maintainer queue and approve, request changes, or reject with audit evidence; approval never rewrites artifact provenance or implies school authorization. The authenticated reviewer principal must be distinct from the immutable submitter principal; self-review fails closed as CONTENT_PACK_SUBMITTER_CANNOT_REVIEW even when this permission is granted.
     default_granted: false
   - id: content_pack.publish
     scope: operations_school_scope
-    description: Publish approved maintainer-signed immutable content pack versions; requires explicit operations authorization in the matching school scope and never implies school verification.
+    description: Publish approved maintainer-signed immutable content pack versions; requires explicit operations authorization in the matching school scope and never implies school verification. Publish is an independent operations duty, never implied by content_pack.submit or content_pack.review; the publisher principal is authenticated and audit-recorded, and operations deployment must not rely on one principal to complete submit+review+publish.
     default_granted: false
   - id: content_pack.retire
     scope: operations_school_scope

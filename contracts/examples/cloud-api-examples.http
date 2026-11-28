@@ -756,12 +756,13 @@ Accept: application/json
 
 ### 83. CT-06 List Content Pack Submission Review Queue (planned)
 GET http://127.0.0.1:4100/api/v1/admin/content-pack-submissions?school_id=haut&status=PENDING_REVIEW&kind=procedure-guide&limit=20
-Authorization: Bearer <operations_admin_access_token>
+Authorization: Bearer <operations_reviewer_access_token>
 Accept: application/json
 
 ### 84. CT-06 Approve Content Pack Submission After Review (planned)
+# Runtime truth: the reviewer is the authenticated principal and must differ from the immutable submitter principal; self-review fails with 403 CONTENT_PACK_SUBMITTER_CANNOT_REVIEW.
 POST http://127.0.0.1:4100/api/v1/admin/content-pack-submissions/12121212-1212-4212-8212-121212121212/review
-Authorization: Bearer <operations_admin_access_token>
+Authorization: Bearer <operations_reviewer_access_token>
 Content-Type: application/json
 Idempotency-Key: content_pack_review_demo_0001
 
@@ -772,8 +773,9 @@ Idempotency-Key: content_pack_review_demo_0001
 
 ### 85. CT-06 Publish Approved Maintainer-Signed Content Pack Version (planned)
 # Signature fields are shape examples only: a real maintainer must sign the exact artifact payload offline with a pinned trusted key before publishing.
+# Publish is an independent operations duty; content_pack.submit/review never imply content_pack.publish, and deployment must not rely on one principal to complete submit+review+publish.
 POST http://127.0.0.1:4100/api/v1/admin/content-packs
-Authorization: Bearer <operations_admin_access_token>
+Authorization: Bearer <operations_publisher_access_token>
 Content-Type: application/json
 Idempotency-Key: content_pack_publish_demo_0001
 
@@ -791,7 +793,7 @@ Idempotency-Key: content_pack_publish_demo_0001
 
 ### 86. CT-06 Retire Published Content Pack Version Without Rewriting History (planned)
 POST http://127.0.0.1:4100/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire
-Authorization: Bearer <operations_admin_access_token>
+Authorization: Bearer <operations_retirement_access_token>
 Content-Type: application/json
 Idempotency-Key: content_pack_retire_demo_0001
 

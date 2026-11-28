@@ -475,6 +475,11 @@ errors:
     retryable: false
     user_action: CHECK_CONTENT_PACK_SUBMISSION
     description: Content pack submission does not exist or is not visible to the authenticated caller or reviewer scope.
+  - code: CONTENT_PACK_SUBMITTER_CANNOT_REVIEW
+    http_status: 403
+    retryable: false
+    user_action: USE_DISTINCT_REVIEWER_PRINCIPAL
+    description: Authenticated reviewer principal is the immutable submitter principal; content pack self-review is forbidden even when the caller holds content_pack.review authorization.
   - code: CONTENT_PACK_REVIEW_INVALID
     http_status: 409
     retryable: false

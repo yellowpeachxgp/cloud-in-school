@@ -3224,9 +3224,7 @@ paths:
           in: query
           required: true
           schema:
-            type: string
-            minLength: 2
-            maxLength: 64
+            $ref: '#/components/schemas/ContentPackSchoolIdValue'
           description: School catalog isolation scope. The master-plan draft used camelCase schoolId; v1 uses the repository-wide snake_case query spelling school_id consistently.
         - name: kind
           in: query
@@ -3343,7 +3341,7 @@ paths:
         - bearerAuth: []
       summary: Download the exact signed artifact bytes for one non-retired content pack version
       description: |
-        Returns application/octet-stream artifact bytes. For dis-campus-plugin/v1 the artifact is the existing school-package zip; for dis-datapack/v1 it is the canonical JSON document. The detached signature is available from the metadata endpoint rather than being concatenated into this byte stream, preserving byte-for-byte digest semantics. The server must send X-Content-Pack-Artifact-Sha256 and clients must compare it with metadata before install. Retired versions fail with 410 CONTENT_PACK_VERSION_RETIRED so retirement cannot be bypassed by a cached link. Example 80.
+        Returns application/octet-stream artifact bytes. For dis-campus-plugin/v1 the artifact is the existing school-package zip; for dis-datapack/v1 it is the canonical JSON document. The detached signature is available from the metadata endpoint rather than being concatenated into this byte stream, preserving byte-for-byte digest semantics. The server must send X-Content-Pack-Artifact-Sha256 and clients must compare it with metadata before install. For dis-datapack/v1 clients must also treat the download as an exact-byte chain: parse the exact UTF-8 bytes and require bytes == RFC8785(parse(bytes)); semantically equivalent variants are rejected rather than canonicalized into acceptance. Retired versions fail with 410 CONTENT_PACK_VERSION_RETIRED so retirement cannot be bypassed by a cached link. Example 80.
       parameters:
         - $ref: '#/components/parameters/ContentPackIdParam'
         - $ref: '#/components/parameters/ContentPackVersionParam'
@@ -3399,7 +3397,7 @@ paths:
         - bearerAuth: []
       summary: Submit one signed-pack candidate artifact for maintainer review
       description: |
-        Accepts one complete artifact plus catalog provenance for review. The submitter supplies the unsigned dis-datapack/v1 canonical JSON document or the legacy school-package zip, its contribution reference, and explicit provenance. For dis-datapack/v1 the provenance must field-by-field duplicate the signature-covered embedded sources/verifiedAt/reviewBy/maintainers/verificationLevel metadata after the API snake_case mapping (an absent embedded verificationLevel counts as UNVERIFIED); for dis-campus-plugin/v1 it is maintainer-reviewed catalog metadata because the legacy manifest cannot carry those fields and is not represented as artifact-signed provenance. The server validates shape, artifact hash, size ceiling, format/kind compatibility, package id/school target consistency, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
+        Accepts one complete artifact plus catalog provenance for review. The submitter supplies the unsigned dis-datapack/v1 canonical JSON document or the legacy school-package zip, its contribution reference, and explicit provenance. For dis-datapack/v1 the provenance must field-by-field duplicate the signature-covered embedded sources/verifiedAt/reviewBy/maintainers/verificationLevel metadata after the API snake_case mapping (an absent embedded verificationLevel counts as UNVERIFIED); for dis-campus-plugin/v1 it is maintainer-reviewed catalog metadata because the legacy manifest cannot carry those fields and is not represented as artifact-signed provenance. The server validates shape, artifact hash, size ceiling, format/kind compatibility, package id/school target consistency, schema, provenance dates, HTTPS sources, and the absence of executable payload types before accepting. For dis-datapack/v1 this consistency check is exact: school_id is dot-free, the first dot-separated pack_id segment equals the complete school_id, and both match the artifact embedded schoolId. For dis-datapack/v1 it must additionally parse the exact submitted UTF-8 bytes and require bytes == RFC8785(parse(bytes)); semantic-equivalent formatting, key-order, string-escape, or number variants are rejected instead of being normalized into acceptance. Submission acceptance is not publication, not verification, and not evidence of school approval. Replaying the same Idempotency-Key returns the original submission. Artifact bytes are stored only for review/publish and are never exposed through the submission read API. Example 81.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
@@ -3487,9 +3485,7 @@ paths:
           in: query
           required: true
           schema:
-            type: string
-            minLength: 2
-            maxLength: 64
+            $ref: '#/components/schemas/ContentPackSchoolIdValue'
           description: School catalog isolation scope. The master-plan draft used camelCase schoolId; v1 uses the repository-wide snake_case query spelling school_id consistently.
         - name: status
           in: query
@@ -3523,14 +3519,14 @@ paths:
       x-dis-api-version: v1
       x-dis-compatibility: Contract-first planned CT-06 content catalog surface. It is runtime-inert until the implementation PR atomically wires the route and flips this operation to active.
       x-dis-permissions: [content_pack.review]
-      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_REVIEW_INVALID, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
+      x-dis-error-codes: [BAD_REQUEST, CLOUD_AUTH_REQUIRED, SCHOOL_SCOPE_MISMATCH, CONTENT_PACK_SUBMISSION_NOT_FOUND, CONTENT_PACK_SUBMITTER_CANNOT_REVIEW, CONTENT_PACK_REVIEW_INVALID, CONTENT_PACK_PERMISSION_DENIED, REQUEST_DUPLICATE, STORAGE_PERSISTENCE_FAILED, STORAGE_COMMIT_UNKNOWN]
       x-dis-idempotency: required
       tags: [content-packs, admin]
       security:
         - bearerAuth: []
       summary: Approve, request changes on, or reject one content pack submission
       description: |
-        Applies exactly one review decision while status=PENDING_REVIEW. APPROVE means the artifact may be published once after the maintainer signing step; it does not itself create a catalog version and does not imply school verification. REQUEST_CHANGES and REJECT require a public-safe review_note. APPROVED, CHANGES_REQUESTED, REJECTED, and PUBLISHED submissions cannot be reviewed again; a corrected artifact requires a new immutable submission rather than rewriting this one. The decision is written to the tamper-evident audit trail; the response exposes only pseudonymous aliases. Example 84.
+        Applies exactly one review decision while status=PENDING_REVIEW. The reviewer principal is derived from the authenticated session and compared with the immutable submitter principal server-side; request-body aliases never redefine either identity. If they are the same principal, the server must reject the attempt with 403 CONTENT_PACK_SUBMITTER_CANNOT_REVIEW before applying any decision, even when that principal holds content_pack.review. This hard submitter≠reviewer separation follows the wallet/refund dual-control precedent and prevents self-submission from becoming self-approval. APPROVE means the artifact may be published once after the maintainer signing step; it does not itself create a catalog version and does not imply school verification. REQUEST_CHANGES and REJECT require a public-safe review_note. APPROVED, CHANGES_REQUESTED, REJECTED, and PUBLISHED submissions cannot be reviewed again; a corrected artifact requires a new immutable submission rather than rewriting this one. The decision is written to the tamper-evident audit trail; the response exposes only pseudonymous aliases. Example 84.
       parameters:
         - $ref: '#/components/parameters/ContentPackSubmissionIdParam'
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -3574,7 +3570,7 @@ paths:
         - bearerAuth: []
       summary: Publish one approved and maintainer-signed content pack submission
       description: |
-        Publishes exactly one immutable version derived from an APPROVED submission. The publisher obtains the identical artifact bytes through the public contribution reference or its own review workspace, signs them offline, and supplies the detached Ed25519 signature in this request; the API never re-serves submission artifact bytes. The signature scheme must match the artifact format: the existing dis-campus-plugin/v1 manifest+files payload or the CT-06 dis-datapack/v1 canonical JSON payload. The server revalidates schema, format/kind compatibility, provenance, review state, trust-root eligibility, artifact digest, signature payload, size ceiling, and package version ordering. Publishing the same pack_id/version with different bytes or metadata is CONTENT_PACK_VERSION_CONFLICT; replays require the same Idempotency-Key. On first durable commit the submission atomically becomes PUBLISHED and exactly one content-pack.published event is emitted. Example 85.
+        Publishes exactly one immutable version derived from an APPROVED submission. Publication is an independent operations duty, not a continuation of submission or review: content_pack.submit and content_pack.review never imply content_pack.publish. The publisher principal is derived from the authenticated session, never from request body; the server audits submitter, approving reviewer, and publisher as separate facts. Following the wallet/refund dual-control precedent, operations deployment must grant publish independently and must not rely on one principal to complete submit+review+publish; a caller without the independent publish grant fails with CONTENT_PACK_PERMISSION_DENIED. The publisher obtains the identical artifact bytes through the public contribution reference or its own review workspace, signs them offline, and supplies the detached Ed25519 signature in this request; the API never re-serves submission artifact bytes. The signature scheme must match the artifact format: the existing dis-campus-plugin/v1 manifest+files payload or the CT-06 dis-datapack/v1 canonical JSON payload. The server revalidates schema, exact-byte canonicality for dis-datapack/v1, format/kind compatibility, provenance, review state, trust-root eligibility, artifact digest, signature payload, size ceiling, and package version ordering. Publishing the same pack_id/version with different bytes or metadata is CONTENT_PACK_VERSION_CONFLICT; replays require the same Idempotency-Key. On first durable commit the submission atomically becomes PUBLISHED and exactly one content-pack.published event is emitted. Example 85.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
@@ -8316,7 +8312,7 @@ components:
     ContentPackArtifactFormat:
       type: string
       enum: [dis-campus-plugin/v1, dis-datapack/v1]
-      description: Signed artifact family. For CT-06 transport, dis-campus-plugin/v1 is a ZIP containing root manifest.json plus exactly the payload files declared by the legacy manifest under the existing profile/, assets/, or rules/ path policy; the detached signature is never a ZIP entry. Implementations reject extra, duplicate, encrypted, zip-slip, absolute, backslash, NUL, ZIP64, or multi-disk entries and enforce the legacy 512-entry, 4 MiB-per-file, and 16 MiB-uncompressed-total ceilings. dis-datapack/v1 is the canonical JSON data pack format whose schema lives at contracts/schemas/dis-datapack-v1.schema.json.
+      description: Signed artifact family. For CT-06 transport, dis-campus-plugin/v1 is a ZIP containing root manifest.json plus exactly the payload files declared by the legacy manifest under the existing profile/, assets/, or rules/ path policy; the detached signature is never a ZIP entry. Implementations reject extra, duplicate, encrypted, zip-slip, absolute, backslash, NUL, ZIP64, or multi-disk entries and enforce the legacy 512-entry, 4 MiB-per-file, and 16 MiB-uncompressed-total ceilings. dis-datapack/v1 is the canonical JSON data pack format whose schema lives at contracts/schemas/dis-datapack-v1.schema.json. Exact-byte canonicality is mandatory for dis-datapack/v1: implementations must parse the exact UTF-8 artifact bytes and require bytes == RFC8785(parse(bytes)) before acceptance, so semantically equivalent whitespace, key-order, string-escape, or number variants are rejected rather than normalized into acceptance. Android's existing Json.canonical BigDecimal normalization is not RFC 8785/JCS and must not be reused for this datapack canonicalizer.
     ContentPackKind:
       type: string
       enum: [school-profile, campus-guide, procedure-guide, opportunity-catalog, facility-catalog, indoor-graph, period-preset, pharmacy-catalog]
@@ -8337,12 +8333,18 @@ components:
     ContentPackRetireReason:
       type: string
       enum: [INCORRECT_DATA, OUTDATED, SECURITY, LICENSE, MAINTAINER_REQUEST, OTHER]
+    ContentPackSchoolIdValue:
+      type: string
+      minLength: 2
+      maxLength: 64
+      pattern: ^[a-z0-9][a-z0-9_-]{1,63}$
+      description: Lowercase school catalog isolation scope. Dots are forbidden, matching the PluginSchoolId/Android SchoolId direction, so a pack_id first dot-separated segment can unambiguously equal the complete school scope; for dis-datapack/v1 it must also match the artifact embedded schoolId.
     ContentPackIdValue:
       type: string
       minLength: 3
       maxLength: 128
       pattern: ^[a-z0-9][a-z0-9._-]{2,127}$
-      description: Stable package identifier, normally <schoolId>.<topic>; it contains no slash and must be percent-encoded when used in one path segment.
+      description: Stable package identifier, normally <schoolId>.<topic>; it contains no slash and must be percent-encoded when used in one path segment. For dis-datapack/v1 the first dot-separated segment must equal the complete no-dot school_id; legacy dis-campus-plugin/v1 keeps its existing package-id compatibility rules.
     ContentPackVersionValue:
       type: string
       pattern: ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$
@@ -8375,7 +8377,7 @@ components:
         scheme:
           type: string
           enum: [DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1, DIS_DATAPACK_CANONICAL_JSON_SHA256_V1]
-          description: DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1 is the existing school-package payload (format line, canonical manifest digest, files digest). DIS_DATAPACK_CANONICAL_JSON_SHA256_V1 signs UTF-8 text dis-datapack/v1 + LF + lowercase SHA-256 of the RFC-8785-canonical JSON document + LF. Implementations must not invent a third interpretation.
+          description: DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1 is the existing school-package payload (format line, canonical manifest digest, files digest). DIS_DATAPACK_CANONICAL_JSON_SHA256_V1 signs UTF-8 text dis-datapack/v1 + LF + lowercase SHA-256 of the RFC-8785-canonical JSON document + LF. Because exact-byte canonicality is mandatory for dis-datapack/v1, that canonical digest must be the SHA-256 of the exact artifact bytes; semantic equivalence is not sufficient. Implementations must not invent a third interpretation.
         public_key_fingerprint:
           type: string
           pattern: ^[0-9a-f]{64}$
@@ -8396,9 +8398,7 @@ components:
         pack_id:
           $ref: '#/components/schemas/ContentPackIdValue'
         school_id:
-          type: string
-          minLength: 2
-          maxLength: 64
+          $ref: '#/components/schemas/ContentPackSchoolIdValue'
         kind:
           $ref: '#/components/schemas/ContentPackKind'
         artifact_format:
@@ -8432,9 +8432,7 @@ components:
         pack_id:
           $ref: '#/components/schemas/ContentPackIdValue'
         school_id:
-          type: string
-          minLength: 2
-          maxLength: 64
+          $ref: '#/components/schemas/ContentPackSchoolIdValue'
         kind:
           $ref: '#/components/schemas/ContentPackKind'
         artifact_format:
@@ -8622,9 +8620,7 @@ components:
         kind:
           $ref: '#/components/schemas/ContentPackKind'
         school_id:
-          type: string
-          minLength: 2
-          maxLength: 64
+          $ref: '#/components/schemas/ContentPackSchoolIdValue'
         pack_id:
           $ref: '#/components/schemas/ContentPackIdValue'
         version:
@@ -8705,9 +8701,7 @@ components:
         kind:
           $ref: '#/components/schemas/ContentPackKind'
         school_id:
-          type: string
-          minLength: 2
-          maxLength: 64
+          $ref: '#/components/schemas/ContentPackSchoolIdValue'
         pack_id:
           $ref: '#/components/schemas/ContentPackIdValue'
         version:
