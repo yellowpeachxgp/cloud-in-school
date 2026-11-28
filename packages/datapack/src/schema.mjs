@@ -24,7 +24,7 @@ const VERSION_PATTERN = /^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9
 const MAINTAINER_PATTERN = /^[a-z0-9-]+:[^\s]+$/;
 const ITEM_ID_PATTERN = /^[a-z0-9][a-z0-9._/-]{0,119}$/;
 const DATE_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
-const DATE_TIME_PATTERN = /^([0-9]{4}-[0-9]{2}-[0-9]{2})[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$/;
+const DATE_TIME_PATTERN = /^([0-9]{4}-[0-9]{2}-[0-9]{2})[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$/;
 const TIME_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 
 function fail(path, message) {
@@ -212,8 +212,14 @@ function isValidIpv6Literal(value) {
   const left = parseSide(value.slice(0, firstCompression));
   const right = parseSide(value.slice(firstCompression + 2));
   if (left === null || right === null) return false;
-  const groups = ipv6PieceGroupCount(left) + ipv6PieceGroupCount(right);
-  return groups >= 0 && groups < 8;
+  // An embedded IPv4 tail is only legal as the final 32 bits of the whole address.
+  // Counting it on the left of "::" would let 192.0.2.1:: pass even though the
+  // compressed zeroes, not the IPv4 tail, occupy the end of the address.
+  if (left.some((piece) => piece.includes("."))) return false;
+  const leftGroups = ipv6PieceGroupCount(left);
+  const rightGroups = ipv6PieceGroupCount(right);
+  if (leftGroups < 0 || rightGroups < 0) return false;
+  return leftGroups + rightGroups < 8;
 }
 
 /**
@@ -274,6 +280,9 @@ function validateHttpsAuthorityAndBracketPlacement(value, path) {
 function expectHttpsUri(value, path) {
   expectString(value, path, { pattern: /^https:\/\// });
   if (!isRfc3986UriCharactersValid(value)) fail(path, "must be an RFC 3986 URI without raw non-ASCII/control characters or invalid percent escapes");
+  // RFC 3986 uses the first # as the fragment delimiter; the fragment grammar
+  // itself does not admit another raw #, so nested fragment text must be encoded.
+  if (value.indexOf("#") !== value.lastIndexOf("#")) fail(path, "must percent-encode additional # characters in a URI fragment");
   validateHttpsAuthorityAndBracketPlacement(value, path);
   return value;
 }

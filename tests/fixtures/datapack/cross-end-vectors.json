@@ -29,10 +29,10 @@
       "valid": true
     },
     {
-      "name": "datetime-fraction-10-rejected",
+      "name": "datetime-fraction-10-accepted",
       "target": "opportunity.deadlineAt",
       "value": "2027-05-20T17:00:00.1234567891Z",
-      "valid": false
+      "valid": true
     },
     {
       "name": "datetime-empty-fraction-rejected",
@@ -159,6 +159,60 @@
       "target": "source.url",
       "value": "https://[v1.fe80::1]/apply",
       "valid": false
+    },
+    {
+      "name": "datetime-fraction-40-accepted",
+      "target": "opportunity.deadlineAt",
+      "value": "2027-05-20T17:00:00.1234567890123456789012345678901234567890Z",
+      "valid": true
+    },
+    {
+      "name": "fragment-single-delimiter-accepted",
+      "target": "source.url",
+      "value": "https://example.org/files#section-1",
+      "valid": true
+    },
+    {
+      "name": "fragment-repeated-delimiter-rejected",
+      "target": "source.url",
+      "value": "https://example.org/files#one#two",
+      "valid": false
+    },
+    {
+      "name": "fragment-encoded-delimiter-accepted",
+      "target": "source.url",
+      "value": "https://example.org/files#one%23two",
+      "valid": true
+    },
+    {
+      "name": "ipv6-invalid-left-group-cannot-cancel-rejected",
+      "target": "source.url",
+      "value": "https://[abcde::1]/apply",
+      "valid": false
+    },
+    {
+      "name": "ipv6-invalid-right-group-cannot-cancel-rejected",
+      "target": "source.url",
+      "value": "https://[1::abcde]/apply",
+      "valid": false
+    },
+    {
+      "name": "ipv6-ipv4-before-compression-rejected",
+      "target": "source.url",
+      "value": "https://[192.0.2.1::]/apply",
+      "valid": false
+    },
+    {
+      "name": "ipv6-ipv4-before-compression-tail-rejected",
+      "target": "source.url",
+      "value": "https://[192.0.2.1::1]/apply",
+      "valid": false
+    },
+    {
+      "name": "ipv6-ipv4-final-tail-accepted",
+      "target": "source.url",
+      "value": "https://[::ffff:192.0.2.1]/apply",
+      "valid": true
     }
   ]
 }

@@ -291,7 +291,7 @@ test("W5-01 signature verification rejects semantic tampering wrong payload hash
 });
 
 const CROSS_END_VECTOR_PATH = "tests/fixtures/datapack/cross-end-vectors.json";
-const CROSS_END_VECTOR_SHA256 = "e9039bb104209ac5cd85eabffd191196679bd45b9e5ad397d3d7ec988f386824";
+const CROSS_END_VECTOR_SHA256 = "025638e35c4f3671db88783124348b31ac8a6ffe26323843beba101b0d2514f5";
 
 function crossEndVectors() {
   const bytes = fs.readFileSync(CROSS_END_VECTOR_PATH);
