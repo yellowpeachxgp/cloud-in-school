@@ -3,7 +3,7 @@ info:
   title: Day in School Campus Cloud Event & Outbox Contracts
   version: 1.0.0
   description: |
-    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, repair workflow events, and Campus Graph place status events.
+    Versioned AsyncAPI event envelopes for Transactional Outbox, Triple-Schedule Reservation Events (`PRECHECK` at T-30m, `FINAL_CHECK` at T-5m, `FIRE` at T), Finance Saga (`ORDER_CHARGE_REQUIRED`, `ORDER_REFUND_REQUIRED`), Parcel Sync Batch Streams, Security Audit Events, group collaboration events, append-only ledger events, dorm duty events, repair workflow events, Campus Graph place status events, reserved UGC moderation events, and content catalog publication events.
 defaultContentType: application/json
 channels:
   reservation.schedule.precheck:
@@ -156,6 +156,12 @@ channels:
       operationId: publishUgcPostModeratedEvent
       message:
         $ref: '#/components/messages/UgcPostModeratedEvent'
+  content-pack.published:
+    description: Immutable content pack version became visible in the school-scoped catalog after approval, maintainer signing, digest verification, and first durable publication commit. Consumers must treat event_key as idempotent. The payload carries catalog metadata only—never artifact bytes, credentials, raw submitter/reviewer/cloud identities, or proof of official school verification.
+    publish:
+      operationId: publishContentPackPublishedEvent
+      message:
+        $ref: '#/components/messages/ContentPackPublishedEvent'
 components:
   messages:
     GroupMemberEvent:
@@ -793,6 +799,87 @@ components:
             type: string
             format: uuid
             description: Tamper-evident security audit event id carrying the disposition evidence; the payload intentionally carries no operator identity, no reporter identity, and no user-generated content text.
+    ContentPackPublishedEvent:
+      name: ContentPackPublishedEvent
+      payload:
+        type: object
+        required: [event_id, event_key, event_type, occurred_at, school_id, pack_id, version, kind, artifact_format, artifact_sha256, artifact_size_bytes, signature_scheme, public_key_fingerprint, verification_level, verified_at, review_by, source_count, submission_id, published_by_alias, audit_event_id, download_path]
+        properties:
+          event_id:
+            type: string
+            format: uuid
+          event_key:
+            type: string
+            pattern: '^dis:content-pack:submission:[0-9a-fA-F-]{36}:published:v1$'
+            description: Exactly-once consumer dedupe key derived from the immutable approved submission; republication attempts replay the same key rather than creating a second logical event.
+          event_type:
+            type: string
+            enum: [published]
+          occurred_at:
+            type: string
+            format: date-time
+          school_id:
+            type: string
+            minLength: 2
+            maxLength: 64
+            pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
+            description: Dot-free school catalog scope aligned with the content-pack OpenAPI schema; for dis-datapack/v1 it matches the artifact embedded schoolId.
+          pack_id:
+            type: string
+            minLength: 3
+            maxLength: 128
+            pattern: '^[a-z0-9][a-z0-9._-]{2,127}$'
+          version:
+            type: string
+            pattern: '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$'
+          kind:
+            type: string
+            enum: [school-profile, campus-guide, procedure-guide, opportunity-catalog, facility-catalog, indoor-graph, period-preset, pharmacy-catalog]
+          artifact_format:
+            type: string
+            enum: [dis-campus-plugin/v1, dis-datapack/v1]
+          artifact_sha256:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+          artifact_size_bytes:
+            type: integer
+            minimum: 1
+            maximum: 16777216
+          signature_scheme:
+            type: string
+            enum: [DIS_CAMPUS_PLUGIN_MANIFEST_FILES_V1, DIS_DATAPACK_CANONICAL_JSON_SHA256_V1]
+          public_key_fingerprint:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+            description: SHA-256 fingerprint of the raw Ed25519 public key; consumers still compare it with a pinned publisher trust root rather than trusting event data alone.
+          verification_level:
+            type: string
+            enum: [UNVERIFIED, SOURCE_CONFIRMED, MOCK_TESTED, DEVICE_TESTED, SCHOOL_VERIFIED, DISTRIBUTION_READY]
+          verified_at:
+            type: string
+            format: date
+          review_by:
+            type: string
+            format: date
+          source_count:
+            type: integer
+            minimum: 1
+          submission_id:
+            type: string
+            format: uuid
+          published_by_alias:
+            type: string
+            minLength: 2
+            maxLength: 80
+            description: Pseudonymous operator alias; never a cloud user UUID, SSO username, student number, or real-name staff identifier.
+          audit_event_id:
+            type: string
+            format: uuid
+            description: Tamper-evident audit event id for the publication decision and signature verification evidence.
+          download_path:
+            type: string
+            pattern: '^/api/v1/content-packs/[^\s]+/versions/[^\s]+/download$'
+            description: Concrete percent-encoded relative download path for the immutable artifact; consumers must still compare digest and verify the detached signature before install.
     TripleScheduleEvent:
       name: TripleScheduleEvent
       payload:

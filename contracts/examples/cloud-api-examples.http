@@ -689,3 +689,115 @@ Content-Type: application/json
 POST http://127.0.0.1:4100/api/v1/media/uploads/dddddddd-dddd-4ddd-8ddd-dddddddddddd/complete
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
+
+### 76. CT-06 List Content Pack Catalog (planned)
+GET http://127.0.0.1:4100/api/v1/content-packs?school_id=haut&kind=procedure-guide&artifact_format=dis-datapack/v1&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 77. CT-06 List Content Pack Catalog Including Fully Retired Rows (planned)
+GET http://127.0.0.1:4100/api/v1/content-packs?school_id=haut&include_retired=true&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 78. CT-06 List Content Pack Versions (planned)
+GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions?include_retired=true&limit=20
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 79. CT-06 Get Content Pack Version Metadata And Detached Signature Facts (planned)
+GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions/2026.11.1
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 80. CT-06 Download Exact Non-Retired Content Pack Artifact Bytes (planned)
+# Runtime truth: response body is application/octet-stream; clients compare X-Content-Pack-Artifact-Sha256 with metadata before verification/install.
+GET http://127.0.0.1:4100/api/v1/content-packs/haut.procedures/versions/2026.11.1/download
+Authorization: Bearer <cloud_access_token>
+Accept: application/octet-stream
+
+### 81. CT-06 Submit Data Pack Candidate For Maintainer Review (planned)
+# artifact_base64 is the canonical UTF-8 dis-datapack/v1 example document; artifact_sha256 is its exact SHA-256. The example is UNVERIFIED public-source-shaped data, not real school data.
+POST http://127.0.0.1:4100/api/v1/content-pack-submissions
+Authorization: Bearer <cloud_access_token>
+Content-Type: application/json
+Idempotency-Key: content_pack_submission_demo_0001
+
+{
+  "artifact_format": "dis-datapack/v1",
+  "kind": "procedure-guide",
+  "school_id": "haut",
+  "pack_id": "haut.procedures",
+  "version": "2026.11.1",
+  "artifact_encoding": "base64",
+  "artifact_sha256": "2af33a7f0e4574c501a6cb0513e68e191fd9757e2efb325d584d2d9daffcbca5",
+  "artifact_base64": "eyJmb3JtYXQiOiJkaXMtZGF0YXBhY2svdjEiLCJpdGVtcyI6W3siY29udGFjdHMiOlt7ImtpbmQiOiJ3ZWJzaXRlIiwibGFiZWwiOiLlhazlvIDmnaXmupAiLCJ2YWx1ZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vaGF1dC9wcm9jZWR1cmUtZ3VpZGUifV0sImRlcGVuZHNPbiI6W10sImlkIjoic3R1ZGVudC1jZXJ0aWZpY2F0ZSIsIm1hdGVyaWFscyI6W3sibmFtZSI6IuWtpueUn+ivgeaIluagoeWbreWNoSIsIm5vdGUiOm51bGwsInJlcXVpcmVkIjp0cnVlLCJ2YWxpZERheXMiOm51bGx9XSwic3RlcHMiOlt7ImVzdGltYXRlZE1pbnV0ZXMiOjE1LCJpZCI6InByZXBhcmUiLCJpbnN0cnVjdGlvbiI6IuaQuuW4puWtpueUn+ivgeaIluagoeWbreWNoe+8jOWJjeW+gOWFrOW8gOadpea6kOagh+azqOeahOWKnueQhueql+WPo+OAgiIsInBsYWNlUmVmIjoiaGF1dC9saWFuaHVhamllL2J1aWxkaW5nL2FkbWluaXN0cmF0aW9uIiwidGl0bGUiOiLlh4blpIfmnZDmlpkifV0sInN1bW1hcnkiOiLnpLrkvovmtYHnqIvvvJvku4XmvJTnpLrlpZHnuqblvaLnirbvvIzkuI3mmK/nnJ/lrp7lrabmoKHmlbDmja4iLCJ0aXRsZSI6IuWcqOivu+ivgeaYjuWKnueQhiJ9XSwia2luZCI6InByb2NlZHVyZS1ndWlkZSIsIm1haW50YWluZXJzIjpbImdpdGh1YjpleGFtcGxlLW1haW50YWluZXIiXSwicGFja0lkIjoiaGF1dC5wcm9jZWR1cmVzIiwicmV2aWV3QnkiOiIyMDI3LTA1LTIwIiwic2Nob29sSWQiOiJoYXV0Iiwic291cmNlcyI6W3sicmV0cmlldmVkQXQiOiIyMDI2LTExLTIwIiwidGl0bGUiOiLlhazlvIDlip7kuovmtYHnqIvnpLrkvovmnaXmupAiLCJ1cmwiOiJodHRwczovL2V4YW1wbGUuY29tL2hhdXQvcHJvY2VkdXJlLWd1aWRlIn1dLCJ2ZXJpZmljYXRpb25MZXZlbCI6IlVOVkVSSUZJRUQiLCJ2ZXJpZmllZEF0IjoiMjAyNi0xMS0yMCIsInZlcnNpb24iOiIyMDI2LjExLjEifQ==",
+  "contribution_reference": "https://github.com/yellowpeachxgp/day-in-school/pull/0000",
+  "provenance": {
+    "sources": [
+      {
+        "url": "https://example.com/haut/procedure-guide",
+        "title": "公开办事流程示例来源",
+        "retrieved_at": "2026-11-20"
+      }
+    ],
+    "verified_at": "2026-11-20",
+    "review_by": "2027-05-20",
+    "maintainers": ["github:example-maintainer"],
+    "verification_level": "UNVERIFIED"
+  },
+  "submission_note": "示例提交流程；不是真实学校数据"
+}
+
+### 82. CT-06 Get My Content Pack Submission Status (planned)
+GET http://127.0.0.1:4100/api/v1/content-pack-submissions/12121212-1212-4212-8212-121212121212
+Authorization: Bearer <cloud_access_token>
+Accept: application/json
+
+### 83. CT-06 List Content Pack Submission Review Queue (planned)
+GET http://127.0.0.1:4100/api/v1/admin/content-pack-submissions?school_id=haut&status=PENDING_REVIEW&kind=procedure-guide&limit=20
+Authorization: Bearer <operations_reviewer_access_token>
+Accept: application/json
+
+### 84. CT-06 Approve Content Pack Submission After Review (planned)
+# Runtime truth: the reviewer is the authenticated principal and must differ from the immutable submitter principal; self-review fails with 403 CONTENT_PACK_SUBMITTER_CANNOT_REVIEW.
+POST http://127.0.0.1:4100/api/v1/admin/content-pack-submissions/12121212-1212-4212-8212-121212121212/review
+Authorization: Bearer <operations_reviewer_access_token>
+Content-Type: application/json
+Idempotency-Key: content_pack_review_demo_0001
+
+{
+  "action": "APPROVE",
+  "review_note": "公开来源、Schema、摘要与体积检查通过；不代表学校已验证"
+}
+
+### 85. CT-06 Publish Approved Maintainer-Signed Content Pack Version (planned)
+# Signature fields are shape examples only: a real maintainer must sign the exact artifact payload offline with a pinned trusted key before publishing.
+# Publish is an independent operations duty; content_pack.submit/review never imply content_pack.publish, and deployment must not rely on one principal to complete submit+review+publish.
+POST http://127.0.0.1:4100/api/v1/admin/content-packs
+Authorization: Bearer <operations_publisher_access_token>
+Content-Type: application/json
+Idempotency-Key: content_pack_publish_demo_0001
+
+{
+  "submission_id": "12121212-1212-4212-8212-121212121212",
+  "signature": {
+    "algorithm": "Ed25519",
+    "scheme": "DIS_DATAPACK_CANONICAL_JSON_SHA256_V1",
+    "public_key_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    "signed_payload_sha256": "0dfa9ac05936c4b6f51ba1dad6330fa161b54052659a6ef9e4d35b15821aa910"
+  },
+  "release_note": "首个公开来源办事流程数据包；仍标 UNVERIFIED"
+}
+
+### 86. CT-06 Retire Published Content Pack Version Without Rewriting History (planned)
+POST http://127.0.0.1:4100/api/v1/admin/content-packs/haut.procedures/versions/2026.11.1/retire
+Authorization: Bearer <operations_retirement_access_token>
+Content-Type: application/json
+Idempotency-Key: content_pack_retire_demo_0001
+
+{
+  "reason": "OUTDATED",
+  "detail": "新版 2026.11.2 已发布，旧版停止新安装和新下载"
+}

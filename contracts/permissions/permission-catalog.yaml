@@ -172,6 +172,30 @@ permissions:
     scope: operations_school_scope
     description: CT-05 reserved semantics only; would review the moderation queue and apply audited keep/hide/delete/reject dispositions with security audit evidence if ever enabled; never permits rewriting user content. The endpoint family currently returns uniform 501 FEATURE_NOT_ENABLED.
     default_granted: false
+  - id: content_pack.read
+    scope: user_school_scope
+    description: Read signed school-package and dis-datapack/v1 catalog metadata, versions, provenance, lifecycle status, and detached signature facts in the requested school catalog scope. Authentication is required, but catalog visibility is not proof of campus binding or official school verification.
+    default_granted: true
+  - id: content_pack.download
+    scope: user_school_scope
+    description: Download exact non-retired content package artifact bytes after reading digest and signature metadata; rate limits and retirement remain enforced.
+    default_granted: true
+  - id: content_pack.submit
+    scope: user_school_scope
+    description: Submit public-source school-package or data-pack artifacts for maintainer review; acceptance never implies publication, verification, or school approval.
+    default_granted: true
+  - id: content_pack.review
+    scope: operations_school_scope
+    description: Review content pack submissions in an explicit school-scoped maintainer queue and approve, request changes, or reject with audit evidence; approval never rewrites artifact provenance or implies school authorization. The authenticated reviewer principal must be distinct from the immutable submitter principal; self-review fails closed as CONTENT_PACK_SUBMITTER_CANNOT_REVIEW even when this permission is granted.
+    default_granted: false
+  - id: content_pack.publish
+    scope: operations_school_scope
+    description: Publish approved maintainer-signed immutable content pack versions; requires explicit operations authorization in the matching school scope and never implies school verification. Publish is an independent operations duty, never implied by content_pack.submit or content_pack.review; the publisher principal is authenticated and audit-recorded, and operations deployment must not rely on one principal to complete submit+review+publish.
+    default_granted: false
+  - id: content_pack.retire
+    scope: operations_school_scope
+    description: Retire published content pack versions without deleting history, causing new downloads/installs to fail closed while preserving audit metadata; requires explicit operations authorization in the matching school scope independent of publish authorization.
+    default_granted: false
 roles:
   - role: PLATFORM_OWNER
     allowed_actions: [read_overview, manage_schools, toggle_kill_switch, approve_school_auth, read_orders, reconcile_orders, approve_refund, read_audit]

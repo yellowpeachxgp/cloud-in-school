@@ -948,9 +948,22 @@ const EXPECTED_CT05_RESERVED_ROUTES = Object.freeze([
   { method: "POST", path: "/api/v1/media/uploads/{uploadId}/complete", operationId: "completeMediaUpload", auth: "public" }
 ]);
 
-const EXPECTED_CT_PLANNED_ROUTE_COUNT = 0;
+const EXPECTED_CT06_PLANNED_ROUTES = Object.freeze([
+  { method: "GET", path: "/api/v1/content-packs", operationId: "listContentPacks", auth: "bearer" },
+  { method: "GET", path: "/api/v1/content-packs/{packId}/versions", operationId: "listContentPackVersions", auth: "bearer" },
+  { method: "GET", path: "/api/v1/content-packs/{packId}/versions/{version}", operationId: "getContentPackVersion", auth: "bearer" },
+  { method: "GET", path: "/api/v1/content-packs/{packId}/versions/{version}/download", operationId: "downloadContentPackArtifact", auth: "bearer" },
+  { method: "POST", path: "/api/v1/content-pack-submissions", operationId: "createContentPackSubmission", auth: "bearer" },
+  { method: "GET", path: "/api/v1/content-pack-submissions/{submissionId}", operationId: "getContentPackSubmission", auth: "bearer" },
+  { method: "GET", path: "/api/v1/admin/content-pack-submissions", operationId: "listContentPackSubmissionReviews", auth: "bearer" },
+  { method: "POST", path: "/api/v1/admin/content-pack-submissions/{submissionId}/review", operationId: "reviewContentPackSubmission", auth: "bearer" },
+  { method: "POST", path: "/api/v1/admin/content-packs", operationId: "publishContentPackVersion", auth: "bearer" },
+  { method: "POST", path: "/api/v1/admin/content-packs/{packId}/versions/{version}/retire", operationId: "retireContentPackVersion", auth: "bearer" }
+]);
 
-test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime and CT-05 stays reserved; all contract-only routes are runtime-inert", () => {
+const EXPECTED_CT_PLANNED_ROUTE_COUNT = EXPECTED_CT06_PLANNED_ROUTES.length;
+
+test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime, CT-05 stays reserved, and CT-06 stays planned/runtime-inert", () => {
   const app = createCampusCloudApp({ requireAdminAccess: false });
   const coreRegistered = app.getRegisteredCoreRoutes();
   const inventoryPartitions = partitionByStatus(loadInventoryOperations());
@@ -962,8 +975,8 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime a
   const plannedOpenApi = openApiPartitions.planned;
   const reservedInventory = inventoryPartitions.reserved;
   const reservedOpenApi = openApiPartitions.reserved;
-  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "W4-03 flips CT-03 to active; endpoint-inventory.yaml must declare no planned operations");
-  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "W4-03 flips CT-03 to active; OpenAPI must declare no planned operations");
+  assert.equal(plannedInventory.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "endpoint-inventory.yaml must declare exactly the 10 CT-06 planned operations");
+  assert.equal(plannedOpenApi.length, EXPECTED_CT_PLANNED_ROUTE_COUNT, "OpenAPI must declare exactly the 10 CT-06 planned operations");
   assertUniqueOperationIds(coreRegistered, "active core runtime");
   assertUniqueOperationIds(inventoryPartitions.active, "active endpoint inventory");
   assertUniqueOperationIds(openApiPartitions.active, "active OpenAPI");
@@ -1001,6 +1014,14 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime a
     ct05Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
     EXPECTED_CT05_RESERVED_ROUTES,
     "CT-05 reserved inventory must exactly match the approved forum/private-messaging reserved route slice"
+  );
+
+  const ct06Inventory = plannedInventory.filter((entry) => entry.contractCard === "CT-06");
+  assert.equal(ct06Inventory.length, EXPECTED_CT06_PLANNED_ROUTES.length, "CT-06 planned inventory entries must be explicitly countable");
+  assert.deepEqual(
+    ct06Inventory.map(({ method, path, operationId, auth }) => ({ method, path, operationId, auth })),
+    EXPECTED_CT06_PLANNED_ROUTES,
+    "CT-06 planned inventory must exactly match the approved content-pack catalog/review route slice"
   );
 
   const coreByKey = byRouteKey(coreRegistered);
@@ -1076,7 +1097,7 @@ test("Contract Parity: CT-01/CT-02/CT-03/CT-04 contracts are active in runtime a
     assert.equal(planned.status, "planned", "planned inventory entry must carry machine-readable status: " + key);
     assert.ok(/^CT-[0-9]+$/.test(planned.contractCard || ""), "planned inventory entry must carry machine-readable contract_card: " + key);
     assert.ok(planned.auth, "planned inventory entry must carry auth mode: " + key);
-    assert.ok(!coreByKey.has(key), "planned contract-only endpoint must not silently exist in runtime before W4 implementation: " + key);
+    assert.ok(!coreByKey.has(key), "planned contract-only endpoint must not silently exist in runtime before its implementation card: " + key);
   }
   for (const planned of plannedOpenApi) {
     const key = routeKey(planned);
