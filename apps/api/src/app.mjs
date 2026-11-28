@@ -32,7 +32,7 @@ import {
 } from "../../../packages/plugin-sdk/src/index.mjs";
 import { RedisGatewayBuffer } from "../../../packages/redis-buffer/src/index.mjs";
 import { createCampusRouter } from "./router.mjs";
-import { createCoreRoutes, createExtensionRoutes } from "./routes/index.mjs";
+import { createCoreRoutes, createExtensionRoutes, createReservedRoutes } from "./routes/index.mjs";
 
 // Host-owned reference command implementations. They preserve the documented
 // built-in example behavior without evaluating the plugin artifacts themselves.
@@ -558,8 +558,9 @@ export function createCampusCloudApp(options = {}) {
 
   const coreRoutes = createCoreRoutes(ctx);
   const extensionRoutes = createExtensionRoutes(ctx);
+  const reservedRoutes = createReservedRoutes();
   ctx.getCoreRouteCount = () => coreRoutes.length;
-  const router = createCampusRouter(ctx, { coreRoutes, extensionRoutes });
+  const router = createCampusRouter(ctx, { coreRoutes, extensionRoutes, reservedRoutes });
 
   return {
     store,
@@ -585,6 +586,7 @@ export function createCampusCloudApp(options = {}) {
     getRegisteredRoutes: router.getRegisteredRoutes,
     getRegisteredCoreRoutes: router.getRegisteredCoreRoutes,
     getRegisteredExtensionRoutes: router.getRegisteredExtensionRoutes,
+    getRegisteredReservedRoutes: router.getRegisteredReservedRoutes,
     getRouteBehaviorFingerprint: router.getRouteBehaviorFingerprint,
     setDraining: router.setDraining,
     isDraining: router.isDraining,
