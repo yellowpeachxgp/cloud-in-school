@@ -246,7 +246,7 @@ Idempotency-Key: poll_confirm_demo_0001
 }
 
 
-### 27. CT-03 Append Shared Expense With Deterministic Split (planned)
+### 27. CT-03 Append Shared Expense With Deterministic Split (active)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -268,12 +268,12 @@ Idempotency-Key: ledger_entry_create_demo_0001
   }
 }
 
-### 28. CT-03 List Ledger Entries And Append-Only Corrections (planned)
+### 28. CT-03 List Ledger Entries And Append-Only Corrections (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries?limit=50
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 29. CT-03 Append Signed Ledger Correction (planned)
+### 29. CT-03 Append Signed Ledger Correction (active)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/entries/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/amend
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -294,12 +294,12 @@ Idempotency-Key: ledger_entry_amend_demo_0001
   }
 }
 
-### 30. CT-03 Get Member Balances And Balance Revision (planned)
+### 30. CT-03 Get Member Balances And Balance Revision (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/ledger/balances
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 31. CT-03 Propose Two-Party Settlement Record (planned)
+### 31. CT-03 Propose Two-Party Settlement Record (active)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -313,17 +313,17 @@ Idempotency-Key: settlement_create_demo_0001
   "note": "线下已自行结清，等待双方确认"
 }
 
-### 32. CT-03 List Settlement History (planned)
+### 32. CT-03 List Settlement History (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/settlements?status=PENDING_BOTH_CONFIRMATIONS&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 33. CT-03 Get Settlement Detail (planned)
+### 33. CT-03 Get Settlement Detail (active)
 GET http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 34. CT-03 Confirm One Side Of Settlement (planned)
+### 34. CT-03 Confirm One Side Of Settlement (active)
 POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/confirm
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -333,7 +333,7 @@ Idempotency-Key: settlement_confirm_demo_0001
   "basis_balance_revision": 3
 }
 
-### 35. CT-03 Cancel Unconfirmed Settlement (planned)
+### 35. CT-03 Cancel Unconfirmed Settlement (active)
 POST http://127.0.0.1:4100/api/v1/settlements/cccccccc-cccc-4ccc-8ccc-cccccccccccc/cancel
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -343,7 +343,7 @@ Idempotency-Key: settlement_cancel_demo_0001
   "reason": "账本更正后金额已变化，重新结算"
 }
 
-### 36. CT-03 Create Weekly Duty Rotation (planned)
+### 36. CT-03 Create Weekly Duty Rotation (active)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -364,17 +364,17 @@ Idempotency-Key: duty_rota_create_demo_0001
   "generate_weeks_ahead": 2
 }
 
-### 37. CT-03 List Duty Rotations (planned)
+### 37. CT-03 List Duty Rotations (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/rotas?status=ACTIVE&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 38. CT-03 Get Duty Rotation Detail (planned)
+### 38. CT-03 Get Duty Rotation Detail (active)
 GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 39. CT-03 Update Future Duty Rotation Schedule (planned)
+### 39. CT-03 Update Future Duty Rotation Schedule (active)
 PATCH http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -385,12 +385,12 @@ Idempotency-Key: duty_rota_patch_demo_0001
   "generate_weeks_ahead": 3
 }
 
-### 40. CT-03 List Duty Tasks (planned)
+### 40. CT-03 List Duty Tasks (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/duty-tasks?status=PENDING&from_date=2026-12-01&to_date=2026-12-14
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 41. CT-03 Mark Assigned Duty Task Completed (planned)
+### 41. CT-03 Mark Assigned Duty Task Completed (active)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/complete
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -400,7 +400,7 @@ Idempotency-Key: duty_task_complete_demo_0001
   "completion_note": "垃圾已倒，地面已扫"
 }
 
-### 42. CT-03 Confirm Another Member Duty Completion (planned)
+### 42. CT-03 Confirm Another Member Duty Completion (active)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/confirm
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -410,7 +410,7 @@ Idempotency-Key: duty_task_confirm_demo_0001
   "confirmation_note": "现场检查完成"
 }
 
-### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (planned)
+### 43. CT-03 Mark Pending Duty Task Skipped After Leave Disposition (active)
 POST http://127.0.0.1:4100/api/v1/duty-tasks/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/skip
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -420,7 +420,7 @@ Idempotency-Key: duty_task_skip_demo_0001
   "skip_reason": "请假且无人接受代值，宿舍管理员确认本次跳过"
 }
 
-### 44. CT-03 Request Duty Cover Or Swap (planned)
+### 44. CT-03 Request Duty Cover Or Swap (active)
 POST http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -433,17 +433,17 @@ Idempotency-Key: duty_swap_request_demo_0001
   "reason": "当晚有实验课"
 }
 
-### 45. CT-03 List Duty Swap Audit Records (planned)
+### 45. CT-03 List Duty Swap Audit Records (active)
 GET http://127.0.0.1:4100/api/v1/rotas/dddddddd-dddd-4ddd-8ddd-dddddddddddd/swaps?status=ACCEPTED&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 46. CT-03 Get Duty Swap Audit Record (planned)
+### 46. CT-03 Get Duty Swap Audit Record (active)
 GET http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 47. CT-03 Resolve Duty Swap Request (planned)
+### 47. CT-03 Resolve Duty Swap Request (active)
 POST http://127.0.0.1:4100/api/v1/duty-swaps/ffffffff-ffff-4fff-8fff-ffffffffffff/resolve
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -454,7 +454,7 @@ Idempotency-Key: duty_swap_resolve_demo_0001
   "resolution_note": "本次由我代值"
 }
 
-### 48. CT-03 Submit Dorm Repair Record (planned)
+### 48. CT-03 Submit Dorm Repair Record (active)
 POST http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -467,17 +467,17 @@ Idempotency-Key: repair_create_demo_0001
   "description": "夜间滴水，地面有积水。此记录仅用于宿舍协作，不代表已向校方正式报修。"
 }
 
-### 49. CT-03 List Repair Records (planned)
+### 49. CT-03 List Repair Records (active)
 GET http://127.0.0.1:4100/api/v1/groups/55555555-5555-4555-8555-555555555555/repairs?status=OPEN&limit=20
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 50. CT-03 Get Repair Detail (planned)
+### 50. CT-03 Get Repair Detail (active)
 GET http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Accept: application/json
 
-### 51. CT-03 Update Editable Repair Metadata (planned)
+### 51. CT-03 Update Editable Repair Metadata (active)
 PATCH http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -487,7 +487,7 @@ Idempotency-Key: repair_patch_demo_0001
   "description": "夜间滴水加快，已用盆接水。此记录仅用于宿舍协作，不代表校方受理状态。"
 }
 
-### 52. CT-03 Transition Repair Status (planned)
+### 52. CT-03 Transition Repair Status (active)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/status
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
@@ -499,7 +499,7 @@ Idempotency-Key: repair_status_demo_0001
   "note": "先检查是否能临时紧固"
 }
 
-### 53. CT-03 Submit One-Time Repair Review (planned)
+### 53. CT-03 Submit One-Time Repair Review (active)
 POST http://127.0.0.1:4100/api/v1/repairs/12121212-1212-4212-8212-121212121212/review
 Authorization: Bearer <cloud_access_token>
 Content-Type: application/json
