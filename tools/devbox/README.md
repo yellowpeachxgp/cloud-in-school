@@ -58,8 +58,8 @@ cis-clean --days 7
 | 门禁 | 当前行为 |
 |---|---|
 | `quick <模块> [...]` | 自动识别模块类型：纯 Kotlin JVM 模块执行 `<模块>:test`，Android 模块执行 `<模块>:testDebugUnitTest`；重复传入同一模块只保留一次 |
-| `android` | 显式枚举所有已注册模块：Android 模块 `<模块>:testDebugUnitTest`，纯 JVM 模块 `<模块>:test`；另执行 `:app:lintDebug :app:assembleDebug`，发现 Roborazzi 后追加 `verifyRoborazziDebug`，并动态执行 W0-07 提供的检查入口 |
-| `android-full` | `android` 内容加 release lint/assemble；Room 迁移测试由全量单元测试覆盖 |
+| `android` | 显式枚举所有已注册模块：Android 模块 `<模块>:testDebugUnitTest`，纯 JVM 模块 `<模块>:test`；另执行非限定 `lintDebug`（覆盖 app 与全部 Android 库模块，与托管 CI `gradlew lintDebug lintRelease` 一致）和 `:app:assembleDebug`，发现 Roborazzi 后追加 `verifyRoborazziDebug`，并动态执行 W0-07 提供的检查入口 |
+| `android-full` | `android` 内容加非限定 `lintRelease`（覆盖 app 与全部 Android 库模块）与 `:app:assembleRelease`；Room 迁移测试由全量单元测试覆盖 |
 | `cloud` | 有 `package-lock.json`/`npm-shrinkwrap.json` 时必须 `npm ci`；无 lockfile 且 `package.json` 所有依赖字段均为空时明确记录并跳过安装；有任何依赖却无 lockfile 时失败并要求补 lockfile。随后 `npm test && npm run contract:check`（AUTO-006 候选） |
 | `contracts` | 本仓 contract-ci + 与另一仓 `main` 的 `contracts/` 逐文件比对 |
 | `secrets` | 调用 INF-01 的 `tools/secret-scan`；未合入时明确返回缺失，不伪造通过 |
