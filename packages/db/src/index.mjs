@@ -860,11 +860,15 @@ export class CloudDatabaseStore {
     pricingMicropeach = DEFAULT_RESERVATION_PRICE_MICROPEACH,
     adminSsoSubjects = null,
     snapshotFs = fs,
-    onPersistStage = null
+    onPersistStage = null,
+    onSyncCiphertextSweepEvent = null,
+    syncCiphertextSweepRetryBaseMs = 500
   } = {}) {
     this.snapshotPath = snapshotPath;
     this.snapshotFs = snapshotFs;
     this.onPersistStage = onPersistStage;
+    this.onSyncCiphertextSweepEvent = onSyncCiphertextSweepEvent;
+    this.syncCiphertextSweepRetryBaseMs = Math.max(25, Number(syncCiphertextSweepRetryBaseMs) || 500);
     this.storageCommitUnknown = false;
     this.requireDurableSnapshot = Boolean(requireDurableSnapshot);
     this.pricingMicropeach = pricingMicropeach;
@@ -978,6 +982,30 @@ export class CloudDatabaseStore {
     this.syncCiphertextMemory = new Map(); // digest -> Buffer (ephemeral mode only)
     this.syncCiphertextDir = snapshotPath ? `${snapshotPath}.ciphertext` : null;
     this._syncCiphertextTmpSeq = 0;
+    // Directory entries of deleted sidecar files are durable only after the
+    // shard-directory fsync succeeds. If that fsync reports failure, the volatile
+    // name may already be gone; remembering the shard is the only way a retry can
+    // still flush the deletion instead of mistaking volatile absence for durable
+    // erasure. The counters are operator-visible health, never payload data.
+    this.syncCiphertextPendingDeleteFsync = new Set(); // shardDir -> deletion durability uncertain
+    this.syncCiphertextSweepMetrics = {
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      consecutive_failures: 0,
+      removed_total: 0,
+      last_removed: 0,
+      last_trigger: null,
+      last_success_at: null,
+      last_failure_at: null,
+      last_failure_code: null,
+      last_failure_message: null,
+      retry_pending: false,
+      retry_scheduled: false,
+      next_retry_delay_ms: null,
+      pending_delete_fsync_shards: 0
+    };
+    this._syncCiphertextSweepRetryTimer = null;
 
     // Notifications, Audit, Idempotency
     this.notifications = new Map(); // notificationId -> notification
@@ -1298,9 +1326,10 @@ export class CloudDatabaseStore {
       this._migrateLegacyInlineSyncCiphertext();
       this._verifySyncCiphertextReferencesDurable();
       try {
-        this.sweepSyncCiphertextOrphans(this);
+        this.sweepSyncCiphertextOrphans(this, { trigger: "startup" });
       } catch {
-        // best-effort startup reclamation; retried after the next successful publish
+        // The sweep itself has already emitted metrics/logs and scheduled retry;
+        // startup remains available while reclamation continues out-of-band.
       }
     } catch (err) {
       if (this.requireDurableSnapshot) {
@@ -1367,9 +1396,11 @@ export class CloudDatabaseStore {
         io.fsyncSync(fd);
       } finally { io.closeSync(fd); }
       io.renameSync(tmpPath, finalPath);
-      const dirFd = io.openSync(shardDir, "r");
-      try { io.fsyncSync(dirFd); }
-      finally { io.closeSync(dirFd); }
+      this._fsyncSyncCiphertextShardDir(shardDir);
+      // A successful shard directory fsync also makes any earlier deletion in
+      // the same directory durable, even when that deletion had been waiting
+      // for a sweep retry.
+      this.syncCiphertextPendingDeleteFsync?.delete(shardDir);
     } catch (err) {
       if (err instanceof ContractError) throw err;
       throw new ContractError(
@@ -1429,48 +1460,183 @@ export class CloudDatabaseStore {
     return digests;
   }
 
+  _fsyncSyncCiphertextShardDir(shardDir) {
+    const io = this.snapshotFs;
+    const fd = io.openSync(shardDir, "r");
+    try { io.fsyncSync(fd); }
+    finally { io.closeSync(fd); }
+  }
+
+  _scheduleSyncCiphertextSweepRetry() {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!this.syncCiphertextDir || !metrics) return 0;
+    if (this._syncCiphertextSweepRetryTimer) return metrics.next_retry_delay_ms || 0;
+    const exponent = Math.min(Math.max(metrics.consecutive_failures - 1, 0), 5);
+    const delayMs = Math.min(this.syncCiphertextSweepRetryBaseMs * (2 ** exponent), 30_000);
+    metrics.retry_scheduled = true;
+    metrics.next_retry_delay_ms = delayMs;
+    this._syncCiphertextSweepRetryTimer = setTimeout(() => {
+      this._syncCiphertextSweepRetryTimer = null;
+      try {
+        this.sweepSyncCiphertextOrphans(this, { trigger: "retry" });
+      } catch {
+        // The failure path has already emitted the structured event, updated
+        // metrics, and scheduled the next backoff retry; the timer callback must
+        // never turn that observable failure into an unhandled exception.
+      }
+    }, delayMs);
+    this._syncCiphertextSweepRetryTimer.unref?.();
+    return delayMs;
+  }
+
+  _recordSyncCiphertextSweepSuccess(trigger, removed) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!metrics) return;
+    if (this._syncCiphertextSweepRetryTimer) {
+      clearTimeout(this._syncCiphertextSweepRetryTimer);
+      this._syncCiphertextSweepRetryTimer = null;
+    }
+    metrics.successes += 1;
+    metrics.consecutive_failures = 0;
+    metrics.removed_total += removed;
+    metrics.last_removed = removed;
+    metrics.last_success_at = new Date().toISOString();
+    metrics.retry_pending = false;
+    metrics.retry_scheduled = false;
+    metrics.next_retry_delay_ms = null;
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+  }
+
+  _recordSyncCiphertextSweepFailure(err, trigger, removed) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (!metrics) return;
+    const nowIso = new Date().toISOString();
+    const message = String(err?.message || err || "unknown").slice(0, 240);
+    metrics.failures += 1;
+    metrics.consecutive_failures += 1;
+    metrics.last_removed = removed;
+    metrics.last_failure_at = nowIso;
+    metrics.last_failure_code = err?.code || "SYNC_CIPHERTEXT_SWEEP_FAILED";
+    metrics.last_failure_message = message;
+    metrics.retry_pending = true;
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+    const retryDelayMs = this._scheduleSyncCiphertextSweepRetry();
+    metrics.pending_delete_fsync_shards = this.syncCiphertextPendingDeleteFsync?.size || 0;
+    const event = {
+      service: "sync-ciphertext-sweep",
+      level: "error",
+      timestamp: nowIso,
+      trigger,
+      error_code: metrics.last_failure_code,
+      error_message: message,
+      removed_before_failure: removed,
+      pending_delete_fsync_shards: metrics.pending_delete_fsync_shards,
+      metrics: {
+        attempts: metrics.attempts,
+        successes: metrics.successes,
+        failures: metrics.failures,
+        consecutive_failures: metrics.consecutive_failures,
+        removed_total: metrics.removed_total
+      },
+      retry_pending: true,
+      retry_scheduled: retryDelayMs > 0,
+      retry_delay_ms: retryDelayMs || null
+    };
+    const sink = this.onSyncCiphertextSweepEvent;
+    if (typeof sink === "function") {
+      try {
+        sink({ ...event });
+        return;
+      } catch (sinkErr) {
+        event.event_sink_error = String(sinkErr?.message || sinkErr || "unknown").slice(0, 120);
+      }
+    }
+    console.error(JSON.stringify(event));
+  }
+
   // Reclaim ciphertext bytes no live UPSERT row references anymore — tombstoned,
-  // expired, purged, or orphaned by a rolled-back/crashed upload.  Deletion only
+  // expired, purged, or orphaned by a rolled-back/crashed upload. Deletion only
   // ever runs after the referencing-removal snapshot is already published (or at
-  // startup recovery), so a sweep can never strand a durable reference; leftover
-  // orphans are retried at the next publish or restart.
-  sweepSyncCiphertextOrphans(source = this) {
+  // startup recovery), so a sweep can never strand a durable reference. Every
+  // unlink is followed by a shard-directory fsync; failures are metered, emitted
+  // as structured logs, and retried instead of being silently swallowed.
+  sweepSyncCiphertextOrphans(source = this, { trigger = "manual" } = {}) {
+    const metrics = this.syncCiphertextSweepMetrics;
+    if (metrics) {
+      metrics.attempts += 1;
+      metrics.last_trigger = trigger;
+    }
     const referenced = this._syncCiphertextDigestReferences(source);
     let removed = 0;
-    if (!this.syncCiphertextDir) {
-      for (const digest of Array.from(this.syncCiphertextMemory.keys())) {
-        if (!referenced.has(digest)) {
-          this.syncCiphertextMemory.delete(digest);
-          removed += 1;
+    try {
+      if (!this.syncCiphertextDir) {
+        for (const digest of Array.from(this.syncCiphertextMemory.keys())) {
+          if (!referenced.has(digest)) {
+            this.syncCiphertextMemory.delete(digest);
+            removed += 1;
+          }
+        }
+        this._recordSyncCiphertextSweepSuccess(trigger, removed);
+        return removed;
+      }
+      const io = this.snapshotFs;
+      if (!io.existsSync(this.syncCiphertextDir)) {
+        this._recordSyncCiphertextSweepSuccess(trigger, removed);
+        return removed;
+      }
+
+      // A previous unlink may have succeeded only in the volatile directory
+      // view before its fsync failed. Flush those shards first even when the
+      // file is already invisible here; volatile absence is not durable erasure.
+      for (const shardDir of Array.from(this.syncCiphertextPendingDeleteFsync || [])) {
+        this._fsyncSyncCiphertextShardDir(shardDir);
+        this.syncCiphertextPendingDeleteFsync.delete(shardDir);
+      }
+
+      for (const shard of io.readdirSync(this.syncCiphertextDir)) {
+        if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+        const shardDir = path.join(this.syncCiphertextDir, shard);
+        // A shard read failure is a sweep failure and must surface through the
+        // outer failure path; skipping it would silently strand ciphertext.
+        const names = io.readdirSync(shardDir);
+        for (const name of names) {
+          const match = /^([0-9a-f]{64})\.bin$/.exec(name);
+          const isOrphanBlob = match && !referenced.has(match[1]);
+          const isTmpResidue = !match && name.includes(".tmp.");
+          if (!isOrphanBlob && !isTmpResidue) continue;
+          const filePath = path.join(shardDir, name);
+          let unlinked = false;
+          try {
+            io.unlinkSync(filePath);
+            unlinked = true;
+          } catch (err) {
+            if (err?.code !== "ENOENT") {
+              // An unlink error can leave the entry state unknown. Remember the
+              // shard for a directory-fsync retry instead of assuming either success
+              // or failure; the next scan also retries the unlink if it still exists.
+              this.syncCiphertextPendingDeleteFsync.add(shardDir);
+              throw err;
+            }
+            // ENOENT still needs the same directory durability barrier: another
+            // actor may have removed the volatile entry without making that removal
+            // power-loss durable.
+          }
+          try {
+            this._fsyncSyncCiphertextShardDir(shardDir);
+            this.syncCiphertextPendingDeleteFsync.delete(shardDir);
+          } catch (err) {
+            this.syncCiphertextPendingDeleteFsync.add(shardDir);
+            throw err;
+          }
+          if (unlinked) removed += 1;
         }
       }
+      this._recordSyncCiphertextSweepSuccess(trigger, removed);
       return removed;
+    } catch (err) {
+      this._recordSyncCiphertextSweepFailure(err, trigger, removed);
+      throw err;
     }
-    const io = this.snapshotFs;
-    if (!io.existsSync(this.syncCiphertextDir)) return 0;
-    for (const shard of io.readdirSync(this.syncCiphertextDir)) {
-      if (!/^[0-9a-f]{2}$/.test(shard)) continue;
-      const shardDir = path.join(this.syncCiphertextDir, shard);
-      let names = [];
-      try {
-        names = io.readdirSync(shardDir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        const match = /^([0-9a-f]{64})\.bin$/.exec(name);
-        const isOrphanBlob = match && !referenced.has(match[1]);
-        const isTmpResidue = !match && name.includes(".tmp.");
-        if (!isOrphanBlob && !isTmpResidue) continue;
-        try {
-          io.unlinkSync(path.join(shardDir, name));
-          removed += 1;
-        } catch (err) {
-          if (err?.code !== "ENOENT") throw err;
-        }
-      }
-    }
-    return removed;
   }
 
   // Load-time upgrade path: snapshots written before the sidecar split still
@@ -2364,9 +2530,10 @@ export class CloudDatabaseStore {
       // Best-effort — a sweep failure never invalidates the committed snapshot;
       // leftover orphans are retried after the next publish or at startup.
       try {
-        this.sweepSyncCiphertextOrphans(source);
+        this.sweepSyncCiphertextOrphans(source, { trigger: "post_publish" });
       } catch {
-        // orphan reclamation retries at the next publish or startup recovery
+        // The committed snapshot stays valid; the sweep failure is visible in
+        // metrics/logs and its backoff retry flushes pending delete fsyncs.
       }
       for (const p of source.reservationPlans.values()) {
         if (p?._stopPersistencePending) delete p._stopPersistencePending;

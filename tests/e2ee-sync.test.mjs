@@ -6,6 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createCampusCloudApp } from "../apps/api/src/app.mjs";
+import { SnapshotFs } from "./helpers/snapshot-fs.mjs";
 
 const BASE_NOW = Date.parse("2026-12-05T10:00:00.000Z");
 const HOUR = 60 * 60 * 1000;
@@ -1163,6 +1164,173 @@ test("W4-11 review regression: tombstone, account erasure, and orphan sweep phys
   const deleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: fixture.auth });
   assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
   assert.equal(listSidecarFiles(snapshotPath).length, 0, "account erasure must physically erase all sidecar ciphertext");
+});
+
+test("W4-11 crash regression: tombstone deletion fsyncs the shard so ciphertext cannot resurrect", async (t) => {
+  const io = new SnapshotFs();
+  const snapshotPath = "/sync-e2ee-tombstone-crash/state.json";
+  const app = createTestApp({
+    storeOptions: { snapshotPath, requireDurableSnapshot: true, snapshotFs: io }
+  });
+  t.after(() => {
+    clearTimeout(app.store._snapshotFlushTimer);
+    clearTimeout(app.store._syncCiphertextSweepRetryTimer);
+  });
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_crash_delete_user");
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId);
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+  const digest = cipherBlob().ciphertext_sha256;
+  const sidecarPath = snapshotPath + ".ciphertext/" + digest.slice(0, 2) + "/" + digest + ".bin";
+  assert.equal(io.existsSync(sidecarPath), true, "uploaded ciphertext starts durable in the fake filesystem");
+
+  const del = await deleteBlob(app, fixture, deviceId, blobId, vector(deviceId, 1), 2);
+  assert.equal(del.status, 200, JSON.stringify(del.body));
+  assert.equal(io.existsSync(sidecarPath), false, "post-publish sweep unlinks tombstoned ciphertext");
+
+  io.crash();
+  assert.equal(
+    io.existsSync(sidecarPath),
+    false,
+    "power loss after a completed delete must not resurrect the unlinked ciphertext directory entry"
+  );
+
+  const restarted = createTestApp({
+    storeOptions: { snapshotPath, requireDurableSnapshot: true, snapshotFs: io }
+  });
+  t.after(() => {
+    clearTimeout(restarted.store._snapshotFlushTimer);
+    clearTimeout(restarted.store._syncCiphertextSweepRetryTimer);
+  });
+  const key = fixture.user.id + ":" + blobId;
+  assert.equal(restarted.store.syncBlobs.get(key)?.change_kind, "TOMBSTONE");
+  assert.equal(restarted.store.syncBlobAntiResurrection.has(key), true);
+});
+
+test("W4-11 crash regression: account erasure fsyncs shard deletes so ciphertext cannot resurrect", async (t) => {
+  const io = new SnapshotFs();
+  const snapshotPath = "/sync-e2ee-erasure-crash/state.json";
+  const app = createTestApp({
+    storeOptions: { snapshotPath, requireDurableSnapshot: true, snapshotFs: io }
+  });
+  t.after(() => {
+    clearTimeout(app.store._snapshotFlushTimer);
+    clearTimeout(app.store._syncCiphertextSweepRetryTimer);
+  });
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_crash_erasure_user");
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId);
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+  const digest = cipherBlob().ciphertext_sha256;
+  const sidecarPath = snapshotPath + ".ciphertext/" + digest.slice(0, 2) + "/" + digest + ".bin";
+  assert.equal(io.existsSync(sidecarPath), true);
+
+  const deleted = await app.inject({ method: "POST", url: "/api/v1/me/data-delete", headers: fixture.auth });
+  assert.equal(deleted.status, 202, JSON.stringify(deleted.body));
+  assert.equal(io.existsSync(sidecarPath), false, "data-delete sweep unlinks erased ciphertext");
+
+  io.crash();
+  assert.equal(
+    io.existsSync(sidecarPath),
+    false,
+    "power loss after completed account erasure must not resurrect the ciphertext as an orphan"
+  );
+  const restarted = createTestApp({
+    storeOptions: { snapshotPath, requireDurableSnapshot: true, snapshotFs: io }
+  });
+  t.after(() => {
+    clearTimeout(restarted.store._snapshotFlushTimer);
+    clearTimeout(restarted.store._syncCiphertextSweepRetryTimer);
+  });
+  assert.equal(
+    Array.from(restarted.store.syncBlobs.values()).some((row) => row?.cloud_user_id === fixture.user.id),
+    false,
+    "account erasure metadata must stay deleted across the same power-loss boundary"
+  );
+});
+
+test("W4-11 review regression: sweep failure is logged, metered, and retried until delete durability is flushed", async (t) => {
+  const io = new SnapshotFs();
+  const sweepEvents = [];
+  const snapshotPath = "/sync-e2ee-sweep-failure/state.json";
+  const app = createTestApp({
+    storeOptions: {
+      snapshotPath,
+      requireDurableSnapshot: true,
+      snapshotFs: io,
+      onSyncCiphertextSweepEvent: (event) => sweepEvents.push(event),
+      syncCiphertextSweepRetryBaseMs: 60_000
+    }
+  });
+  t.after(() => {
+    clearTimeout(app.store._snapshotFlushTimer);
+    clearTimeout(app.store._syncCiphertextSweepRetryTimer);
+  });
+  const { fixture, deviceId } = await setupDeviceUser(app, "sync_sweep_visible_user");
+  const blobId = crypto.randomUUID();
+  const put = await putBlob(app, fixture, deviceId, blobId);
+  assert.equal(put.status, 201, JSON.stringify(put.body));
+  const digest = cipherBlob().ciphertext_sha256;
+  const shardDir = snapshotPath + ".ciphertext/" + digest.slice(0, 2);
+  const sidecarPath = shardDir + "/" + digest + ".bin";
+
+  const realFsync = io.fsyncSync.bind(io);
+  let failShardFsync = false;
+  io.fsyncSync = (fd) => {
+    const open = io.fds.get(fd);
+    if (failShardFsync && open && !open.inode && String(open.p).includes(".ciphertext/")) {
+      throw Object.assign(new Error("injected shard directory fsync failure"), { code: "EIO" });
+    }
+    return realFsync(fd);
+  };
+
+  failShardFsync = true;
+  const del = await deleteBlob(app, fixture, deviceId, blobId, vector(deviceId, 1), 2);
+  assert.equal(del.status, 200, JSON.stringify(del.body), "a post-publish sweep failure must not invalidate the durable tombstone commit");
+  const metricsAfterFailure = app.store.syncCiphertextSweepMetrics;
+  assert.equal(metricsAfterFailure.failures, 1, "sweep failure must increment operator-visible failure metrics");
+  assert.equal(metricsAfterFailure.retry_pending, true);
+  assert.equal(metricsAfterFailure.retry_scheduled, true);
+  assert.equal(metricsAfterFailure.pending_delete_fsync_shards, 1);
+  assert.equal(app.store.syncCiphertextPendingDeleteFsync.has(shardDir), true);
+  assert.equal(sweepEvents.length, 1, "sweep failure must emit one structured log event");
+  assert.equal(sweepEvents[0].service, "sync-ciphertext-sweep");
+  assert.equal(sweepEvents[0].level, "error");
+  assert.equal(sweepEvents[0].trigger, "post_publish");
+  assert.equal(sweepEvents[0].error_code, "EIO");
+  assert.equal(sweepEvents[0].retry_scheduled, true);
+  assert.equal(sweepEvents[0].retry_delay_ms, 60_000);
+  assert.equal(io.existsSync(sidecarPath), false, "unlink may already be volatile-visible even though durability is unknown");
+
+  // The retry path must not confuse volatile absence with durable erasure: the
+  // pending shard fsync is replayed first, then the power-loss barrier is proofed
+  // by crashing the fake filesystem.
+  failShardFsync = false;
+  clearTimeout(app.store._syncCiphertextSweepRetryTimer);
+  app.store._syncCiphertextSweepRetryTimer = null;
+  const successesBeforeRetry = metricsAfterFailure.successes;
+  const swept = app.store.sweepSyncCiphertextOrphans(app.store, { trigger: "manual_test_retry" });
+  assert.equal(swept, 0, "the file is already volatile-unlinked; retry owes the shard fsync rather than another unlink");
+  assert.equal(metricsAfterFailure.successes, successesBeforeRetry + 1);
+  assert.equal(metricsAfterFailure.retry_pending, false);
+  assert.equal(metricsAfterFailure.retry_scheduled, false);
+  assert.equal(metricsAfterFailure.pending_delete_fsync_shards, 0);
+  assert.equal(app.store.syncCiphertextPendingDeleteFsync.size, 0);
+
+  io.crash();
+  assert.equal(
+    io.existsSync(sidecarPath),
+    false,
+    "once the visible retry completes, power loss must not resurrect the erased ciphertext"
+  );
+  const restarted = createTestApp({
+    storeOptions: { snapshotPath, requireDurableSnapshot: true, snapshotFs: io }
+  });
+  t.after(() => {
+    clearTimeout(restarted.store._snapshotFlushTimer);
+    clearTimeout(restarted.store._syncCiphertextSweepRetryTimer);
+  });
+  assert.equal(restarted.store.syncBlobs.get(fixture.user.id + ":" + blobId)?.change_kind, "TOMBSTONE");
 });
 
 test("W4-11 review regression: missing or corrupted sidecar ciphertext fails closed", async (t) => {
