@@ -1,6 +1,6 @@
 # dis-datapack/v1 加载器与签名边界（W5-01）
 
-本实现对齐 CT-06fix2 分支中 `contracts/schemas/dis-datapack-v1.schema.json` 的当前形状；本卡**不修改、不复制、不覆盖** `contracts/**`。CT-06 合入前，运行时校验器是手工镜像；CT-06fix2 若改变形状，必须由契约线先改权威契约，再同步更新两仓实现。
+本实现对齐已合入 main 的 CT-06 `contracts/schemas/dis-datapack-v1.schema.json` 当前形状（schema SHA-256 `b0cf0e4bc46a960e2881deae95d92d71c63fb25ee0b08b71ecc1df2f12345fbe`）；本卡**不修改、不复制、不覆盖** `contracts/**`。运行时校验器是手工镜像并带契约形状回归测试；契约线后续若改变形状，必须先改权威契约，再同步更新两仓实现。
 
 ## 验收链
 

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import {
+  DATAPACK_KINDS,
+  DATAPACK_VERIFICATION_LEVELS,
   canonicalizeRfc8785,
   dataPackFreshness,
   dataPackSignaturePayload,
@@ -116,6 +118,37 @@ test("W5-01 valid fixture passes exact-byte decoding, schema validation, digest 
   assert.equal(Buffer.from(dataPackSignaturePayload(decoded.canonicalBytes)).toString("utf8"), "dis-datapack/v1\n" + FIXTURE_SHA256 + "\n");
   assert.equal(dataPackFreshness(decoded.pack, "2027-05-20"), "CURRENT");
   assert.equal(dataPackFreshness(decoded.pack, "2027-05-21"), "REVIEW_DUE");
+});
+
+
+test("W5-01 merged CT-06 schema keeps the mirrored root shape and fixed enum sets", () => {
+  const schema = JSON.parse(fs.readFileSync("contracts/schemas/dis-datapack-v1.schema.json", "utf8"));
+  assert.deepEqual(schema.required, [
+    "format",
+    "packId",
+    "schoolId",
+    "kind",
+    "version",
+    "sources",
+    "verifiedAt",
+    "reviewBy",
+    "maintainers",
+    "items"
+  ]);
+  assert.deepEqual([...DATAPACK_KINDS], schema.properties.kind.enum);
+  assert.deepEqual([...DATAPACK_VERIFICATION_LEVELS], schema.properties.verificationLevel.enum);
+  assert.match(schema.description, /bytes to equal RFC8785\(parse\(bytes\)\)/);
+  assert.match(schema.description, /dis-datapack\/v1, LF, lowercase SHA-256/);
+  for (const defName of [
+    "procedureGuideItem",
+    "opportunityCatalogItem",
+    "facilityCatalogItem",
+    "indoorGraphItem",
+    "periodPresetItem",
+    "pharmacyCatalogItem"
+  ]) {
+    assert.ok(schema.$defs[defName], defName);
+  }
 });
 
 test("W5-01 exact-byte chain rejects whitespace key-order escape and number variants", () => {
