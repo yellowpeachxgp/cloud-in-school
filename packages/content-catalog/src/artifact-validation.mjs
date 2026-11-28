@@ -136,6 +136,11 @@ function validateLegacyPayloadPath(path) {
   return path;
 }
 
+function catalogDisplayTitle(value) {
+  const chars = [...String(value || "content pack")];
+  return chars.length <= 120 ? chars.join("") : chars.slice(0, 120).join("");
+}
+
 function executableArtifactReason(path, bytes) {
   const lower = path.toLowerCase();
   const extension = lower.includes(".") ? lower.slice(lower.lastIndexOf(".")) : "";
@@ -354,7 +359,7 @@ export function unpackAndValidateLegacySchoolPackage(artifactBytes) {
     manifestDigest,
     filesDigest: manifest.filesDigest,
     entries,
-    title: manifest.id,
+    title: catalogDisplayTitle(manifest.id),
     minHostApi: manifest.minHostApi,
     minAppVersionCode: manifest.minAppVersionCode
   };
@@ -438,7 +443,7 @@ export function validateContentPackArtifact({
       artifactSha256: decoded.artifactSha256,
       artifactSizeBytes: bytes.length,
       decoded,
-      title: pack.items[0]?.title || pack.packId,
+      title: catalogDisplayTitle(pack.items[0]?.title || pack.packId),
       minHostApi: null,
       minAppVersionCode: null,
       verificationLevel: pack.verificationLevel || "UNVERIFIED"
@@ -464,7 +469,7 @@ export function validateContentPackArtifact({
     artifactSha256: sha256Hex(bytes),
     artifactSizeBytes: bytes.length,
     legacy,
-    title: manifest.id,
+    title: catalogDisplayTitle(manifest.id),
     minHostApi: manifest.minHostApi,
     minAppVersionCode: manifest.minAppVersionCode,
     verificationLevel: provenance?.verification_level || "UNVERIFIED"

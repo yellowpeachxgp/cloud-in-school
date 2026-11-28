@@ -448,11 +448,12 @@ export class ContentPackCatalogService {
     const version = requireString(body.version, "version", { error: submissionInvalid });
     if (!CONTENT_PACK_VERSION_RE.test(version)) throw submissionInvalid("version must be MAJOR.MINOR.PATCH[-prerelease]");
     if (body.artifact_encoding !== "base64") throw submissionInvalid("artifact_encoding must be base64");
-    const declaredDigest = requireString(body.artifact_sha256, "artifact_sha256", { min: 64, max: 64, trim: false, error: submissionInvalid }).toLowerCase();
+    const declaredDigest = requireString(body.artifact_sha256, "artifact_sha256", { min: 64, max: 64, trim: false, error: submissionInvalid });
     if (!SHA256_RE.test(declaredDigest)) throw submissionInvalid("artifact_sha256 must be lowercase sha256 hex");
     const encoded = requireString(body.artifact_base64, "artifact_base64", { min: 16, max: 23_000_000, trim: false, error: submissionInvalid });
     if (!STRICT_BASE64_RE.test(encoded) || encoded.length % 4 !== 0) throw submissionInvalid("artifact_base64 is not strict canonical base64");
     const bytes = Buffer.from(encoded, "base64");
+    if (bytes.toString("base64") !== encoded) throw submissionInvalid("artifact_base64 is not strict canonical base64");
     if (bytes.length < 1 || bytes.length > CONTENT_PACK_MAX_ARTIFACT_BYTES) {
       throw contentError("CONTENT_PACK_ARTIFACT_TOO_LARGE", "content package artifact exceeds the 16 MiB ceiling", {
         artifact_size_bytes: bytes.length,
@@ -869,6 +870,9 @@ export class ContentPackCatalogService {
       throw contentError("CONTENT_PACK_VERSION_CONFLICT", "immutable pack_id/version already exists; publish a new version instead of rewriting history");
     }
     const existingVersions = this._versionsForPack(submission.pack_id);
+    if (existingVersions.some((row) => row.school_id !== submission.school_id || row.kind !== submission.kind || row.artifact_format !== submission.artifact_format)) {
+      throw contentError("CONTENT_PACK_VERSION_CONFLICT", "pack_id namespace is immutable across school, kind, and artifact format");
+    }
     if (existingVersions.length && compareVersions(submission.version, existingVersions[0].version) <= 0) {
       throw contentError("CONTENT_PACK_VERSION_CONFLICT", "content pack versions must be published in strictly increasing MAJOR.MINOR.PATCH order");
     }
