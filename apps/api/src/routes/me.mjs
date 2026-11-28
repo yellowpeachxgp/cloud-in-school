@@ -265,11 +265,20 @@ export function createMeRoutes(ctx) {
       }
       c.withdrawn_at = new Date(nowMs).toISOString();
       const syncWithdrawal = syncE2ee?.handleConsentWithdrawn?.(auth.cloudUserId, c, nowMs) || null;
-      const cascade = store.haltAllUserPlansAndBindings(
-        auth.cloudUserId,
-        "CONSENT_WITHDRAWN",
-        nowMs
-      );
+      const e2eeOnlyConsent =
+        c.purpose === "E2EE_CLOUD_SYNC" ||
+        (Array.isArray(c.scope_list) && c.scope_list.length === 1 && c.scope_list[0] === "E2EE_CLOUD_SYNC");
+      // E2EE cloud sync is an independent user-scope consent.  Withdrawing it must
+      // fail-close sync ciphertext processing without revoking school credential
+      // escrow or reservation delegation, which are separate consent domains.
+      const cascade = e2eeOnlyConsent
+        ? { cancelledJobIds: [] }
+        : store.haltAllUserPlansAndBindings(
+            auth.cloudUserId,
+            "CONSENT_WITHDRAWN",
+            nowMs
+          );
+      if (e2eeOnlyConsent) store.flushSnapshotStrictSync?.();
       return {
         status: 200,
         code: "CONSENT_WITHDRAWN_OK",

@@ -485,6 +485,20 @@ test("W4-11 sync consent lifecycle: withdrawal disables blobs, cursorless reauth
   const firstPage = await listChanges(app, fixture, deviceId, "?limit=1");
   assert.equal(firstPage.status, 200);
   const oldCursor = firstPage.body.meta.next_cursor;
+  const schoolBinding = {
+    id: crypto.randomUUID(),
+    cloud_user_id: fixture.user.id,
+    school_id: "haut",
+    student_no: "2026990101",
+    status: "DELEGATED_ACTIVE",
+    credential_ref: null,
+    consent_id: null,
+    auth_version: 1,
+    created_at: new Date(BASE_NOW).toISOString(),
+    revoked_at: null
+  };
+  app.store.schoolBindings.set(schoolBinding.id, schoolBinding);
+  app.store.indexUserScoped?.("schoolBindings", schoolBinding.id, fixture.user.id);
 
   const withdrawn = await app.inject({
     method: "DELETE",
@@ -495,6 +509,8 @@ test("W4-11 sync consent lifecycle: withdrawal disables blobs, cursorless reauth
   assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
   assert.ok(withdrawn.body.data.sync_withdrawal, "withdrawal response must expose the sync retention lifecycle");
   assert.equal(withdrawn.body.data.sync_withdrawal.retention_expires_at, new Date(BASE_NOW + HOUR + 30 * DAY).toISOString());
+  assert.deepEqual(withdrawn.body.data.cancelled_job_ids, [], "withdrawing user-scope E2EE consent must not revoke school delegation");
+  assert.equal(app.store.schoolBindings.get(schoolBinding.id).revoked_at, null);
 
   const blocked = await downloadBlob(app, fixture, deviceId, blobId, BASE_NOW + HOUR + 1);
   assert.equal(blocked.status, 403);
